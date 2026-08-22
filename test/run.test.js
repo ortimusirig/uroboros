@@ -506,6 +506,46 @@ test('empty diff → verifier is NOT launched (no-op)', async () => {
   rmSync(scr, { recursive: true, force: true });
 });
 
+test('non-zero executor exit with an empty diff is executor-failed', async () => {
+  let verifierCalls = 0;
+  const scr = scratch();
+  const facts = await run({
+    task: 'do the task', target: makeTarget(), gate: [], gateRetries: 2,
+    scratchRoot: scr, runId: 'executor-failed-empty-diff',
+    adapters: {
+      runExecutor: async () => ({
+        changedFiles: [], lastMessage: 'executor aborted before making changes', exitCode: 1,
+      }),
+      runGate: async () => ({ passed: true, results: [] }),
+      runVerifier: async () => {
+        verifierCalls++;
+        throw new Error('an empty diff must not launch a verifier');
+      },
+    },
+  });
+  assert.equal(facts.outcome, 'executor-failed',
+    'a non-zero executor exit with no diff must be reported as executor-failed');
+  assert.equal(verifierCalls, 0, 'an empty diff must not launch a verifier');
+  assert.notEqual(exitCodeFor(facts.outcome), 0);
+  rmSync(scr, { recursive: true, force: true });
+});
+
+test('zero executor exit with an empty diff remains a successful no-op', async () => {
+  const scr = scratch();
+  const facts = await run({
+    task: 'do the task', target: makeTarget(), gate: [], gateRetries: 2,
+    scratchRoot: scr, runId: 'clean-empty-diff',
+    adapters: {
+      runExecutor: async () => ({ changedFiles: [], lastMessage: 'nothing to do', exitCode: 0 }),
+      runGate: async () => ({ passed: true, results: [] }),
+      runVerifier: async () => { throw new Error('a no-op must not launch a verifier'); },
+    },
+  });
+  assert.equal(facts.outcome, 'no-op');
+  assert.equal(exitCodeFor(facts.outcome), 0);
+  rmSync(scr, { recursive: true, force: true });
+});
+
 test('red gate exhausts retries → gate-failed, verifier never launched', async () => {
   let gateCalls = 0, launches = 0;
   const scr = scratch();

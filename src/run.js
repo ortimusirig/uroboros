@@ -460,7 +460,10 @@ export async function run(opts) {
     const diff = await diffText(iso.dir, merge === undefined ? 'HEAD' : merge.mergeBase);
     if (diff.trim() === '') {
       reportEvent(eventReporter, runId, 'diff', 'finish', { verdict: 'empty' });
-      outcome = 'no-op';
+      // A non-zero exit with no diff is a crashed/aborted executor, not a legitimate no-op.
+      outcome = Number.isInteger(iter.executor.exitCode) && iter.executor.exitCode !== 0
+        ? 'executor-failed'
+        : 'no-op';
       iterations.push(iter);
     } else {
       writeFileSync(join(iso.dir, 'CHANGES.diff'), diff);
