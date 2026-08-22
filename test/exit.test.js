@@ -43,3 +43,9 @@ test('executor-failed has a dedicated non-zero exit distinct from the unknown fa
   assert.notEqual(exitCodeFor('executor-failed'), 0);
   assert.notEqual(exitCodeFor('executor-failed'), EXIT_UNKNOWN_OUTCOME);
 });
+
+test('needs-decision has a dedicated non-zero exit distinct from the unknown fallback', () => {
+  assert.equal(exitCodeFor('needs-decision'), 9);
+  assert.notEqual(exitCodeFor('needs-decision'), 0);
+  assert.notEqual(exitCodeFor('needs-decision'), EXIT_UNKNOWN_OUTCOME);
+});

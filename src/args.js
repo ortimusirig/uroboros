@@ -13,6 +13,7 @@ import { UNIT_KINDS } from './events.js';
 const EXECUTOR_EFFORTS = new Set([
   'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra',
 ]);
+const RUN_MODES = new Set(['manual', 'autonomous']);
 const UNIT_KIND_SET = new Set(UNIT_KINDS);
 
 // This is the single source of truth for the batch flag surface and its precedence class.
@@ -195,6 +196,7 @@ export function parseArgs(argv) {
       'executor-model': { type: 'string' },
       'executor-effort': { type: 'string' },
       'verifier-model': { type: 'string' },
+      mode: { type: 'string' },
       quiet: { type: 'boolean' },
       'no-dashboard': { type: 'boolean' },
       open: { type: 'boolean' },
@@ -222,6 +224,9 @@ export function parseArgs(argv) {
   const executorEffort = values['executor-effort'];
   validateExecutorEffort(executorEffort);
   if (command === 'run') {
+    if (values.mode !== undefined && !RUN_MODES.has(values.mode)) {
+      throw new Error(`invalid --mode: ${values.mode}; expected one of: manual, autonomous`);
+    }
     const parsed = {
       command,
       task: values.task,
@@ -233,6 +238,7 @@ export function parseArgs(argv) {
       executorEffort,
       verifierModel: values['verifier-model'],
     };
+    if (values.mode !== undefined) parsed.mode = values.mode;
     if (values.quiet) parsed.quiet = true;
     if (values['no-dashboard']) parsed.noDashboard = true;
     if (values.open) parsed.open = true;

@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { isolate } from './isolation.js';
 import {
@@ -37,6 +37,7 @@ import {
   testCountFloorCommand,
 } from './merge.js';
 import { countTestFiles } from './merge-test-count.js';
+import { detectChallenge } from './decision.js';
 
 export { HARNESS_ARTIFACTS } from './artifacts.js';
 
@@ -95,6 +96,29 @@ export function planWithStallNotice(plan, stall) {
     `Last event: ${lastEvent}`;
 }
 
+function planWithDecision(plan, questions, resolution) {
+  const answers = Array.isArray(resolution?.answers) ? resolution.answers : [];
+  const basePlan = typeof resolution?.amendedPlan === 'string'
+    ? resolution.amendedPlan
+    : plan;
+  const pairs = questions.map((question) => {
+    const answer = answers.find((candidate) => candidate?.id === question.id);
+    const lines = [
+      `### ${question.id}`,
+      '',
+      `Question: ${question.question}`,
+      `Answer: ${answer?.answer ?? '(no answer provided)'}`,
+    ];
+    if (answer?.assumption) lines.push(`Assumption: ${answer.assumption}`);
+    if (answer?.flaggedForHuman !== undefined) {
+      lines.push(`Flagged for human: ${answer.flaggedForHuman ? 'yes' : 'no'}`);
+    }
+    return lines.join('\n');
+  });
+  return `${basePlan}\n\n## Decision — resolved autonomously\n\n${pairs.join('\n\n')}` +
+    '\n\nProceed with the original task above, incorporating these decisions.';
+}
+
 export async function run(opts) {
   const {
     task, target, gate, gateRetries, scratchRoot, runId,
@@ -104,8 +128,16 @@ export async function run(opts) {
     executorModel = DEFAULT_EXECUTOR_MODEL,
     executorEffort = DEFAULT_EXECUTOR_EFFORT,
     verifierModel = DEFAULT_VERIFIER_MODEL,
+    mode = 'manual', decisionResolver, challengeRounds = 2,
     adapters = {}, reporter,
   } = opts;
+  if (mode !== 'manual' && mode !== 'autonomous') {
+    throw new Error(`invalid mode: ${mode}; expected manual or autonomous`);
+  }
+  if (!Number.isInteger(challengeRounds) || challengeRounds < 1) {
+    throw new Error(`invalid challengeRounds: ${challengeRounds}; expected a positive integer`);
+  }
+  const maxChallengeRounds = Math.min(challengeRounds, 2);
   const runExecutor = adapters.runExecutor ?? realExecutor;
   const runGate = adapters.runGate ?? realGate;
   const runVerifier = adapters.runVerifier ?? realVerifier;
@@ -375,12 +407,52 @@ export async function run(opts) {
   }
   let retries = 0;
   let executorTimedOut = Boolean(exec.timedOut);
+  let challengeRound = 0;
+  let decision = null;
+  const routeChallenges = async () => {
+    while (!executorTimedOut && !conflictingIntent && mergePreparationFailure === null) {
+      const challenge = detectChallenge({ dir: iso.dir });
+      if (!challenge.challenged) break;
+
+      const substantiveDiff = await diffText(
+        iso.dir,
+        merge === undefined ? 'HEAD' : merge.mergeBase,
+      );
+      if (substantiveDiff.trim() !== '') break;
+
+      challengeRound++;
+      reportEvent(eventReporter, runId, 'decision', 'challenged', {
+        questions: challenge.questions,
+      });
+      if (mode !== 'autonomous'
+        || typeof decisionResolver !== 'function'
+        || challengeRound >= maxChallengeRounds) {
+        decision = { questions: challenge.questions, mode, challengeRound };
+        break;
+      }
+
+      const resolution = await decisionResolver({
+        questions: challenge.questions,
+        plan,
+        task: originalPlan,
+      });
+      const answers = Array.isArray(resolution?.answers) ? resolution.answers : [];
+      plan = planWithDecision(plan, challenge.questions, resolution);
+      writeFileSync(join(iso.dir, 'TASK.md'), plan);
+      unlinkSync(join(iso.dir, 'DECISION.md'));
+      exec = await executePlan(plan);
+      executorTimedOut = Boolean(exec.timedOut);
+      reportEvent(eventReporter, runId, 'decision', 'resolved', { answers });
+    }
+  };
+  await routeChallenges();
   // Gate retries rerun the executor within this single controller-driven pass.
   let gateResult = null;
   const mergeGateCommands = merge === undefined
     ? commands
     : [...commands, testCountFloorCommand(merge.testCounts.required)];
-  if (!executorTimedOut && !conflictingIntent && mergePreparationFailure === null) {
+  if (decision === null && !executorTimedOut && !conflictingIntent
+    && mergePreparationFailure === null) {
     gateResult = await runGate({
       commands: mergeGateCommands, cwd: iso.dir, timeoutMs: stageTimeouts.gate,
       reporter: eventReporter, runId, attempt: 1,
@@ -398,7 +470,8 @@ export async function run(opts) {
       }],
     };
   }
-  while (!executorTimedOut && !conflictingIntent && mergePreparationFailure === null
+  while (decision === null && !executorTimedOut && !conflictingIntent
+    && mergePreparationFailure === null
     && !gateResult.passed && retries < gateRetries) {
     retries++;
     gateRetryCount++;
@@ -412,7 +485,8 @@ export async function run(opts) {
     });
     exec = await executePlan(retryPlan);
     executorTimedOut = Boolean(exec.timedOut);
-    if (!executorTimedOut) {
+    await routeChallenges();
+    if (decision === null && !executorTimedOut) {
       gateResult = await runGate({
         commands: mergeGateCommands, cwd: iso.dir, timeoutMs: stageTimeouts.gate,
         reporter: eventReporter, runId, attempt: retries + 1,
@@ -438,6 +512,10 @@ export async function run(opts) {
   } else if (conflictingIntent) {
     gateStatus = 'not-run';
     outcome = 'conflicting-intent';
+    iterations.push(iter);
+  } else if (decision !== null) {
+    gateStatus = 'not-run';
+    outcome = 'needs-decision';
     iterations.push(iter);
   } else if (!gateResult.passed) {
     gateStatus = 'failed';
@@ -570,6 +648,7 @@ export async function run(opts) {
       executorEffort,
       verifier: verifierModel,
     } });
+  if (outcome === 'needs-decision') facts.decision = decision;
   writeReport({ dir: iso.dir, facts, reporter: eventReporter, runId });
   return facts;
   } finally {

@@ -13,6 +13,7 @@ export const EXIT_BY_OUTCOME = {
   'campaign-failed': 6,
   'budget-exhausted': 7,
   'conflicting-intent': 8,
+  'needs-decision': 9,
   'executor-failed': 10,
 };
 
