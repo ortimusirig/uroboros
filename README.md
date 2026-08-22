@@ -1,5 +1,9 @@
 # uroboros
 
+<p align="center">
+  <img src="docs/assets/ouroboros.svg" alt="A serpent curved into a ring and eating its own tail" width="200">
+</p>
+
 [![tests](https://github.com/ortimusirig/uroboros/actions/workflows/tests.yml/badge.svg)](https://github.com/ortimusirig/uroboros/actions/workflows/tests.yml) [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) ![node](https://img.shields.io/badge/node-%3E%3D24-brightgreen) ![runtime dependencies](https://img.shields.io/badge/runtime%20dependencies-0-brightgreen)
 
 Codex writes in a git-isolated copy, command exit codes gate the change, and Cursor reviews it read-only.
