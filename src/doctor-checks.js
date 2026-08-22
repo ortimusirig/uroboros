@@ -699,7 +699,6 @@ export const DOCTOR_CHECKS = Object.freeze([
   }),
 ]);
 
-export const doctorChecks = DOCTOR_CHECKS;
 
 export function createDoctorProbeState(scratchRoot) {
   return {

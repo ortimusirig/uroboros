@@ -10,10 +10,10 @@ import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildReportMarkdown } from './report.js';
 import { reportEvent } from './events.js';
+import { EVENTS_FILENAME } from './event-stream.js';
 
 export const RUN_FACTS_FILENAME = 'uro-runfacts.json';
 export const LEGACY_RUN_FACTS_FILENAME = 'ccc-runfacts.json';
-export const EVENTS_FILENAME = 'events.jsonl';
 
 const DEFAULT_PROJECT_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 
