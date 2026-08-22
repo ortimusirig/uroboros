@@ -37,3 +37,15 @@ test('conflicting intent has its own non-zero exit distinct from gate failure', 
   assert.equal(exitCodeFor('conflicting-intent'), 8);
   assert.notEqual(exitCodeFor('conflicting-intent'), exitCodeFor('gate-failed'));
 });
+
+test('executor-failed has a dedicated non-zero exit distinct from the unknown fallback', () => {
+  assert.equal(exitCodeFor('executor-failed'), 10);
+  assert.notEqual(exitCodeFor('executor-failed'), 0);
+  assert.notEqual(exitCodeFor('executor-failed'), EXIT_UNKNOWN_OUTCOME);
+});
+
+test('needs-decision has a dedicated non-zero exit distinct from the unknown fallback', () => {
+  assert.equal(exitCodeFor('needs-decision'), 9);
+  assert.notEqual(exitCodeFor('needs-decision'), 0);
+  assert.notEqual(exitCodeFor('needs-decision'), EXIT_UNKNOWN_OUTCOME);
+});

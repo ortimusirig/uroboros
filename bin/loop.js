@@ -281,6 +281,7 @@ async function main() {
     executorModel: opts.executorModel,
     executorEffort: opts.executorEffort,
     verifierModel: opts.verifierModel,
+    mode: opts.mode,
     correctsRunId: opts.correctsRunId,
     scratchRoot: SCRATCH_ROOT,
     runId,

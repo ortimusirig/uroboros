@@ -1,0 +1,82 @@
+<svg xmlns="http://www.w3.org/2000/svg"
+     viewBox="0 0 240 240"
+     role="img"
+     aria-labelledby="ouroboros-title ouroboros-description">
+  <title id="ouroboros-title">Ouroboros serpent eating its own tail</title>
+  <desc id="ouroboros-description">
+    A teal serpent curls into a ring and closes the loop by taking its tapered tail in its mouth.
+  </desc>
+
+  <!-- The single closed contour forms both edges of the tapered body. -->
+  <path d="M 169 76
+           C 137 31 84 29 48 62
+           C 9 97 17 159 58 192
+           C 98 224 156 214 188 173
+           C 205 151 211 124 204 99
+           L 177 106
+           C 181 123 177 143 166 158
+           C 144 187 103 195 75 173
+           C 46 150 42 108 68 83
+           C 92 61 131 59 157 82
+           Z"
+        fill="#438F7D"
+        stroke="#286B66"
+        stroke-width="4"
+        stroke-linejoin="round" />
+
+  <!-- Curved scale marks follow the turn of the body. -->
+  <g fill="none"
+     stroke="#78B69C"
+     stroke-width="4"
+     stroke-linecap="round"
+     opacity="0.9">
+    <path d="M 122 47 C 128 55 132 63 133 72" />
+    <path d="M 78 56 C 86 61 92 68 96 77" />
+    <path d="M 45 91 C 55 94 63 99 68 107" />
+    <path d="M 38 136 C 49 135 58 137 66 142" />
+    <path d="M 60 178 C 68 171 77 167 86 165" />
+    <path d="M 103 201 C 104 190 109 181 116 175" />
+    <path d="M 149 190 C 145 181 145 171 148 162" />
+    <path d="M 184 162 C 176 156 171 148 169 140" />
+  </g>
+
+  <!-- A warm tail stripe remains visible where the head closes over it. -->
+  <path d="M 153 82 C 159 80 164 78 169 76"
+        fill="none"
+        stroke="#D29A43"
+        stroke-width="6"
+        stroke-linecap="round" />
+
+  <!-- The head overlaps the body and faces back toward the tapered tail. -->
+  <path d="M 178 108
+           C 174 99 171 90 174 82
+           L 168 79
+           C 164 77 165 72 169 71
+           L 185 70
+           C 192 60 204 55 215 59
+           C 229 64 236 76 233 89
+           C 229 103 216 113 201 117
+           C 191 119 183 116 178 108
+           Z"
+        fill="#519A80"
+        stroke="#286B66"
+        stroke-width="4"
+        stroke-linejoin="round" />
+
+  <!-- The mouth wraps around the tail tip, making the bite explicit. -->
+  <path d="M 191 84
+           C 182 83 175 79 169 76
+           C 174 82 178 88 184 92"
+        fill="none"
+        stroke="#984D5C"
+        stroke-width="4"
+        stroke-linecap="round"
+        stroke-linejoin="round" />
+
+  <circle cx="204" cy="75" r="8"
+          fill="#D5A545"
+          stroke="#286B66"
+          stroke-width="3" />
+  <circle cx="205" cy="74" r="3.5" fill="#365F5A" />
+  <circle cx="183" cy="75" r="2.5" fill="#365F5A" />
+</svg>

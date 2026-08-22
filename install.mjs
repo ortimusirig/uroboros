@@ -27,7 +27,7 @@ const PLUGIN_SKILL = join(SRC, 'skills', 'uroboros', 'SKILL.md');
 
 // This inventory defines the source payload whose readability the verifier checks.
 const PAYLOAD = [
-  'package.json', 'README.md', 'LICENSE', 'PORTING.md', 'diag.mjs', 'bin', 'src',
+  'package.json', 'README.md', 'LICENSE', 'PORTING.md', 'bin', 'src',
   'fixtures', 'test', 'docs', 'cursor-plugin', 'commands', 'skills',
 ];
 

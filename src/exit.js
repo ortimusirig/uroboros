@@ -1,9 +1,9 @@
 // Outcome -> process exit code.
 //
 // Kept out of bin/loop.js because that module self-executes on import and so
-// cannot be unit tested. Only review-ready and no-op are successes: verifier-failed
-// once fell through to 0, which reported success to automated callers for a run
-// where verification never happened.
+// cannot be unit tested. Only review-ready and no-op are successes. verifier-failed
+// marks a failed verification launch; executor-failed marks a crashed or aborted
+// executor that wrote nothing.
 export const EXIT_BY_OUTCOME = {
   'review-ready': 0,
   'no-op': 0,
@@ -13,6 +13,8 @@ export const EXIT_BY_OUTCOME = {
   'campaign-failed': 6,
   'budget-exhausted': 7,
   'conflicting-intent': 8,
+  'needs-decision': 9,
+  'executor-failed': 10,
 };
 
 // An unrecognised outcome is not a success. Defaulting to 0 here would recreate

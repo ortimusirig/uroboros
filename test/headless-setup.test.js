@@ -13,16 +13,16 @@ import { spawnCapture } from '../src/spawn.js';
 
 const cli = fileURLToPath(new URL('../bin/loop.js', import.meta.url));
 
-function writePassingBin(directory, name, script) {
+function writePassingBin(directory, name) {
   if (process.platform === 'win32') {
     writeFileSync(
       join(directory, `${name}.cmd`),
-      `@echo off\r\n"${process.execPath}" "${script}" %*\r\n`,
+      '@echo off\r\nexit /b 0\r\n',
     );
     return;
   }
   const path = join(directory, name);
-  writeFileSync(path, `#!/bin/sh\nexec '${process.execPath}' '${script}' "$@"\n`);
+  writeFileSync(path, '#!/bin/sh\nexit 0\n');
   chmodSync(path, 0o755);
 }
 
@@ -139,16 +139,14 @@ test('headless summary preserves an unrecognized setup status', () => {
   );
 });
 
-test('real setup CLI is headless-safe on a failing required check', async () => {
+test('real setup CLI is headless-safe on a failing required check', async (t) => {
   const root = mkdtempSync(join(tmpdir(), 'uro-headless-cli-'));
   const operatorDirectory = join(root, 'operator');
   const scratchRoot = join(root, 'AppData', 'scratch');
   const shims = join(root, 'bin');
-  const passingBin = join(root, 'passing-bin.mjs');
   mkdirSync(operatorDirectory);
   mkdirSync(shims);
-  writeFileSync(passingBin, "process.stdout.write('ok\\n');\n");
-  for (const name of ['git', 'codex', 'agent']) writePassingBin(shims, name, passingBin);
+  for (const name of ['git', 'codex', 'agent']) writePassingBin(shims, name);
   const pathKey = Object.keys(process.env)
     .find((key) => key.toLowerCase() === 'path') ?? 'PATH';
   const env = {
@@ -161,7 +159,8 @@ test('real setup CLI is headless-safe on a failing required check', async () => 
     ], {
       cwd: operatorDirectory,
       env,
-      timeoutMs: 15_000,
+      // This bounds a genuine hang without turning scheduler throughput into the assertion.
+      timeoutMs: 120_000,
     });
     const output = result.stdout + result.stderr;
 
@@ -180,7 +179,16 @@ test('real setup CLI is headless-safe on a failing required check', async () => 
       + '(for example `C:\\uro\\w`) and rerun doctor.',
     ), 'the structured remaining-work record must be emitted on stdout');
   } finally {
-    rmSync(root, { recursive: true, force: true });
+    try {
+      rmSync(root, {
+        recursive: true,
+        force: true,
+        maxRetries: 5,
+        retryDelay: 100,
+      });
+    } catch (error) {
+      t.diagnostic(`temporary directory cleanup failed for ${root}: ${error}`);
+    }
   }
 });
 

@@ -6,6 +6,7 @@ import { join } from 'node:path';
 // so a run directory created before the rename is still excluded.
 export const HARNESS_ARTIFACTS = Object.freeze([
   'TASK.md',
+  'DECISION.md',
   'CHANGES.diff',
   'uro-report.md',
   'uro-runfacts.json',

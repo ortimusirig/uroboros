@@ -11,14 +11,6 @@ import {
   snapshotForClient,
 } from './dashboard-view.js';
 
-export {
-  buildDashboardSnapshot,
-  renderDashboardContent,
-  renderDashboardPage,
-  renderRunDetail,
-} from './dashboard-view.js';
-
-export { DEFAULT_DASHBOARD_PORT, DASHBOARD_HOST } from './dashboard-config.js';
 
 function fingerprint(snapshot) {
   return JSON.stringify({

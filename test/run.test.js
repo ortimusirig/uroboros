@@ -40,6 +40,14 @@ const writingExecutor = async ({ cwd }) => {
 };
 const noopExecutor = async () => ({ changedFiles: [], lastMessage: 'nothing to do' });
 
+const DECISION_CONTENT = `
+## Q1
+Kind: technical
+Question: Should this follow the existing implementation convention?
+Options: follow the task literally, follow the existing convention
+Recommendation: follow the existing convention
+`;
+
 test('correctness and intent findings are separately lifted while verdict is merged', async () => {
   const scr = scratch();
   const verifierCalls = [];
@@ -503,6 +511,220 @@ test('empty diff → verifier is NOT launched (no-op)', async () => {
   assert.equal(readFileSync(join(facts.dir, 'TASK.md'), 'utf8'), 'do the task');
   assert.equal(await diffText(facts.dir), '',
     'TASK.md and generated report artifacts must not turn a no-op into a change');
+  rmSync(scr, { recursive: true, force: true });
+});
+
+test('a sentinel-only executor challenge needs a decision in manual mode', async () => {
+  const scr = scratch();
+  let gateCalls = 0;
+  let verifierCalls = 0;
+  const facts = await run({
+    task: 'do the task', target: makeTarget(), gate: [], gateRetries: 0,
+    scratchRoot: scr, runId: 'manual-decision', mode: 'manual',
+    adapters: {
+      runExecutor: async ({ cwd }) => {
+        writeFileSync(join(cwd, 'DECISION.md'), DECISION_CONTENT);
+        return { changedFiles: ['DECISION.md'], lastMessage: 'need a decision', exitCode: 0 };
+      },
+      runGate: async () => {
+        gateCalls++;
+        return { passed: true, results: [] };
+      },
+      runVerifier: async () => {
+        verifierCalls++;
+        throw new Error('verifier must not launch for a challenge');
+      },
+    },
+  });
+
+  assert.equal(facts.outcome, 'needs-decision');
+  assert.equal(facts.gateStatus, 'not-run');
+  assert.equal(gateCalls, 0);
+  assert.equal(verifierCalls, 0);
+  assert.equal(facts.decision.questions.length, 1);
+  assert.equal(facts.decision.questions[0].id, 'Q1');
+  assert.equal(facts.decision.mode, 'manual');
+  assert.equal(facts.decision.challengeRound, 1);
+  rmSync(scr, { recursive: true, force: true });
+});
+
+test('a clean executor run in manual mode preserves no-op', async () => {
+  const scr = scratch();
+  const facts = await run({
+    task: 'do the task', target: makeTarget(), gate: [], gateRetries: 0,
+    scratchRoot: scr, runId: 'manual-noop', mode: 'manual',
+    adapters: {
+      runExecutor: async () => ({ changedFiles: [], lastMessage: 'nothing', exitCode: 0 }),
+      runGate: async () => ({ passed: true, results: [] }),
+      runVerifier: async () => { throw new Error('verifier must not launch for no-op'); },
+    },
+  });
+
+  assert.equal(facts.outcome, 'no-op');
+  rmSync(scr, { recursive: true, force: true });
+});
+
+test('a sentinel plus substantive files follows the normal gate and verifier path', async () => {
+  const scr = scratch();
+  let gateCalls = 0;
+  let verifierCalls = 0;
+  const facts = await run({
+    task: 'do the task', target: makeTarget(), gate: [], gateRetries: 0,
+    scratchRoot: scr, runId: 'decision-with-work', mode: 'manual',
+    adapters: {
+      runExecutor: async ({ cwd }) => {
+        writeFileSync(join(cwd, 'DECISION.md'), DECISION_CONTENT);
+        writeFileSync(join(cwd, 'new.txt'), 'substantive work');
+        return {
+          changedFiles: ['DECISION.md', 'new.txt'],
+          lastMessage: 'wrote a sentinel and real work',
+          exitCode: 0,
+        };
+      },
+      runGate: async () => {
+        gateCalls++;
+        return { passed: true, results: [] };
+      },
+      runVerifier: async () => {
+        verifierCalls++;
+        return { verdict: 'NO_BLOCKERS', launchFailed: false };
+      },
+    },
+  });
+
+  assert.equal(facts.outcome, 'review-ready');
+  assert.equal(gateCalls, 1);
+  assert.equal(verifierCalls, 2);
+  assert.equal(facts.decision, undefined);
+  rmSync(scr, { recursive: true, force: true });
+});
+
+test('autonomous mode resolves a sentinel challenge and reruns the executor', async () => {
+  const scr = scratch();
+  const executorPlans = [];
+  const resolverCalls = [];
+  let executorCalls = 0;
+  const facts = await run({
+    task: 'do the task', target: makeTarget(), gate: [], gateRetries: 0,
+    scratchRoot: scr, runId: 'autonomous-decision', mode: 'autonomous',
+    decisionResolver: async (input) => {
+      resolverCalls.push(input);
+      return { answers: [{ id: 'Q1', answer: 'Follow the existing convention.' }] };
+    },
+    adapters: {
+      runExecutor: async ({ cwd, plan }) => {
+        executorCalls++;
+        executorPlans.push(plan);
+        if (executorCalls === 1) {
+          writeFileSync(join(cwd, 'DECISION.md'), DECISION_CONTENT);
+          return { changedFiles: ['DECISION.md'], lastMessage: 'need a decision', exitCode: 0 };
+        }
+        writeFileSync(join(cwd, 'new.txt'), 'resolved work');
+        return { changedFiles: ['new.txt'], lastMessage: 'implemented the answer', exitCode: 0 };
+      },
+      runGate: async () => ({ passed: true, results: [] }),
+      runVerifier: async () => ({ verdict: 'NO_BLOCKERS', launchFailed: false }),
+    },
+  });
+
+  assert.equal(facts.outcome, 'review-ready');
+  assert.equal(executorCalls, 2);
+  assert.equal(resolverCalls.length, 1);
+  assert.equal(resolverCalls[0].plan, 'do the task');
+  assert.equal(resolverCalls[0].task, 'do the task');
+  assert.match(executorPlans[1], /## Decision — resolved autonomously/);
+  assert.match(executorPlans[1], /Answer: Follow the existing convention\./);
+  assert.equal(existsSync(join(facts.dir, 'DECISION.md')), false);
+  rmSync(scr, { recursive: true, force: true });
+});
+
+test('a sentinel challenge from a gate-retry executor stops before another gate', async () => {
+  const scr = scratch();
+  let executorCalls = 0;
+  let gateCalls = 0;
+  let verifierCalls = 0;
+  const facts = await run({
+    task: 'do the task', target: makeTarget(), gate: [], gateRetries: 1,
+    scratchRoot: scr, runId: 'gate-retry-decision', mode: 'manual',
+    adapters: {
+      runExecutor: async ({ cwd }) => {
+        executorCalls++;
+        if (executorCalls === 2) writeFileSync(join(cwd, 'DECISION.md'), DECISION_CONTENT);
+        return {
+          changedFiles: executorCalls === 2 ? ['DECISION.md'] : [],
+          lastMessage: executorCalls === 2 ? 'need a decision' : 'initial attempt',
+          exitCode: 0,
+        };
+      },
+      runGate: async () => {
+        gateCalls++;
+        return gateCalls === 1
+          ? {
+              passed: false,
+              results: [{ bin: 'node', args: ['--test'], code: 1, outputTail: 'failed' }],
+            }
+          : { passed: true, results: [] };
+      },
+      runVerifier: async () => {
+        verifierCalls++;
+        throw new Error('verifier must not launch for a challenge');
+      },
+    },
+  });
+
+  assert.equal(facts.outcome, 'needs-decision');
+  assert.equal(facts.gateStatus, 'not-run');
+  assert.equal(executorCalls, 2);
+  assert.equal(gateCalls, 1);
+  assert.equal(verifierCalls, 0);
+  assert.equal(facts.decision.challengeRound, 1);
+  rmSync(scr, { recursive: true, force: true });
+});
+
+test('--mode accepts manual or autonomous and rejects other values', () => {
+  const base = ['run', '--task', 'p', '--target', 't', '--gate', 'g'];
+  assert.equal(parseArgs([...base, '--mode', 'manual']).mode, 'manual');
+  assert.equal(parseArgs([...base, '--mode', 'autonomous']).mode, 'autonomous');
+  assert.throws(() => parseArgs([...base, '--mode', 'interactive']), /invalid --mode/i);
+});
+
+test('non-zero executor exit with an empty diff is executor-failed', async () => {
+  let verifierCalls = 0;
+  const scr = scratch();
+  const facts = await run({
+    task: 'do the task', target: makeTarget(), gate: [], gateRetries: 2,
+    scratchRoot: scr, runId: 'executor-failed-empty-diff',
+    adapters: {
+      runExecutor: async () => ({
+        changedFiles: [], lastMessage: 'executor aborted before making changes', exitCode: 1,
+      }),
+      runGate: async () => ({ passed: true, results: [] }),
+      runVerifier: async () => {
+        verifierCalls++;
+        throw new Error('an empty diff must not launch a verifier');
+      },
+    },
+  });
+  assert.equal(facts.outcome, 'executor-failed',
+    'a non-zero executor exit with no diff must be reported as executor-failed');
+  assert.equal(verifierCalls, 0, 'an empty diff must not launch a verifier');
+  assert.notEqual(exitCodeFor(facts.outcome), 0);
+  rmSync(scr, { recursive: true, force: true });
+});
+
+test('zero executor exit with an empty diff remains a successful no-op', async () => {
+  const scr = scratch();
+  const facts = await run({
+    task: 'do the task', target: makeTarget(), gate: [], gateRetries: 2,
+    scratchRoot: scr, runId: 'clean-empty-diff',
+    adapters: {
+      runExecutor: async () => ({ changedFiles: [], lastMessage: 'nothing to do', exitCode: 0 }),
+      runGate: async () => ({ passed: true, results: [] }),
+      runVerifier: async () => { throw new Error('a no-op must not launch a verifier'); },
+    },
+  });
+  assert.equal(facts.outcome, 'no-op');
+  assert.equal(exitCodeFor(facts.outcome), 0);
   rmSync(scr, { recursive: true, force: true });
 });
 

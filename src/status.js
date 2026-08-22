@@ -9,9 +9,6 @@ import {
 } from './event-stream.js';
 import { addUsage, EMPTY_USAGE } from './usage.js';
 
-// Preserve the status module's public parser surface while both status and dashboard use
-// the same implementation.
-export { CAMPAIGN_EVENTS_FILENAME, EVENTS_FILENAME, parsePartialEventStream };
 
 function runIdsIn(events) {
   return [...new Set(events
