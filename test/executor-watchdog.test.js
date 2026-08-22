@@ -81,8 +81,6 @@ test('a healthy executor outliving the threshold stays unstalled when items keep
             : { itemType: 'command_execution', attempt: 1 },
         ));
       }
-      watchdog.reporter(executorEvent(clock, runId, 'finish', { code: 0, attempt: 1 }));
-
       assert.ok(clock.now() > thresholdMs,
         'positive setup: total executor duration must exceed the watchdog threshold');
       assert.equal(delivered.filter((event) => event.type === 'file_change').length, 1,
@@ -91,6 +89,20 @@ test('a healthy executor outliving the threshold stays unstalled when items keep
         'other completed items must also count as real intra-stage progress');
       assert.equal(delivered.some((event) => event.type === 'stalled'), false,
         'steady executor items must reset the gap timer');
+
+      clock.advance(thresholdMs);
+      clock.fireDueTimers();
+      const stalls = delivered.filter((event) => event.type === 'stalled');
+      assert.equal(stalls.length, 1,
+        'positive control: the same controlled clock must deliver a stall after silence');
+      assert.equal(stalls[0].stage, 'executor');
+      assert.equal(stalls[0].lastEvent.type, 'item_completed');
+
+      watchdog.reporter(executorEvent(clock, runId, 'finish', { code: 0, attempt: 1 }));
+      clock.advance(thresholdMs);
+      clock.fireDueTimers();
+      assert.equal(delivered.filter((event) => event.type === 'stalled').length, 1,
+        'finishing the stage must prevent any further stall notification');
     } finally {
       watchdog.dispose();
     }
