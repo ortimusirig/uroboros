@@ -1,0 +1,1 @@
+[{"bin": "node", "args": ["--test", "test/fix-plan.test.js"]}]
