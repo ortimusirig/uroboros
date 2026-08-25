@@ -50,12 +50,24 @@ test('DebateLedger tracks resolved findings (appeared then disappeared)', () => 
 
 // --- detectCircling ---
 
-test('detectCircling returns false when findings are decreasing', () => {
+test('detectCircling returns true when findings decrease but one is stuck', () => {
   const ledger = new DebateLedger();
   ledger.record(1, ['F1', 'F2', 'F3']);
   ledger.record(2, ['F1', 'F2']);
   ledger.record(3, ['F1']);
 
+  // F1 appears in all 3 rounds — stuck finding triggers circling
+  // even though counts decrease (3→2→1), per the OR condition
+  assert.equal(detectCircling(ledger), true);
+});
+
+test('detectCircling returns false when findings decrease and none stuck', () => {
+  const ledger = new DebateLedger();
+  ledger.record(1, ['F1', 'F2', 'F3']);
+  ledger.record(2, ['F2', 'F4']);
+  ledger.record(3, ['F5']);
+
+  // No finding persists across all 3 rounds, and no count plateau
   assert.equal(detectCircling(ledger), false);
 });
 
