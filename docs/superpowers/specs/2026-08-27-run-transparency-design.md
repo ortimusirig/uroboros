@@ -1,7 +1,7 @@
 # Run Transparency
 
 **Date:** 2026-08-27
-**Status:** Design approved, pending implementation
+**Status:** Draft, pending review
 
 ## Summary
 
@@ -363,7 +363,7 @@ completed-item threshold no longer has to be generous.
 - Silent past the liveness threshold → kill, and record *why*: gap length, last
   event, and the setting to raise
 
-A hard ceiling (`URO_EXECUTOR_MAX_MS`, default 4h) remains so a truly wedged
+A hard ceiling (`URO_EXECUTOR_MAX_MS`, default 6h) remains so a truly wedged
 process cannot hang a run forever. A timeout that can never fire is not a timeout.
 
 **Preserve partial work.** Before any kill, commit whatever the executor has
@@ -404,17 +404,19 @@ Two things still cause the bad first impression:
 - Lead with the verdict. Emit the health line immediately after the `uroboros
   doctor` header, then the detail. The trailing verdict stays, so scripts reading
   either position keep working.
-- Optional checks that are absent report `SKIP`, not `FAIL`. `FAIL` is reserved
-  for something that is broken. `required` check rendering is untouched.
+- Optional check status tokens are **unchanged**. Renaming absent optional checks
+  from `FAIL` to `SKIP` was considered and **rejected by the operator**: it changes
+  `doctor` output that scripts or CI may be parsing, and leading with the verdict
+  already solves the first-impression problem on its own.
 - `doctor` reports the artifact-root size from §2.
 
 ### Testing
 
 - The health verdict appears in the first three lines and again at the end, and
   the two agree
-- A missing optional tool renders `SKIP` and leaves `ok: true`
+- A missing optional tool still renders `FAIL` and still leaves `ok: true`
 - A failing required check renders `FAIL` and sets `ok: false`
-- `--fix` remediation still triggers for `SKIP`-rendered optional checks
+- `--fix` remediation behaviour for optional checks is unchanged
 
 ---
 
@@ -473,9 +475,24 @@ claude-tap's self-contained-HTML-plus-SSE shape — which is already what
 
 ### Design
 
-A third view alongside Triage and Detail, served by the same HTTP server, SSE
-push, event parser, and diff renderer. The fleet dashboard remains for campaigns,
-which genuinely need it.
+**The transcript is the only view.** The Triage and Project/Session tabs are
+**removed**, not demoted — stated three times by the operator: "I don't need the
+current 2 tabs, just one." Opening the dashboard lands directly in the transcript.
+
+It is served by the same HTTP server, SSE push, event parser, and diff renderer
+the removed views used — the plumbing is reused, the tab bar and its two views go.
+
+**Many runs are handled by a run picker, not a second view.** Campaigns fan out
+concurrent units (`campaign.js:535`), so the transcript header carries a selector
+listing discoverable runs under the scratch root with their state, defaulting to
+the most recent active one. Switching runs swaps the transcript; it does not open
+a different page. One tab, one layout.
+
+**This deletion removes most of the reason to split the file.** `renderTriage`,
+`renderSessions`, `renderProjects`, `renderSessionList`, `renderProjectList`,
+`renderPassRow`, `orderCorrectionRows`, `inferSessions`, `groupRunsByProject`, and
+their triage helpers all go with the views they served. `dashboard-view.js` gets
+substantially smaller before a single transcript renderer is added.
 
 Two panes:
 
@@ -514,9 +531,10 @@ different author.
 - New event types: `verify/item_completed` (mirroring `executor/item_completed`)
   and an in-progress type for started items.
 
-**Refactor first.** `dashboard-view.js` is 1,251 lines. Split it before adding a
-third view — at minimum the transcript renderers into their own module. Adding a
-view to a file already at this size makes it worse.
+**No separate refactor pass.** The operator declined splitting the file as scope
+that delays visible work, and removing the two views largely solves it anyway.
+New transcript renderers go in their own module rather than growing
+`dashboard-view.js` further.
 
 ### Phasing
 
@@ -537,9 +555,76 @@ Phase 0 ships independently of everything else and should not wait.
 - An `item.started` `command_execution` emits an in-progress event, later
   reconciled by its `item.completed`
 - Transcript rendering is a pure function of a snapshot — golden-file tested like
-  the existing dashboard views
+  the removed dashboard views were
+- The run picker lists discoverable runs and defaults to the most recent active one
+- Removing the triage/session/project views breaks no remaining code path, and
+  their golden fixtures are deleted with them
 - Every rendered field is HTML-escaped; agent prose is untrusted input
 - The transcript renders correctly for a run with zero decision events
+
+---
+
+## §8 — Nobody is listening when the executor pushes back
+
+### Problem
+
+`§3` fixes one end of the conversation: the executor is told it may push back, and
+how. This section fixes the other end — **nothing answers.**
+
+`run.js:131` accepts a `decisionResolver`. `run.js:428` refuses to use the
+answer-and-continue path unless one is a function:
+
+```js
+if (mode !== 'autonomous'
+    || typeof decisionResolver !== 'function'
+    || challengeRound >= maxChallengeRounds) {
+  decision = { questions: challenge.questions, mode, challengeRound };
+  break;
+}
+```
+
+Every production caller — `bin/loop.js`, `campaign.js`, `setup.js` — calls `run()`
+without one. The only supplier in the repository is `test/run.test.js:610`. So the
+answer-and-continue path at `:433-446` is **unreachable outside the test suite**,
+and every challenge halts the run.
+
+The result the operator observed: Codex raises a legitimate question, and the loop
+stops rather than resolving it. The debate is one-way by omission, not by design.
+
+### Design
+
+Wire a resolver so the exchange completes without the operator restarting the run.
+
+- **`--mode manual` (default)** — unchanged behaviour, now made visible. The run
+  halts with `needs-decision`, and §4's events plus §7's transcript render the
+  questions so the operator can answer and re-run. `answeredBy: 'user'`.
+- **`--mode autonomous`** — `bin/loop.js` supplies a resolver that answers from the
+  plan and the executor's stated reasoning, rewrites `TASK.md` via the existing
+  `planWithDecision`, and re-runs the executor. `answeredBy: 'planner'`.
+
+The mode flag already exists (`args.js:16`, `RUN_MODES`) and `run.js` already
+branches on it. This wires the branch that was left unconnected.
+
+**Bounds, because an auto-answering loop must not run away:**
+
+- `challengeRounds` (existing, default 2) caps the exchange. On exhaustion the run
+  halts with `needs-decision` and reports the unresolved questions — it does not
+  silently proceed.
+- A resolver that returns no answers is treated as no resolution: halt, do not
+  re-run.
+- `kind: 'authority'` questions **always** halt, even in autonomous mode. A
+  question the executor itself classified as requiring authority is not one a
+  resolver should answer on the operator's behalf.
+
+### Testing
+
+- Manual mode halts with `needs-decision` and emits `decision/challenged`
+- Autonomous mode with a resolver answers, rewrites `TASK.md`, re-runs the
+  executor, and emits `decision/resolved` with `answeredBy: 'planner'`
+- `challengeRounds` exhaustion halts rather than looping
+- An `authority`-kind question halts in autonomous mode
+- A resolver returning no answers halts and does not re-run
+- `DECISION.md` is removed before the executor re-runs (existing `unlinkSync`)
 
 ---
 
@@ -550,18 +635,20 @@ this order — each independently shippable and independently valuable.
 
 **Plan A — say what you know (small, no new surface).**
 §1 env warning + timeout flags · §4 event vocabulary (all pairs in the table) ·
-§6 doctor verdict and `SKIP`. Nothing here depends on anything else, and §4 alone
+§6 doctor verdict-first. Nothing here depends on anything else, and §4 alone
 makes the debate visible for the first time.
 
-**Plan B — stop losing things.**
+**Plan B — stop losing things, and finish the conversation.**
 §2 durable artifacts · §5 evidence-based deadline and partial-work preservation ·
-§3 executor preamble, plan template, and the named no-op. §5 depends on §4 having
-declared `executor/extended`.
+§3 executor preamble, plan template, and the named no-op · §8 resolver wiring.
+§5 depends on §4 having declared `executor/extended`. §8 depends on §3 — teaching
+the executor to ask is worthless if nothing answers, and wiring an answer is
+worthless if it never asks.
 
 **Plan C — the transcript.**
-§7 phases 1 and 2: verifier streaming, reasoning and `item.started` capture, the
-`dashboard-view.js` split, then the two-pane view. Depends on Plan A's vocabulary
-and reads better once Plan B's artifacts exist.
+§7 phases 1 and 2: verifier streaming, reasoning and `item.started` capture, then
+the two-pane view as the primary entry point. Depends on Plan A's vocabulary, and
+renders Plan B's debate exchange once §8 lands.
 
 ## Cross-cutting constraints
 
@@ -585,18 +672,11 @@ and reads better once Plan B's artifacts exist.
   which a single-process local pipeline has. Reconsider only if campaign units
   ever fan out across machines.
 - Automated retention/pruning of the artifact root
-- Wiring a production `decisionResolver`. `run.js:131` accepts one; nothing in
-  `src/` or `bin/` supplies it, so the auto-answer path at `:433-446` is
-  test-only today. Manual halt at `needs-decision` remains the shipped behaviour;
-  `§4`'s `answeredBy` field is designed so autonomous mode can be added later
-  without an event-schema change.
 
 ## Open questions
 
-None blocking. Two judgement calls made in this spec, flagged for review:
+None blocking. One judgement call, resolved:
 
 1. Dropping the shipped `URO_STALL_THRESHOLD_MS` default from 10m to 5m changes
-   behaviour for existing users. Safe because it applies to the new *liveness*
-   tier and the default policy is `report`, but it is a default change.
-2. Optional checks rendering `SKIP` instead of `FAIL` changes `doctor` output that
-   something may be parsing.
+   behaviour for existing users. **Approved by the operator.** Safe because it
+   applies to the new *liveness* tier and the default policy is `report`.
