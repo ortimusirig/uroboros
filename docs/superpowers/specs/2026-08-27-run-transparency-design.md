@@ -17,10 +17,27 @@ discards, buries, or silently ignores it.
 6. A health verdict it computes but prints last (`§6`)
 
 Plus the view that makes the result legible: a **live single-run transcript**
-(`§7`).
+(`§7`), and the push-back, arbitration, and STORM pivot that make the debate a
+conversation rather than a monologue (`§8`).
 
 Origin: `FINDINGS-2026-08-27-performance.md`, written from two live runs against a
 ~1,670-file repo, plus source verification of every claim.
+
+**This spec is infrastructure for the three-way debate loop**, which is already
+specced (`2026-08-25-three-way-debate-loop-design.md`), already has pre-written
+tests (`test/debate.test.js`, `test/review.test.js`, `test/fix-plan.test.js`) and
+Codex-ready plans (`campaign/debate/plan-*.md`), and is waiting only on
+implementation of `src/debate.js`, `src/review.js`, and `src/fix-plan.js`.
+
+Each item below is a precondition for that loop working or being observable:
+
+| Section | What breaks in the debate loop without it |
+|---|---|
+| §4 | `debate` / `resist` are undeclared — every debate event is silently swallowed |
+| §5 | `detectCircling` needs 3 completed rounds; a 30-minute wall-clock kill destroys the debate first |
+| §7 | A three-way argument is invisible without a transcript to read it in |
+| §3 | The Codex arm of the debate *is* `DECISION.md`, which it has never been told exists |
+| §8 | "Claude arbitrates" has no wiring, and `PIVOT_FRESH` has no meaning |
 
 ## Motivation
 
@@ -285,6 +302,13 @@ same way.** The full set:
 | `executor/extended` | §5 |
 | `verify/item_completed` | §7 |
 | `executor/item_started`, `verify/item_started` | §7 |
+| `debate/round`, `debate/resist`, `debate/converged` | §8 / three-way debate spec |
+| `debate/circling`, `debate/pivot` | §8 |
+
+The `debate` stage and `resist` type are **already emitted by the pending
+three-way debate design** (`{"stage":"debate","type":"resist",...}`) and are
+likewise undeclared today. Declaring them here means that loop is observable the
+day it lands, instead of shipping mute and needing this fix a second time.
 
 Treat "emitting an event whose stage or type is undeclared" as the defect class
 this section exists to close, not as a one-off fix for `decision`.
@@ -365,6 +389,25 @@ completed-item threshold no longer has to be generous.
 
 A hard ceiling (`URO_EXECUTOR_MAX_MS`, default 6h) remains so a truly wedged
 process cannot hang a run forever. A timeout that can never fire is not a timeout.
+
+**This is a precondition for the debate loop's own stuck-detection.**
+`detectCircling` returns `false` with fewer than three recorded rounds. Three
+rounds of review → fix-plan → re-execute against a real repository do not fit in
+thirty minutes. The current wall-clock kill therefore destroys a debate *before*
+circling can be detected — the timeout is not an alternative to `shouldPivot`, it
+is what currently prevents it from ever firing.
+
+The two detectors are complementary and neither substitutes for the other:
+
+| | `detectCircling` | §5 liveness |
+|---|---|---|
+| Detects | **semantic** stuck — findings recur, count not decreasing | **mechanical** stuck — zero bytes |
+| State | agents healthy, not converging | process crashed or wedged |
+| Response | pivot | kill |
+
+A wedged process produces no rounds, so the ledger never reaches three and
+`detectCircling` never fires. A circling debate emits bytes constantly, so liveness
+sees a healthy process. Both are required.
 
 **Preserve partial work.** Before any kill, commit whatever the executor has
 written to the isolated branch. A timed-out run then reports *how far it got*
@@ -564,67 +607,110 @@ Phase 0 ships independently of everything else and should not wait.
 
 ---
 
-## §8 — Nobody is listening when the executor pushes back
+## §8 — Push-back, arbitration, and the STORM pivot
 
 ### Problem
 
-`§3` fixes one end of the conversation: the executor is told it may push back, and
-how. This section fixes the other end — **nothing answers.**
+Three separate breaks in what is meant to be a conversation.
 
-`run.js:131` accepts a `decisionResolver`. `run.js:428` refuses to use the
-answer-and-continue path unless one is a function:
+**1. Only one seat can push back, and its channel is disconnected.**
 
-```js
-if (mode !== 'autonomous'
-    || typeof decisionResolver !== 'function'
-    || challengeRound >= maxChallengeRounds) {
-  decision = { questions: challenge.questions, mode, challengeRound };
-  break;
-}
-```
+| Seat | Can it push back? | Vocabulary |
+|---|---|---|
+| Codex (executor) | in principle | `DECISION.md`, typed questions |
+| Cursor (verifier) | **no** | two strings — `NO_BLOCKERS` or `ISSUES` (`verifier.js:24`) |
+| Claude (planner) | no | authors `TASK.md`; nothing challenges back |
 
-Every production caller — `bin/loop.js`, `campaign.js`, `setup.js` — calls `run()`
-without one. The only supplier in the repository is `test/run.test.js:610`. So the
-answer-and-continue path at `:433-446` is **unreachable outside the test suite**,
-and every challenge halts the run.
+The seat whose entire job is finding problems can only vote.
 
-The result the operator observed: Codex raises a legitimate question, and the loop
-stops rather than resolving it. The debate is one-way by omission, not by design.
+**2. Nothing answers.** `run.js:428` refuses the answer-and-continue path unless a
+`decisionResolver` is a function. Every production caller — `bin/loop.js`,
+`campaign.js`, `setup.js` — omits it; the only supplier in the repository is
+`test/run.test.js:610`. So `:433-446` is unreachable outside tests and every
+challenge halts the run. The debate is one-way by omission, not design.
+
+**3. `PIVOT_FRESH` has no meaning.** `campaign/debate/plan-debate.md` specifies
+`shouldPivot` as returning `PIVOT_AMEND` / `PIVOT_FRESH` / `PIVOT_CONCLUDE`, each
+merely "a distinct non-empty string". Nothing says what a fresh pivot *does*. A
+pivot that re-runs the same approach is the re-roll the campaigns spec
+deliberately removed in v2 — repetition, not learning.
 
 ### Design
 
-Wire a resolver so the exchange completes without the operator restarting the run.
+**Arbitration.** Wire the resolver so the exchange completes without the operator
+restarting the run.
 
-- **`--mode manual` (default)** — unchanged behaviour, now made visible. The run
-  halts with `needs-decision`, and §4's events plus §7's transcript render the
-  questions so the operator can answer and re-run. `answeredBy: 'user'`.
+- **`--mode manual` (default)** — halts with `needs-decision`; §4's events and §7's
+  transcript render the questions; the operator answers and re-runs.
+  `answeredBy: 'user'`.
 - **`--mode autonomous`** — `bin/loop.js` supplies a resolver that answers from the
   plan and the executor's stated reasoning, rewrites `TASK.md` via the existing
   `planWithDecision`, and re-runs the executor. `answeredBy: 'planner'`.
 
-The mode flag already exists (`args.js:16`, `RUN_MODES`) and `run.js` already
-branches on it. This wires the branch that was left unconnected.
+The `mode` flag already exists (`args.js:16`) and `run.js` already branches on it.
+This connects the branch that was left dangling.
+
+This same mechanism is what the three-way debate design calls "Claude arbitrates".
+It must not be built twice: the debate loop's `run.js` integration consumes this
+resolver rather than introducing a parallel one.
 
 **Bounds, because an auto-answering loop must not run away:**
 
 - `challengeRounds` (existing, default 2) caps the exchange. On exhaustion the run
-  halts with `needs-decision` and reports the unresolved questions — it does not
-  silently proceed.
-- A resolver that returns no answers is treated as no resolution: halt, do not
-  re-run.
+  halts with `needs-decision` and reports the unresolved questions.
+- A resolver returning no answers is treated as no resolution: halt, do not re-run.
 - `kind: 'authority'` questions **always** halt, even in autonomous mode. A
   question the executor itself classified as requiring authority is not one a
-  resolver should answer on the operator's behalf.
+  resolver answers on the operator's behalf.
+
+**The STORM pivot.** When `detectCircling` fires, `shouldPivot` escalates:
+
+```
+shouldPivot(0) → PIVOT_AMEND     adjust the existing plan in place
+shouldPivot(1) → PIVOT_FRESH     regenerate via STORM multi-perspective
+shouldPivot(2) → PIVOT_CONCLUDE  stop and report honestly
+```
+
+`PIVOT_FRESH` is defined here as **escalation to a campaign round**, not a local
+retry. Operator decision, chosen to preserve the boundary the campaigns spec
+draws: *"`loop run` remains one pass with one checkpoint. Rounds live at the
+campaign level, in a separate command."*
+
+Mechanism:
+
+- The run ends with a new outcome, **`needs-pivot`**, carrying the debate ledger —
+  all findings seen, which recurred, which resolved, and the round history.
+- `campaign.js` consumes that ledger as input to Mode A: the planner generates N
+  candidates from **genuinely distinct perspectives**, informed by exactly which
+  framings already failed and how.
+- Mode A's existing machinery is reused unchanged — `planner/candidate_generated`
+  with declared perspectives, per-candidate gates and verifier passes,
+  `planner/synthesis`. **No comparator is built and nothing is scored**, per that
+  spec's anti-gaming rule.
+
+This is the campaigns spec's own distinction between repetition and learning: a
+round re-runs a *different* plan informed by real reviews of really executed code.
+The ledger is what makes the new round better-informed rather than a re-roll.
+
+**Out of scope for this pass:** STORM-generating the *initial* plan. It requires
+`loop run` to hold a planner seat, which crosses the same boundary in the opposite
+direction and costs planner tokens on every run. Revisit once pivot escalation is
+proven.
 
 ### Testing
 
 - Manual mode halts with `needs-decision` and emits `decision/challenged`
-- Autonomous mode with a resolver answers, rewrites `TASK.md`, re-runs the
-  executor, and emits `decision/resolved` with `answeredBy: 'planner'`
+- Autonomous mode answers, rewrites `TASK.md`, re-runs the executor, and emits
+  `decision/resolved` with `answeredBy: 'planner'`
 - `challengeRounds` exhaustion halts rather than looping
 - An `authority`-kind question halts in autonomous mode
 - A resolver returning no answers halts and does not re-run
 - `DECISION.md` is removed before the executor re-runs (existing `unlinkSync`)
+- `detectCircling` true at `pivotCount === 1` produces outcome `needs-pivot`
+- A `needs-pivot` run's facts carry the full ledger: all, recurring, resolved
+- `PIVOT_CONCLUDE` stops and reports; it does not silently succeed
+- A campaign consuming a `needs-pivot` ledger generates candidates whose declared
+  perspectives differ from the failed framing
 
 ---
 
@@ -640,10 +726,16 @@ makes the debate visible for the first time.
 
 **Plan B — stop losing things, and finish the conversation.**
 §2 durable artifacts · §5 evidence-based deadline and partial-work preservation ·
-§3 executor preamble, plan template, and the named no-op · §8 resolver wiring.
-§5 depends on §4 having declared `executor/extended`. §8 depends on §3 — teaching
-the executor to ask is worthless if nothing answers, and wiring an answer is
-worthless if it never asks.
+§3 executor preamble, plan template, and the named no-op · §8 arbitration and the
+`needs-pivot` outcome. §5 depends on §4 having declared `executor/extended`. §8
+depends on §3 — teaching the executor to ask is worthless if nothing answers, and
+wiring an answer is worthless if it never asks. §5 is a hard precondition for the
+debate loop: without it, `detectCircling` can never accumulate three rounds.
+
+**Then — the debate loop itself.** `src/debate.js`, `src/review.js`,
+`src/fix-plan.js` against their existing pre-written tests, then `run.js`
+integration consuming §8's resolver and emitting §4's declared `debate/*` events.
+Not part of this spec, but the reason it exists.
 
 **Plan C — the transcript.**
 §7 phases 1 and 2: verifier streaming, reasoning and `item.started` capture, then
