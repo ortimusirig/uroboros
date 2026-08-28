@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { preflight } from '../src/preflight.js';
+import { preflight, probeVerifierLiveness } from '../src/preflight.js';
 
 const SAFE_SCRATCH_BASE = process.env.URO_TEST_SCRATCH_ROOT ?? (process.platform === 'win32'
   ? 'C:/ccc-test'
@@ -96,4 +96,40 @@ test('preflight rejects a missing corrected run and accepts an existing run dire
     rmSync(d, { recursive: true, force: true });
     rmSync(scratchRoot, { recursive: true, force: true });
   }
+});
+
+test('verifier liveness probe names the binary and version invocation on failure', async () => {
+  const calls = [];
+  const result = await probeVerifierLiveness({
+    bin: 'seat-agent',
+    spawn: async (bin, args) => {
+      calls.push({ bin, args });
+      return { code: 7, stdout: '', stderr: 'cannot start verifier', timedOut: false };
+    },
+  });
+
+  assert.deepEqual(calls, [{ bin: 'seat-agent', args: ['--version'] }]);
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /seat-agent/);
+  assert.match(result.reason, /seat-agent --version/);
+  assert.match(result.reason, /exited 7/);
+  assert.match(result.reason, /cannot start verifier/);
+});
+
+test('preflight accepts an injected passing verifier probe', async () => {
+  const d = mkdtempSync(join(tmpdir(), 'p-probe-'));
+  writeFileSync(join(d, 'gate.json'), '[]');
+  let probed = null;
+  const r = await preflight({
+    target: d, gate: join(d, 'gate.json'), scratchRoot: 'C:/ccc/w',
+    bins: { git: process.execPath, codex: process.execPath, agent: process.execPath },
+    probeVerifier: async ({ bin }) => {
+      probed = bin;
+      return { ok: true, reason: null };
+    },
+    checkCommand: async () => true,
+  });
+
+  assert.equal(r.ok, true);
+  assert.equal(probed, process.execPath);
 });

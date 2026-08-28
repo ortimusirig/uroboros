@@ -189,7 +189,7 @@ test('buildCursorArgs uses read-only plan mode, trust, and the pinned model', ()
   const a = buildCursorArgs({}).join(' ');
   assert.match(a, /--mode plan/);
   assert.match(a, /--output-format stream-json/);
-  assert.match(a, /--trust/, 'must clear the workspace-trust gate or every review fails to ISSUES');
+  assert.match(a, /--trust/, 'must clear the workspace-trust gate or every review is UNVERIFIED');
   assert.match(a, new RegExp(DEFAULT_VERIFIER_MODEL.replaceAll('.', '\\.')));
 });
 
@@ -229,7 +229,7 @@ test('runVerifier returns NO_BLOCKERS when the stream says so', async () => {
 test('runVerifier identifies a non-zero empty stream as a launch failure', async () => {
   const r = await runVerifier({ cwd: process.cwd(), bin: process.execPath,
     extraArgv: [brokenFakeAgent] });
-  assert.equal(r.verdict, 'ISSUES');
+  assert.equal(r.verdict, 'UNVERIFIED');
   assert.equal(r.launchFailed, true);
   assert.notEqual(r.exitCode, 0);
   assert.match(r.stderr, /fake agent failed/);
@@ -318,6 +318,38 @@ test('parseVerdict returns NO_BLOCKERS from a real-shaped result string', () => 
     JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: 'All clear.\n\nNO_BLOCKERS' }),
   ].join('\n');
   assert.equal(parseVerdict(streamText), 'NO_BLOCKERS');
+});
+
+test('an empty stream is UNVERIFIED with unchanged none provenance', () => {
+  const detail = parseVerdictDetail('');
+
+  assert.equal(detail.verdict, 'UNVERIFIED');
+  assert.equal(detail.source, 'none');
+  assert.equal(detail.text, '');
+  assert.equal(detail.planText, '');
+});
+
+test('a markerless stream with findings remains fail-safe ISSUES', () => {
+  const detail = parseVerdictDetail(JSON.stringify({
+    type: 'result', subtype: 'success', is_error: false,
+    result: 'A blocking race remains in the retry path.',
+  }));
+
+  assert.equal(detail.verdict, 'ISSUES');
+  assert.equal(detail.source, 'none');
+  assert.match(detail.text, /blocking race/);
+});
+
+test('real verdict markers remain conclusive', () => {
+  for (const verdict of ['NO_BLOCKERS', 'ISSUES']) {
+    const detail = parseVerdictDetail(JSON.stringify({
+      type: 'result', subtype: 'success', is_error: false,
+      result: `Review complete.\n\n${verdict}`,
+    }));
+
+    assert.equal(detail.verdict, verdict);
+    assert.equal(detail.source, 'result');
+  }
 });
 
 test('a non-blocking-notes heading does not turn a clean assistant verdict into ISSUES', () => {

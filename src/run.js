@@ -38,6 +38,7 @@ import {
 } from './merge.js';
 import { countTestFiles } from './merge-test-count.js';
 import { detectChallenge } from './decision.js';
+import { probeVerifierLiveness } from './preflight.js';
 
 export { HARNESS_ARTIFACTS } from './artifacts.js';
 
@@ -63,9 +64,23 @@ export async function diffText(dir, baseRef = 'HEAD') {
 }
 
 export function mergeVerifierVerdicts(correctnessVerdict, intentVerdict) {
-  return correctnessVerdict === 'NO_BLOCKERS' && intentVerdict === 'NO_BLOCKERS'
-    ? 'NO_BLOCKERS'
-    : 'ISSUES';
+  if (correctnessVerdict === 'NO_BLOCKERS' && intentVerdict === 'NO_BLOCKERS') {
+    return 'NO_BLOCKERS';
+  }
+  if ((correctnessVerdict === 'UNVERIFIED' && intentVerdict !== 'ISSUES')
+    || (intentVerdict === 'UNVERIFIED' && correctnessVerdict !== 'ISSUES')) {
+    return 'UNVERIFIED';
+  }
+  return 'ISSUES';
+}
+
+export function reviewOutcomeFor(correctness, intent) {
+  if (correctness.timedOut || intent.timedOut) return 'timed-out';
+  if (correctness.launchFailed || intent.launchFailed
+    || correctness.verdict === 'UNVERIFIED' || intent.verdict === 'UNVERIFIED') {
+    return 'verifier-failed';
+  }
+  return 'review-ready';
 }
 
 function planWithGateFailure(plan, gateResult) {
@@ -128,6 +143,7 @@ export async function run(opts) {
     executorModel = DEFAULT_EXECUTOR_MODEL,
     executorEffort = DEFAULT_EXECUTOR_EFFORT,
     verifierModel = DEFAULT_VERIFIER_MODEL,
+    verifierBin = 'agent', verifierProbeCompleted = false,
     mode = 'manual', decisionResolver, challengeRounds = 2,
     adapters = {}, reporter,
   } = opts;
@@ -145,6 +161,13 @@ export async function run(opts) {
   let plan = originalPlan;
   const commands = Array.isArray(gate) ? gate : JSON.parse(readFileSync(gate, 'utf8'));
   const stageTimeouts = resolveStageTimeouts();
+  const probeVerifier = adapters.probeVerifier
+    ?? (adapters.runVerifier === undefined ? probeVerifierLiveness : null);
+  if (!verifierProbeCompleted && probeVerifier) {
+    const probe = await probeVerifier({ bin: verifierBin });
+    if (!probe?.ok) throw new Error(`preflight failed: ${probe?.reason
+      ?? `verifier liveness probe failed for ${verifierBin}`}`);
+  }
 
   // The reporter is the feature boundary. Without one, do not resolve watchdog settings,
   // allocate its state, arm timers, or create abort controllers.
@@ -550,12 +573,12 @@ export async function run(opts) {
       });
 
       const v = annotateVerifierConsistency(observeUsage(await runVerifier({
-        cwd: iso.dir, model: verifierModel, prompt: DEFAULT_PROMPT,
+        cwd: iso.dir, bin: verifierBin, model: verifierModel, prompt: DEFAULT_PROMPT,
         timeoutMs: stageTimeouts.verifier,
         reporter: eventReporter, runId, pass: 'correctness',
       }), { seat: 'verifier', pass: 'correctness', iteration: n }));
       const intentVerifier = annotateVerifierConsistency(observeUsage(await runVerifier({
-        cwd: iso.dir, model: verifierModel, prompt: INTENT_PROMPT,
+        cwd: iso.dir, bin: verifierBin, model: verifierModel, prompt: INTENT_PROMPT,
         timeoutMs: stageTimeouts.verifier,
         reporter: eventReporter, runId, pass: 'intent',
       }), { seat: 'verifier', pass: 'intent', iteration: n }));
@@ -576,9 +599,7 @@ export async function run(opts) {
         verdict, source: 'merged',
       });
       iterations.push(iter);
-      outcome = v.timedOut || intentVerifier.timedOut
-        ? 'timed-out'
-        : v.launchFailed || intentVerifier.launchFailed ? 'verifier-failed' : 'review-ready';
+      outcome = reviewOutcomeFor(v, intentVerifier);
     }
   }
 

@@ -149,6 +149,9 @@ export function buildReportMarkdown(facts, {
   const configuredTimeouts = facts.limits?.timeoutsMs;
   const usageDisagreements = (facts.usageConsistency?.checks ?? [])
     .filter((check) => check.status === 'disagreement');
+  const correctnessUnverified = facts.correctnessVerdict === 'UNVERIFIED'
+    || (facts.correctnessVerdict === null && facts.verdict === 'UNVERIFIED');
+  const intentUnverified = facts.intentVerdict === 'UNVERIFIED';
   const md = [
     `# CCC run ${facts.runId}`,
     ``,
@@ -181,11 +184,15 @@ export function buildReportMarkdown(facts, {
             `stall ${facts.retryCounts?.stall ?? 0}/${facts.limits.stall.restartLimit}`,
         ]
       : []),
-    ...(facts.verdictSource === 'none'
-      ? [``, `Correctness verifier: no verdict marker was found; ISSUES is the fail-safe default.`]
+    ...(correctnessUnverified
+      ? [``, `Correctness verifier produced no readable verdict; the review did not run for this seat.`]
+      : facts.verdictSource === 'none'
+        ? [``, `Correctness verifier: no verdict marker was found; ISSUES is the fail-safe default.`]
       : []),
-    ...(facts.intentVerdictSource === 'none'
-      ? [``, `Intent verifier: no verdict marker was found; ISSUES is the fail-safe default.`]
+    ...(intentUnverified
+      ? [``, `Intent verifier produced no readable verdict; the review did not run for this seat.`]
+      : facts.intentVerdictSource === 'none'
+        ? [``, `Intent verifier: no verdict marker was found; ISSUES is the fail-safe default.`]
       : []),
     ...(facts.verifierConsistency?.status === 'disagreement'
       ? [

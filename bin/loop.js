@@ -264,6 +264,7 @@ async function main() {
         executorModel: opts.executorModel,
         executorEffort: opts.executorEffort,
         verifierModel: opts.verifierModel,
+        verifierProbeCompleted: true,
       },
     });
     aggregate.campaignEventsPath = campaignEventsPath;
@@ -281,6 +282,7 @@ async function main() {
     executorModel: opts.executorModel,
     executorEffort: opts.executorEffort,
     verifierModel: opts.verifierModel,
+    verifierProbeCompleted: true,
     mode: opts.mode,
     correctsRunId: opts.correctsRunId,
     scratchRoot: SCRATCH_ROOT,

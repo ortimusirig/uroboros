@@ -2,8 +2,8 @@
 //
 // Kept out of bin/loop.js because that module self-executes on import and so
 // cannot be unit tested. Only review-ready and no-op are successes. verifier-failed
-// marks a failed verification launch; executor-failed marks a crashed or aborted
-// executor that wrote nothing.
+// marks a verifier launch failure or a seat that produced no readable verdict;
+// executor-failed marks a crashed or aborted executor that wrote nothing.
 export const EXIT_BY_OUTCOME = {
   'review-ready': 0,
   'no-op': 0,

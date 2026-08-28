@@ -159,6 +159,27 @@ test('writeReport omits optional plan and gate sections when facts contain null'
   assert.match(md, /## Tokens/);
 });
 
+test('writeReport names every seat that produced no readable verdict', () => {
+  const unverifiedFacts = buildRunFacts({
+    runId: 'unverified', target: 'C:/proj', dir: 'C:/ccc/w', isRepo: false,
+    branch: 'ccc/unverified', iterations: [], gateStatus: 'passed',
+    verdict: 'UNVERIFIED', verdictSource: 'none',
+    correctnessVerdict: 'UNVERIFIED', correctnessVerdictSource: 'none',
+    intentVerdict: 'UNVERIFIED', intentVerdictSource: 'none',
+    outcome: 'verifier-failed', gateRetries: 0,
+  });
+  const d = mkdtempSync(join(tmpdir(), 'rep-unverified-'));
+  const { jsonPath, mdPath } = writeReport({ dir: d, facts: unverifiedFacts });
+  const persisted = JSON.parse(readFileSync(jsonPath, 'utf8'));
+  const md = readFileSync(mdPath, 'utf8');
+
+  assert.equal(persisted.outcome, 'verifier-failed');
+  assert.equal(persisted.verdict, 'UNVERIFIED');
+  assert.match(md, /Correctness verifier produced no readable verdict; the review did not run/i);
+  assert.match(md, /Intent verifier produced no readable verdict; the review did not run/i);
+  assert.doesNotMatch(md, /UNVERIFIED is .*finding/i);
+});
+
 test('configured timeouts and timeout events reach facts and markdown', () => {
   const timedOut = buildRunFacts({
     runId: 'timeout', target: 'C:/proj', dir: 'C:/ccc/w', isRepo: false,

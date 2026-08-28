@@ -164,3 +164,22 @@ test('truncation is explicit and replay uses the exact bounded text that was jud
     judgedTextTruncated: true,
   });
 });
+
+test('whitespace-only retained evidence is UNVERIFIED and replays identically', () => {
+  const detail = parseVerdictDetail([
+    assistant(' \t\n '),
+    plan({ name: ' \t', overview: '\n', plan: '   ' }),
+    result('\r\n\t'),
+  ].join('\n'));
+
+  assert.equal(detail.verdict, 'UNVERIFIED');
+  assert.equal(detail.source, 'none');
+  assert.equal(detail.text.trim(), '');
+  assert.equal(detail.planText.trim(), '');
+  assert.deepEqual(deriveVerdictFromEvidence(detail.evidence), {
+    verdict: 'UNVERIFIED',
+    source: 'none',
+    judgedText: detail.evidence.judgedText,
+    judgedTextTruncated: false,
+  });
+});

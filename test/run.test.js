@@ -5,7 +5,13 @@ import { tmpdir, homedir } from 'node:os';
 import { join } from 'node:path';
 import { parseArgs } from '../src/args.js';
 import { DEFAULT_EXECUTOR_EFFORT, DEFAULT_EXECUTOR_MODEL } from '../src/executor.js';
-import { HARNESS_ARTIFACTS, run, diffText, mergeVerifierVerdicts } from '../src/run.js';
+import {
+  HARNESS_ARTIFACTS,
+  run,
+  diffText,
+  mergeVerifierVerdicts,
+  reviewOutcomeFor,
+} from '../src/run.js';
 import { EMPTY_USAGE } from '../src/usage.js';
 import {
   DEFAULT_PROMPT,
@@ -514,6 +520,79 @@ test('empty diff → verifier is NOT launched (no-op)', async () => {
   rmSync(scr, { recursive: true, force: true });
 });
 
+test('an UNVERIFIED seat prevents a review-ready outcome', async () => {
+  const scr = scratch();
+  const facts = await run({
+    task: 'do the task', target: makeTarget(), gate: [], gateRetries: 0,
+    scratchRoot: scr, runId: 'unverified-verdict',
+    adapters: {
+      runExecutor: writingExecutor,
+      runGate: async () => ({ passed: true, results: [] }),
+      runVerifier: async ({ prompt }) => prompt === INTENT_PROMPT
+        ? { verdict: 'NO_BLOCKERS', launchFailed: false, verdictSource: 'result' }
+        : { verdict: 'UNVERIFIED', launchFailed: false, verdictSource: 'none', findings: '' },
+    },
+  });
+
+  assert.equal(facts.verdict, 'UNVERIFIED');
+  assert.equal(facts.correctnessVerdict, 'UNVERIFIED');
+  assert.equal(facts.correctnessVerdictSource, 'none');
+  assert.equal(facts.outcome, 'verifier-failed');
+  assert.notEqual(facts.outcome, 'review-ready');
+  rmSync(scr, { recursive: true, force: true });
+});
+
+test('a failing verifier preflight probe stops before executor dispatch', async () => {
+  let executorCalled = false;
+  const target = makeTarget();
+  try {
+    await assert.rejects(
+      () => run({
+        task: 'do the task', target, gate: [], gateRetries: 0,
+        scratchRoot: 'unused-because-preflight-fails', runId: 'probe-failed',
+        adapters: {
+          probeVerifier: async () => ({
+            ok: false,
+            reason: 'verifier liveness probe failed for agent: tried "agent --version"; exited 9',
+          }),
+          runExecutor: async () => {
+            executorCalled = true;
+            return { changedFiles: [], lastMessage: 'must not run' };
+          },
+          runGate: async () => ({ passed: true, results: [] }),
+          runVerifier: async () => ({ verdict: 'NO_BLOCKERS', launchFailed: false }),
+        },
+      }),
+      /agent.*agent --version.*exited 9/i,
+    );
+    assert.equal(executorCalled, false);
+  } finally {
+    rmSync(target, { recursive: true, force: true });
+  }
+});
+
+test('a passing verifier preflight probe leaves executor dispatch unchanged', async () => {
+  const scr = scratch();
+  let executorCalled = false;
+  const facts = await run({
+    task: 'do the task', target: makeTarget(), gate: [], gateRetries: 0,
+    scratchRoot: scr, runId: 'probe-passed',
+    adapters: {
+      probeVerifier: async () => ({ ok: true, reason: null }),
+      runExecutor: async () => {
+        executorCalled = true;
+        return { changedFiles: [], lastMessage: 'nothing to do' };
+      },
+      runGate: async () => ({ passed: true, results: [] }),
+      runVerifier: async () => { throw new Error('no-op must not verify'); },
+    },
+  });
+
+  assert.equal(executorCalled, true);
+  assert.equal(facts.outcome, 'no-op');
+  rmSync(scr, { recursive: true, force: true });
+});
+
 test('a sentinel-only executor challenge needs a decision in manual mode', async () => {
   const scr = scratch();
   let gateCalls = 0;
@@ -891,4 +970,19 @@ test('mergeVerifierVerdicts is fail-safe across both passes', () => {
   assert.equal(mergeVerifierVerdicts('NO_BLOCKERS', 'NO_BLOCKERS'), 'NO_BLOCKERS');
   assert.equal(mergeVerifierVerdicts('NO_BLOCKERS', 'ISSUES'), 'ISSUES');
   assert.equal(mergeVerifierVerdicts('ISSUES', 'NO_BLOCKERS'), 'ISSUES');
+  assert.equal(mergeVerifierVerdicts('NO_BLOCKERS', 'UNVERIFIED'), 'UNVERIFIED');
+  assert.equal(mergeVerifierVerdicts('UNVERIFIED', 'NO_BLOCKERS'), 'UNVERIFIED');
+  assert.equal(mergeVerifierVerdicts('ISSUES', 'UNVERIFIED'), 'ISSUES');
+});
+
+test('review outcome rejects UNVERIFIED seats as verifier failures', () => {
+  const clean = { verdict: 'NO_BLOCKERS', launchFailed: false, timedOut: false };
+  const issues = { verdict: 'ISSUES', launchFailed: false, timedOut: false };
+  const unverified = { verdict: 'UNVERIFIED', launchFailed: false, timedOut: false };
+
+  assert.equal(reviewOutcomeFor(clean, clean), 'review-ready');
+  assert.equal(reviewOutcomeFor(issues, clean), 'review-ready',
+    'a parsed ISSUES verdict remains a completed review');
+  assert.equal(reviewOutcomeFor(unverified, clean), 'verifier-failed');
+  assert.equal(reviewOutcomeFor(clean, unverified), 'verifier-failed');
 });

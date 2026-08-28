@@ -33,7 +33,7 @@ export function assertUsablePrompt(prompt) {
 export function buildCursorArgs({ model = DEFAULT_VERIFIER_MODEL, prompt = DEFAULT_PROMPT } = {}) {
   assertUsablePrompt(prompt);
   // --trust clears Cursor's "Workspace Trust Required" gate for READING the checkout; without
-  // it the agent exits 1 with no output and every review defaults to fail-safe ISSUES. It is
+  // it the agent exits 1 with no output and every review is UNVERIFIED. It is
   // NOT one of the forbidden flags (--force/--yolo/-f/--approve-mcps auto-APPROVE actions);
   // --mode plan keeps the agent read-only regardless. Verified live (exit 0, NO_BLOCKERS).
   const args = [
@@ -206,9 +206,12 @@ export function deriveVerdictFromEvidence(evidence) {
     return { verdict: artifactVerdict, source: 'plan',
       judgedText: plan.text ?? '', judgedTextTruncated: plan.truncated === true };
   }
+  const hasSubstantiveEvidence = [result.text, assistant.text, plan.text]
+    .some((text) => typeof text === 'string' && text.trim() !== '');
   // With no winning marker, the plan candidate is the final text examined before
-  // the fail-safe ISSUES default. Retain it as the judged text for source=none.
-  return { verdict: 'ISSUES', source: 'none',
+  // the fail-safe verdict. Retain it as the judged text for source=none. An empty
+  // evidence set means the review produced nothing readable, not that it found an issue.
+  return { verdict: hasSubstantiveEvidence ? 'ISSUES' : 'UNVERIFIED', source: 'none',
     judgedText: plan.text ?? '', judgedTextTruncated: plan.truncated === true };
 }
 
