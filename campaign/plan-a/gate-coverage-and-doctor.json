@@ -1,0 +1,1 @@
+[{"bin": "node", "args": ["--test", "test/doctor-checks.test.js", "test/dashboard.test.js", "test/dashboard-transcript.test.js", "test/setup.test.js", "test/headless-setup.test.js"]}]
