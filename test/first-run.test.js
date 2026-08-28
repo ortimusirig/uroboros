@@ -308,9 +308,16 @@ test('doctor reports GitHub installed, authentication, and remote preconditions 
   }
 });
 
-test('the init plan template puts its dashboard title directly below the task heading', () => {
+test('the init plan template is an implementation work order with the decision escape hatch', () => {
   assert.match(PLAN_TEMPLATE,
-    /^# Task\r?\nTitle: <one-line summary for the dashboard>\r?\n\r?\nDescribe the user-visible outcome and why it matters[.]/);
+    /^# Task\r?\nTitle: <one-line summary for the dashboard>\r?\n\r?\nImplement:/);
+  assert.match(PLAN_TEMPLATE, /## Required behavior/);
+  assert.match(PLAN_TEMPLATE, /## Invariants/);
+  assert.match(PLAN_TEMPLATE, /## Out of scope/);
+  assert.match(PLAN_TEMPLATE, /## Test requirements/);
+  assert.match(PLAN_TEMPLATE, /DECISION[.]md/);
+  assert.match(PLAN_TEMPLATE, /## Q1[\s\S]*Kind: technical \| product \| authority/);
+  assert.doesNotMatch(PLAN_TEMPLATE, /(?:please|must) approve|request approval/i);
 });
 
 test('init creates detected runnable scaffolding and refuses a second overwrite', async () => {

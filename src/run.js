@@ -1,9 +1,10 @@
-import { readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { isolate } from './isolation.js';
 import {
   DEFAULT_EXECUTOR_EFFORT,
   DEFAULT_EXECUTOR_MODEL,
+  EXECUTOR_PREAMBLE,
   runExecutor as realExecutor,
 } from './executor.js';
 import { runGate as realGate } from './gate.js';
@@ -132,6 +133,16 @@ function planWithDecision(plan, questions, resolution) {
   });
   return `${basePlan}\n\n## Decision — resolved autonomously\n\n${pairs.join('\n\n')}` +
     '\n\nProceed with the original task above, incorporating these decisions.';
+}
+
+const APPROVAL_REQUEST = /(?:^|[.!?]\s+|\n\s*)(?:please\s+)?approve\s+(?:this|the)\s+(?:design|plan|proposal|approach)(?=\s*(?:[,.!?;:]|$|\band\b|\bso\b|\bbefore\b))/i;
+
+function executorRequestedApproval(result) {
+  const messages = Array.isArray(result?.agentMessages) ? [...result.agentMessages] : [];
+  if (messages.length === 0 && typeof result?.lastMessage === 'string') {
+    messages.push(result.lastMessage);
+  }
+  return messages.some((message) => typeof message === 'string' && APPROVAL_REQUEST.test(message));
 }
 
 export async function run(opts) {
@@ -273,7 +284,6 @@ export async function run(opts) {
     if (activeConflict) mergeConflicts.push(activeConflict);
     plan = buildMergeTask(originalPlan, merge, activeConflict);
   }
-  writeFileSync(join(iso.dir, 'TASK.md'), plan);
   const iterations = [];
   let gateStatus = 'failed';
   let verdict = null;
@@ -285,6 +295,7 @@ export async function run(opts) {
   const timeoutEvents = [];
   let gateRetryCount = 0;
   let executorLaunchCount = 0;
+  let noOpReason;
 
   const recordExecutorTimeout = (exec, iteration, attempt) => {
     if (!exec.timedOut) return;
@@ -317,6 +328,8 @@ export async function run(opts) {
     let attemptPlan = basePlan;
     while (true) {
       const attempt = ++executorLaunchCount;
+      const executorPlan = `${EXECUTOR_PREAMBLE}\n\n${attemptPlan}`;
+      writeFileSync(join(iso.dir, 'TASK.md'), executorPlan);
       const controller = stallConfig?.policy === 'restart'
         && stallRestartCount < stallConfig.restartLimit
         ? new AbortController()
@@ -326,7 +339,7 @@ export async function run(opts) {
       let result;
       try {
         result = observeUsage(await runExecutor({
-          plan: attemptPlan, cwd: iso.dir, model: executorModel, effort: executorEffort,
+          plan: executorPlan, cwd: iso.dir, model: executorModel, effort: executorEffort,
           timeoutMs: stageTimeouts.executor,
           reporter: eventReporter, runId, attempt,
           ...(controller ? { signal: controller.signal } : {}),
@@ -426,7 +439,6 @@ export async function run(opts) {
     if (!activeConflict) break;
     mergeConflicts.push(activeConflict);
     plan = buildMergeTask(originalPlan, merge, activeConflict);
-    writeFileSync(join(iso.dir, 'TASK.md'), plan);
   }
   let retries = 0;
   let executorTimedOut = Boolean(exec.timedOut);
@@ -461,7 +473,6 @@ export async function run(opts) {
       });
       const answers = Array.isArray(resolution?.answers) ? resolution.answers : [];
       plan = planWithDecision(plan, challenge.questions, resolution);
-      writeFileSync(join(iso.dir, 'TASK.md'), plan);
       unlinkSync(join(iso.dir, 'DECISION.md'));
       exec = await executePlan(plan);
       executorTimedOut = Boolean(exec.timedOut);
@@ -565,6 +576,12 @@ export async function run(opts) {
       outcome = Number.isInteger(iter.executor.exitCode) && iter.executor.exitCode !== 0
         ? 'executor-failed'
         : 'no-op';
+      if (outcome === 'no-op'
+        && iter.executor.exitCode === 0
+        && !existsSync(join(iso.dir, 'DECISION.md'))
+        && executorRequestedApproval(exec)) {
+        noOpReason = 'approval-requested';
+      }
       iterations.push(iter);
     } else {
       writeFileSync(join(iso.dir, 'CHANGES.diff'), diff);
@@ -650,6 +667,7 @@ export async function run(opts) {
     intentVerifierFindings, intentVerdict, intentVerdictSource,
     intentVerifierPlan, intentVerifierEvidence, intentVerifierConsistency,
     gateFailure, tokens, usageConsistency, outcome, gateRetries,
+    ...(noOpReason === undefined ? {} : { noOpReason }),
     timeouts: stageTimeouts, timeoutEvents,
     ...(campaignId === undefined
       ? {}

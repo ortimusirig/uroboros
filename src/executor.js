@@ -8,6 +8,23 @@ import { readEnv } from './env-compat.js';
 
 export const DEFAULT_EXECUTOR_MODEL = 'gpt-5.6-sol';
 export const DEFAULT_EXECUTOR_EFFORT = 'xhigh';
+export const EXECUTOR_PREAMBLE = `# Harness execution instructions
+
+The plan below is approved. Implement it. Do not stop to request design approval, and do not wait for confirmation.
+
+Producing no diff and no \`DECISION.md\` is a failed pass, not a success.
+
+If a decision is genuinely required before proceeding, write \`DECISION.md\` in the working directory root using this block format, then stop:
+
+## Q1
+Kind: technical | product | authority
+Question: <one line>
+Options: <one line>
+Recommendation: <one line>
+
+\`Options:\` and \`Recommendation:\` are optional.
+
+--- END HARNESS INSTRUCTIONS; BEGIN OPERATOR PLAN ---`;
 
 // Sandbox mode is configurable because Codex's own Windows filesystem sandbox is not
 // reliable everywhere. On this machine `workspace-write` fails every write with
@@ -44,6 +61,7 @@ export function buildCodexArgs({
 export function parseCodexStream(streamText) {
   const seen = new Set();
   const changedFiles = [];
+  const agentMessages = [];
   let lastMessage = '';
   let usage = EMPTY_USAGE;
   for (const line of streamText.split('\n')) {
@@ -62,10 +80,11 @@ export function parseCodexStream(streamText) {
         if (c && typeof c.path === 'string' && !seen.has(c.path)) { seen.add(c.path); changedFiles.push(c.path); }
       }
     } else if (it.type === 'agent_message' && typeof it.text === 'string') {
+      agentMessages.push(it.text);
       lastMessage = it.text;
     }
   }
-  return { changedFiles, lastMessage, usage };
+  return { changedFiles, lastMessage, agentMessages, usage };
 }
 
 function createIncrementalReporter({ reporter, runId, attempt }) {

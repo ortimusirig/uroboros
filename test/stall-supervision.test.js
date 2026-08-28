@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { reportEvent } from '../src/events.js';
 import { exitCodeFor } from '../src/exit.js';
 import { run } from '../src/run.js';
+import { EXECUTOR_PREAMBLE } from '../src/executor.js';
 
 const SAFE_SCRATCH_BASE = process.env.URO_TEST_SCRATCH_ROOT ?? (process.platform === 'win32'
   ? 'C:/ccc-test'
@@ -101,7 +102,7 @@ test('restart kills the stalled attempt, augments its replacement plan, and stop
       });
       assert.deepEqual(killed, [true], 'the first stalled launch must actually receive abort');
       assert.equal(calls, 2, 'one allowed restart means exactly two executor launches');
-      assert.equal(plans[0], 'Complete the original task.');
+      assert.equal(plans[0], `${EXECUTOR_PREAMBLE}\n\nComplete the original task.`);
       assert.ok(plans[1].startsWith(plans[0]));
       assert.match(plans[1], /Previous executor attempt stalled/);
       assert.match(plans[1], /Last event: executor\/start/);

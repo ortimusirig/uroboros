@@ -12,7 +12,20 @@ import { join, resolve } from 'node:path';
 export const PLAN_TEMPLATE = `# Task
 Title: <one-line summary for the dashboard>
 
-Describe the user-visible outcome and why it matters.
+Implement: <state exactly what to build or change>.
+
+Explain the user-visible outcome and why it matters. This task is to be implemented.
+
+If a decision is genuinely required before implementation can continue, write \`DECISION.md\`
+in the working directory root using this block format, then stop:
+
+## Q1
+Kind: technical | product | authority
+Question: <one line>
+Options: <one line>
+Recommendation: <one line>
+
+\`Options:\` and \`Recommendation:\` are optional.
 
 ## Required behavior
 

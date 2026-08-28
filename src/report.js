@@ -34,6 +34,7 @@ export function buildRunFacts({
   usageConsistency = null,
   models = {},
   outcome,
+  noOpReason,
   gateRetries,
   timeouts = {},
   timeoutEvents = [],
@@ -94,6 +95,7 @@ export function buildRunFacts({
   }
   if (unitKind !== undefined) facts.unitKind = unitKind;
   if (merge !== undefined) facts.merge = merge;
+  if (noOpReason !== undefined) facts.noOpReason = noOpReason;
   if (supervision !== null) {
     facts.limits.stall = {
       thresholdMs: supervision.thresholdMs,
@@ -156,6 +158,7 @@ export function buildReportMarkdown(facts, {
     `# CCC run ${facts.runId}`,
     ``,
     `- **Outcome:** ${facts.outcome}`,
+    ...(facts.noOpReason === undefined ? [] : [`- **No-op reason:** ${facts.noOpReason}`]),
     `- **Gate:** ${facts.gateStatus}`,
     `- **Verdict:** ${facts.verdict ?? 'n/a'} (source: ${facts.verdictSource ?? 'n/a'})`,
     `- **Intent verdict:** ${facts.intentVerdict ?? 'n/a'} (source: ${facts.intentVerdictSource ?? 'n/a'})`,
@@ -230,6 +233,13 @@ export function buildReportMarkdown(facts, {
       : []),
     ...(facts.intentVerifierEvidence?.inputTruncated
       ? [``, `Intent verifier evidence was truncated before judgment; the retained text is the complete judged input.`]
+      : []),
+    ...(facts.noOpReason === 'approval-requested'
+      ? [
+          ``,
+          `The executor requested approval instead of implementing the approved plan. `
+            + `For a genuinely blocking question, use \`DECISION.md\`, the supported decision channel.`,
+        ]
       : []),
     ``,
     `## What changed`,

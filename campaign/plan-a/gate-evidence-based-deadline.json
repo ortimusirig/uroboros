@@ -1,0 +1,1 @@
+[{"bin": "node", "args": ["--test", "test/stall-watchdog.test.js", "test/executor-watchdog.test.js", "test/spawn.test.js", "test/events.test.js", "test/timeouts.test.js", "test/stall-supervision.test.js"]}]

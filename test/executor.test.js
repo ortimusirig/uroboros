@@ -8,6 +8,7 @@ import {
   buildCodexArgs,
   DEFAULT_EXECUTOR_EFFORT,
   DEFAULT_EXECUTOR_MODEL,
+  EXECUTOR_PREAMBLE,
   runExecutor,
   parseCodexStream,
 } from '../src/executor.js';
@@ -76,6 +77,16 @@ test('buildCodexArgs accepts explicit model and effort overrides', () => {
   const a = buildCodexArgs({ cwd: 'C:/w', model: 'executor-override', effort: 'medium' });
   assert.equal(a[a.indexOf('-m') + 1], 'executor-override');
   assert.ok(a.includes('model_reasoning_effort=medium'));
+});
+
+test('executor preamble names the approved-work and decision protocol', () => {
+  assert.match(EXECUTOR_PREAMBLE, /plan below is approved/i);
+  assert.match(EXECUTOR_PREAMBLE, /implement it/i);
+  assert.match(EXECUTOR_PREAMBLE, /no diff and no `?DECISION[.]md`?.*failed pass/is);
+  assert.match(EXECUTOR_PREAMBLE, /## Q1[\s\S]*Kind: technical \| product \| authority/);
+  assert.match(EXECUTOR_PREAMBLE, /Question:/);
+  assert.match(EXECUTOR_PREAMBLE, /Options:/);
+  assert.match(EXECUTOR_PREAMBLE, /Recommendation:/);
 });
 
 test('runExecutor parses file_change and agent_message from the stream', async () => {
@@ -207,6 +218,7 @@ test('parseCodexStream handles the real wrapped item.completed schema, ignores e
   const r = parseCodexStream(sample);
   assert.deepEqual(r.changedFiles, ['ok.txt']);
   assert.equal(r.lastMessage, 'Created ok.txt.');
+  assert.deepEqual(r.agentMessages, ['Created ok.txt.']);
   assert.deepEqual(r.usage, EMPTY_USAGE);
 });
 

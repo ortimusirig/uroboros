@@ -4,7 +4,11 @@ import { mkdtempSync, writeFileSync, mkdirSync, rmSync, existsSync, readFileSync
 import { tmpdir, homedir } from 'node:os';
 import { join } from 'node:path';
 import { parseArgs } from '../src/args.js';
-import { DEFAULT_EXECUTOR_EFFORT, DEFAULT_EXECUTOR_MODEL } from '../src/executor.js';
+import {
+  DEFAULT_EXECUTOR_EFFORT,
+  DEFAULT_EXECUTOR_MODEL,
+  EXECUTOR_PREAMBLE,
+} from '../src/executor.js';
 import {
   HARNESS_ARTIFACTS,
   run,
@@ -305,14 +309,19 @@ test('TASK.md is written before execution, excluded from the diff, and both veri
   let launches = 0;
   const scr = scratch();
   const plan = 'Implement the exact requested behavior.\nDo not narrow shared scope.\n';
+  const composedPlan = `${EXECUTOR_PREAMBLE}\n\n${plan}`;
   const target = makeTarget();
   const facts = await run({
     task: plan, target, gate: [], gateRetries: 2,
     scratchRoot: scr, runId: 'g1',
     adapters: {
-      runExecutor: async ({ cwd }) => {
-        assert.equal(readFileSync(join(cwd, 'TASK.md'), 'utf8'), plan,
-          'executor must receive an isolated checkout containing the resolved task');
+      runExecutor: async ({ cwd, plan: received }) => {
+        assert.ok(received.startsWith(EXECUTOR_PREAMBLE));
+        assert.equal(received.slice(EXECUTOR_PREAMBLE.length + 2), plan,
+          'the operator plan must survive byte-for-byte after the preamble');
+        assert.equal(received, composedPlan);
+        assert.equal(readFileSync(join(cwd, 'TASK.md'), 'utf8'), received,
+          'TASK.md must exactly match the text sent to the executor');
         return writingExecutor({ cwd });
       },
       runGate: async () => ({ passed: true, results: [] }),
@@ -334,14 +343,16 @@ test('run reads an existing .txt task file instead of executing its path string'
   const taskDir = mkdtempSync(join(tmpdir(), 'run-task-'));
   const taskPath = join(taskDir, 'plan.txt');
   const plan = 'Use the contents of the text task file.\n';
+  const composedPlan = `${EXECUTOR_PREAMBLE}\n\n${plan}`;
   writeFileSync(taskPath, plan);
   const facts = await run({
     task: taskPath, target: makeTarget(), gate: [], gateRetries: 0,
     scratchRoot: scr, runId: 'txt-task',
     adapters: {
       runExecutor: async ({ cwd, plan: received }) => {
-        assert.equal(received, plan, 'the executor must receive file contents, not the .txt path');
-        assert.equal(readFileSync(join(cwd, 'TASK.md'), 'utf8'), plan);
+        assert.equal(received, composedPlan,
+          'the executor must receive framed file contents, not the .txt path');
+        assert.equal(readFileSync(join(cwd, 'TASK.md'), 'utf8'), received);
         return noopExecutor();
       },
       runGate: async () => ({ passed: true, results: [] }),
@@ -356,6 +367,7 @@ test('run reads an existing .txt task file instead of executing its path string'
 test('first executor call gets the verbatim plan and a retry gets the preceding gate failure', async () => {
   const scr = scratch();
   const plan = 'Implement the requested behavior exactly.\nKeep the original plan unchanged.\n';
+  const composedPlan = `${EXECUTOR_PREAMBLE}\n\n${plan}`;
   const executorPlans = [];
   let gateCall = 0;
   const failure = {
@@ -379,21 +391,24 @@ test('first executor call gets the verbatim plan and a retry gets the preceding 
 
   assert.equal(facts.gateStatus, 'passed');
   assert.equal(executorPlans.length, 2);
-  assert.equal(executorPlans[0], plan, 'the initial executor prompt must be the plan verbatim');
-  assert.ok(executorPlans[1].startsWith(plan), 'retry context must be appended to the original plan');
+  assert.equal(executorPlans[0], composedPlan,
+    'the initial executor prompt must frame the verbatim plan');
+  assert.ok(executorPlans[1].startsWith(composedPlan),
+    'retry context must be appended to the same framed plan');
   assert.match(executorPlans[1], /Previous gate attempt failed/);
   assert.match(executorPlans[1], /"bin":"node"/);
   assert.match(executorPlans[1], /"--test","test\/repair[.]test[.]js"/);
   assert.match(executorPlans[1], /Exit code: 7/);
   assert.ok(executorPlans[1].includes(failure.outputTail));
-  assert.equal(readFileSync(join(facts.dir, 'TASK.md'), 'utf8'), plan,
-    'TASK.md must retain only the original plan');
+  assert.equal(readFileSync(join(facts.dir, 'TASK.md'), 'utf8'), executorPlans[1],
+    'TASK.md must match the final retry text the executor received');
   rmSync(scr, { recursive: true, force: true });
 });
 
 test('each retry receives only the immediately preceding distinguishable gate failure', async () => {
   const scr = scratch();
   const plan = 'Repair the implementation.';
+  const composedPlan = `${EXECUTOR_PREAMBLE}\n\n${plan}`;
   const executorPlans = [];
   const firstFailure = {
     bin: 'node', args: ['--test', 'test/first.test.js'], code: 11,
@@ -423,7 +438,7 @@ test('each retry receives only the immediately preceding distinguishable gate fa
 
   assert.equal(facts.gateStatus, 'passed');
   assert.equal(executorPlans.length, 3);
-  assert.equal(executorPlans[0], plan);
+  assert.equal(executorPlans[0], composedPlan);
   assert.ok(executorPlans[1].includes('FIRST_FAILURE_ONLY'));
   assert.ok(!executorPlans[1].includes('SECOND_FAILURE_ONLY'));
   assert.match(executorPlans[1], /Exit code: 11/);
@@ -438,6 +453,7 @@ test('each retry receives only the immediately preceding distinguishable gate fa
 test('a green first gate never augments the executor prompt', async () => {
   const scr = scratch();
   const plan = 'Make one focused change.\n';
+  const composedPlan = `${EXECUTOR_PREAMBLE}\n\n${plan}`;
   const executorPlans = [];
   const facts = await run({
     task: plan, target: makeTarget(), gate: [], gateRetries: 2,
@@ -453,7 +469,7 @@ test('a green first gate never augments the executor prompt', async () => {
   });
 
   assert.equal(facts.gateStatus, 'passed');
-  assert.deepEqual(executorPlans, [plan]);
+  assert.deepEqual(executorPlans, [composedPlan]);
   assert.doesNotMatch(executorPlans[0], /Previous gate attempt failed/);
   rmSync(scr, { recursive: true, force: true });
 });
@@ -514,7 +530,8 @@ test('empty diff → verifier is NOT launched (no-op)', async () => {
   });
   assert.equal(launches, 0, 'no diff means nothing to review');
   assert.equal(facts.outcome, 'no-op');
-  assert.equal(readFileSync(join(facts.dir, 'TASK.md'), 'utf8'), 'do the task');
+  assert.equal(readFileSync(join(facts.dir, 'TASK.md'), 'utf8'),
+    `${EXECUTOR_PREAMBLE}\n\ndo the task`);
   assert.equal(await diffText(facts.dir), '',
     'TASK.md and generated report artifacts must not turn a no-op into a change');
   rmSync(scr, { recursive: true, force: true });
@@ -711,8 +728,12 @@ test('autonomous mode resolves a sentinel challenge and reruns the executor', as
   assert.equal(resolverCalls.length, 1);
   assert.equal(resolverCalls[0].plan, 'do the task');
   assert.equal(resolverCalls[0].task, 'do the task');
+  assert.equal(executorPlans[0], `${EXECUTOR_PREAMBLE}\n\ndo the task`);
+  assert.ok(executorPlans[1].startsWith(`${EXECUTOR_PREAMBLE}\n\ndo the task`),
+    'the challenge rerun must retain the same framed plan');
   assert.match(executorPlans[1], /## Decision — resolved autonomously/);
   assert.match(executorPlans[1], /Answer: Follow the existing convention\./);
+  assert.equal(readFileSync(join(facts.dir, 'TASK.md'), 'utf8'), executorPlans[1]);
   assert.equal(existsSync(join(facts.dir, 'DECISION.md')), false);
   rmSync(scr, { recursive: true, force: true });
 });
@@ -806,6 +827,60 @@ test('zero executor exit with an empty diff remains a successful no-op', async (
   assert.equal(exitCodeFor(facts.outcome), 0);
   rmSync(scr, { recursive: true, force: true });
 });
+
+test('an approval-request message names the advisory no-op reason without changing status', async () => {
+  const scr = scratch();
+  const facts = await run({
+    task: 'Implement the requested behavior.', target: makeTarget(), gate: [], gateRetries: 0,
+    scratchRoot: scr, runId: 'approval-request-no-op',
+    adapters: {
+      runExecutor: async () => ({
+        changedFiles: [],
+        agentMessages: ['I reviewed the design.', "Approve this design and I'll implement it."],
+        lastMessage: "Approve this design and I'll implement it.",
+        exitCode: 0,
+      }),
+      runGate: async () => ({ passed: true, results: [] }),
+      runVerifier: async () => { throw new Error('a no-op must not launch a verifier'); },
+    },
+  });
+
+  assert.equal(facts.noOpReason, 'approval-requested');
+  assert.equal(facts.outcome, 'no-op');
+  assert.equal(facts.gateStatus, 'passed');
+  assert.equal(exitCodeFor(facts.outcome), 0);
+  const report = readFileSync(join(facts.dir, 'uro-report.md'), 'utf8');
+  assert.match(report, /approval-requested/);
+  assert.match(report, /DECISION[.]md/);
+  rmSync(scr, { recursive: true, force: true });
+});
+
+test('unrelated executor prose does not label an empty successful pass as approval-requested',
+  async () => {
+    const scr = scratch();
+    const facts = await run({
+      task: 'Implement the requested behavior.', target: makeTarget(), gate: [], gateRetries: 0,
+      scratchRoot: scr, runId: 'ordinary-no-op',
+      adapters: {
+        runExecutor: async () => ({
+          changedFiles: [],
+          agentMessages: ['The approved design is already implemented; no changes are needed.'],
+          lastMessage: 'The approved design is already implemented; no changes are needed.',
+          exitCode: 0,
+        }),
+        runGate: async () => ({ passed: true, results: [] }),
+        runVerifier: async () => { throw new Error('a no-op must not launch a verifier'); },
+      },
+    });
+
+    assert.equal(facts.outcome, 'no-op');
+    assert.equal(facts.gateStatus, 'passed');
+    assert.equal(exitCodeFor(facts.outcome), 0);
+    assert.equal(Object.hasOwn(facts, 'noOpReason'), false);
+    assert.doesNotMatch(readFileSync(join(facts.dir, 'uro-report.md'), 'utf8'),
+      /approval-requested/);
+    rmSync(scr, { recursive: true, force: true });
+  });
 
 test('red gate exhausts retries → gate-failed, verifier never launched', async () => {
   let gateCalls = 0, launches = 0;
