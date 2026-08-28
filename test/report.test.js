@@ -52,6 +52,39 @@ test('writeReport emits json and markdown', () => {
   assert.match(readFileSync(mdPath, 'utf8'), /review-ready/);
 });
 
+test('run facts and markdown explain the debate history and stop reason', () => {
+  const debateFacts = buildRunFacts({
+    runId: 'debate-report', target: 'C:/proj', dir: 'C:/uro/w', isRepo: true,
+    branch: 'uro/debate-report', iterations: [], gateStatus: 'passed', verdict: 'ISSUES',
+    outcome: 'needs-pivot', gateRetries: 0,
+    debate: {
+      roundsRun: 2,
+      maxRounds: 2,
+      findingsPerRound: [['F1'], ['F1']],
+      roundHistory: [],
+      allFindingIds: ['F1'],
+      recurredFindingIds: ['F1'],
+      resolvedFindingIds: [],
+      stuckFindingIds: [],
+      circlingDetected: false,
+      pivotCount: 0,
+      finalPivotDecision: null,
+      stopReason: 'rounds-exhausted',
+      ledger: { rounds: [], allFindingIds: ['F1'], recurredFindingIds: ['F1'],
+        resolvedFindingIds: [], stuckFindingIds: [] },
+    },
+  });
+  const d = mkdtempSync(join(tmpdir(), 'rep-debate-'));
+  const { jsonPath, mdPath } = writeReport({ dir: d, facts: debateFacts });
+  const persisted = JSON.parse(readFileSync(jsonPath, 'utf8'));
+  const md = readFileSync(mdPath, 'utf8');
+
+  assert.equal(persisted.debate.roundsRun, 2);
+  assert.deepEqual(persisted.debate.findingsPerRound, [['F1'], ['F1']]);
+  assert.match(md, /Debate rounds:\*\* 2/);
+  assert.match(md, /Debate stopped:\*\* rounds-exhausted/);
+});
+
 test('verifier findings reach both the facts and the markdown report', () => {
   const withFindings = buildRunFacts({
     runId: 'r2', target: 'C:/proj', dir: 'C:/ccc/w', isRepo: false, branch: 'ccc/r2',

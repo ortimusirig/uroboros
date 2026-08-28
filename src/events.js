@@ -10,6 +10,7 @@ export const EVENT_STAGES = Object.freeze([
   'diff',
   'decision',
   'verify',
+  'debate',
   'report',
   'journal',
 ]);
@@ -33,6 +34,11 @@ export const EVENT_TYPES = Object.freeze([
   'synthesis',
   'challenged',
   'resolved',
+  'round',
+  'resist',
+  'converged',
+  'circling',
+  'pivot',
 ]);
 
 export const UNIT_KINDS = Object.freeze(['candidate', 'node', 'merge']);
@@ -80,6 +86,11 @@ export const EVENT_PAIRS = Object.freeze([
   'verify/finish',
   'verify/verdict',
   'verify/stalled',
+  'debate/round',
+  'debate/resist',
+  'debate/converged',
+  'debate/circling',
+  'debate/pivot',
   'report/start',
   'report/finish',
   'report/stalled',
@@ -359,6 +370,22 @@ export function detailFor(event) {
     const pass = event.pass ? ` pass=${oneLine(event.pass)}` : '';
     const verdict = event.verdict ? ` verdict=${oneLine(event.verdict)}` : '';
     return `${event.type === 'start' ? 'started' : 'finished'}${pass}${verdict}`;
+  }
+  if (event.stage === 'debate') {
+    const round = event.debateRound === undefined ? '' : ` round=${oneLine(event.debateRound)}`;
+    if (event.type === 'round') {
+      return `reviewed${round} blockers=${oneLine(event.blockingFindingIds?.join(',')) || '(none)'}`;
+    }
+    if (event.type === 'resist') {
+      return `blocking findings${round} ids=${oneLine(event.findingIds?.join(','))}`;
+    }
+    if (event.type === 'converged') {
+      return `converged${round} resolved=${oneLine(event.resolvedFindingIds?.join(',')) || '(none)'}`;
+    }
+    if (event.type === 'circling') {
+      return `circling${round} stuck=${oneLine(event.stuckFindingIds?.join(',')) || '(count plateau)'}`;
+    }
+    return `pivot${round} decision=${oneLine(event.decision)} count=${oneLine(event.pivotCount)}`;
   }
   if (event.stage === 'report') {
     return event.type === 'start'

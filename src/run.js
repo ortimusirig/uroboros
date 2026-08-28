@@ -44,10 +44,71 @@ import {
 import { countTestFiles } from './merge-test-count.js';
 import { detectChallenge } from './decision.js';
 import { probeVerifierLiveness } from './preflight.js';
+import {
+  DebateLedger,
+  detectCircling,
+  PIVOT_AMEND,
+  PIVOT_CONCLUDE,
+  PIVOT_FRESH,
+  shouldPivot,
+} from './debate.js';
+import { detectReview, parseReview } from './review.js';
+import { buildFixPlan, validateFindings } from './fix-plan.js';
 
 export { HARNESS_ARTIFACTS } from './artifacts.js';
 
 const PARTIAL_WORK_GIT_TIMEOUT_MS = 30_000;
+export const DEFAULT_DEBATE_ROUNDS = 2;
+export const MAX_DEBATE_ROUNDS = 5;
+
+export function resolveDebateRounds(env = process.env, override) {
+  const raw = override ?? env?.URO_DEBATE_ROUNDS;
+  if (raw === undefined) return DEFAULT_DEBATE_ROUNDS;
+  if ((typeof raw !== 'number' && (typeof raw !== 'string' || !/^\d+$/.test(raw)))
+    || !Number.isSafeInteger(Number(raw))) {
+    throw new Error(`URO_DEBATE_ROUNDS must be an integer between 1 and ${MAX_DEBATE_ROUNDS}`);
+  }
+  const value = Number(raw);
+  if (value < 1 || value > MAX_DEBATE_ROUNDS) {
+    throw new Error(`URO_DEBATE_ROUNDS must be between 1 and ${MAX_DEBATE_ROUNDS}`);
+  }
+  return value;
+}
+
+function collectReviewFindings(dir, ...verifierResults) {
+  const candidates = [];
+  const detected = detectReview({ dir });
+  if (detected.reviewed) candidates.push(...detected.findings);
+  for (const result of verifierResults) {
+    for (const content of [result?.findings, result?.plan]) {
+      const parsed = parseReview(content);
+      if (parsed) candidates.push(...parsed);
+    }
+  }
+
+  // Finding ids are the ledger identity. If two seats use the same id, retain a
+  // blocking version over a suggestion so a real blocker cannot be hidden by order.
+  const byId = new Map();
+  for (const finding of candidates) {
+    const previous = byId.get(finding.id);
+    if (!previous || (previous.severity !== 'blocking' && finding.severity === 'blocking')) {
+      byId.set(finding.id, finding);
+    }
+  }
+  return [...byId.values()];
+}
+
+function amendFixPlanWithLedger(fixPlan, ledger) {
+  const history = Array.from({ length: ledger.currentRound }, (_, index) => {
+    const round = index + 1;
+    return `- Round ${round}: ${ledger.round(round).join(', ') || '(none)'}`;
+  });
+  return `${fixPlan}\n## Pivot amendment\n\n`
+    + 'The prior fix approach is circling. Use a materially different implementation '
+    + 'approach for the recurring blockers while preserving the original task and tests.\n\n'
+    + `Recurring blockers: ${[...ledger.stuckFindings()].join(', ') || '(count plateau)'}\n\n`
+    + `Round history:\n${history.join('\n')}\n`;
+}
 
 // Files the harness itself writes into the isolated directory. They must never enter
 // CHANGES.diff (an artifact in the diff would make the `no-op` outcome unreachable) and
@@ -181,6 +242,7 @@ export async function run(opts) {
     verifierModel = DEFAULT_VERIFIER_MODEL,
     verifierBin = 'agent', verifierProbeCompleted = false,
     mode = 'manual', decisionResolver, challengeRounds = 2,
+    debateRounds,
     adapters = {}, reporter,
   } = opts;
   if (mode !== 'manual' && mode !== 'autonomous') {
@@ -193,6 +255,9 @@ export async function run(opts) {
   const runExecutor = adapters.runExecutor ?? realExecutor;
   const runGate = adapters.runGate ?? realGate;
   const runVerifier = adapters.runVerifier ?? realVerifier;
+  const detectDebateCircling = adapters.detectCircling ?? detectCircling;
+  const selectPivot = adapters.shouldPivot ?? shouldPivot;
+  const maxDebateRounds = resolveDebateRounds(opts.env ?? process.env, debateRounds);
   const originalPlan = resolveTask(task);
   let plan = originalPlan;
   const commands = Array.isArray(gate) ? gate : JSON.parse(readFileSync(gate, 'utf8'));
@@ -333,6 +398,12 @@ export async function run(opts) {
   let gateRetryCount = 0;
   let executorLaunchCount = 0;
   let noOpReason;
+  const debateLedger = new DebateLedger();
+  const debateRoundHistory = [];
+  let debateCirclingDetected = false;
+  let debatePivotCount = 0;
+  let finalPivotDecision = null;
+  let debateStopReason = 'not-started';
 
   const recordExecutorTimeout = (exec, iteration, attempt) => {
     if (!exec.timedOut) return;
@@ -359,7 +430,7 @@ export async function run(opts) {
     }
   };
 
-  const n = 1;
+  let n = 1;
   const observeUsage = (result, context) => {
     const annotated = annotateUsageConsistency(result);
     const consistency = annotated?.usageConsistency ?? checkUsageConsistency(result?.usage);
@@ -585,33 +656,46 @@ export async function run(opts) {
       recordGateTimeout(gateResult, n, retries + 1);
     }
   }
-  const iter = { n, changedFiles: exec.changedFiles, lastMessage: exec.lastMessage,
+  const makeIteration = (iteration, executorResult, iterationGate, timedOut) => ({
+    n: iteration,
+    changedFiles: executorResult.changedFiles,
+    lastMessage: executorResult.lastMessage,
     executorUsage: iterationExecutorUsage,
     executor: {
-      exitCode: Number.isInteger(exec.exitCode) ? exec.exitCode : null,
-      timedOut: executorTimedOut,
-      timeoutMs: exec.timeoutReason?.timeoutMs ?? exec.timeoutMs ?? stageTimeouts.executor,
-      ...(exec.timeoutReason ? { timeoutReason: exec.timeoutReason } : {}),
-      ...(exec.usageConsistency ? { usageConsistency: exec.usageConsistency } : {}),
+      exitCode: Number.isInteger(executorResult.exitCode) ? executorResult.exitCode : null,
+      timedOut,
+      timeoutMs: executorResult.timeoutReason?.timeoutMs
+        ?? executorResult.timeoutMs ?? stageTimeouts.executor,
+      ...(executorResult.timeoutReason ? { timeoutReason: executorResult.timeoutReason } : {}),
+      ...(executorResult.usageConsistency
+        ? { usageConsistency: executorResult.usageConsistency } : {}),
     },
-    gate: gateResult, verifier: null, intentVerifier: null };
+    gate: iterationGate,
+    verifier: null,
+    intentVerifier: null,
+  });
+  let iter = makeIteration(n, exec, gateResult, executorTimedOut);
 
   if (executorTimedOut) {
     gateStatus = gateResult ? 'failed' : 'not-run';
     outcome = 'timed-out';
+    debateStopReason = 'executor-timed-out';
     iterations.push(iter);
   } else if (conflictingIntent) {
     gateStatus = 'not-run';
     outcome = 'conflicting-intent';
+    debateStopReason = 'conflicting-intent';
     iterations.push(iter);
   } else if (decision !== null) {
     gateStatus = 'not-run';
     outcome = 'needs-decision';
+    debateStopReason = 'needs-decision';
     iterations.push(iter);
   } else if (!gateResult.passed) {
     gateStatus = 'failed';
     const failed = gateResult.results.find((result) => result.code !== 0);
     outcome = failed?.timedOut ? 'timed-out' : 'gate-failed';
+    debateStopReason = 'gate-failed';
     if (failed) {
       gateFailure = {
         bin: failed.bin,
@@ -625,17 +709,29 @@ export async function run(opts) {
     iterations.push(iter);
   } else {
     gateStatus = 'passed';
-    reportEvent(eventReporter, runId, 'diff', 'start');
-    const diff = await diffText(
-      iso.dir,
-      merge === undefined ? iso.baseCommit : merge.mergeBase,
-    );
+    const refreshDiff = async () => {
+      reportEvent(eventReporter, runId, 'diff', 'start');
+      const value = await diffText(
+        iso.dir,
+        merge === undefined ? iso.baseCommit : merge.mergeBase,
+      );
+      if (value.trim() === '') {
+        reportEvent(eventReporter, runId, 'diff', 'finish', { verdict: 'empty' });
+      } else {
+        writeFileSync(join(iso.dir, 'CHANGES.diff'), value);
+        reportEvent(eventReporter, runId, 'diff', 'finish', {
+          verdict: 'produced', file: 'CHANGES.diff',
+        });
+      }
+      return value;
+    };
+    let diff = await refreshDiff();
     if (diff.trim() === '') {
-      reportEvent(eventReporter, runId, 'diff', 'finish', { verdict: 'empty' });
       // A non-zero exit with no diff is a crashed/aborted executor, not a legitimate no-op.
       outcome = Number.isInteger(iter.executor.exitCode) && iter.executor.exitCode !== 0
         ? 'executor-failed'
         : 'no-op';
+      debateStopReason = 'no-substantive-diff';
       if (outcome === 'no-op'
         && iter.executor.exitCode === 0
         && !existsSync(join(iso.dir, 'DECISION.md'))
@@ -644,43 +740,228 @@ export async function run(opts) {
       }
       iterations.push(iter);
     } else {
-      writeFileSync(join(iso.dir, 'CHANGES.diff'), diff);
-      reportEvent(eventReporter, runId, 'diff', 'finish', {
-        verdict: 'produced', file: 'CHANGES.diff',
-      });
+      let debateRound = 0;
+      while (true) {
+        debateRound++;
+        const v = annotateVerifierConsistency(observeUsage(await runVerifier({
+          cwd: iso.dir, bin: verifierBin, model: verifierModel, prompt: DEFAULT_PROMPT,
+          timeoutMs: stageTimeouts.verifier,
+          reporter: eventReporter, runId, pass: 'correctness',
+        }), { seat: 'verifier', pass: 'correctness', iteration: n }));
+        const intentVerifier = annotateVerifierConsistency(observeUsage(await runVerifier({
+          cwd: iso.dir, bin: verifierBin, model: verifierModel, prompt: INTENT_PROMPT,
+          timeoutMs: stageTimeouts.verifier,
+          reporter: eventReporter, runId, pass: 'intent',
+        }), { seat: 'verifier', pass: 'intent', iteration: n }));
+        if (v.timedOut) {
+          timeoutEvents.push({ stage: 'verifier', pass: 'correctness', iteration: n,
+            timeoutMs: v.timeoutMs ?? stageTimeouts.verifier });
+        }
+        if (intentVerifier.timedOut) {
+          timeoutEvents.push({ stage: 'verifier', pass: 'intent', iteration: n,
+            timeoutMs: intentVerifier.timeoutMs ?? stageTimeouts.verifier });
+        }
+        verifierUsage = addUsage(verifierUsage, v.usage);
+        verifierUsage = addUsage(verifierUsage, intentVerifier.usage);
+        iter.verifier = v;
+        iter.intentVerifier = intentVerifier;
+        verdict = mergeVerifierVerdicts(v.verdict, intentVerifier.verdict);
+        reportEvent(eventReporter, runId, 'verify', 'verdict', {
+          verdict, source: 'merged',
+        });
 
-      const v = annotateVerifierConsistency(observeUsage(await runVerifier({
-        cwd: iso.dir, bin: verifierBin, model: verifierModel, prompt: DEFAULT_PROMPT,
-        timeoutMs: stageTimeouts.verifier,
-        reporter: eventReporter, runId, pass: 'correctness',
-      }), { seat: 'verifier', pass: 'correctness', iteration: n }));
-      const intentVerifier = annotateVerifierConsistency(observeUsage(await runVerifier({
-        cwd: iso.dir, bin: verifierBin, model: verifierModel, prompt: INTENT_PROMPT,
-        timeoutMs: stageTimeouts.verifier,
-        reporter: eventReporter, runId, pass: 'intent',
-      }), { seat: 'verifier', pass: 'intent', iteration: n }));
-      if (v.timedOut) {
-        timeoutEvents.push({ stage: 'verifier', pass: 'correctness', iteration: n,
-          timeoutMs: v.timeoutMs ?? stageTimeouts.verifier });
+        const findings = collectReviewFindings(iso.dir, v, intentVerifier);
+        const blockingFindings = findings.filter((finding) => finding.severity === 'blocking');
+        const suggestionFindings = findings.filter((finding) => finding.severity === 'suggestion');
+        const findingIds = findings.map((finding) => finding.id);
+        const blockingFindingIds = blockingFindings.map((finding) => finding.id);
+        debateLedger.record(debateRound, blockingFindingIds);
+        debateRoundHistory.push({
+          round: debateRound,
+          findingIds,
+          blockingFindingIds,
+          suggestionFindingIds: suggestionFindings.map((finding) => finding.id),
+          findings: findings.map((finding) => ({ ...finding })),
+          verdict,
+        });
+        reportEvent(eventReporter, runId, 'debate', 'round', {
+          debateRound,
+          findingIds,
+          blockingFindingIds,
+          suggestionFindingIds: suggestionFindings.map((finding) => finding.id),
+          verdict,
+        });
+        iterations.push(iter);
+        const circling = detectDebateCircling(debateLedger);
+
+        const reviewOutcome = reviewOutcomeFor(v, intentVerifier);
+        if (reviewOutcome !== 'review-ready') {
+          outcome = reviewOutcome;
+          debateStopReason = v.verdict === 'UNVERIFIED' || intentVerifier.verdict === 'UNVERIFIED'
+            ? 'unverified'
+            : reviewOutcome;
+          break;
+        }
+
+        if (blockingFindings.length === 0) {
+          outcome = 'review-ready';
+          debateStopReason = 'converged';
+          reportEvent(eventReporter, runId, 'debate', 'converged', {
+            debateRound,
+            resolvedFindingIds: [...debateLedger.resolvedFindings()],
+            suggestionFindingIds: suggestionFindings.map((finding) => finding.id),
+          });
+          break;
+        }
+
+        reportEvent(eventReporter, runId, 'debate', 'resist', {
+          debateRound,
+          findingIds: blockingFindingIds,
+        });
+
+        let amendPlan = false;
+        if (circling) {
+          debateCirclingDetected = true;
+          const stuckFindingIds = [...debateLedger.stuckFindings()];
+          reportEvent(eventReporter, runId, 'debate', 'circling', {
+            debateRound,
+            stuckFindingIds,
+          });
+          const pivotDecision = selectPivot(debatePivotCount);
+          if (![PIVOT_AMEND, PIVOT_FRESH, PIVOT_CONCLUDE].includes(pivotDecision)) {
+            throw new Error(`invalid debate pivot decision: ${pivotDecision}`);
+          }
+          finalPivotDecision = pivotDecision;
+          debatePivotCount++;
+          reportEvent(eventReporter, runId, 'debate', 'pivot', {
+            debateRound,
+            decision: pivotDecision,
+            pivotCount: debatePivotCount,
+            stuckFindingIds,
+          });
+          if (pivotDecision === PIVOT_FRESH || pivotDecision === PIVOT_CONCLUDE) {
+            outcome = 'needs-pivot';
+            debateStopReason = 'pivot';
+            break;
+          }
+          amendPlan = true;
+        }
+
+        if (debateRound >= maxDebateRounds) {
+          outcome = 'needs-pivot';
+          debateStopReason = 'rounds-exhausted';
+          break;
+        }
+
+        const validation = validateFindings(blockingFindings);
+        let fixPlan = buildFixPlan({
+          findings: blockingFindings,
+          accepted: validation.accepted,
+          rejected: validation.rejected,
+          originalTask: originalPlan,
+        });
+        if (amendPlan) fixPlan = amendFixPlanWithLedger(fixPlan, debateLedger);
+        plan = fixPlan;
+        n++;
+        iterationExecutorUsage = EMPTY_USAGE;
+        exec = await executePlan(plan);
+        executorTimedOut = Boolean(exec.timedOut);
+        await routeChallenges();
+
+        let fixGateRetries = 0;
+        gateResult = null;
+        if (decision === null && !executorTimedOut && !conflictingIntent
+          && mergePreparationFailure === null) {
+          gateResult = await runGate({
+            commands: mergeGateCommands, cwd: iso.dir, timeoutMs: stageTimeouts.gate,
+            reporter: eventReporter, runId, attempt: 1,
+            captureTestCount,
+          });
+          recordGateTimeout(gateResult, n, 1);
+        }
+        while (decision === null && !executorTimedOut && !conflictingIntent
+          && mergePreparationFailure === null && !gateResult.passed
+          && fixGateRetries < gateRetries) {
+          fixGateRetries++;
+          gateRetryCount++;
+          const retryPlan = planWithGateFailure(plan, gateResult);
+          const failed = gateResult.results.find((result) => result.code !== 0);
+          reportEvent(eventReporter, runId, 'executor', 'retry', {
+            attempt: executorLaunchCount + 1,
+            source: 'gate',
+            reason: failed ? `gate command exited ${failed.code}` : 'gate did not pass',
+            ...(failed ? { bin: failed.bin, args: failed.args, code: failed.code } : {}),
+          });
+          exec = await executePlan(retryPlan);
+          executorTimedOut = Boolean(exec.timedOut);
+          await routeChallenges();
+          if (decision === null && !executorTimedOut) {
+            gateResult = await runGate({
+              commands: mergeGateCommands, cwd: iso.dir, timeoutMs: stageTimeouts.gate,
+              reporter: eventReporter, runId, attempt: fixGateRetries + 1,
+              captureTestCount,
+            });
+            recordGateTimeout(gateResult, n, fixGateRetries + 1);
+          }
+        }
+
+        iter = makeIteration(n, exec, gateResult, executorTimedOut);
+        if (executorTimedOut) {
+          gateStatus = gateResult ? 'failed' : 'not-run';
+          outcome = 'timed-out';
+          debateStopReason = 'executor-timed-out';
+          iterations.push(iter);
+          break;
+        }
+        if (conflictingIntent) {
+          gateStatus = 'not-run';
+          outcome = 'conflicting-intent';
+          debateStopReason = 'conflicting-intent';
+          iterations.push(iter);
+          break;
+        }
+        if (decision !== null) {
+          gateStatus = 'not-run';
+          outcome = 'needs-decision';
+          debateStopReason = 'needs-decision';
+          iterations.push(iter);
+          break;
+        }
+        if (!gateResult.passed) {
+          gateStatus = 'failed';
+          const failed = gateResult.results.find((result) => result.code !== 0);
+          outcome = failed?.timedOut ? 'timed-out' : 'gate-failed';
+          debateStopReason = 'gate-failed';
+          if (failed) {
+            gateFailure = {
+              bin: failed.bin,
+              args: failed.args,
+              ...(failed.harness === undefined ? {} : { harness: failed.harness }),
+              code: failed.code,
+              ...(failed.timedOut
+                ? { timedOut: true, timeoutMs: failed.timeoutMs } : {}),
+              outputTail: failed.outputTail,
+            };
+          }
+          iterations.push(iter);
+          break;
+        }
+
+        gateStatus = 'passed';
+        diff = await refreshDiff();
+        if (diff.trim() === '') {
+          outcome = Number.isInteger(iter.executor.exitCode) && iter.executor.exitCode !== 0
+            ? 'executor-failed'
+            : 'no-op';
+          debateStopReason = 'no-substantive-diff';
+          iterations.push(iter);
+          break;
+        }
       }
-      if (intentVerifier.timedOut) {
-        timeoutEvents.push({ stage: 'verifier', pass: 'intent', iteration: n,
-          timeoutMs: intentVerifier.timeoutMs ?? stageTimeouts.verifier });
-      }
-      verifierUsage = addUsage(verifierUsage, v.usage);
-      verifierUsage = addUsage(verifierUsage, intentVerifier.usage);
-      iter.verifier = v;
-      iter.intentVerifier = intentVerifier;
-      verdict = mergeVerifierVerdicts(v.verdict, intentVerifier.verdict);
-      reportEvent(eventReporter, runId, 'verify', 'verdict', {
-        verdict, source: 'merged',
-      });
-      iterations.push(iter);
-      outcome = reviewOutcomeFor(v, intentVerifier);
     }
   }
 
-  const lastVerifier = iterations.at(-1)?.verifier;
+  const lastVerifier = iterations.findLast((iteration) => iteration.verifier)?.verifier;
   const verifierFindings = lastVerifier?.findings ?? null;
   const correctnessVerdict = lastVerifier?.verdict ?? null;
   const correctnessVerdictSource = lastVerifier?.verdictSource ?? null;
@@ -688,7 +969,9 @@ export async function run(opts) {
   const verifierPlan = lastVerifier?.plan ?? null;
   const verifierEvidence = lastVerifier?.verdictEvidence ?? null;
   const verifierConsistency = lastVerifier?.verdictConsistency ?? null;
-  const lastIntentVerifier = iterations.at(-1)?.intentVerifier;
+  const lastIntentVerifier = iterations.findLast(
+    (iteration) => iteration.intentVerifier,
+  )?.intentVerifier;
   const intentVerifierFindings = lastIntentVerifier?.findings ?? null;
   const intentVerdict = lastIntentVerifier?.verdict ?? null;
   const intentVerdictSource = lastIntentVerifier?.verdictSource ?? null;
@@ -701,6 +984,51 @@ export async function run(opts) {
     total: addUsage(executorUsage, verifierUsage),
   };
   const usageConsistency = summarizeUsageConsistency(usageChecks);
+  const blockingOccurrences = new Map();
+  const observedOccurrences = new Map();
+  for (const roundRecord of debateRoundHistory) {
+    for (const findingId of roundRecord.findingIds) {
+      observedOccurrences.set(findingId, (observedOccurrences.get(findingId) ?? 0) + 1);
+    }
+    for (const findingId of roundRecord.blockingFindingIds) {
+      blockingOccurrences.set(findingId, (blockingOccurrences.get(findingId) ?? 0) + 1);
+    }
+  }
+  const ledgerHistory = debateRoundHistory.map((roundRecord) => ({
+    round: roundRecord.round,
+    findingIds: [...roundRecord.blockingFindingIds],
+  }));
+  const debate = {
+    roundsRun: debateRoundHistory.length,
+    maxRounds: maxDebateRounds,
+    findingsPerRound: debateRoundHistory.map((roundRecord) => [...roundRecord.findingIds]),
+    roundHistory: debateRoundHistory.map((roundRecord) => ({
+      ...roundRecord,
+      findingIds: [...roundRecord.findingIds],
+      blockingFindingIds: [...roundRecord.blockingFindingIds],
+      suggestionFindingIds: [...roundRecord.suggestionFindingIds],
+      findings: roundRecord.findings.map((finding) => ({ ...finding })),
+    })),
+    allFindingIds: [...observedOccurrences.keys()],
+    recurredFindingIds: [...observedOccurrences.entries()]
+      .filter(([, count]) => count > 1)
+      .map(([findingId]) => findingId),
+    resolvedFindingIds: [...debateLedger.resolvedFindings()],
+    stuckFindingIds: [...debateLedger.stuckFindings()],
+    circlingDetected: debateCirclingDetected,
+    pivotCount: debatePivotCount,
+    finalPivotDecision,
+    stopReason: debateStopReason,
+    ledger: {
+      rounds: ledgerHistory,
+      allFindingIds: [...debateLedger.allFindings()],
+      recurredFindingIds: [...blockingOccurrences.entries()]
+        .filter(([, count]) => count > 1)
+        .map(([findingId]) => findingId),
+      resolvedFindingIds: [...debateLedger.resolvedFindings()],
+      stuckFindingIds: [...debateLedger.stuckFindings()],
+    },
+  };
   const mergeFacts = merge === undefined ? null : {
     parentOrder: [...merge.parentOrder],
     parents: merge.parents.map((parent) => ({ ...parent })),
@@ -726,7 +1054,7 @@ export async function run(opts) {
     verifierPlan, verifierEvidence, verifierConsistency,
     intentVerifierFindings, intentVerdict, intentVerdictSource,
     intentVerifierPlan, intentVerifierEvidence, intentVerifierConsistency,
-    gateFailure, tokens, usageConsistency, outcome, gateRetries,
+    gateFailure, tokens, usageConsistency, outcome, gateRetries, debate,
     ...(noOpReason === undefined ? {} : { noOpReason }),
     timeouts: stageTimeouts, timeoutEvents,
     ...(campaignId === undefined

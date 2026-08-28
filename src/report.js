@@ -46,6 +46,7 @@ export function buildRunFacts({
   perspective,
   unitKind,
   merge,
+  debate = null,
 }) {
   const facts = {
     runId, target, dir, isRepo, baseRef, baseCommit, branch,
@@ -84,6 +85,24 @@ export function buildRunFacts({
       total: addUsage(EMPTY_USAGE, tokens?.total),
     },
     usageConsistency: usageConsistency ?? null,
+    debate: debate ?? {
+      roundsRun: 0,
+      maxRounds: null,
+      findingsPerRound: [],
+      roundHistory: [],
+      allFindingIds: [],
+      recurredFindingIds: [],
+      resolvedFindingIds: [],
+      stuckFindingIds: [],
+      circlingDetected: false,
+      pivotCount: 0,
+      finalPivotDecision: null,
+      stopReason: 'not-started',
+      ledger: {
+        rounds: [], allFindingIds: [], recurredFindingIds: [],
+        resolvedFindingIds: [], stuckFindingIds: [],
+      },
+    },
     outcome,
   };
   if (campaignId !== undefined) {
@@ -172,6 +191,12 @@ export function buildReportMarkdown(facts, {
     `- **Branch:** ${facts.branch}`,
     ...(facts.perspective === undefined ? [] : [`- **Perspective:** ${facts.perspective}`]),
     `- **Iterations:** ${facts.iterations.length}`,
+    `- **Debate rounds:** ${facts.debate?.roundsRun ?? 0}`,
+    `- **Debate stopped:** ${facts.debate?.stopReason ?? 'not-recorded'}`,
+    ...(facts.debate?.circlingDetected ? [`- **Debate circling detected:** yes`] : []),
+    ...(facts.debate?.finalPivotDecision
+      ? [`- **Final pivot decision:** ${facts.debate.finalPivotDecision}`]
+      : []),
     ...(facts.unitKind === 'merge'
       ? [
           `- **Unit kind:** merge`,

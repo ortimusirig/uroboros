@@ -19,6 +19,7 @@ import {
   detailFor,
   EVENT_PAIRS,
   EVENT_STAGES,
+  EVENT_TYPES,
   formatEventSummary,
   MAX_EVENT_SUMMARY_LENGTH,
   reportEvent,
@@ -166,6 +167,48 @@ test('decision events preserve challenge details and render specific one-line su
   }), /unknown event pair/i);
 });
 
+test('every debate event pair round-trips and is retained in events.jsonl', () => {
+  assert.ok(EVENT_STAGES.includes('debate'));
+  for (const type of ['round', 'resist', 'converged', 'circling', 'pivot']) {
+    assert.ok(EVENT_TYPES.includes(type), `${type} must be a declared event type`);
+  }
+
+  const dir = mkdtempSync(join(tmpdir(), 'debate-events-'));
+  const eventPath = join(dir, 'events.jsonl');
+  try {
+    const debatePairs = EVENT_PAIRS.filter((pair) => pair.startsWith('debate/'));
+    assert.deepEqual(debatePairs.sort(), [
+      'debate/circling', 'debate/converged', 'debate/pivot', 'debate/resist', 'debate/round',
+    ]);
+    for (const pair of debatePairs) {
+      const [, type] = pair.split('/');
+      const event = createEvent({
+        runId: `debate-${type}`,
+        stage: 'debate',
+        type,
+        fields: {
+          debateRound: 3,
+          findingIds: ['F1'],
+          blockingFindingIds: ['F1'],
+          resolvedFindingIds: ['F2'],
+          stuckFindingIds: ['F1'],
+          decision: 'amend',
+          pivotCount: 1,
+        },
+      });
+      appendFileSync(eventPath, `${JSON.stringify(event)}\n`);
+    }
+
+    const retainedPairs = readFileSync(eventPath, 'utf8').trim().split(/\r?\n/)
+      .map((line) => JSON.parse(line))
+      .map((event) => `${event.stage}/${event.type}`)
+      .sort();
+    assert.deepEqual(retainedPairs, debatePairs.sort());
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('stage transitions and executor file changes reach the reporter in order', async () => {
   const scr = scratch();
   const tgt = target();
@@ -201,6 +244,8 @@ test('stage transitions and executor file changes reach the reporter in order', 
       'verify/start:intent',
       'verify/finish:intent',
       'verify/verdict',
+      'debate/round',
+      'debate/converged',
       'report/start',
       'report/finish',
     ]);
@@ -488,10 +533,16 @@ test('fully exercised runs have exact pair equality with both event vocabularies
       'decision/resolved': 'No executor challenge is resolved by this healthy campaign.',
       // Both verifier passes complete; their stall path has separate supervision coverage.
       'verify/stalled': 'Requires a deliberately silent verifier process.',
+      // The clean verifier presents no blocking finding for the executor to resist.
+      'debate/resist': 'Requires at least one structured blocking review finding.',
+      // Healthy conformance converges on its first review and therefore cannot circle.
+      'debate/circling': 'Requires unresolved blockers across three consecutive review rounds.',
+      // A pivot is only selected after the debate has been detected as circling.
+      'debate/pivot': 'Requires a circling debate before a pivot strategy can be selected.',
       // Report writes are synchronous, so the event loop cannot observe a mid-write timer gap.
       'report/stalled': 'Unreachable during synchronous report writes.',
     });
-    assert.equal(Object.keys(deliberatelyUncovered).length, 10,
+    assert.equal(Object.keys(deliberatelyUncovered).length, 13,
       'the deliberately-uncovered ratchet must not grow without an explicit test change');
     assert.ok(Object.values(deliberatelyUncovered).every((reason) => reason.length >= 24),
       'every allowlisted pair must carry a substantive reason');

@@ -15,6 +15,7 @@ export const EXIT_BY_OUTCOME = {
   'conflicting-intent': 8,
   'needs-decision': 9,
   'executor-failed': 10,
+  'needs-pivot': 11,
 };
 
 // An unrecognised outcome is not a success. Defaulting to 0 here would recreate

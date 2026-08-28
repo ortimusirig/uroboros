@@ -85,7 +85,7 @@ gate with the real task and project checks before relying on the result.
 One `loop run` is one pass:
 
 ```
-plan.md ──► Codex writes (isolated copy) ──► gate (exit codes) ──► Cursor verifies (read-only) ──► report
+plan.md ──► Codex writes (isolated copy) ──► gate (exit codes) ──► bounded review/fix loop ──► report
 ```
 
 Your target folder is never modified. Work lands on a branch in an isolated copy, and you

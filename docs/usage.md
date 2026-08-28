@@ -134,6 +134,9 @@ error; multi-word inline prose is used verbatim.
 | `campaign-failed` | at least one dispatched batch unit failed | 6 |
 | `budget-exhausted` | a batch exceeded its token budget | 7 |
 | `conflicting-intent` | a merge found incompatible parent intents and needs human direction | 8 |
+| `needs-decision` | the executor raised a decision that could not be resolved in-run | 9 |
+| `executor-failed` | the executor exited non-zero without producing a diff | 10 |
+| `needs-pivot` | blocking findings exhausted the debate or require a new approach | 11 |
 | — | preflight or argument failure | 2 |
 | — | unexpected fatal error, or an unrecognised outcome | 3 |
 
@@ -142,8 +145,9 @@ become a success.
 
 ## Iterating
 
-One `loop run` invocation performs one pass. Iteration is controller-driven: read the report,
-author a correction plan, and invoke `loop run` again for the next pass.
+One `loop run` invocation can perform up to the configured number of debate rounds. Each
+structured blocking review finding is converted into executor work, followed by the full gate
+and both verifier seats. A `needs-pivot` result returns control to the campaign or operator.
 
 ## Optional flat event view with Logdy
 
@@ -222,5 +226,7 @@ embedded Obsidian Bases campaign table.
   tree and relaunch it with a stall notice appended to the original plan.
 - **Stall restart bound:** one restart by default; set `URO_STALL_RESTARTS` to `0`-`3`.
   Stall restarts and gate retries have separate limits and counters in the run facts.
+- **Debate rounds:** two review rounds by default; set `URO_DEBATE_ROUNDS` to an integer
+  from `1` through `5`. Unresolved blocking findings at the bound stop with `needs-pivot`.
 - **Terminal heartbeat:** pass `--quiet` to suppress event summaries on stderr without
   disabling the isolated `events.jsonl` stream.

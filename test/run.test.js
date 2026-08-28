@@ -15,7 +15,9 @@ import {
   diffText,
   mergeVerifierVerdicts,
   reviewOutcomeFor,
+  resolveDebateRounds,
 } from '../src/run.js';
+import { PIVOT_CONCLUDE } from '../src/debate.js';
 import { EMPTY_USAGE } from '../src/usage.js';
 import {
   DEFAULT_PROMPT,
@@ -1141,4 +1143,284 @@ test('review outcome rejects UNVERIFIED seats as verifier failures', () => {
     'a parsed ISSUES verdict remains a completed review');
   assert.equal(reviewOutcomeFor(unverified, clean), 'verifier-failed');
   assert.equal(reviewOutcomeFor(clean, unverified), 'verifier-failed');
+});
+
+const blockingReview = (id = 'F1') => `
+## ${id}
+Severity: blocking
+Category: correctness
+Description: ${id} demonstrates a reproducible defect.
+Test: __uro_review/tests/test_${id.toLowerCase()}.py
+`;
+
+const suggestionReview = (id = 'F1') => `
+## ${id}
+Severity: suggestion
+Category: maintainability
+Description: ${id} would make the implementation easier to maintain.
+`;
+
+function verifierForRounds(correctnessFindings) {
+  let correctnessRound = 0;
+  return async ({ prompt }) => {
+    if (prompt === INTENT_PROMPT) {
+      return { verdict: 'NO_BLOCKERS', launchFailed: false, findings: 'Intent is covered.' };
+    }
+    const findings = correctnessFindings[correctnessRound++] ?? null;
+    return findings === null
+      ? { verdict: 'NO_BLOCKERS', launchFailed: false, findings: 'No blockers.' }
+      : { verdict: 'ISSUES', launchFailed: false, findings };
+  };
+}
+
+test('debate regression control converges after one clean review round', async () => {
+  const scr = scratch();
+  try {
+    let executorCalls = 0;
+    let gateCalls = 0;
+    const facts = await run({
+      task: 'do the task', target: makeTarget(), gate: [], gateRetries: 0,
+      scratchRoot: scr, runId: 'debate-clean',
+      adapters: {
+        runExecutor: async (opts) => { executorCalls++; return writingExecutor(opts); },
+        runGate: async () => { gateCalls++; return { passed: true, results: [] }; },
+        runVerifier: verifierForRounds([null]),
+      },
+    });
+
+    assert.equal(facts.outcome, 'review-ready');
+    assert.equal(executorCalls, 1);
+    assert.equal(gateCalls, 1);
+    assert.equal(facts.debate.roundsRun, 1);
+    assert.deepEqual(facts.debate.findingsPerRound, [[]]);
+    assert.equal(facts.debate.stopReason, 'converged');
+  } finally {
+    rmSync(scr, { recursive: true, force: true });
+  }
+});
+
+test('one blocking finding is fixed by the executor and converges in round two', async () => {
+  const scr = scratch();
+  try {
+    let executorCalls = 0;
+    let gateCalls = 0;
+    const plans = [];
+    const facts = await run({
+      task: 'do the task', target: makeTarget(), gate: [], gateRetries: 0,
+      scratchRoot: scr, runId: 'debate-fixed',
+      adapters: {
+        runExecutor: async (opts) => {
+          executorCalls++;
+          plans.push(opts.plan);
+          return writingExecutor(opts);
+        },
+        runGate: async () => { gateCalls++; return { passed: true, results: [] }; },
+        runVerifier: verifierForRounds([blockingReview(), null]),
+      },
+    });
+
+    assert.equal(facts.outcome, 'review-ready');
+    assert.equal(executorCalls, 2);
+    assert.equal(gateCalls, 2);
+    assert.equal(facts.debate.roundsRun, 2);
+    assert.deepEqual(facts.debate.findingsPerRound, [['F1'], []]);
+    assert.deepEqual(facts.debate.resolvedFindingIds, ['F1']);
+    assert.match(plans[1], /# Fix Plan/);
+    assert.match(plans[1], /F1 \(blocking\)/);
+  } finally {
+    rmSync(scr, { recursive: true, force: true });
+  }
+});
+
+test('a finding persistent across three rounds detects circling and retries an amended plan', async () => {
+  const scr = scratch();
+  const events = [];
+  try {
+    const facts = await run({
+      task: 'do the task', target: makeTarget(), gate: [], gateRetries: 0,
+      scratchRoot: scr, runId: 'debate-circling', debateRounds: 4,
+      reporter: (event) => events.push(event),
+      adapters: {
+        runExecutor: writingExecutor,
+        runGate: async () => ({ passed: true, results: [] }),
+        runVerifier: verifierForRounds([
+          blockingReview(), blockingReview(), blockingReview(), null,
+        ]),
+      },
+    });
+
+    assert.equal(facts.debate.roundsRun, 4);
+    assert.equal(facts.debate.circlingDetected, true);
+    assert.equal(facts.debate.finalPivotDecision, 'amend');
+    assert.equal(facts.debate.stopReason, 'converged');
+    assert.equal(facts.outcome, 'review-ready');
+    assert.ok(events.some((event) => event.stage === 'debate' && event.type === 'circling'));
+    assert.ok(events.some((event) => event.stage === 'debate'
+      && event.type === 'pivot' && event.decision === 'amend'));
+  } finally {
+    rmSync(scr, { recursive: true, force: true });
+  }
+});
+
+test('the fresh pivot stops with needs-pivot and carries the complete ledger', async () => {
+  const scr = scratch();
+  try {
+    const facts = await run({
+      task: 'do the task', target: makeTarget(), gate: [], gateRetries: 0,
+      scratchRoot: scr, runId: 'debate-fresh', debateRounds: 5,
+      adapters: {
+        runExecutor: writingExecutor,
+        runGate: async () => ({ passed: true, results: [] }),
+        runVerifier: verifierForRounds([
+          blockingReview(), blockingReview(), blockingReview(), blockingReview(),
+        ]),
+      },
+    });
+
+    assert.equal(facts.outcome, 'needs-pivot');
+    assert.equal(facts.debate.roundsRun, 4);
+    assert.equal(facts.debate.pivotCount, 2);
+    assert.equal(facts.debate.finalPivotDecision, 'fresh');
+    assert.deepEqual(facts.debate.ledger.allFindingIds, ['F1']);
+    assert.deepEqual(facts.debate.ledger.recurredFindingIds, ['F1']);
+    assert.equal(facts.debate.ledger.rounds.length, 4);
+    assert.notEqual(exitCodeFor(facts.outcome), 0);
+  } finally {
+    rmSync(scr, { recursive: true, force: true });
+  }
+});
+
+test('the conclude pivot stops without reporting success', async () => {
+  const scr = scratch();
+  try {
+    const facts = await run({
+      task: 'do the task', target: makeTarget(), gate: [], gateRetries: 0,
+      scratchRoot: scr, runId: 'debate-conclude', debateRounds: 5,
+      adapters: {
+        runExecutor: writingExecutor,
+        runGate: async () => ({ passed: true, results: [] }),
+        runVerifier: verifierForRounds([blockingReview(), blockingReview(), blockingReview()]),
+        shouldPivot: () => PIVOT_CONCLUDE,
+      },
+    });
+
+    assert.equal(facts.outcome, 'needs-pivot');
+    assert.equal(facts.debate.stopReason, 'pivot');
+    assert.equal(facts.debate.finalPivotDecision, 'conclude');
+    assert.notEqual(exitCodeFor(facts.outcome), 0);
+  } finally {
+    rmSync(scr, { recursive: true, force: true });
+  }
+});
+
+test('URO_DEBATE_ROUNDS exhaustion stops honestly with unresolved findings', async () => {
+  const scr = scratch();
+  try {
+    const facts = await run({
+      task: 'do the task', target: makeTarget(), gate: [], gateRetries: 0,
+      scratchRoot: scr, runId: 'debate-exhausted',
+      env: { URO_DEBATE_ROUNDS: '1' },
+      adapters: {
+        runExecutor: writingExecutor,
+        runGate: async () => ({ passed: true, results: [] }),
+        runVerifier: verifierForRounds([blockingReview()]),
+      },
+    });
+
+    assert.equal(facts.outcome, 'needs-pivot');
+    assert.equal(facts.debate.roundsRun, 1);
+    assert.equal(facts.debate.stopReason, 'rounds-exhausted');
+    const report = readFileSync(join(facts.dir, 'uro-report.md'), 'utf8');
+    assert.match(report, /Debate rounds:\*\* 1/);
+    assert.match(report, /Debate stopped:\*\* rounds-exhausted/);
+  } finally {
+    rmSync(scr, { recursive: true, force: true });
+  }
+});
+
+test('a fix round that breaks the gate fails like an initial gate failure', async () => {
+  const scr = scratch();
+  try {
+    let gateCall = 0;
+    let verifierCalls = 0;
+    const facts = await run({
+      task: 'do the task', target: makeTarget(), gate: [], gateRetries: 0,
+      scratchRoot: scr, runId: 'debate-fix-gate-failed',
+      adapters: {
+        runExecutor: writingExecutor,
+        runGate: async () => ++gateCall === 1
+          ? { passed: true, results: [] }
+          : { passed: false, results: [{ bin: 'node', args: ['--test'], code: 7,
+              outputTail: 'review regression failed' }] },
+        runVerifier: async (options) => {
+          verifierCalls++;
+          return verifierForRounds([blockingReview()])(options);
+        },
+      },
+    });
+
+    assert.equal(facts.outcome, 'gate-failed');
+    assert.equal(facts.gateStatus, 'failed');
+    assert.equal(facts.gateFailure.code, 7);
+    assert.equal(verifierCalls, 2, 'the failed fix gate must prevent another review');
+  } finally {
+    rmSync(scr, { recursive: true, force: true });
+  }
+});
+
+test('UNVERIFIED is recorded as a round but never converges the debate', async () => {
+  const scr = scratch();
+  try {
+    const facts = await run({
+      task: 'do the task', target: makeTarget(), gate: [], gateRetries: 0,
+      scratchRoot: scr, runId: 'debate-unverified',
+      adapters: {
+        runExecutor: writingExecutor,
+        runGate: async () => ({ passed: true, results: [] }),
+        runVerifier: async ({ prompt }) => prompt === INTENT_PROMPT
+          ? { verdict: 'NO_BLOCKERS', launchFailed: false }
+          : { verdict: 'UNVERIFIED', launchFailed: false },
+      },
+    });
+
+    assert.equal(facts.outcome, 'verifier-failed');
+    assert.equal(facts.debate.roundsRun, 1);
+    assert.equal(facts.debate.stopReason, 'unverified');
+  } finally {
+    rmSync(scr, { recursive: true, force: true });
+  }
+});
+
+test('suggestions alone converge without another executor or gate round', async () => {
+  const scr = scratch();
+  try {
+    let executorCalls = 0;
+    let gateCalls = 0;
+    const facts = await run({
+      task: 'do the task', target: makeTarget(), gate: [], gateRetries: 0,
+      scratchRoot: scr, runId: 'debate-suggestion',
+      adapters: {
+        runExecutor: async (opts) => { executorCalls++; return writingExecutor(opts); },
+        runGate: async () => { gateCalls++; return { passed: true, results: [] }; },
+        runVerifier: verifierForRounds([suggestionReview()]),
+      },
+    });
+
+    assert.equal(facts.outcome, 'review-ready');
+    assert.equal(executorCalls, 1);
+    assert.equal(gateCalls, 1);
+    assert.equal(facts.debate.roundsRun, 1);
+    assert.deepEqual(facts.debate.roundHistory[0].suggestionFindingIds, ['F1']);
+    assert.deepEqual(facts.debate.ledger.rounds[0].findingIds, []);
+  } finally {
+    rmSync(scr, { recursive: true, force: true });
+  }
+});
+
+test('debate round setting defaults to two and rejects values outside one through five', () => {
+  assert.equal(resolveDebateRounds({}), 2);
+  assert.equal(resolveDebateRounds({ URO_DEBATE_ROUNDS: '5' }), 5);
+  assert.throws(() => resolveDebateRounds({ URO_DEBATE_ROUNDS: '0' }), /between 1 and 5/);
+  assert.throws(() => resolveDebateRounds({ URO_DEBATE_ROUNDS: '6' }), /between 1 and 5/);
+  assert.throws(() => resolveDebateRounds({ URO_DEBATE_ROUNDS: '2.5' }), /integer between 1 and 5/);
 });

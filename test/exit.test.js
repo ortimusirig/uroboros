@@ -49,3 +49,9 @@ test('needs-decision has a dedicated non-zero exit distinct from the unknown fal
   assert.notEqual(exitCodeFor('needs-decision'), 0);
   assert.notEqual(exitCodeFor('needs-decision'), EXIT_UNKNOWN_OUTCOME);
 });
+
+test('needs-pivot has a dedicated non-zero exit distinct from the unknown fallback', () => {
+  assert.equal(exitCodeFor('needs-pivot'), 11);
+  assert.notEqual(exitCodeFor('needs-pivot'), 0);
+  assert.notEqual(exitCodeFor('needs-pivot'), EXIT_UNKNOWN_OUTCOME);
+});
