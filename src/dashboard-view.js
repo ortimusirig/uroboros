@@ -11,19 +11,17 @@ import { basename, dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { URO_DASHBOARD_MARKER } from './dashboard-config.js';
 import { CAMPAIGN_EVENTS_FILENAME, readEventStream } from './event-stream.js';
-import { decodeRecordedText } from './execution-record.js';
-import { addUsage, EMPTY_USAGE } from './usage.js';
 import { resolveArtifact } from './artifacts.js';
+import {
+  escapeHtml,
+  renderRunTranscript,
+  renderTranscriptDashboard,
+} from './dashboard-transcript.js';
 
-export const DEFAULT_SESSION_THRESHOLD_HOURS = 2;
 export const MAX_RENDERED_DIFF_BYTES = 128 * 1024;
 
 const TASK_TITLE_MAX_LENGTH = 70;
 const TASK_TITLE_MIN_PUNCTUATION_LENGTH = 20;
-
-function emptyUsage() {
-  return { ...EMPTY_USAGE };
-}
 
 function emptyDiff() {
   return {
@@ -46,8 +44,6 @@ function emptyRun(directory, overrides = {}) {
     runId: basename(directory),
     title: null,
     taskBody: null,
-    projectPath: null,
-    correctsRunId: null,
     state: 'waiting',
     message: 'Waiting for the event stream to appear.',
     startTs: null,
@@ -57,21 +53,12 @@ function emptyRun(directory, overrides = {}) {
     lastEventTs: null,
     timeline: [],
     verifiers: { correctness: null, intent: null },
-    files: [],
-    filesChanged: [],
     gateCommands: [],
     gateResult: 'pending',
-    tokens: {
-      executor: emptyUsage(),
-      correctness: emptyUsage(),
-      intent: emptyUsage(),
-    },
-    stalls: [],
-    executorRationale: null,
     diff: emptyDiff(),
     ...overrides,
   };
-  return addTriageFacts(run);
+  return run;
 }
 
 function readRunFacts(eventsPath) {
@@ -93,13 +80,19 @@ function consistencyStatus(value) {
   return value?.status ?? null;
 }
 
-function enrichFromFacts(verifiers, facts) {
-  if (facts === null) return { verifiers, executorRationale: null };
+function enrichVerifiersFromFacts(verifiers, facts) {
+  if (facts === null) return verifiers;
   const iteration = Array.isArray(facts.iterations) ? facts.iterations.at(-1) : null;
   const completed = {
     correctness: {
-      verdict: iteration?.verifier?.verdict ?? facts.verdict ?? null,
-      verdictSource: iteration?.verifier?.verdictSource ?? facts.verdictSource ?? null,
+      verdict: iteration?.verifier?.verdict
+        ?? facts.correctnessVerdict
+        ?? facts.verdict
+        ?? null,
+      verdictSource: iteration?.verifier?.verdictSource
+        ?? facts.correctnessVerdictSource
+        ?? facts.verdictSource
+        ?? null,
       verdictConsistency: consistencyStatus(iteration?.verifier?.verdictConsistency)
         ?? consistencyStatus(facts.verifierConsistency),
       plan: facts.verifierPlan ?? iteration?.verifier?.plan ?? null,
@@ -124,10 +117,7 @@ function enrichFromFacts(verifiers, facts) {
       completed[pass] = null;
     }
   }
-  return {
-    verifiers: completed,
-    executorRationale: iteration?.lastMessage ?? null,
-  };
+  return completed;
 }
 
 function readDiffPreview(worktreeDirectory, maxBytes = MAX_RENDERED_DIFF_BYTES) {
@@ -171,44 +161,6 @@ function readDiffPreview(worktreeDirectory, maxBytes = MAX_RENDERED_DIFF_BYTES) 
 function validTimestamp(value) {
   const parsed = typeof value === 'string' ? Date.parse(value) : Number.NaN;
   return Number.isFinite(parsed) ? parsed : null;
-}
-
-function verdictPresentation(verifier) {
-  if (verifier === null) return { kind: 'pending', text: 'Pending — unknown' };
-  if (verifier.verdictSource === 'none') {
-    return {
-      kind: 'unknown',
-      text: 'No verdict — unknown (ISSUES is a fail-safe, not a finding)',
-    };
-  }
-  if (verifier.verdict === 'ISSUES') {
-    return { kind: 'issues', text: 'ISSUES — reviewer found a problem' };
-  }
-  if (verifier.verdict === 'NO_BLOCKERS') {
-    return { kind: 'clean', text: 'NO_BLOCKERS — fine' };
-  }
-  return { kind: 'pending', text: `${verifier.verdict ?? 'Pending'} — unknown` };
-}
-
-export function runNeedsAttention(run) {
-  return run?.gateResult === 'failed'
-    || ['correctness', 'intent'].some((pass) => (
-      run?.verifiers?.[pass]?.verdict === 'ISSUES'
-      || run?.verifiers?.[pass]?.verdictSource === 'none'
-    ));
-}
-
-function addTriageFacts(run) {
-  const triage = {
-    gate: run.gateResult === 'passed'
-      ? { kind: 'clean', text: 'Passed — fine' }
-      : run.gateResult === 'failed'
-        ? { kind: 'issues', text: 'Failed — needs attention' }
-        : { kind: 'pending', text: 'Pending — not complete' },
-    correctness: verdictPresentation(run.verifiers.correctness),
-    intent: verdictPresentation(run.verifiers.intent),
-  };
-  return { ...run, triage, needsAttention: runNeedsAttention(run) };
 }
 
 function firstTimestamp(events) {
@@ -314,24 +266,13 @@ function digestRunDirectory(runDirectory) {
   }
 
   const events = stream.events.filter((event) => event?.runId === stream.runId);
-  const tokens = {
-    executor: emptyUsage(),
-    correctness: emptyUsage(),
-    intent: emptyUsage(),
-  };
   const verifiers = { correctness: null, intent: null };
-  const files = [];
   const gateCommands = [];
-  const stalls = [];
   let gateResult = 'pending';
 
   for (const event of events) {
-    if (event.stage === 'executor' && event.type === 'finish') {
-      tokens.executor = addUsage(tokens.executor, event.tokens);
-    }
     if (event.stage === 'verify' && event.type === 'finish'
       && (event.pass === 'correctness' || event.pass === 'intent')) {
-      tokens[event.pass] = addUsage(tokens[event.pass], event.tokens);
       verifiers[event.pass] = {
         verdict: event.verdict ?? null,
         verdictSource: event.source ?? event.verdictSource ?? null,
@@ -342,10 +283,6 @@ function digestRunDirectory(runDirectory) {
         timedOut: event.timedOut === true,
         ts: event.ts ?? null,
       };
-    }
-    if (event.stage === 'executor' && event.type === 'file_change'
-      && typeof event.file === 'string') {
-      files.push({ file: event.file, attempt: event.attempt ?? null, ts: event.ts ?? null });
     }
     if (event.stage === 'gate' && event.type === 'gate_command') {
       gateCommands.push({
@@ -361,11 +298,10 @@ function digestRunDirectory(runDirectory) {
       gateResult = event.verdict === 'passed' ? 'passed'
         : event.verdict === 'failed' ? 'failed' : gateResult;
     }
-    if (event.type === 'stalled') stalls.push(event);
   }
 
   const facts = readRunFacts(stream.eventsPath);
-  const completedDetails = enrichFromFacts(verifiers, facts);
+  const completedVerifiers = enrichVerifiersFromFacts(verifiers, facts);
   if (gateResult === 'pending' && (facts?.gateStatus === 'passed' || facts?.gateStatus === 'failed')) {
     gateResult = facts.gateStatus;
   }
@@ -377,17 +313,13 @@ function digestRunDirectory(runDirectory) {
   const lastEvent = events.at(-1) ?? null;
   const finished = events.some((event) => event.stage === 'report' && event.type === 'finish');
   const worktreeDirectory = dirname(stream.eventsPath);
-  return addTriageFacts({
+  return {
     directory,
     worktreeDirectory,
     eventsPath: stream.eventsPath,
     runId: stream.runId,
     title,
     taskBody,
-    projectPath: events.find((event) => event.stage === 'isolate' && event.type === 'start'
-      && typeof event.source === 'string')?.source ?? null,
-    correctsRunId: events.find((event) => event.stage === 'isolate' && event.type === 'start'
-      && typeof event.correctsRunId === 'string')?.correctsRunId ?? null,
     state: finished ? 'finished' : events.length > 0 ? 'running' : 'waiting',
     message: events.length > 0 ? null : 'Event stream is empty; waiting for the first event.',
     startTs: firstTimestamp(events),
@@ -412,90 +344,33 @@ function digestRunDirectory(runDirectory) {
       text: typeof event.text === 'string' ? event.text : null,
       textEncoding: typeof event.textEncoding === 'string' ? event.textEncoding : null,
       textTruncated: event.textTruncated === true,
+      file: typeof event.file === 'string' ? event.file : null,
+      questions: Array.isArray(event.questions) ? event.questions.map((question) => ({
+        id: typeof question?.id === 'string' ? question.id : null,
+        kind: typeof question?.kind === 'string' ? question.kind : null,
+        question: typeof question?.question === 'string' ? question.question : null,
+        options: Array.isArray(question?.options)
+          ? question.options.filter((option) => typeof option === 'string')
+          : typeof question?.options === 'string' ? question.options : null,
+        recommendation: typeof question?.recommendation === 'string'
+          ? question.recommendation : null,
+        askedBy: typeof question?.askedBy === 'string' ? question.askedBy : null,
+      })) : [],
+      answers: Array.isArray(event.answers) ? event.answers.map((answer) => ({
+        id: typeof answer?.id === 'string' ? answer.id : null,
+        answer: typeof answer?.answer === 'string' ? answer.answer : null,
+        author: typeof answer?.author === 'string' ? answer.author : null,
+        answeredBy: typeof answer?.answeredBy === 'string' ? answer.answeredBy : null,
+      })) : [],
+      author: typeof event.author === 'string' ? event.author : null,
+      askedBy: typeof event.askedBy === 'string' ? event.askedBy : null,
+      answeredBy: typeof event.answeredBy === 'string' ? event.answeredBy : null,
     })),
-    verifiers: completedDetails.verifiers,
-    files,
-    filesChanged: [...new Set(files.map((file) => file.file))],
+    verifiers: completedVerifiers,
     gateCommands,
     gateResult,
-    tokens,
-    stalls,
-    executorRationale: completedDetails.executorRationale,
     diff: readDiffPreview(worktreeDirectory),
-  });
-}
-
-export function inferSessions(runs, thresholdHours = DEFAULT_SESSION_THRESHOLD_HOURS) {
-  if (!Number.isFinite(thresholdHours) || thresholdHours < 0) {
-    throw new TypeError('session threshold must be a non-negative number of hours');
-  }
-  const indexed = runs.map((run, index) => ({ run, index, time: validTimestamp(run.startTs) }));
-  indexed.sort((left, right) => {
-    if (left.time === null && right.time === null) return left.index - right.index;
-    if (left.time === null) return 1;
-    if (right.time === null) return -1;
-    return right.time - left.time || right.run.runId.localeCompare(left.run.runId);
-  });
-  const thresholdMs = thresholdHours * 60 * 60 * 1000;
-  const sessions = [];
-  let current = null;
-  for (const item of indexed) {
-    const separate = current === null
-      || item.time === null
-      || current.lastStartMs === null
-      || current.lastStartMs - item.time > thresholdMs;
-    if (separate) {
-      current = { runs: [], lastStartMs: item.time };
-      sessions.push(current);
-    }
-    current.runs.push(item.run);
-    current.lastStartMs = item.time;
-  }
-  return sessions.map((session, index) => {
-    const starts = session.runs.map((run) => validTimestamp(run.startTs)).filter((time) => time !== null);
-    const ends = session.runs.map((run) => validTimestamp(run.endTs)).filter((time) => time !== null);
-    const startMs = starts.length > 0 ? Math.min(...starts) : null;
-    const endMs = ends.length > 0 ? Math.max(...ends) : startMs;
-    return {
-      id: `session-${index + 1}-${session.runs[0]?.runId ?? 'empty'}`,
-      startTs: startMs === null ? null : new Date(startMs).toISOString(),
-      endTs: endMs === null ? null : new Date(endMs).toISOString(),
-      durationMs: startMs === null || endMs === null ? null : Math.max(0, endMs - startMs),
-      passCount: session.runs.length,
-      attentionCount: session.runs.filter((run) => run.needsAttention ?? runNeedsAttention(run)).length,
-      runs: session.runs,
-    };
-  });
-}
-
-export function groupRunsByProject(runs) {
-  const byPath = new Map();
-  runs.forEach((run, index) => {
-    const projectPath = typeof run.projectPath === 'string' ? run.projectPath : null;
-    const group = byPath.get(projectPath) ?? {
-      projectPath,
-      name: projectPath === null ? 'Unknown project' : basename(projectPath),
-      runs: [],
-      latestStartMs: null,
-      firstIndex: index,
-      attentionCount: 0,
-    };
-    const startMs = validTimestamp(run.startTs);
-    group.runs.push(run);
-    if (startMs !== null && (group.latestStartMs === null || startMs > group.latestStartMs)) {
-      group.latestStartMs = startMs;
-    }
-    if (run.needsAttention ?? runNeedsAttention(run)) group.attentionCount += 1;
-    byPath.set(projectPath, group);
-  });
-  return [...byPath.values()].sort((left, right) => {
-    if (left.latestStartMs === null && right.latestStartMs === null) {
-      return left.firstIndex - right.firstIndex;
-    }
-    if (left.latestStartMs === null) return 1;
-    if (right.latestStartMs === null) return -1;
-    return right.latestStartMs - left.latestStartMs || left.firstIndex - right.firstIndex;
-  });
+  };
 }
 
 export function buildDashboardSnapshot({ runDirectory, scratchRoot } = {}) {
@@ -554,361 +429,6 @@ export function buildDashboardSnapshot({ runDirectory, scratchRoot } = {}) {
     message: runs.length === 0 ? 'No run directories found yet.' : null,
     runs,
   };
-}
-
-function escapeHtml(value) {
-  return String(value ?? '')
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;')
-    .replaceAll('"', '&quot;')
-    .replaceAll("'", '&#39;');
-}
-
-function formatDuration(ms) {
-  if (!Number.isFinite(ms)) return 'unknown';
-  const safe = Math.max(0, Math.floor(ms));
-  if (safe < 1000) return `${safe} ms`;
-  const seconds = Math.floor(safe / 1000);
-  if (seconds < 60) return `${seconds}s`;
-  const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes}m ${seconds % 60}s`;
-  const hours = Math.floor(minutes / 60);
-  return `${hours}h ${minutes % 60}m`;
-}
-
-function shortTime(ts) {
-  const parsed = validTimestamp(ts);
-  return parsed === null ? '--:--:--' : new Date(parsed).toISOString().slice(11, 19);
-}
-
-function fullTime(ts) {
-  const parsed = validTimestamp(ts);
-  return parsed === null ? 'time unknown' : new Date(parsed).toISOString().replace('T', ' ').replace('Z', ' UTC');
-}
-
-function shortRunId(runId) {
-  if (runId.length <= 18) return runId;
-  return `${runId.slice(0, 10)}…${runId.slice(-7)}`;
-}
-
-function attempt(value) {
-  return value === null || value === undefined ? '' : ` · attempt ${escapeHtml(value)}`;
-}
-
-function usageText(usage) {
-  return `in ${usage.inputTokens} · cached ${usage.cachedInputTokens} · out ${usage.outputTokens}`
-    + ` · reasoning ${usage.reasoningOutputTokens} · cache write ${usage.cacheWriteTokens}`;
-}
-
-function triageExplanation(checkType, kind, text) {
-  if (checkType === 'gate') {
-    if (kind === 'clean' && text === 'Passed — fine') {
-      return 'All automated checks completed successfully.';
-    }
-    if (kind === 'issues' && text === 'Failed — needs attention') {
-      return 'One or more automated checks failed, so this pass needs attention.';
-    }
-    if (kind === 'pending' && text === 'Pending — not complete') {
-      return 'The automated checks have not finished yet.';
-    }
-  }
-
-  if (checkType === 'correctness') {
-    if (kind === 'pending' && text === 'Pending — unknown') {
-      return 'The code-quality review has not run yet, so whether the code has defects is unknown.';
-    }
-    if (kind === 'unknown' && text === 'No verdict — unknown (ISSUES is a fail-safe, not a finding)') {
-      return 'The code-quality review did not return a usable result; ISSUES is shown as a precaution, not because a defect was found.';
-    }
-    if (kind === 'issues' && text === 'ISSUES — reviewer found a problem') {
-      return 'The code-quality review found a possible defect in the code.';
-    }
-    if (kind === 'clean' && text === 'NO_BLOCKERS — fine') {
-      return 'The code-quality review did not find defects that would block this pass.';
-    }
-    if (kind === 'pending' && text.endsWith(' — unknown')) {
-      return `The code-quality review returned "${text}", which the dashboard does not recognize, so whether the code has defects is unknown.`;
-    }
-  }
-
-  if (checkType === 'intent') {
-    if (kind === 'pending' && text === 'Pending — unknown') {
-      return 'The task-intent review has not run yet, so it is unknown whether the changes meet TASK.md and whether new assertions would catch broken behavior.';
-    }
-    if (kind === 'unknown' && text === 'No verdict — unknown (ISSUES is a fail-safe, not a finding)') {
-      return 'The task-intent review did not return a usable result; ISSUES is shown as a precaution, not because a mismatch with TASK.md or a weak assertion was found.';
-    }
-    if (kind === 'issues' && text === 'ISSUES — reviewer found a problem') {
-      return 'The task-intent review found that the changes may not meet TASK.md or that new assertions may not catch broken behavior.';
-    }
-    if (kind === 'clean' && text === 'NO_BLOCKERS — fine') {
-      return 'The task-intent review found no problem with whether the changes meet TASK.md or whether new assertions would catch broken behavior.';
-    }
-    if (kind === 'pending' && text.endsWith(' — unknown')) {
-      return `The task-intent review returned "${text}", which the dashboard does not recognize, so it is unknown whether the changes meet TASK.md and whether new assertions would catch broken behavior.`;
-    }
-  }
-
-  throw new Error(`Unknown triage presentation: ${checkType}/${kind}/${text}`);
-}
-
-function renderTriageState(checkType, presentation, runId) {
-  const explanation = triageExplanation(checkType, presentation.kind, presentation.text);
-  return `<button class="result ${escapeHtml(presentation.kind)}" type="button"`
-    + ` data-result-kind="${escapeHtml(presentation.kind)}" data-detail-run="${escapeHtml(runId)}"`
-    + ` data-detail-section="${escapeHtml(checkType)}" title="${escapeHtml(explanation)}">`
-    + `${escapeHtml(presentation.text)}</button>`;
-}
-
-function orderCorrectionRows(sessionRuns, allRunsById) {
-  const sessionById = new Map(sessionRuns.map((run) => [run.runId, run]));
-  const parentById = new Map();
-  for (const run of sessionRuns) {
-    if (typeof run.correctsRunId === 'string'
-      && allRunsById.has(run.correctsRunId)
-      && sessionById.has(run.correctsRunId)) {
-      parentById.set(run.runId, run.correctsRunId);
-    }
-  }
-
-  const cycleRunIds = new Set();
-  for (const run of sessionRuns) {
-    const path = [];
-    const positionById = new Map();
-    let currentRunId = run.runId;
-    for (let steps = 0; steps <= sessionRuns.length && parentById.has(currentRunId); steps++) {
-      const cycleStart = positionById.get(currentRunId);
-      if (cycleStart !== undefined) {
-        for (const cycleRunId of path.slice(cycleStart)) cycleRunIds.add(cycleRunId);
-        break;
-      }
-      positionById.set(currentRunId, path.length);
-      path.push(currentRunId);
-      currentRunId = parentById.get(currentRunId);
-    }
-  }
-
-  const childrenById = new Map();
-  const nestedRunIds = new Set();
-  for (const run of sessionRuns) {
-    const parentRunId = parentById.get(run.runId);
-    if (parentRunId === undefined || cycleRunIds.has(run.runId)) continue;
-    const children = childrenById.get(parentRunId) ?? [];
-    children.push(run);
-    childrenById.set(parentRunId, children);
-    nestedRunIds.add(run.runId);
-  }
-
-  const ordered = [];
-  const emitted = new Set();
-  const emitTree = (root) => {
-    const stack = [{ run: root, depth: 0 }];
-    while (stack.length > 0) {
-      const item = stack.pop();
-      if (emitted.has(item.run.runId)) continue;
-      emitted.add(item.run.runId);
-      ordered.push(item);
-      const children = childrenById.get(item.run.runId) ?? [];
-      for (let index = children.length - 1; index >= 0; index--) {
-        stack.push({ run: children[index], depth: item.depth + 1 });
-      }
-    }
-  };
-  for (const run of sessionRuns) {
-    if (!nestedRunIds.has(run.runId)) emitTree(run);
-  }
-  for (const run of sessionRuns) {
-    if (!emitted.has(run.runId)) ordered.push({ run, depth: 0 });
-  }
-  return ordered;
-}
-
-function renderPassRow(run, attentionOnly, correctionDepth = 0) {
-  const hidden = attentionOnly && !run.needsAttention ? ' hidden' : '';
-  const files = run.filesChanged.length === 0 ? '0 files'
-    : `${run.filesChanged.length} ${run.filesChanged.length === 1 ? 'file' : 'files'}`;
-  const shortId = `<code title="${escapeHtml(run.runId)}">${escapeHtml(shortRunId(run.runId))}</code>`;
-  const correction = typeof run.correctsRunId === 'string'
-    ? `<small class="correction-note">corrects <code title="${escapeHtml(run.correctsRunId)}">`
-      + `${escapeHtml(shortRunId(run.correctsRunId))}</code></small>`
-    : '';
-  const identity = typeof run.title === 'string' && run.title.length > 0
-    ? `<span class="pass-identity"><b title="${escapeHtml(run.title)}">${escapeHtml(run.title)}</b>`
-      + `<small>${shortId}</small>${correction}</span>`
-    : correction ? `<span class="pass-identity">${shortId}${correction}</span>` : shortId;
-  return `<tr class="pass-row${run.needsAttention ? ' attention' : ' clean'}" data-run-id="${escapeHtml(run.runId)}"`
-    + ` data-correction-depth="${correctionDepth}" data-needs-attention="${run.needsAttention}"`
-    + ` style="--correction-depth:${correctionDepth}"${hidden}>`
-    + `<td><button class="pass-detail" type="button" data-detail-run="${escapeHtml(run.runId)}">`
-    + `${escapeHtml(shortTime(run.startTs))}</button></td>`
-    + `<td>${identity}</td>`
-    + `<td>${renderTriageState('gate', run.triage.gate, run.runId)}</td>`
-    + `<td>${renderTriageState('correctness', run.triage.correctness, run.runId)}</td>`
-    + `<td>${renderTriageState('intent', run.triage.intent, run.runId)}</td>`
-    + `<td title="${escapeHtml(run.filesChanged.join(', '))}">${escapeHtml(files)}</td></tr>`;
-}
-
-function renderSessions(runs, thresholdHours, attentionOnly, allRuns = runs) {
-  const sessions = inferSessions(runs, thresholdHours);
-  const allRunsById = new Map(allRuns.map((run) => [run.runId, run]));
-  if (sessions.length === 0) return '<section class="empty">No passes to group into sessions.</section>';
-  const allFiltered = attentionOnly && sessions.every((session) => session.attentionCount === 0);
-  const filterMessage = allFiltered
-    ? '<section class="empty filter-empty">No passes need attention. Turn off the filter to see clean passes.</section>'
-    : '';
-  return filterMessage + sessions.map((session) => {
-    const hidden = attentionOnly && session.attentionCount === 0 ? ' hidden' : '';
-    const headlineTitle = session.runs[0]?.title ?? null;
-    const differentTitleCount = headlineTitle === null ? 0 : session.runs.slice(1)
-      .filter((run) => run.title !== null && run.title !== undefined && run.title !== headlineTitle)
-      .length;
-    const headline = headlineTitle === null
-      ? fullTime(session.startTs)
-      : `${headlineTitle}${differentTitleCount > 0 ? ` +${differentTitleCount} more` : ''}`;
-    return `<details class="session" data-attention-count="${session.attentionCount}"${hidden}>`
-      + `<summary><span><b${headlineTitle === null ? '' : ` title="${escapeHtml(headline)}"`}>`
-      + `${escapeHtml(headline)}</b>`
-      + `<small>${escapeHtml(fullTime(session.startTs))} · ${escapeHtml(formatDuration(session.durationMs))}</small></span>`
-      + `<span>${session.passCount} ${session.passCount === 1 ? 'pass' : 'passes'}</span>`
-      + `<strong>${session.attentionCount} need${session.attentionCount === 1 ? 's' : ''} attention</strong></summary>`
-      + '<div class="pass-table-wrap"><table class="passes"><thead><tr><th>Time</th><th>Pass</th>'
-      + '<th>Gate</th><th>Correctness</th><th>Intent</th><th>Files changed</th></tr></thead><tbody>'
-      + orderCorrectionRows(session.runs, allRunsById)
-        .map(({ run, depth }) => renderPassRow(run, attentionOnly, depth)).join('')
-      + '</tbody></table></div></details>';
-  }).join('');
-}
-
-function renderProjects(runs, thresholdHours, attentionOnly) {
-  const projects = groupRunsByProject(runs);
-  if (projects.length <= 1) return renderSessions(runs, thresholdHours, attentionOnly, runs);
-  const allFiltered = attentionOnly && projects.every((project) => project.attentionCount === 0);
-  const filterMessage = allFiltered
-    ? '<section class="empty filter-empty">No passes need attention. Turn off the filter to see clean passes.</section>'
-    : '';
-  return filterMessage + projects.map((project) => {
-    const hidden = attentionOnly && project.attentionCount === 0 ? ' hidden' : '';
-    const subtitle = project.projectPath ?? 'Unknown project';
-    return `<details class="project" data-project-path="${escapeHtml(project.projectPath ?? '')}"`
-      + ` data-attention-count="${project.attentionCount}"${hidden}>`
-      + `<summary><span><b>${escapeHtml(project.name)}</b><small>${escapeHtml(subtitle)}</small></span>`
-      + `<span>${project.runs.length} ${project.runs.length === 1 ? 'pass' : 'passes'}</span>`
-      + `<strong>${project.attentionCount} need${project.attentionCount === 1 ? 's' : ''} attention</strong></summary>`
-      + `<div class="project-sessions">${renderSessions(project.runs, thresholdHours, attentionOnly, runs)}</div></details>`;
-  }).join('');
-}
-
-export function renderSessionList(
-  runs,
-  thresholdHours = DEFAULT_SESSION_THRESHOLD_HOURS,
-  attentionOnly = true,
-) {
-  return renderSessions(runs, thresholdHours, attentionOnly);
-}
-
-export function renderProjectList(
-  runs,
-  thresholdHours = DEFAULT_SESSION_THRESHOLD_HOURS,
-  attentionOnly = true,
-) {
-  return renderProjects(runs, thresholdHours, attentionOnly);
-}
-
-function renderTriage(snapshot) {
-  return '<section id="triage-view" class="view-panel" data-view-panel="triage">'
-    + '<div class="controls"><label class="toggle"><input id="attention-only" type="checkbox" checked> Show needs-attention passes only</label></div>'
-    + `<div id="sessions">${renderProjects(snapshot.runs, DEFAULT_SESSION_THRESHOLD_HOURS, true)}</div></section>`;
-}
-
-function renderVerifier(passKey, name, verifier) {
-  const id = `detail-verifier-${passKey}`;
-  if (verifier === null) {
-    return `<div id="${escapeHtml(id)}" class="verifier pending"><b>${escapeHtml(name)}</b>`
-      + '<span>Pending — unknown</span></div>';
-  }
-  const source = verifier.verdictSource ?? 'unknown';
-  const consistency = verifier.verdictConsistency ?? 'not recorded';
-  const findings = verifier.findings ?? '(findings are recorded when the run report completes)';
-  const hasPlan = verifier.plan !== null && verifier.plan !== undefined;
-  const primary = hasPlan ? verifier.plan : findings;
-  const primaryHeading = source === 'none'
-    ? hasPlan
-      ? `${name} retained report (not authoritative reviewer findings)`
-      : `${name} retained output (not authoritative reviewer findings)`
-    : hasPlan ? `${name} report` : `${name} findings`;
-  const processTrace = hasPlan
-    ? '<details class="verifier-process-trace"><summary>Process trace</summary>'
-      + `<pre>${escapeHtml(findings)}</pre></details>`
-    : '';
-  const detail = `<details class="verifier-findings"><summary>${escapeHtml(primaryHeading)}</summary>`
-    + `<pre>${escapeHtml(primary)}</pre>${processTrace}</details>`;
-  if (source === 'none') {
-    return `<div id="${escapeHtml(id)}" class="verifier fail-safe" data-verdict-kind="fail-safe">`
-      + `<b>${escapeHtml(name)}</b><strong>No verdict — unknown</strong>`
-      + `<span>Recorded fail-safe value: ${escapeHtml(verifier.verdict ?? 'ISSUES')}</span>`
-      + '<span>verdictSource: none</span>'
-      + `<span>Consistency: ${escapeHtml(consistency)}</span>`
-      + '<em>No verdict marker found — ISSUES is a fail-safe, not a reviewer finding.</em>'
-      + `${detail}</div>`;
-  }
-  const finding = verifier.verdict === 'ISSUES'
-    ? 'Reviewer reported ISSUES — a real problem'
-    : verifier.verdict === 'NO_BLOCKERS' ? 'NO_BLOCKERS — fine' : 'Reviewer verdict';
-  return `<div id="${escapeHtml(id)}" class="verifier reviewer" data-verdict-kind="reviewer">`
-    + `<b>${escapeHtml(name)}</b><strong>${escapeHtml(verifier.verdict ?? 'unknown')}</strong>`
-    + `<span>verdictSource: ${escapeHtml(source)}</span>`
-    + `<span>Consistency: ${escapeHtml(consistency)}</span><em>${finding}</em>${detail}</div>`;
-}
-
-function renderTimeline(timeline) {
-  if (timeline.length === 0) return '<p class="muted">No stages emitted yet.</p>';
-  return `<ol class="timeline">${timeline.map((event) => {
-    const details = [
-      event.pass ? `pass ${escapeHtml(event.pass)}` : '',
-      event.verdict ? `verdict ${escapeHtml(event.verdict)}` : '',
-      event.attempt === null ? '' : `attempt ${escapeHtml(event.attempt)}`,
-    ].filter(Boolean).join(' · ');
-    let executionRecord = '';
-    if (event.stage === 'executor' && event.type === 'item_completed') {
-      if (event.itemType === 'command_execution') {
-        const command = typeof event.command === 'string'
-          ? `<code>${escapeHtml(event.command)}</code>`
-          : '';
-        const exitCode = Number.isInteger(event.exitCode)
-          ? `<span class="${event.exitCode === 0 ? 'exit-ok' : 'exit-fail'}">exit ${escapeHtml(event.exitCode)}</span>`
-          : '';
-        const heading = command === '' && exitCode === '' ? ''
-          : `<div class="executor-record-heading">${command}${exitCode}</div>`;
-        const decoded = decodeRecordedText({
-          text: event.output,
-          encoding: event.outputEncoding,
-          truncated: event.outputTruncated,
-        });
-        const output = decoded.text === '' ? ''
-          : '<details class="executor-record"><summary>Recorded output'
-            + `${decoded.truncated ? ' · truncated' : ''}</summary>`
-            + `<pre>${escapeHtml(decoded.text)}</pre></details>`;
-        executionRecord = heading + output;
-      } else if (event.itemType === 'error' && typeof event.errorMessage === 'string') {
-        executionRecord = `<p class="executor-error">${escapeHtml(event.errorMessage)}</p>`;
-      } else if (event.itemType === 'agent_message') {
-        const decoded = decodeRecordedText({
-          text: event.text,
-          encoding: event.textEncoding,
-          truncated: event.textTruncated,
-        });
-        if (decoded.text !== '') {
-          executionRecord = '<details class="executor-record"><summary>Agent text'
-            + `${decoded.truncated ? ' · truncated' : ''}</summary>`
-            + `<pre>${escapeHtml(decoded.text)}</pre></details>`;
-        }
-      }
-    }
-    return `<li><time>${escapeHtml(shortTime(event.ts))}</time>`
-      + `<b>${escapeHtml(event.stage)}</b><span>${escapeHtml(event.type)}</span>`
-      + (details ? `<small>${details}</small>` : '') + executionRecord + '</li>';
-  }).join('')}</ol>`;
 }
 
 export function vscodeFileHref(path) {
@@ -975,7 +495,7 @@ export function renderUnifiedDiff(diff, worktreeDirectory = null) {
       ? vscodeFileHref(join(worktreeDirectory, relativePath))
       : null;
     const link = href === null ? '' : `<p class="diff-file-link">${renderVsCodeLink(href)}</p>`;
-    return '<details class="diff-file">'
+    return `<details class="diff-file" data-diff-path="${escapeHtml(relativePath ?? '')}">`
       + `<summary><code>${escapeHtml(label)}</code></summary>`
       + `<div class="diff-file-content">${link}`
       + `<pre class="diff" aria-label="Unified diff for ${escapeHtml(label)}">`
@@ -984,78 +504,12 @@ export function renderUnifiedDiff(diff, worktreeDirectory = null) {
   return `${capNotice}<div class="diff-files">${files}</div>`;
 }
 
-export function renderRunDetail(run) {
-  if (!run) return '<section class="empty">Select a pass to inspect its details.</section>';
-  const age = run.lastEventTs === null ? 'no events yet'
-    : formatDuration(Date.now() - Date.parse(run.lastEventTs));
-  const stateLabel = run.state === 'finished' ? 'Finished' : run.state === 'running'
-    ? 'Live' : run.state === 'error' ? 'Read error' : 'Waiting';
-  const files = run.files.length === 0 ? '<p class="muted">No files reported.</p>'
-    : `<ul class="rows">${run.files.map((file) => `<li><code>${escapeHtml(file.file)}</code>`
-      + `<span>attempt ${escapeHtml(file.attempt ?? '?')}</span></li>`).join('')}</ul>`;
-  const gates = run.gateCommands.length === 0 ? '<p class="muted">No gate commands reported.</p>'
-    : `<ul class="rows">${run.gateCommands.map((command) => {
-      const line = [command.bin, ...command.args].filter(Boolean).join(' ');
-      const exitClass = command.code === 0 ? 'exit-ok' : 'exit-fail';
-      return `<li><code>${escapeHtml(line)}</code><span class="${exitClass}">exit `
-        + `${escapeHtml(command.code ?? '?')}${attempt(command.attempt)}`
-        + `${command.timedOut ? ' · timed out' : ''}</span></li>`;
-    }).join('')}</ul>`;
-  const stalls = run.stalls.length === 0 ? '<p class="muted">No stalls.</p>'
-    : `<ul class="stalls">${run.stalls.map((stall) => {
-      const last = stall.lastEvent ?? {};
-      return `<li><strong>STALL</strong><span>${escapeHtml(formatDuration(stall.gapMs))}`
-        + ` after ${escapeHtml(last.stage ?? 'unknown')}/${escapeHtml(last.type ?? 'unknown')}</span></li>`;
-    }).join('')}</ul>`;
-  const rationale = run.executorRationale
-    ?? '(executor rationale is recorded when the run report completes)';
-  const task = run.taskBody === null || run.taskBody === undefined
-    ? '<section><h3>Plan</h3><p class="muted">TASK.md is not available for this pass.</p></section>'
-    : '<section><h3>Plan</h3><details class="task-plan">'
-      + `<summary>${escapeHtml(run.title || 'The plan')}</summary>`
-      + `<pre class="prose">${escapeHtml(run.taskBody)}</pre></details></section>`;
-
-  return `<article class="run-card ${escapeHtml(run.state)}">`
-    + `<header><div><h2>${escapeHtml(run.runId)}</h2><p title="${escapeHtml(run.directory)}">`
-    + `${escapeHtml(run.directory)}</p></div><span class="state ${escapeHtml(run.state)}">${stateLabel}</span></header>`
-    + (run.message ? `<p class="notice">${escapeHtml(run.message)}</p>` : '')
-    + `<div class="current"><span>Current stage</span><strong>${escapeHtml(run.currentStage ?? 'not started')}</strong>`
-    + `<small>${escapeHtml(run.currentType ?? '')}</small><span>Last event</span>`
-    + `<strong class="age" data-last-event-ts="${escapeHtml(run.lastEventTs ?? '')}">${escapeHtml(age)}</strong></div>`
-    + task
-    + '<section><h3>Verifier seats</h3>'
-    + renderVerifier('correctness', 'Correctness pass', run.verifiers.correctness)
-    + renderVerifier('intent', 'Intent pass', run.verifiers.intent) + '</section>'
-    + `<section><h3>Executor rationale</h3><pre class="prose">${escapeHtml(rationale)}</pre></section>`
-    + '<section><h3>Unified diff</h3>' + renderUnifiedDiff(run.diff, run.worktreeDirectory) + '</section>'
-    + '<section><h3>Token usage by seat</h3><dl class="tokens">'
-    + `<dt>Executor</dt><dd>${escapeHtml(usageText(run.tokens.executor))}</dd>`
-    + `<dt>Correctness</dt><dd>${escapeHtml(usageText(run.tokens.correctness))}</dd>`
-    + `<dt>Intent</dt><dd>${escapeHtml(usageText(run.tokens.intent))}</dd></dl></section>`
-    + `<section><h3>Files as landed</h3>${files}</section>`
-    + `<section id="detail-gate"><h3>Gate commands</h3>${gates}</section>`
-    + `<section><h3>Stalls</h3>${stalls}</section>`
-    + `<section><h3>Full stage timeline</h3>${renderTimeline(run.timeline)}</section></article>`;
-}
-
-function renderDetail(snapshot) {
-  const selected = snapshot.runs[0] ?? null;
-  const options = snapshot.runs.map((run, index) => (
-    `<option value="${escapeHtml(run.runId)}"${index === 0 ? ' selected' : ''}>${escapeHtml(run.runId)}</option>`
-  )).join('');
-  return '<section id="detail-view" class="view-panel" data-view-panel="detail" hidden>'
-    + '<div class="detail-picker"><label>Pass <select id="detail-pass">'
-    + `${options}</select></label><small>One pass is rendered at a time.</small></div>`
-    + `<div id="detail-body">${renderRunDetail(selected)}</div></section>`;
-}
-
 export function renderDashboardContent(snapshot) {
-  const message = snapshot.message ? `<section class="empty source-message">${escapeHtml(snapshot.message)}</section>` : '';
-  return `${message}<nav class="view-tabs" aria-label="Dashboard views">`
-    + '<button type="button" data-view="triage" aria-pressed="true">Triage</button>'
-    + '<button type="button" data-view="detail" aria-pressed="false">Detail</button>'
-    + '</nav>'
-    + renderTriage(snapshot) + renderDetail(snapshot);
+  return renderTranscriptDashboard(snapshot, renderUnifiedDiff);
+}
+
+export function renderTranscriptDetail(run) {
+  return renderRunTranscript(run, renderUnifiedDiff);
 }
 
 export function snapshotForClient(snapshot) {
@@ -1067,30 +521,9 @@ export function snapshotForClient(snapshot) {
     runs: snapshot.runs.map((run) => ({
       runId: run.runId,
       title: run.title,
-      projectPath: run.projectPath,
-      correctsRunId: run.correctsRunId,
       state: run.state,
-      message: run.message,
       startTs: run.startTs,
-      endTs: run.endTs,
-      currentStage: run.currentStage,
-      currentType: run.currentType,
       lastEventTs: run.lastEventTs,
-      timeline: run.timeline.map((event) => ({
-        ts: event.ts,
-        stage: event.stage,
-        type: event.type,
-        attempt: event.attempt,
-        pass: event.pass,
-        verdict: event.verdict,
-      })),
-      files: run.files.map((file) => ({
-        ...file,
-        attemptText: `attempt ${file.attempt ?? '?'}`,
-      })),
-      filesChanged: run.filesChanged,
-      triage: run.triage,
-      needsAttention: run.needsAttention,
     })),
   };
 }
@@ -1103,35 +536,22 @@ function clientScript() {
   return String.raw`
 const connection=document.getElementById('connection');
 const root=document.getElementById('runs');
-const DEFAULT_SESSION_GAP_HOURS=${DEFAULT_SESSION_THRESHOLD_HOURS};
-const state={snapshot:JSON.parse(document.getElementById('initial-dashboard-data').textContent),view:'triage',attentionOnly:true,detailRunId:null};
+const state={snapshot:JSON.parse(document.getElementById('initial-dashboard-data').textContent),runId:null};
 function esc(value){return String(value==null?'':value).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;').replaceAll("'",'&#39;')}
-function duration(ms){ms=Math.max(0,Math.floor(ms));if(ms<1000)return ms+' ms';const s=Math.floor(ms/1000);if(s<60)return s+'s';const m=Math.floor(s/60);if(m<60)return m+'m '+(s%60)+'s';return Math.floor(m/60)+'h '+(m%60)+'m'}
-function timeMs(value){const parsed=typeof value==='string'?Date.parse(value):NaN;return Number.isFinite(parsed)?parsed:null}
-function shortTime(value){const parsed=timeMs(value);return parsed===null?'--:--:--':new Date(parsed).toISOString().slice(11,19)}
-function fullTime(value){const parsed=timeMs(value);return parsed===null?'time unknown':new Date(parsed).toISOString().replace('T',' ').replace('Z',' UTC')}
-function shortId(value){return value.length<=18?value:value.slice(0,10)+'…'+value.slice(-7)}
-function sessions(runs,hours){const indexed=runs.map(function(run,index){return{run:run,index:index,time:timeMs(run.startTs)}});indexed.sort(function(a,b){if(a.time===null&&b.time===null)return a.index-b.index;if(a.time===null)return 1;if(b.time===null)return-1;return b.time-a.time||b.run.runId.localeCompare(a.run.runId)});const groups=[];let current=null;const gap=hours*3600000;indexed.forEach(function(item){if(current===null||item.time===null||current.last===null||current.last-item.time>gap){current={runs:[],last:item.time};groups.push(current)}current.runs.push(item.run);current.last=item.time});return groups.map(function(group){const starts=group.runs.map(function(run){return timeMs(run.startTs)}).filter(function(value){return value!==null});const ends=group.runs.map(function(run){return timeMs(run.endTs)}).filter(function(value){return value!==null});const start=starts.length?Math.min.apply(null,starts):null;const end=ends.length?Math.max.apply(null,ends):start;return{runs:group.runs,startTs:start===null?null:new Date(start).toISOString(),durationMs:start===null||end===null?null:Math.max(0,end-start),attentionCount:group.runs.filter(function(run){return run.needsAttention}).length}})}
-function projectName(value){if(value===null)return'Unknown project';const parts=value.split(/[\\/]/).filter(Boolean);return parts.length?parts[parts.length-1]:value}
-function projects(runs){const byPath=new Map();runs.forEach(function(run,index){const path=typeof run.projectPath==='string'?run.projectPath:null;const group=byPath.get(path)||{projectPath:path,name:projectName(path),runs:[],latestStartMs:null,firstIndex:index,attentionCount:0};const start=timeMs(run.startTs);group.runs.push(run);if(start!==null&&(group.latestStartMs===null||start>group.latestStartMs))group.latestStartMs=start;if(run.needsAttention)group.attentionCount+=1;byPath.set(path,group)});return Array.from(byPath.values()).sort(function(a,b){if(a.latestStartMs===null&&b.latestStartMs===null)return a.firstIndex-b.firstIndex;if(a.latestStartMs===null)return 1;if(b.latestStartMs===null)return-1;return b.latestStartMs-a.latestStartMs||a.firstIndex-b.firstIndex})}
-function triageExplanation(checkType,kind,text){if(checkType==='gate'){if(kind==='clean'&&text==='Passed — fine')return'All automated checks completed successfully.';if(kind==='issues'&&text==='Failed — needs attention')return'One or more automated checks failed, so this pass needs attention.';if(kind==='pending'&&text==='Pending — not complete')return'The automated checks have not finished yet.'}if(checkType==='correctness'){if(kind==='pending'&&text==='Pending — unknown')return'The code-quality review has not run yet, so whether the code has defects is unknown.';if(kind==='unknown'&&text==='No verdict — unknown (ISSUES is a fail-safe, not a finding)')return'The code-quality review did not return a usable result; ISSUES is shown as a precaution, not because a defect was found.';if(kind==='issues'&&text==='ISSUES — reviewer found a problem')return'The code-quality review found a possible defect in the code.';if(kind==='clean'&&text==='NO_BLOCKERS — fine')return'The code-quality review did not find defects that would block this pass.';if(kind==='pending'&&text.endsWith(' — unknown'))return'The code-quality review returned "'+text+'", which the dashboard does not recognize, so whether the code has defects is unknown.'}if(checkType==='intent'){if(kind==='pending'&&text==='Pending — unknown')return'The task-intent review has not run yet, so it is unknown whether the changes meet TASK.md and whether new assertions would catch broken behavior.';if(kind==='unknown'&&text==='No verdict — unknown (ISSUES is a fail-safe, not a finding)')return'The task-intent review did not return a usable result; ISSUES is shown as a precaution, not because a mismatch with TASK.md or a weak assertion was found.';if(kind==='issues'&&text==='ISSUES — reviewer found a problem')return'The task-intent review found that the changes may not meet TASK.md or that new assertions may not catch broken behavior.';if(kind==='clean'&&text==='NO_BLOCKERS — fine')return'The task-intent review found no problem with whether the changes meet TASK.md or whether new assertions would catch broken behavior.';if(kind==='pending'&&text.endsWith(' — unknown'))return'The task-intent review returned "'+text+'", which the dashboard does not recognize, so it is unknown whether the changes meet TASK.md and whether new assertions would catch broken behavior.'}throw new Error('Unknown triage presentation: '+checkType+'/'+kind+'/'+text)}
-function resultCell(checkType,result,runId){const explanation=triageExplanation(checkType,result.kind,result.text);return'<button class="result '+esc(result.kind)+'" type="button" data-result-kind="'+esc(result.kind)+'" data-detail-run="'+esc(runId)+'" data-detail-section="'+esc(checkType)+'" title="'+esc(explanation)+'">'+esc(result.text)+'</button>'}
-function correctionRows(sessionRuns,allRuns){const allById=new Map((allRuns||sessionRuns).map(function(run){return[run.runId,run]}));const sessionById=new Map(sessionRuns.map(function(run){return[run.runId,run]}));const parentById=new Map();sessionRuns.forEach(function(run){if(typeof run.correctsRunId==='string'&&allById.has(run.correctsRunId)&&sessionById.has(run.correctsRunId))parentById.set(run.runId,run.correctsRunId)});const cycles=new Set();sessionRuns.forEach(function(run){const path=[];const positions=new Map();let current=run.runId;for(let steps=0;steps<=sessionRuns.length&&parentById.has(current);steps++){if(positions.has(current)){path.slice(positions.get(current)).forEach(function(id){cycles.add(id)});break}positions.set(current,path.length);path.push(current);current=parentById.get(current)}});const children=new Map();const nested=new Set();sessionRuns.forEach(function(run){const parent=parentById.get(run.runId);if(parent===undefined||cycles.has(run.runId))return;const rows=children.get(parent)||[];rows.push(run);children.set(parent,rows);nested.add(run.runId)});const ordered=[];const emitted=new Set();function emit(rootRun){const stack=[{run:rootRun,depth:0}];while(stack.length){const item=stack.pop();if(emitted.has(item.run.runId))continue;emitted.add(item.run.runId);ordered.push(item);const childRows=children.get(item.run.runId)||[];for(let index=childRows.length-1;index>=0;index--)stack.push({run:childRows[index],depth:item.depth+1})}}sessionRuns.forEach(function(run){if(!nested.has(run.runId))emit(run)});sessionRuns.forEach(function(run){if(!emitted.has(run.runId))ordered.push({run:run,depth:0})});return ordered}
-function passRow(item){const run=item.run||item;const depth=item.depth||0;const hidden=state.attentionOnly&&!run.needsAttention?' hidden':'';const count=run.filesChanged.length;const files=count+' '+(count===1?'file':'files');const short='<code title="'+esc(run.runId)+'">'+esc(shortId(run.runId))+'</code>';const correction=typeof run.correctsRunId==='string'?'<small class="correction-note">corrects <code title="'+esc(run.correctsRunId)+'">'+esc(shortId(run.correctsRunId))+'</code></small>':'';const identity=run.title?'<span class="pass-identity"><b title="'+esc(run.title)+'">'+esc(run.title)+'</b><small>'+short+'</small>'+correction+'</span>':correction?'<span class="pass-identity">'+short+correction+'</span>':short;return'<tr class="pass-row '+(run.needsAttention?'attention':'clean')+'" data-client-run-id="'+esc(run.runId)+'" data-correction-depth="'+depth+'" data-needs-attention="'+run.needsAttention+'" style="--correction-depth:'+depth+'"'+hidden+'><td><button class="pass-detail" type="button" data-detail-run="'+esc(run.runId)+'">'+esc(shortTime(run.startTs))+'</button></td><td>'+identity+'</td><td>'+resultCell('gate',run.triage.gate,run.runId)+'</td><td>'+resultCell('correctness',run.triage.correctness,run.runId)+'</td><td>'+resultCell('intent',run.triage.intent,run.runId)+'</td><td title="'+esc(run.filesChanged.join(', '))+'">'+esc(files)+'</td></tr>'}
-function renderSessionGroups(runs,allRuns){const groups=sessions(runs,DEFAULT_SESSION_GAP_HOURS);if(!groups.length)return'<section class="empty">No passes to group into sessions.</section>';const allFiltered=state.attentionOnly&&groups.every(function(group){return group.attentionCount===0});const message=allFiltered?'<section class="empty filter-empty">No passes need attention. Turn off the filter to see clean passes.</section>':'';return message+groups.map(function(group){const hidden=state.attentionOnly&&group.attentionCount===0?' hidden':'';const title=group.runs[0]&&group.runs[0].title||null;const different=title===null?0:group.runs.slice(1).filter(function(run){return run.title!=null&&run.title!==title}).length;const headline=title===null?fullTime(group.startTs):title+(different>0?' +'+different+' more':'');return'<details class="session" data-attention-count="'+group.attentionCount+'"'+hidden+'><summary><span><b'+(title===null?'':' title="'+esc(headline)+'"')+'>'+esc(headline)+'</b><small>'+esc(fullTime(group.startTs))+' · '+esc(duration(group.durationMs))+'</small></span><span>'+group.runs.length+' '+(group.runs.length===1?'pass':'passes')+'</span><strong>'+group.attentionCount+' need'+(group.attentionCount===1?'s':'')+' attention</strong></summary><div class="pass-table-wrap"><table class="passes"><thead><tr><th>Time</th><th>Pass</th><th>Gate</th><th>Correctness</th><th>Intent</th><th>Files changed</th></tr></thead><tbody>'+correctionRows(group.runs,allRuns||runs).map(passRow).join('')+'</tbody></table></div></details>'}).join('')}
-function renderSessions(){const target=document.getElementById('sessions');if(!target)return;const groups=projects(state.snapshot.runs);if(groups.length<=1){target.innerHTML=renderSessionGroups(state.snapshot.runs,state.snapshot.runs);return}const allFiltered=state.attentionOnly&&groups.every(function(group){return group.attentionCount===0});const message=allFiltered?'<section class="empty filter-empty">No passes need attention. Turn off the filter to see clean passes.</section>':'';target.innerHTML=message+groups.map(function(group){const hidden=state.attentionOnly&&group.attentionCount===0?' hidden':'';const subtitle=group.projectPath===null?'Unknown project':group.projectPath;return'<details class="project" data-project-path="'+esc(group.projectPath===null?'':group.projectPath)+'" data-attention-count="'+group.attentionCount+'"'+hidden+'><summary><span><b>'+esc(group.name)+'</b><small>'+esc(subtitle)+'</small></span><span>'+group.runs.length+' '+(group.runs.length===1?'pass':'passes')+'</span><strong>'+group.attentionCount+' need'+(group.attentionCount===1?'s':'')+' attention</strong></summary><div class="project-sessions">'+renderSessionGroups(group.runs,state.snapshot.runs)+'</div></details>'}).join('')}
-function refreshAges(){document.querySelectorAll('[data-last-event-ts]').forEach(function(el){const ts=Date.parse(el.dataset.lastEventTs);if(Number.isFinite(ts))el.textContent=duration(Date.now()-ts)})}
-function switchView(view,detailSection){state.view=view;document.querySelectorAll('[data-view-panel]').forEach(function(panel){panel.hidden=panel.dataset.viewPanel!==view});document.querySelectorAll('[data-view]').forEach(function(button){button.setAttribute('aria-pressed',String(button.dataset.view===view))});if(view==='detail')return refreshDetail(detailSection)}
-function revealDetailSection(section){const anchorIds={gate:'detail-gate',correctness:'detail-verifier-correctness',intent:'detail-verifier-intent'};const anchorId=anchorIds[section];if(!anchorId)return;const anchor=document.getElementById(anchorId);if(!anchor)return;const report=anchor.querySelector&&anchor.querySelector('details.verifier-findings');if(report)report.open=true;anchor.scrollIntoView({behavior:'smooth',block:'start'});anchor.classList.add('detail-highlight');setTimeout(function(){anchor.classList.remove('detail-highlight')},1600)}
-async function refreshDetail(detailSection){const target=document.getElementById('detail-body');const select=document.getElementById('detail-pass');if(!target||!select||!select.value){if(target)target.innerHTML='<section class="empty">Select a pass to inspect its details.</section>';return}state.detailRunId=select.value;target.setAttribute('aria-busy','true');try{const response=await fetch('/detail?runId='+encodeURIComponent(state.detailRunId),{cache:'no-store'});target.innerHTML=response.ok?await response.text():'<section class="empty">That pass is no longer available.</section>';if(response.ok)revealDetailSection(detailSection)}catch(error){target.innerHTML='<section class="empty">Could not load pass detail: '+esc(error.message)+'</section>'}finally{target.removeAttribute('aria-busy');refreshAges()}}
-function syncDetailOptions(){const select=document.getElementById('detail-pass');if(!select)return;const wanted=state.detailRunId;select.innerHTML=state.snapshot.runs.map(function(run){return'<option value="'+esc(run.runId)+'">'+esc(run.runId)+'</option>'}).join('');if(wanted&&state.snapshot.runs.some(function(run){return run.runId===wanted}))select.value=wanted;state.detailRunId=select.value||null}
-function bind(){const attention=document.getElementById('attention-only');if(attention)attention.addEventListener('change',function(){state.attentionOnly=attention.checked;renderSessions()});root.addEventListener('click',function(event){const viewButton=event.target.closest('[data-view]');if(viewButton){switchView(viewButton.dataset.view);return}const detailButton=event.target.closest('[data-detail-run]');if(detailButton){const select=document.getElementById('detail-pass');state.detailRunId=detailButton.dataset.detailRun;if(select)select.value=state.detailRunId;switchView('detail',detailButton.dataset.detailSection);return}});root.addEventListener('change',function(event){if(event.target.id==='detail-pass'){state.detailRunId=event.target.value;refreshDetail()}})}
-bind();
+function label(stateValue){if(stateValue==='running')return'Live';if(stateValue==='finished')return'Finished';if(stateValue==='error')return'Read error';return'Waiting'}
+function mostRecent(runs){return runs.reduce(function(latest,run){if(latest===null)return run;const runTime=Date.parse(run.lastEventTs||run.startTs||'');const latestTime=Date.parse(latest.lastEventTs||latest.startTs||'');if(!Number.isFinite(runTime))return latest;return!Number.isFinite(latestTime)||runTime>latestTime?run:latest},null)}
+function defaultRunId(){const runs=state.snapshot.runs;const run=mostRecent(runs.filter(function(item){return item.state==='running'}))||mostRecent(runs.filter(function(item){return item.state==='waiting'}))||runs[0];return run?run.runId:null}
+function syncPicker(){const picker=document.getElementById('run-picker');if(!picker)return;const wanted=state.runId&&state.snapshot.runs.some(function(run){return run.runId===state.runId})?state.runId:defaultRunId();picker.innerHTML=state.snapshot.runs.map(function(run){return'<option value="'+esc(run.runId)+'">'+esc(run.runId)+' — '+esc(label(run.state))+'</option>'}).join('');picker.disabled=state.snapshot.runs.length===0;if(wanted!==null)picker.value=wanted;state.runId=wanted}
+async function refreshTranscript(){const target=document.getElementById('transcript-body');if(!target)return;if(state.runId===null){target.innerHTML='<div class="transcript-layout"><section class="transcript-pane"><p class="empty">No run is available yet.</p></section><aside class="inspector-pane"><p class="muted">Nothing to inspect.</p></aside></div>';return}target.setAttribute('aria-busy','true');try{const response=await fetch('/detail?runId='+encodeURIComponent(state.runId),{cache:'no-store'});target.innerHTML=response.ok?await response.text():'<p class="empty">That run is no longer available.</p>'}catch(error){target.innerHTML='<p class="empty">Could not load run: '+esc(error.message)+'</p>'}finally{target.removeAttribute('aria-busy')}}
+function showInspectorTab(name){document.querySelectorAll('[data-inspector-tab]').forEach(function(button){button.setAttribute('aria-pressed',String(button.dataset.inspectorTab===name))});document.querySelectorAll('[data-inspector-panel]').forEach(function(panel){panel.hidden=panel.dataset.inspectorPanel!==name})}
+function diffKey(value){return String(value||'').replace(/\\/g,'/').replace(/^(?:[.][/]|[ab][/])/,'')}
+root.addEventListener('change',function(event){if(event.target.id==='run-picker'){state.runId=event.target.value;refreshTranscript()}});
+root.addEventListener('click',function(event){const tab=event.target.closest('[data-inspector-tab]');if(tab){showInspectorTab(tab.dataset.inspectorTab);return}const file=event.target.closest('[data-file-diff]');if(!file)return;showInspectorTab('diff');const wanted=diffKey(file.dataset.fileDiff);document.querySelectorAll('[data-diff-path]').forEach(function(section){const match=diffKey(section.dataset.diffPath)===wanted;section.hidden=!match;if(match){section.open=true;section.scrollIntoView({behavior:'smooth',block:'start'})}})});
+const picker=document.getElementById('run-picker');state.runId=picker&&!picker.disabled?picker.value:null;
 const stream=new EventSource('/events');
-stream.addEventListener('snapshot',function(event){state.snapshot=JSON.parse(event.data).snapshot;renderSessions();syncDetailOptions();if(state.view==='detail')refreshDetail();connection.textContent='Live';refreshAges()});
+stream.addEventListener('snapshot',function(event){state.snapshot=JSON.parse(event.data).snapshot;syncPicker();refreshTranscript();connection.textContent='Live'});
 stream.onopen=function(){connection.textContent='Live'};
 stream.onerror=function(){connection.textContent='Reconnecting…'};
-setInterval(refreshAges,1000);refreshAges();
 `;
 }
 
@@ -1151,83 +571,69 @@ body>header{padding:1rem 1.25rem;border-bottom:1px solid var(--line);display:fle
 h1{font-size:1.15rem;margin:0}
 body>header p{margin:.15rem 0 0;color:var(--muted);word-break:break-all}
 .connection{white-space:nowrap;color:var(--ok)}
-main{display:flex;flex-direction:column;gap:1rem;padding:1rem;min-height:calc(100vh - 70px);max-width:1500px;margin:0 auto;width:100%}
-button,select,input{font:inherit}
-.view-tabs{display:flex;gap:.4rem;border-bottom:1px solid var(--line)}
-.view-tabs button{border:0;border-bottom:3px solid transparent;background:transparent;color:var(--muted);padding:.55rem .9rem;cursor:pointer}
-.view-tabs button[aria-pressed="true"]{color:var(--ink);border-color:var(--ink);font-weight:700}
-.controls,.detail-picker{background:var(--card);border:1px solid var(--line);border-radius:7px;padding:.75rem;display:flex;align-items:center;gap:.7rem 1.2rem;flex-wrap:wrap}
-.controls small,.detail-picker small{color:var(--muted);flex:1}
-.toggle{white-space:nowrap}
+main{padding:1rem;min-height:calc(100vh - 70px);max-width:1800px;margin:0 auto;width:100%}
+button,select{font:inherit}
+button{color:inherit}
+.transcript-header{display:flex;align-items:center;justify-content:space-between;gap:1rem;background:var(--card);border:1px solid var(--line);border-radius:7px;padding:.7rem .85rem;margin-bottom:1rem}
+.transcript-header small,.muted{color:var(--muted)}
+.run-picker-label{display:flex;align-items:center;gap:.55rem;font-weight:650;min-width:min(620px,75vw)}
+.run-picker-label select{flex:1;min-width:0;background:var(--card);color:var(--ink);border:1px solid var(--line);border-radius:5px;padding:.35rem .5rem}
 .empty,.notice{padding:.7rem;background:var(--soft);border-radius:5px}
 .source-message{margin-bottom:0}
-.project,.session{background:var(--card);border:1px solid var(--line);border-radius:7px;margin:.7rem 0;overflow:hidden}
-.project>summary,.session>summary{cursor:pointer;display:grid;grid-template-columns:minmax(220px,1fr) auto auto;align-items:center;gap:1rem;padding:.8rem 1rem}
-.project>summary span:first-child,.session>summary span:first-child{display:flex;flex-direction:column}
-.project>summary small,.session>summary small{color:var(--muted)}
-.project>summary strong,.session>summary strong{color:var(--bad)}
-.project-sessions{border-top:1px solid var(--line);padding:0 .7rem .05rem}
-.pass-table-wrap{overflow-x:auto;border-top:1px solid var(--line)}
-.passes{width:100%;border-collapse:collapse;min-width:950px}
-.passes th,.passes td{text-align:left;padding:.55rem .7rem;border-bottom:1px solid var(--line);vertical-align:top}
-.passes th{color:var(--muted);font-size:.72rem;text-transform:uppercase;letter-spacing:.04em}
-.pass-detail,.result{border:0;background:transparent;color:inherit;cursor:pointer;padding:0;font-family:inherit}
-.pass-detail{text-decoration:underline}
-.pass-row>td:nth-child(2){padding-left:calc(.7rem + var(--correction-depth)*1.25rem)}
-.pass-identity{display:flex;flex-direction:column}
-.pass-identity small{color:var(--muted)}
-.correction-note{font-weight:600}
-.result{display:inline-block;font-size:.78rem;font-weight:650}
-.result.clean{color:var(--ok)}
-.result.issues{color:var(--bad)}
-.result.unknown{color:var(--warn)}
-.result.pending{color:var(--muted)}
-.run-card{background:var(--card);border:1px solid var(--line);border-top:4px solid var(--warn);border-radius:7px;padding:1rem;margin:.7rem 0}
-.run-card>header{display:flex;justify-content:space-between;gap:.8rem}
-.run-card.finished{border-top-color:var(--ok)}
-.run-card.error{border-top-color:var(--bad)}
-.run-card h2{font-size:1rem;margin:0;overflow-wrap:anywhere}
-.run-card header p{font-size:.72rem;color:var(--muted);margin:.2rem 0;overflow-wrap:anywhere}
+.transcript-layout{display:grid;grid-template-columns:minmax(0,1.25fr) minmax(360px,.75fr);gap:1rem;align-items:start}
+.transcript-pane,.inspector-pane{background:var(--card);border:1px solid var(--line);border-radius:7px;overflow:hidden}
+.transcript-pane{min-height:70vh}
+.inspector-pane{position:sticky;top:1rem;max-height:calc(100vh - 2rem);overflow:auto}
+.run-heading{display:flex;justify-content:space-between;gap:.8rem;padding:1rem;border-bottom:1px solid var(--line)}
+.run-heading h2{font-size:1rem;margin:0;overflow-wrap:anywhere}
+.run-heading p{font-size:.75rem;color:var(--muted);margin:.2rem 0 0;overflow-wrap:anywhere}
 .state{border:1px solid currentColor;border-radius:999px;padding:.15rem .55rem;height:max-content;font-size:.75rem}
 .state.finished{color:var(--ok)}
 .state.error{color:var(--bad)}
 .state.running{color:var(--warn)}
-.current{display:grid;grid-template-columns:auto 1fr;gap:.2rem .65rem;background:var(--soft);padding:.7rem;margin:.8rem 0;border-radius:5px}
-.current span{color:var(--muted)}
-.current small{grid-column:2;color:var(--muted)}
-.run-card section{margin-top:1rem}
-h3{font-size:.78rem;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:0 0 .45rem}
-.verifier{display:grid;grid-template-columns:1fr auto;gap:.1rem .6rem;border-left:3px solid var(--line);padding:.45rem .6rem;margin:.35rem 0;background:var(--soft)}
-.verifier span,.verifier em{font-size:.75rem;color:var(--muted)}
-.verifier em{grid-column:1/-1}
-.verifier.fail-safe{border-color:var(--warn)}
-.verifier.reviewer:has(strong:first-of-type){border-color:var(--line)}
-.verifier-findings{grid-column:1/-1;margin-top:.35rem}
-.verifier-findings>summary{cursor:pointer;font-size:.75rem;font-weight:650;margin:.15rem 0}
-.verifier-findings pre,.prose{margin:.2rem 0;white-space:pre-wrap;overflow-wrap:anywhere;background:var(--card);border:1px solid var(--line);border-radius:4px;padding:.55rem;font:12px/1.45 ui-monospace,SFMono-Regular,Consolas,monospace}
-.verifier-process-trace{margin-top:.45rem;font-size:.78rem;color:var(--muted)}
-.detail-highlight{outline:2px solid var(--warn);outline-offset:4px}
-.task-plan>summary{cursor:pointer;font-weight:650}
-.tokens{display:grid;grid-template-columns:auto 1fr;gap:.25rem .6rem;margin:0}
-.tokens dt{font-weight:650}
-.tokens dd{margin:0;color:var(--muted);font-variant-numeric:tabular-nums}
-.rows,.stalls{list-style:none;margin:0;padding:0}
-.rows li,.stalls li{display:flex;justify-content:space-between;gap:.7rem;border-top:1px solid var(--line);padding:.35rem 0}
-.rows code{overflow-wrap:anywhere}
-.rows span{white-space:nowrap;color:var(--muted)}
+.transcript-steps{list-style:none;margin:0;padding:0}
+.transcript-row{display:grid;grid-template-columns:4.8rem minmax(0,1fr);gap:.65rem;padding:.65rem .85rem;border-bottom:1px solid var(--line)}
+.transcript-row>time{color:var(--muted);font-variant-numeric:tabular-nums;font-size:.75rem;padding-top:.15rem}
+.transcript-row pre,.prose,.verifier-report pre{white-space:pre-wrap;overflow-wrap:anywhere;margin:.35rem 0 0;font:13px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace}
+.transcript-reasoning>summary,.command-output>summary,.verifier-report summary{cursor:pointer;font-weight:650}
+.transcript-reasoning.muted{color:var(--muted);font-style:italic}
+.transcript-agent-message strong,.decision-question strong,.decision-answer strong{display:block;margin-bottom:.2rem}
+.transcript-agent-message small,.decision-question small,.decision-answer small,.transcript-event small{display:block;color:var(--muted)}
+.transcript-file{width:100%;border:0;background:transparent;padding:0;text-align:left;cursor:pointer;display:flex;justify-content:space-between;gap:.7rem}
+.transcript-file span{color:var(--muted)}
+.transcript-file code,.command-heading code{overflow-wrap:anywhere}
+.command-heading{display:flex;justify-content:space-between;gap:.7rem}
+.command-output pre{max-height:280px;overflow:auto;background:var(--soft);padding:.55rem;border-radius:4px}
+.transcript-error{color:var(--bad)}
+.decision-question,.decision-answer{border-left:3px solid var(--warn);padding-left:.7rem}
+.decision-options,.decision-recommendation{color:var(--muted)}
 .exit-ok{color:var(--ok)!important}
 .exit-fail{color:var(--bad)!important}
-.stalls li{justify-content:flex-start;color:var(--bad)}
-.timeline{list-style:none;margin:0;padding:0;max-height:280px;overflow:auto}
-.timeline li{display:grid;grid-template-columns:4.8rem 5.5rem 1fr;gap:.35rem;border-left:2px solid var(--line);padding:.25rem .5rem}
-.timeline time,.timeline span,.timeline small{color:var(--muted)}
-.timeline small{grid-column:2/-1}
-.executor-record-heading,.executor-error,.executor-record{grid-column:2/-1}
-.executor-record-heading{display:flex;justify-content:space-between;gap:.7rem}
-.executor-record-heading code{overflow-wrap:anywhere}
-.executor-error{margin:.15rem 0;color:var(--bad)}
-.executor-record>summary{cursor:pointer;font-size:.75rem;font-weight:650;margin:.15rem 0}
-.executor-record pre{margin:.2rem 0;max-height:280px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;background:var(--card);border:1px solid var(--line);border-radius:4px;padding:.55rem;font:12px/1.45 ui-monospace,SFMono-Regular,Consolas,monospace}
+.gate-seam{list-style:none}
+.transcript-gate{border-block:3px solid var(--line);background:var(--soft);padding:.8rem .85rem}
+.transcript-gate.passed{border-color:var(--ok)}
+.transcript-gate.failed{border-color:var(--bad)}
+.transcript-gate header,.transcript-gate li{display:flex;justify-content:space-between;gap:.7rem}
+.transcript-gate header time{color:var(--muted);margin-left:auto}
+.transcript-gate ul{list-style:none;margin:.55rem 0 0;padding:0}
+.transcript-gate li{padding:.3rem 0;border-top:1px solid var(--line)}
+.transcript-verifier-seat{display:flex;justify-content:space-between;border-left:3px solid var(--line);padding:.35rem .55rem;background:var(--soft)}
+.transcript-verifier-seat.clean{border-color:var(--ok)}
+.transcript-verifier-seat.issues{border-color:var(--bad)}
+.transcript-verifier-seat.unknown{border-color:var(--warn)}
+.inspector-tabs{display:flex;border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--card);z-index:1}
+.inspector-tabs button{border:0;border-bottom:3px solid transparent;background:transparent;padding:.6rem .85rem;cursor:pointer;color:var(--muted)}
+.inspector-tabs button[aria-pressed="true"]{border-color:var(--ink);color:var(--ink);font-weight:700}
+[data-inspector-panel]{padding:.8rem}
+.verifier-consensus{padding:.5rem .65rem;margin-bottom:.7rem;background:var(--soft);border-left:3px solid var(--line)}
+.verifier-consensus.agreement{border-color:var(--ok)}
+.verifier-consensus.disagreement{border-color:var(--bad);color:var(--bad)}
+.verifier-report{border:1px solid var(--line);border-left-width:3px;border-radius:5px;padding:.65rem;margin:.65rem 0}
+.verifier-report.clean{border-left-color:var(--ok)}
+.verifier-report.issues{border-left-color:var(--bad)}
+.verifier-report.unknown{border-left-color:var(--warn)}
+.verifier-report header{display:flex;justify-content:space-between;gap:.7rem}
+.verifier-report>small{color:var(--muted)}
 .diff-capped{padding:.6rem;background:var(--soft);border-left:3px solid var(--warn)}
 .diff-file{background:var(--card);border:1px solid var(--line);border-radius:7px;margin:.7rem 0;overflow:hidden}
 .diff-file>summary{cursor:pointer;padding:.7rem .85rem}
@@ -1238,7 +644,7 @@ h3{font-size:.78rem;text-transform:uppercase;letter-spacing:.06em;color:var(--mu
 .diff-add{background:var(--add);color:var(--ok)}
 .diff-remove{background:var(--remove);color:var(--bad)}
 .diff-hunk{color:var(--warn)}
-@media(max-width:700px){body>header{align-items:start;flex-direction:column}main{padding:.5rem}.project>summary,.session>summary{grid-template-columns:1fr}.controls{align-items:start;flex-direction:column}}
+@media(max-width:900px){body>header{align-items:start;flex-direction:column}main{padding:.5rem}.transcript-header{align-items:start;flex-direction:column}.run-picker-label{min-width:100%;width:100%}.transcript-layout{grid-template-columns:1fr}.inspector-pane{position:static;max-height:none}.transcript-row{grid-template-columns:4.2rem minmax(0,1fr)}}
 </style>
 </head>
 <body>

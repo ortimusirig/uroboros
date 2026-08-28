@@ -5,9 +5,8 @@ import {
 } from './dashboard-config.js';
 import {
   buildDashboardSnapshot,
-  renderDashboardContent,
   renderDashboardPage,
-  renderRunDetail,
+  renderTranscriptDetail,
   snapshotForClient,
 } from './dashboard-view.js';
 
@@ -66,7 +65,7 @@ export function createDashboardObserver(options, pollIntervalMs = 250) {
     detail(runId) {
       const current = refresh();
       const run = current.runs.find((candidate) => candidate.runId === runId);
-      return run ? renderRunDetail(run) : null;
+      return run ? renderTranscriptDetail(run) : null;
     },
     connect(request, response) {
       response.writeHead(200, {
@@ -141,7 +140,7 @@ export async function startDashboard({
           'Content-Type': 'text/plain; charset=utf-8',
           'Cache-Control': 'no-store',
         });
-        response.end('Pass not found\n');
+        response.end('Run not found\n');
         return;
       }
       response.writeHead(200, {
