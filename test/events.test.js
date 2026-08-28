@@ -83,6 +83,9 @@ test('exporting detailFor preserves the exact heartbeat summary phrasing', () =>
 
 test('event construction validates declared pairs and campaign identity vocabulary', () => {
   assert.throws(() => createEvent({
+    runId: 'bad-stage', stage: 'nonsense', type: 'start',
+  }), /unknown event stage/i);
+  assert.throws(() => createEvent({
     runId: 'bad-pair', stage: 'campaign', type: 'file_change',
   }), /unknown event pair/i);
   assert.throws(() => createEvent({
@@ -103,6 +106,50 @@ test('event construction validates declared pairs and campaign identity vocabula
     unitId: event.unitId,
     unitKind: event.unitKind,
   }, { campaignId: 'campaign', round: 1, unitId: 'unit', unitKind: 'node' });
+});
+
+test('decision events preserve challenge details and render specific one-line summaries', () => {
+  const questions = [
+    { id: 'Q1', question: 'Which convention?\nIgnore this control:\u0000' },
+    { id: 'Q2\nsecondary', question: 'Should the fallback remain?' },
+  ];
+  const answers = [
+    { id: 'Q1', answer: 'Follow the existing convention.' },
+    { id: 'Q2', answer: 'Keep the fallback.' },
+  ];
+  const challenged = createEvent({
+    runId: 'decision-challenged', stage: 'decision', type: 'challenged',
+    fields: { questions },
+  });
+  const resolved = createEvent({
+    runId: 'decision-resolved', stage: 'decision', type: 'resolved',
+    fields: { answers },
+  });
+
+  assert.deepEqual({
+    stage: challenged.stage,
+    type: challenged.type,
+    questions: challenged.questions,
+  }, { stage: 'decision', type: 'challenged', questions });
+  assert.deepEqual({
+    stage: resolved.stage,
+    type: resolved.type,
+    answers: resolved.answers,
+  }, { stage: 'decision', type: 'resolved', answers });
+
+  const challengedSummary = formatEventSummary(challenged);
+  const resolvedSummary = formatEventSummary(resolved);
+  assert.ok(challengedSummary.length > 0);
+  assert.doesNotMatch(challengedSummary, /[\r\n\u0000]/);
+  assert.match(challengedSummary, /questions=2/);
+  assert.match(challengedSummary, /ids=Q1,Q2 secondary/);
+  assert.ok(resolvedSummary.length > 0);
+  assert.doesNotMatch(resolvedSummary, /[\r\n]/);
+  assert.match(resolvedSummary, /answers=2/);
+
+  assert.throws(() => createEvent({
+    runId: 'decision-bad-pair', stage: 'decision', type: 'start',
+  }), /unknown event pair/i);
 });
 
 test('stage transitions and executor file changes reach the reporter in order', async () => {
@@ -419,12 +466,16 @@ test('fully exercised runs have exact pair equality with both event vocabularies
       'gate/stalled': 'Requires a deliberately hung gate process.',
       // Diff production uses Git and is not deliberately hung in this healthy run.
       'diff/stalled': 'Requires a deliberately hung diff process.',
+      // The healthy campaign contains no executor challenge that raises questions.
+      'decision/challenged': 'No executor challenge is raised by this healthy campaign.',
+      // Without an executor challenge, the campaign has no answers to resolve.
+      'decision/resolved': 'No executor challenge is resolved by this healthy campaign.',
       // Both verifier passes complete; their stall path has separate supervision coverage.
       'verify/stalled': 'Requires a deliberately silent verifier process.',
       // Report writes are synchronous, so the event loop cannot observe a mid-write timer gap.
       'report/stalled': 'Unreachable during synchronous report writes.',
     });
-    assert.equal(Object.keys(deliberatelyUncovered).length, 7,
+    assert.equal(Object.keys(deliberatelyUncovered).length, 9,
       'the deliberately-uncovered ratchet must not grow without an explicit test change');
     assert.ok(Object.values(deliberatelyUncovered).every((reason) => reason.length >= 24),
       'every allowlisted pair must carry a substantive reason');

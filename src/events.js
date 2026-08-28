@@ -8,6 +8,7 @@ export const EVENT_STAGES = Object.freeze([
   'executor',
   'gate',
   'diff',
+  'decision',
   'verify',
   'report',
   'journal',
@@ -29,6 +30,8 @@ export const EVENT_TYPES = Object.freeze([
   'candidate_generated',
   'review_received',
   'synthesis',
+  'challenged',
+  'resolved',
 ]);
 
 export const UNIT_KINDS = Object.freeze(['candidate', 'node', 'merge']);
@@ -69,6 +72,8 @@ export const EVENT_PAIRS = Object.freeze([
   'diff/start',
   'diff/finish',
   'diff/stalled',
+  'decision/challenged',
+  'decision/resolved',
   'verify/start',
   'verify/finish',
   'verify/verdict',
@@ -318,6 +323,15 @@ export function detailFor(event) {
   }
   if (event.stage === 'diff') {
     return event.type === 'start' ? 'producing diff' : `finished verdict=${oneLine(event.verdict)}`;
+  }
+  if (event.stage === 'decision') {
+    if (event.type === 'challenged') {
+      const questions = Array.isArray(event.questions) ? event.questions : [];
+      const ids = questions.map((question) => oneLine(question?.id)).filter(Boolean);
+      return `questions=${questions.length}${ids.length > 0 ? ` ids=${ids.join(',')}` : ''}`;
+    }
+    const answers = Array.isArray(event.answers) ? event.answers : [];
+    return `answers=${answers.length}`;
   }
   if (event.stage === 'verify') {
     const pass = event.pass ? ` pass=${oneLine(event.pass)}` : '';
