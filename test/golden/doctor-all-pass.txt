@@ -1,4 +1,5 @@
 uroboros doctor
+Loop health: HEALTHY (all required checks, including the write/read probes, passed).
 
 Required checks:
 PASS [required] Node version: 24.9.0 meets >=24

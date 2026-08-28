@@ -102,6 +102,18 @@ function assertGoldenEquality(actual, expected) {
   assert.equal(actual, expected);
 }
 
+function assertMatchingLeadingAndTrailingVerdicts(output, expectedVerdict) {
+  const lines = output.trimEnd().split('\n');
+  const verdicts = lines.filter((line) => /^Loop (?:core )?health:/.test(line));
+  assert.equal(lines[0], 'uroboros doctor');
+  assert.equal(lines[1], expectedVerdict,
+    'the health verdict must appear immediately after the doctor header');
+  assert.ok(lines.slice(0, 3).includes(expectedVerdict),
+    'the health verdict must appear within the first three output lines');
+  assert.deepEqual(verdicts, [expectedVerdict, expectedVerdict],
+    'the leading and trailing health verdicts must agree');
+}
+
 function removeFixture(root) {
   rmSync(root, { recursive: true, force: true });
   try { rmdirSync(SAFE_TEST_ROOT); } catch { /* Another fixture may still own the parent. */ }
@@ -283,6 +295,26 @@ test('publish guard trufflehog is advisory when absent and passes when present',
   assert.match(present.detail, /advisory publish scanning is available/);
 });
 
+test('doctor leads with the same unhealthy verdict it repeats at the tail', async () => {
+  const fixture = createFailingFixture();
+  try {
+    const result = await runDoctor({
+      deep: true,
+      scratchRoot: fixture.scratchRoot,
+      repository: fixture.repository,
+      nodeVersion: '23.1.2',
+      bins: fixture.bins,
+    });
+    assert.equal(result.ok, false, 'a failing required check must make doctor unhealthy');
+    assertMatchingLeadingAndTrailingVerdicts(
+      result.output,
+      'Loop health: UNHEALTHY (one or more required checks failed).',
+    );
+  } finally {
+    removeFixture(fixture.root);
+  }
+});
+
 test('optional publish guard failures do not affect core health, while required failures do', async () => {
   const fixture = createPassingFixture();
   const bins = {
@@ -303,6 +335,10 @@ test('optional publish guard failures do not affect core health, while required 
     assert.match(healthy.output, /FAIL \[optional\] Publish guard gitleaks/);
     assert.match(healthy.output, /FAIL \[optional\] Publish guard blocklist/);
     assert.match(healthy.output, /FAIL \[optional\] Publish guard trufflehog/);
+    assertMatchingLeadingAndTrailingVerdicts(
+      healthy.output,
+      'Loop core health: HEALTHY (all performed required checks passed; Codex and Cursor sign-ins were verified).',
+    );
 
     const unhealthy = await runDoctor({
       scratchRoot: fixture.scratchRoot,
@@ -312,6 +348,10 @@ test('optional publish guard failures do not affect core health, while required 
     });
     assert.equal(unhealthy.ok, false);
     assert.match(unhealthy.output, /Loop health: UNHEALTHY/);
+    assertMatchingLeadingAndTrailingVerdicts(
+      unhealthy.output,
+      'Loop health: UNHEALTHY (one or more required checks failed).',
+    );
   } finally {
     removeFixture(fixture.root);
   }

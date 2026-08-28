@@ -37,7 +37,7 @@ export async function runDoctor({
     throw new TypeError('doctor --fix requires a consent function');
   }
 
-  const lines = ['uroboros doctor', '', 'Required checks:'];
+  const detailLines = ['', 'Required checks:'];
   const resolvedScratchRoot = resolve(scratchRoot);
   const state = createDoctorProbeState(resolvedScratchRoot);
   const context = {
@@ -56,7 +56,7 @@ export async function runDoctor({
       const outcome = await check.probe(context);
       if (check.kind === 'required' && outcome.status === 'FAIL') requiredFailed = true;
       const next = selectedRemediation(check, outcome.remediationKey)?.prose;
-      lines.push(...statusLine(outcome.status, check.kind, check.name, outcome.detail, next));
+      detailLines.push(...statusLine(outcome.status, check.kind, check.name, outcome.detail, next));
       if (fix) {
         await fixFailedCheck({
           check,
@@ -74,23 +74,27 @@ export async function runDoctor({
     await runChecks('prerequisite');
     await runChecks('deep');
 
-    lines.push('', 'Optional features (these do not affect loop health):');
-    lines.push('INFO [optional] GitHub publishing: optional; the loop is fully usable without it.');
+    detailLines.push('', 'Optional features (these do not affect loop health):');
+    detailLines.push('INFO [optional] GitHub publishing: optional; the loop is fully usable without it.');
     await runChecks('optional');
-    lines.push('INFO [optional] Offline run journal: available through `node bin/generate-run-journal.js --help`; no external integration is required.');
+    detailLines.push('INFO [optional] Offline run journal: available through `node bin/generate-run-journal.js --help`; no external integration is required.');
   } finally {
     cleanupDoctorProbeState(state);
   }
 
-  lines.push('');
+  let healthVerdict;
   if (requiredFailed) {
-    lines.push('Loop health: UNHEALTHY (one or more required checks failed).');
+    healthVerdict = 'Loop health: UNHEALTHY (one or more required checks failed).';
   } else if (deep) {
-    lines.push('Loop health: HEALTHY (all required checks, including the write/read probes, passed).');
+    healthVerdict = 'Loop health: HEALTHY (all required checks, including the write/read probes, passed).';
   } else {
-    lines.push('Loop core health: HEALTHY (all performed required checks passed; Codex and Cursor sign-ins were verified).');
-    lines.push('Deep readiness: UNKNOWN (sign-in was verified, but Codex write and Cursor read remain unproven until `--deep`; those probes were SKIPPED, not passed).');
+    healthVerdict = 'Loop core health: HEALTHY (all performed required checks passed; Codex and Cursor sign-ins were verified).';
   }
-  lines.push('GitHub publishing and Logdy are optional; the loop is fully usable without them.');
+  detailLines.push('', healthVerdict);
+  if (!requiredFailed && !deep) {
+    detailLines.push('Deep readiness: UNKNOWN (sign-in was verified, but Codex write and Cursor read remain unproven until `--deep`; those probes were SKIPPED, not passed).');
+  }
+  detailLines.push('GitHub publishing and Logdy are optional; the loop is fully usable without them.');
+  const lines = ['uroboros doctor', healthVerdict, ...detailLines];
   return { ok: !requiredFailed, output: `${lines.join('\n')}\n` };
 }

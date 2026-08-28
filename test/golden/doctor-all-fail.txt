@@ -1,4 +1,5 @@
 uroboros doctor
+Loop health: UNHEALTHY (one or more required checks failed).
 
 Required checks:
 FAIL [required] Node version: 23.1.2 does not meet >=24

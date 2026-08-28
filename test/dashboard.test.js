@@ -212,6 +212,42 @@ test('TASK.md title truncation prefers punctuation, then a word boundary', () =>
     'titles under 70 characters must not gain an ellipsis');
 });
 
+test('run digests read TASK.md titles and bodies from both supported layouts', () => {
+  const root = mkdtempSync(join(tmpdir(), 'ccc-dashboard-task-layouts-'));
+  const nested = makeRun(root, 'nested-task-run', [
+    event('nested-task-run', 'report', 'finish', { ts: '2026-08-15T00:00:00.000Z' }),
+  ]);
+  const direct = makeRun(root, 'direct-task-run', [
+    event('direct-task-run', 'report', 'finish', { ts: '2026-08-15T01:00:00.000Z' }),
+  ]);
+  makeRun(root, 'missing-task-run', [
+    event('missing-task-run', 'report', 'finish', { ts: '2026-08-15T02:00:00.000Z' }),
+  ]);
+  const nestedBody = '# Task\n\nNested task title\n\nNested task body.\n';
+  const directBody = '# Task\n\nDirect task title\n\nDirect task body.\n';
+  writeFileSync(join(nested.work, 'TASK.md'), nestedBody);
+  writeFileSync(join(direct.directory, 'TASK.md'), directBody);
+
+  try {
+    let snapshot;
+    assert.doesNotThrow(() => {
+      snapshot = buildDashboardSnapshot({ scratchRoot: root });
+    });
+    const nestedDigest = snapshot.runs.find((run) => run.runId === 'nested-task-run');
+    const directDigest = snapshot.runs.find((run) => run.runId === 'direct-task-run');
+    const missingDigest = snapshot.runs.find((run) => run.runId === 'missing-task-run');
+
+    assert.equal(nestedDigest.title, 'Nested task title');
+    assert.equal(nestedDigest.taskBody, nestedBody);
+    assert.equal(directDigest.title, 'Direct task title');
+    assert.equal(directDigest.taskBody, directBody);
+    assert.equal(missingDigest.title, null, 'a missing TASK.md must not invent a title');
+    assert.equal(missingDigest.taskBody, null);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('the Plan inspector shows exact TASK.md and an honest missing-file message', () => {
   const root = mkdtempSync(join(tmpdir(), 'ccc-dashboard-task-body-'));
   const withTask = makeRun(root, 'run-with-task', [
