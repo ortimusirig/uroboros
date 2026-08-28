@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { parseArgs } from '../src/args.js';
+import { resolveStageTimeouts } from '../src/timeouts.js';
 
 test('parses a full run invocation', () => {
   const r = parseArgs(['run', '--task', 'plan.md', '--target', 'C:/proj',
@@ -42,6 +43,48 @@ test('applies the retry default and leaves model defaults to run()', () => {
   assert.equal(r.verifierModel, undefined);
   assert.equal(r.correctsRunId, undefined);
   assert.equal(Object.hasOwn(r, 'maxIterations'), false);
+});
+
+test('run parses each stage timeout flag and the values reach timeout resolution', () => {
+  const parsed = parseArgs([
+    'run', '--task', 'p', '--target', 't', '--gate', 'g',
+    '--executor-timeout', '101', '--verifier-timeout', '202', '--gate-timeout', '303',
+  ]);
+  assert.equal(parsed.executorTimeout, 101);
+  assert.equal(parsed.verifierTimeout, 202);
+  assert.equal(parsed.gateTimeout, 303);
+  assert.deepEqual(resolveStageTimeouts({
+    URO_EXECUTOR_TIMEOUT_MS: '1',
+    URO_VERIFIER_TIMEOUT_MS: '2',
+    URO_GATE_TIMEOUT_MS: '3',
+  }, parsed), { executor: 101, verifier: 202, gate: 303 });
+});
+
+test('batch parses each stage timeout flag', () => {
+  const parsed = parseArgs([
+    'batch', '--task', 'p', '--target', 't', '--gate', 'g',
+    '--executor-timeout', '404', '--verifier-timeout', '505', '--gate-timeout', '606',
+  ]);
+  assert.equal(parsed.executorTimeout, 404);
+  assert.equal(parsed.verifierTimeout, 505);
+  assert.equal(parsed.gateTimeout, 606);
+});
+
+test('stage timeout flags reject values outside the environment-variable rules', () => {
+  const base = ['run', '--task', 'p', '--target', 't', '--gate', 'g'];
+  const invalid = [
+    ['executor-timeout', '0',
+      '--executor-timeout must be between 1 and 2147483647 milliseconds'],
+    ['verifier-timeout', '-1',
+      '--verifier-timeout must be a positive integer number of milliseconds'],
+    ['gate-timeout', 'tomorrow',
+      '--gate-timeout must be a positive integer number of milliseconds'],
+    ['executor-timeout', '2147483648',
+      '--executor-timeout must be between 1 and 2147483647 milliseconds'],
+  ];
+  for (const [flag, value, message] of invalid) {
+    assert.throws(() => parseArgs([...base, `--${flag}`, value]), new Error(message));
+  }
 });
 
 test('rejects the removed --max-iterations option', () => {

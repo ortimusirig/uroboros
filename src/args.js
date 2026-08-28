@@ -9,12 +9,16 @@ import {
 } from './campaign-validation.js';
 import { loadCampaignFile } from './campaign-file.js';
 import { UNIT_KINDS } from './events.js';
+import { parseTimeoutMs } from './timeouts.js';
 
 const EXECUTOR_EFFORTS = new Set([
   'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra',
 ]);
 const RUN_MODES = new Set(['manual', 'autonomous']);
 const UNIT_KIND_SET = new Set(UNIT_KINDS);
+const STAGE_TIMEOUT_FLAGS = new Set([
+  '--executor-timeout', '--verifier-timeout', '--gate-timeout',
+]);
 
 // This is the single source of truth for the batch flag surface and its precedence class.
 // parseArgs derives node:util's option table from it, so tests can enumerate the real flags
@@ -28,6 +32,9 @@ export const BATCH_FLAG_DEFINITIONS = Object.freeze({
   'executor-model': Object.freeze({ type: 'string', scope: 'campaign' }),
   'executor-effort': Object.freeze({ type: 'string', scope: 'campaign' }),
   'verifier-model': Object.freeze({ type: 'string', scope: 'campaign' }),
+  'executor-timeout': Object.freeze({ type: 'string', scope: 'invocation' }),
+  'verifier-timeout': Object.freeze({ type: 'string', scope: 'invocation' }),
+  'gate-timeout': Object.freeze({ type: 'string', scope: 'invocation' }),
   concurrency: Object.freeze({ type: 'string', scope: 'campaign' }),
   'token-budget': Object.freeze({ type: 'string', scope: 'campaign' }),
   rounds: Object.freeze({ type: 'string', scope: 'campaign' }),
@@ -83,6 +90,34 @@ function parseDashboardPort(value) {
     throw new Error(`invalid dashboard port: ${value}; expected an integer from 0 to 65535`);
   }
   return port;
+}
+
+function assignStageTimeouts(parsed, values) {
+  for (const [flag, property] of [
+    ['executor-timeout', 'executorTimeout'],
+    ['verifier-timeout', 'verifierTimeout'],
+    ['gate-timeout', 'gateTimeout'],
+  ]) {
+    if (values[flag] !== undefined) {
+      parsed[property] = parseTimeoutMs(values[flag], `--${flag}`);
+    }
+  }
+  return parsed;
+}
+
+function normalizeNegativeTimeoutArguments(args) {
+  const normalized = [];
+  for (let index = 0; index < args.length; index++) {
+    const argument = args[index];
+    const value = args[index + 1];
+    if (STAGE_TIMEOUT_FLAGS.has(argument) && /^-\d/.test(value)) {
+      normalized.push(`${argument}=${value}`);
+      index++;
+    } else {
+      normalized.push(argument);
+    }
+  }
+  return normalized;
 }
 
 export function parseArgs(argv) {
@@ -186,7 +221,7 @@ export function parseArgs(argv) {
     throw new Error(`unknown command: ${command ?? '(none)'}`);
   }
   const { values } = nodeParseArgs({
-    args: argv.slice(1),
+    args: normalizeNegativeTimeoutArguments(argv.slice(1)),
     options: command === 'batch' ? BATCH_PARSE_OPTIONS : {
       task: { type: 'string' },
       target: { type: 'string' },
@@ -196,6 +231,9 @@ export function parseArgs(argv) {
       'executor-model': { type: 'string' },
       'executor-effort': { type: 'string' },
       'verifier-model': { type: 'string' },
+      'executor-timeout': { type: 'string' },
+      'verifier-timeout': { type: 'string' },
+      'gate-timeout': { type: 'string' },
       mode: { type: 'string' },
       quiet: { type: 'boolean' },
       'no-dashboard': { type: 'boolean' },
@@ -216,7 +254,7 @@ export function parseArgs(argv) {
     if (values['no-dashboard']) parsed.noDashboard = true;
     if (values.open) parsed.open = true;
     if (values.port !== undefined) parsed.port = parseDashboardPort(values.port);
-    return parsed;
+    return assignStageTimeouts(parsed, values);
   }
   for (const req of ['task', 'target', 'gate']) {
     if (!values[req]) throw new Error(`missing required option: --${req}`);
@@ -243,7 +281,7 @@ export function parseArgs(argv) {
     if (values['no-dashboard']) parsed.noDashboard = true;
     if (values.open) parsed.open = true;
     if (values.port !== undefined) parsed.port = parseDashboardPort(values.port);
-    return parsed;
+    return assignStageTimeouts(parsed, values);
   }
 
   const tasks = values.task;
@@ -384,5 +422,5 @@ export function parseArgs(argv) {
   if (values['no-dashboard']) parsed.noDashboard = true;
   if (values.open) parsed.open = true;
   if (values.port !== undefined) parsed.port = parseDashboardPort(values.port);
-  return parsed;
+  return assignStageTimeouts(parsed, values);
 }

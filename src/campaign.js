@@ -328,7 +328,7 @@ async function runCampaignRound(options) {
         const result = await gateRunner({
           commands: gateCommands,
           cwd,
-          timeoutMs: resolveStageTimeouts().gate,
+          timeoutMs: resolveStageTimeouts(process.env, runOptions).gate,
           runId: `${unit.unitId}-baseline-count`,
           attempt: 0,
           captureTestCount: true,
@@ -360,7 +360,7 @@ async function runCampaignRound(options) {
         const result = await gateRunner({
           commands: gateCommands,
           cwd,
-          timeoutMs: resolveStageTimeouts().gate,
+          timeoutMs: resolveStageTimeouts(process.env, runOptions).gate,
           runId: `${unit.unitId}-candidate-baseline-count`,
           attempt: 0,
           captureTestCount: true,

@@ -24,11 +24,18 @@ export function readEnv(env, suffix, { warn = console.warn } = {}) {
   if (!ALIASED.has(suffix)) return undefined;
 
   const legacy = env?.[`CCC_${suffix}`];
-  if (legacy === undefined) return undefined;
-
-  if (!warned.has(suffix)) {
-    warned.add(suffix);
-    warn(`CCC_${suffix} is deprecated; rename it to URO_${suffix}`);
+  if (legacy !== undefined) {
+    if (!warned.has(suffix)) {
+      warned.add(suffix);
+      warn(`CCC_${suffix} is deprecated; rename it to URO_${suffix}`);
+    }
+    return legacy;
   }
-  return legacy;
+
+  const unprefixedWarning = `unprefixed:${suffix}`;
+  if (env?.[suffix] !== undefined && !warned.has(unprefixedWarning)) {
+    warned.add(unprefixedWarning);
+    warn(`${suffix} is set but ignored — did you mean URO_${suffix}?`);
+  }
+  return undefined;
 }

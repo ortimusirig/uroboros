@@ -290,7 +290,9 @@ test('the parser-owned batch flag registry completely enforces campaign preceden
     for (const flag of BATCH_INVOCATION_FLAGS) {
       const definition = BATCH_FLAG_DEFINITIONS[flag];
       const argv = ['batch', '--campaign', file, `--${flag}`];
-      if (definition.type === 'string') argv.push(flag === 'port' ? '0' : 'x');
+      if (definition.type === 'string') {
+        argv.push(flag === 'port' || flag.endsWith('-timeout') ? '1' : 'x');
+      }
       assert.doesNotThrow(() => parseArgs(argv), `${flag} must compose with --campaign`);
     }
     assert.throws(() => parseArgs([

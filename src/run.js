@@ -160,7 +160,7 @@ export async function run(opts) {
   const originalPlan = resolveTask(task);
   let plan = originalPlan;
   const commands = Array.isArray(gate) ? gate : JSON.parse(readFileSync(gate, 'utf8'));
-  const stageTimeouts = resolveStageTimeouts();
+  const stageTimeouts = resolveStageTimeouts(process.env, opts);
   const probeVerifier = adapters.probeVerifier
     ?? (adapters.runVerifier === undefined ? probeVerifierLiveness : null);
   if (!verifierProbeCompleted && probeVerifier) {

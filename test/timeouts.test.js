@@ -26,9 +26,33 @@ test('each stage timeout is overridable by its URO_ environment variable', () =>
   }), { executor: 101, verifier: 202, gate: 303 });
 });
 
+test('explicit stage timeout values override their environment variables', () => {
+  assert.deepEqual(resolveStageTimeouts({
+    URO_EXECUTOR_TIMEOUT_MS: '101',
+    URO_VERIFIER_TIMEOUT_MS: '202',
+    URO_GATE_TIMEOUT_MS: '303',
+  }, {
+    executorTimeout: 404,
+    verifierTimeout: 505,
+    gateTimeout: 606,
+  }), { executor: 404, verifier: 505, gate: 606 });
+});
+
+test('an omitted explicit timeout still resolves from the environment and defaults', () => {
+  assert.deepEqual(resolveStageTimeouts({
+    URO_VERIFIER_TIMEOUT_MS: '202',
+  }, {
+    executorTimeout: 404,
+  }), {
+    executor: 404,
+    verifier: 202,
+    gate: DEFAULT_GATE_TIMEOUT_MS,
+  });
+});
+
 test('invalid configured timeouts fail loudly', () => {
   assert.throws(() => resolveStageTimeouts({ URO_EXECUTOR_TIMEOUT_MS: '0' }),
-    /URO_EXECUTOR_TIMEOUT_MS/);
+    new Error('URO_EXECUTOR_TIMEOUT_MS must be between 1 and 2147483647 milliseconds'));
   assert.throws(() => resolveStageTimeouts({ URO_GATE_TIMEOUT_MS: 'tomorrow' }),
-    /URO_GATE_TIMEOUT_MS/);
+    new Error('URO_GATE_TIMEOUT_MS must be a positive integer number of milliseconds'));
 });

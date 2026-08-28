@@ -6,11 +6,10 @@ export const DEFAULT_GATE_TIMEOUT_MS = 60 * 60 * 1000;
 
 const MAX_TIMEOUT_MS = 2_147_483_647;
 
-function fromEnv(env, suffix, fallback) {
-  const name = `URO_${suffix}`;
-  const raw = readEnv(env, suffix);
-  if (raw === undefined) return fallback;
-  if (!/^\d+$/.test(raw)) throw new Error(`${name} must be a positive integer number of milliseconds`);
+export function parseTimeoutMs(raw, name) {
+  if (!/^\d+$/.test(raw)) {
+    throw new Error(`${name} must be a positive integer number of milliseconds`);
+  }
   const value = Number(raw);
   if (!Number.isSafeInteger(value) || value < 1 || value > MAX_TIMEOUT_MS) {
     throw new Error(`${name} must be between 1 and ${MAX_TIMEOUT_MS} milliseconds`);
@@ -18,10 +17,28 @@ function fromEnv(env, suffix, fallback) {
   return value;
 }
 
-export function resolveStageTimeouts(env = process.env) {
+function fromEnv(env, suffix, fallback) {
+  const name = `URO_${suffix}`;
+  const raw = readEnv(env, suffix);
+  if (raw === undefined) return fallback;
+  return parseTimeoutMs(raw, name);
+}
+
+function resolveStageTimeout(env, overrides, stage, suffix, fallback) {
+  const option = `${stage}Timeout`;
+  const explicit = overrides?.[option];
+  if (explicit !== undefined) return parseTimeoutMs(explicit, `--${stage}-timeout`);
+  return fromEnv(env, suffix, fallback);
+}
+
+export function resolveStageTimeouts(env = process.env, overrides = {}) {
   return {
-    executor: fromEnv(env, 'EXECUTOR_TIMEOUT_MS', DEFAULT_EXECUTOR_TIMEOUT_MS),
-    verifier: fromEnv(env, 'VERIFIER_TIMEOUT_MS', DEFAULT_VERIFIER_TIMEOUT_MS),
-    gate: fromEnv(env, 'GATE_TIMEOUT_MS', DEFAULT_GATE_TIMEOUT_MS),
+    executor: resolveStageTimeout(
+      env, overrides, 'executor', 'EXECUTOR_TIMEOUT_MS', DEFAULT_EXECUTOR_TIMEOUT_MS,
+    ),
+    verifier: resolveStageTimeout(
+      env, overrides, 'verifier', 'VERIFIER_TIMEOUT_MS', DEFAULT_VERIFIER_TIMEOUT_MS,
+    ),
+    gate: resolveStageTimeout(env, overrides, 'gate', 'GATE_TIMEOUT_MS', DEFAULT_GATE_TIMEOUT_MS),
   };
 }

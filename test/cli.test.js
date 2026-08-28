@@ -164,13 +164,21 @@ test('a real CLI run announces a read-only dashboard before executor events and 
   try {
     dashboard = await startDashboard({ scratchRoot: fixture.scratchRoot, port: 0 });
     const r = await spawnCapture(process.execPath,
-      [...fixture.args, '--port', String(dashboard.port)],
+      [
+        ...fixture.args,
+        '--executor-timeout', '60001',
+        '--verifier-timeout', '60002',
+        '--gate-timeout', '60003',
+        '--port', String(dashboard.port),
+      ],
       { env: withDashboardEnabled(fixture.env) });
     assert.equal(r.code, 0, r.stderr);
     const facts = JSON.parse(r.stdout);
     assert.equal(r.stdout, `${JSON.stringify(facts, null, 2)}\n`,
       'stdout must contain exactly the one formatted run-facts document');
     assert.equal(facts.outcome, 'no-op');
+    assert.deepEqual(facts.limits.timeoutsMs,
+      { executor: 60001, verifier: 60002, gate: 60003 });
     assert.match(r.stderr, /^\[uroboros\].*isolate\/start/m,
       'positive control: the heartbeat must actually be emitted');
     assert.match(r.stderr, /^\[uroboros\].*executor\/file_change/m);
@@ -297,6 +305,9 @@ test('batch stdout is one aggregate JSON document while heartbeats remain on std
     '--target', fixture.args[fixture.args.indexOf('--target') + 1],
     '--gate', fixture.args[fixture.args.indexOf('--gate') + 1],
     '--gate-retries', '0',
+    '--executor-timeout', '61001',
+    '--verifier-timeout', '61002',
+    '--gate-timeout', '61003',
     '--concurrency', '2',
     '--token-budget', '1000',
   ];
@@ -311,6 +322,10 @@ test('batch stdout is one aggregate JSON document while heartbeats remain on std
       'stdout must contain exactly one formatted campaign aggregate');
     assert.equal(aggregate.units.length, 2);
     assert.equal(aggregate.rollup.counts.completed, 2);
+    for (const unit of aggregate.units) {
+      assert.deepEqual(unit.facts.limits.timeoutsMs,
+        { executor: 61001, verifier: 61002, gate: 61003 });
+    }
     assert.match(r.stderr, /^\[uroboros\].*campaign\/start/m,
       'positive control: campaign heartbeat must actually be emitted');
     assert.match(r.stderr, /^\[uroboros\].*executor\/file_change/m,
@@ -369,13 +384,21 @@ test('batch --campaign executes the declared units with invocation-only flags', 
   }));
   try {
     const result = await spawnCapture(process.execPath, [
-      cli, 'batch', '--campaign', campaign, '--no-dashboard', '--quiet',
+      cli, 'batch', '--campaign', campaign,
+      '--executor-timeout', '62001',
+      '--verifier-timeout', '62002',
+      '--gate-timeout', '62003',
+      '--no-dashboard', '--quiet',
     ], { env: fixture.env });
     assert.equal(result.code, 0, result.stderr);
     assert.equal(result.stderr, '');
     const aggregate = JSON.parse(result.stdout);
     assert.deepEqual(aggregate.units.map((unit) => unit.unitId), ['declared-a', 'declared-b']);
     assert.equal(aggregate.rollup.counts.completed, 2);
+    for (const unit of aggregate.units) {
+      assert.deepEqual(unit.facts.limits.timeoutsMs,
+        { executor: 62001, verifier: 62002, gate: 62003 });
+    }
   } finally {
     rmSync(fixture.root, { recursive: true, force: true });
     rmSync(fixture.scratchRoot, { recursive: true, force: true });
