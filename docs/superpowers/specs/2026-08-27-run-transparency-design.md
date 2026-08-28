@@ -304,6 +304,7 @@ same way.** The full set:
 | `executor/item_started`, `verify/item_started` | §7 |
 | `debate/round`, `debate/resist`, `debate/converged` | §8 / three-way debate spec |
 | `debate/circling`, `debate/pivot` | §8 |
+| `decision/assumed` | §8 — planner answered an authority question in the operator's absence |
 
 The `debate` stage and `resist` type are **already emitted by the pending
 three-way debate design** (`{"stage":"debate","type":"resist",...}`) and are
@@ -659,9 +660,57 @@ resolver rather than introducing a parallel one.
 - `challengeRounds` (existing, default 2) caps the exchange. On exhaustion the run
   halts with `needs-decision` and reports the unresolved questions.
 - A resolver returning no answers is treated as no resolution: halt, do not re-run.
-- `kind: 'authority'` questions **always** halt, even in autonomous mode. A
-  question the executor itself classified as requiring authority is not one a
-  resolver answers on the operator's behalf.
+- `kind: 'authority'` questions halt for the operator rather than being resolved
+  automatically — **unless the operator is judged absent**. See below.
+
+**Authority questions and an absent operator.**
+
+An `authority` question is one the executor itself classified as needing the
+operator's say-so. Halting for it is right when the operator is there. It is
+useless when they are not: the run stops, nobody is watching, and the work sits
+until someone notices.
+
+The rule is therefore **not a hidden timeout**. No cap is baked in. Instead the
+harness gathers *evidence of presence* and the planner reasons over it, consistent
+with the campaigns spec's principle that judgement is prose reasoning rather than a
+metric an actor could optimise toward.
+
+**Evidence the harness supplies** (observation only — it makes no decision):
+
+- Whether a TTY is attached at all. `createHeadlessInteraction`
+  (`cli-interaction.js`) already returns `WAIT_NOT_ACKNOWLEDGED` from
+  `interaction-signals.js` for exactly this case — no TTY means no operator to
+  wait for, and that signal exists today with a single consumer.
+- Elapsed time since the question was raised.
+- Whether any operator input has been observed since.
+- How the run was invoked: interactively, from CI, or nested inside another agent.
+
+**What the planner does with it.** Given that evidence it decides one of:
+
+- *keep waiting* — the operator is plausibly present, halting is still correct;
+- *proceed* — the operator is judged absent, and the planner answers the authority
+  question itself, **stating its reasoning**.
+
+**The safety argument for letting it proceed at all** is uroboros's own isolation
+guarantee: the executor writes to a disposable worktree on a branch. Nothing the
+planner authorises in the operator's absence can reach the target repository. The
+worst outcome is a branch the operator reads and discards — which is the same
+review step every run already ends in.
+
+**What must be recorded**, so nothing is decided invisibly:
+
+- A new event `decision/assumed`, carrying the questions, the answers, the
+  presence evidence, and the planner's stated reasoning.
+- Run facts flag the decision: `answeredBy: 'planner'` plus
+  `escalation: 'operator-absent'`.
+- `uro-report.md` and the transcript both lead with it. An operator returning to a
+  finished run must see **"this was decided without you, and here is why we
+  concluded you were away"** before they see the diff.
+
+**Non-goal:** a configurable "authority wait" duration. A number invites tuning
+until it is effectively zero, at which point authority questions are silently
+autonomous. Evidence plus stated reasoning is auditable in a way a threshold is
+not.
 
 **The STORM pivot.** When `detectCircling` fires, `shouldPivot` escalates:
 
@@ -703,7 +752,13 @@ proven.
 - Autonomous mode answers, rewrites `TASK.md`, re-runs the executor, and emits
   `decision/resolved` with `answeredBy: 'planner'`
 - `challengeRounds` exhaustion halts rather than looping
-- An `authority`-kind question halts in autonomous mode
+- An `authority`-kind question halts while presence evidence indicates an operator
+- An `authority`-kind question with no TTY and no observed input produces
+  `decision/assumed` carrying evidence and the planner's stated reasoning
+- `decision/assumed` sets `escalation: 'operator-absent'` in the run facts
+- A run resolved by `decision/assumed` leads its report and transcript with that
+  fact, ahead of the diff
+- Nothing the planner authorises in the operator's absence escapes the worktree
 - A resolver returning no answers halts and does not re-run
 - `DECISION.md` is removed before the executor re-runs (existing `unlinkSync`)
 - `detectCircling` true at `pivotCount === 1` produces outcome `needs-pivot`
@@ -759,6 +814,22 @@ renders Plan B's debate exchange once §8 lands.
   without a runtime dependency. Not this pass; the spec moves fast (v1.37→v1.41
   all touched GenAI).
 - Adopting or forking any third-party viewer (see §7 prior art)
+- **Rebuilding on DeepSeek Harness.** Evaluated: MIT, npm, Cordis meta-framework,
+  ~165k stars in its first week, web + TUI + headless, sub-agent delegation.
+  Genuinely in uroboros's category, unlike the viewers — and it would supply
+  Plan C's UI for free. Rejected for now on three grounds: it is a **developer
+  preview roughly two weeks old** on a new meta-framework; npm installation ends
+  the zero-dependency property that lets the gate run in a bare worktree; and
+  "everything is a plugin" is a flexibility thesis that directly contradicts this
+  tool's central claim that **the gate is the one authority that cannot be
+  swapped or argued with**. Revisit once it leaves preview. Note that models are
+  already swappable here (`--executor-model`, `--verifier-model`), so no harness
+  change is needed for that.
+- **Adding Claude as a seat inside the loop.** Separable from the harness
+  question and a genuinely good idea: Claude orchestrates from outside today but
+  is never a seat within the pipeline, even though §8's arbitration and the
+  three-way debate design both cast it as one. Bounded, and does not touch the
+  harness. Not this pass.
 - Distributed/multi-machine execution, and therefore google/sam. Evaluated:
   it solves discovery, zero-trust transport, and identity portability, none of
   which a single-process local pipeline has. Reconsider only if campaign units
