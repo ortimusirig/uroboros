@@ -173,3 +173,80 @@ slow" cannot even be quantified — which is the position I am in writing this.
 
 §2 is the architecture. It is not obviously wrong, but if the goal is "make it
 feel faster", the 97% cache ratio is where the headroom is.
+
+
+---
+
+## 6. The verifier cannot be driven standalone — and it fails SILENTLY
+
+Added 2026-08-27 after four failed attempts to run a verify-only pass over two
+already-committed diffs (no executor, review only). This is the highest-value
+finding in the doc for anyone relying on the loop's review seats.
+
+**What happened.** Importing `runVerifier` from `src/verifier.js` and calling it
+directly returns, every time:
+
+```
+verdict      : ISSUES  (source: plan)
+exit         : 0   launchFailed: false
+```
+
+`exit 0`, `launchFailed: false`, **empty findings text** — i.e. it looks like a
+completed review that found problems. It is not. `ISSUES (source: plan)` is the
+FAIL-SAFE DEFAULT: no verdict marker was parsed, so the harness assumes the
+worst. A caller who reads only the verdict line will confidently report
+"the reviewer found issues" when no review occurred at all.
+
+**Attempts, in order:**
+1. `cwd` = a bare directory holding only `CHANGES.diff` + `TASK.md`. Wrong — a
+   real round gives the verifier the WORKTREE, so it can open the files the diff
+   touches. Returned instantly.
+2. `cwd` = a proper git worktree checked out at the commit, with both files
+   alongside full source. Took minutes (so something ran) — same empty result.
+3. Found the cause looked like PATH: `agent` is not on PATH; the binary lives at
+   `%LOCALAPPDATA%\cursor-agentgent.cmd` and works (`--version` →
+   `2026.08.25-3e8eec8`).
+4. Re-ran with that directory prepended to PATH. **Same empty result.** So PATH
+   was not the whole story — the process runs, exits 0, and emits nothing the
+   verdict parser can read. Most likely it needs an interactive auth context or
+   a TTY that a spawned non-interactive shell does not provide.
+
+**Why this matters more than it looks.** The review seats are where the loop
+earns its cost. On this repo, the same day, they caught two data-loss defects
+that a 646/646 green gate missed. If the seat can silently no-op while
+reporting a plausible verdict, a run can appear reviewed when it was not — and
+the failure looks like a *finding*, which is the most misleading possible shape.
+
+**The codebase already knows this failure mode exists.** `buildCursorArgs` in
+`src/verifier.js:35-38` carries a comment saying that without `--trust` the agent
+*"exits 1 with no output and every review defaults to fail-safe ISSUES."* Same
+end state, different cause — so this is a known class, not a one-off.
+
+**Suggested fixes, in priority order:**
+1. **Distinguish "no review happened" from "the review found issues."** A verdict
+   with `source: plan` and empty findings text is the former and should be
+   reported as `UNVERIFIED` / `REVIEW_DID_NOT_RUN`, never as `ISSUES`. Fail-safe
+   is right; fail-safe *disguised as a finding* is not.
+2. **Assert the seat can actually run** before the executor spends tokens — a
+   cheap liveness probe of the verifier binary at run start would have turned
+   four failed attempts into one clear error.
+3. **Document how to invoke the seats standalone**, or state that it is
+   unsupported. Verify-only review of an existing commit is an obviously useful
+   mode (waves that time out with the gate unrun leave exactly this need) and
+   there is currently no way to do it.
+
+
+**Addendum after a fifth attempt.** With the Cursor binary on PATH, one of four
+passes returned `source: result` (a genuinely parsed verdict) while the other
+three stayed `source: plan` (fail-safe). Same script, same inputs, same
+invocation — so the seat IS reachable and the behaviour is INTERMITTENT rather
+than a hard configuration failure. In every case `r.text` was empty, so even the
+real verdict arrived without reasoning.
+
+Two consequences for anyone relying on these seats:
+1. An intermittently-reachable verifier that fail-safes to ISSUES is worse than
+   one that never runs, because some runs look reviewed and some do not, and the
+   report gives no way to tell them apart.
+2. `runVerifier` returning a verdict with empty findings should itself be
+   treated as a failure by the caller. The harness's own comment says a verdict
+   without reasoning is not actionable; it should refuse to report one.

@@ -1,0 +1,1 @@
+[{"bin": "node", "args": ["--test", "test/verifier.test.js", "test/verifier-evidence.test.js", "test/run.test.js", "test/preflight.test.js"]}]

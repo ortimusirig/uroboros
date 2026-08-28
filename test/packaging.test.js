@@ -46,10 +46,18 @@ test('the plugin verifier payload includes every shippable top-level entry', () 
   // Harness artifacts are generated into a run's directory, not shipped. Derived from
   // run.js so a newly added artifact cannot be excluded from the diff but still
   // counted as shippable here.
-  const repositoryOnly = new Set(['install.mjs', ...HARNESS_ARTIFACTS]);
+  //
+  // `campaign` holds plans and gates used to develop uroboros with uroboros; a plugin
+  // user installs the tool, not the workboard for building it. Field-findings notes are
+  // working documents for the same reason. Both are deliberately repository-only, so
+  // they are named here rather than added to PAYLOAD.
+  const repositoryOnly = new Set(['install.mjs', 'campaign', ...HARNESS_ARTIFACTS]);
+  const workingDocument = (name) => /^FINDINGS-\d{4}-\d{2}-\d{2}-[\w-]+\.md$/.test(name);
   const shippable = readdirSync(root, { withFileTypes: true })
     .map((entry) => entry.name)
-    .filter((name) => !name.startsWith('.') && !repositoryOnly.has(name));
+    .filter((name) => !name.startsWith('.')
+      && !repositoryOnly.has(name)
+      && !workingDocument(name));
   const omitted = shippable.filter((name) => !payload.includes(name));
   assert.deepEqual(omitted, [], `PAYLOAD omits shippable root entries: ${omitted.join(', ')}`);
 });
