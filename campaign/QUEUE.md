@@ -10,7 +10,7 @@ when a run lands.
 | 3 | `campaign/plan-a/plan-env-and-timeout-flags.md` | `gate-env-and-timeout-flags.json` | ✅ shipped `c4dca95` |
 | 4 | `campaign/plan-a/plan-executor-preamble.md` | `gate-executor-preamble.json` | ✅ shipped `3782df5` |
 | 5 | `campaign/plan-a/plan-evidence-based-deadline.md` | `gate-evidence-based-deadline.json` | ✅ shipped `17137d1` |
-| 6 | `campaign/debate/plan-debate.md` | `gate-debate.json` | 🔄 retry — first attempt `needs-decision` (see below) |
+| 6 |  `campaign/debate/plan-debate.md` | `gate-debate.json` | ✅ shipped (see below for the first attempt) |
 | 7 | `campaign/debate/plan-review.md` | `gate-review.json` | ⏳ queued |
 | 8 | `campaign/debate/plan-fix-plan.md` | `gate-fix-plan.json` | ⏳ queued |
 | 9 | arbitration + `run.js` debate integration (§8) | tbd | ⏳ not yet written |
