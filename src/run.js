@@ -831,6 +831,13 @@ export async function run(opts) {
           if (![PIVOT_AMEND, PIVOT_FRESH, PIVOT_CONCLUDE].includes(pivotDecision)) {
             throw new Error(`invalid debate pivot decision: ${pivotDecision}`);
           }
+          // AMEND promises another executor/review round, so it is not a taken pivot
+          // when the configured round bound makes that retry impossible.
+          if (pivotDecision === PIVOT_AMEND && debateRound >= maxDebateRounds) {
+            outcome = 'needs-pivot';
+            debateStopReason = 'rounds-exhausted';
+            break;
+          }
           finalPivotDecision = pivotDecision;
           debatePivotCount++;
           reportEvent(eventReporter, runId, 'debate', 'pivot', {

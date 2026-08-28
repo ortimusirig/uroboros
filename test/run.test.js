@@ -17,7 +17,7 @@ import {
   reviewOutcomeFor,
   resolveDebateRounds,
 } from '../src/run.js';
-import { PIVOT_CONCLUDE } from '../src/debate.js';
+import { PIVOT_CONCLUDE, PIVOT_FRESH } from '../src/debate.js';
 import { EMPTY_USAGE } from '../src/usage.js';
 import {
   DEFAULT_PROMPT,
@@ -1175,12 +1175,14 @@ function verifierForRounds(correctnessFindings) {
 
 test('debate regression control converges after one clean review round', async () => {
   const scr = scratch();
+  const events = [];
   try {
     let executorCalls = 0;
     let gateCalls = 0;
     const facts = await run({
       task: 'do the task', target: makeTarget(), gate: [], gateRetries: 0,
       scratchRoot: scr, runId: 'debate-clean',
+      reporter: (event) => events.push(event),
       adapters: {
         runExecutor: async (opts) => { executorCalls++; return writingExecutor(opts); },
         runGate: async () => { gateCalls++; return { passed: true, results: [] }; },
@@ -1194,6 +1196,9 @@ test('debate regression control converges after one clean review round', async (
     assert.equal(facts.debate.roundsRun, 1);
     assert.deepEqual(facts.debate.findingsPerRound, [[]]);
     assert.equal(facts.debate.stopReason, 'converged');
+    assert.equal(facts.debate.pivotCount, 0);
+    assert.equal(facts.debate.finalPivotDecision, null);
+    assert.equal(events.some((event) => event.stage === 'debate' && event.type === 'pivot'), false);
   } finally {
     rmSync(scr, { recursive: true, force: true });
   }
@@ -1235,13 +1240,17 @@ test('one blocking finding is fixed by the executor and converges in round two',
 test('a finding persistent across three rounds detects circling and retries an amended plan', async () => {
   const scr = scratch();
   const events = [];
+  const plans = [];
   try {
     const facts = await run({
       task: 'do the task', target: makeTarget(), gate: [], gateRetries: 0,
       scratchRoot: scr, runId: 'debate-circling', debateRounds: 4,
       reporter: (event) => events.push(event),
       adapters: {
-        runExecutor: writingExecutor,
+        runExecutor: async (opts) => {
+          plans.push(opts.plan);
+          return writingExecutor(opts);
+        },
         runGate: async () => ({ passed: true, results: [] }),
         runVerifier: verifierForRounds([
           blockingReview(), blockingReview(), blockingReview(), null,
@@ -1251,12 +1260,78 @@ test('a finding persistent across three rounds detects circling and retries an a
 
     assert.equal(facts.debate.roundsRun, 4);
     assert.equal(facts.debate.circlingDetected, true);
+    assert.equal(facts.debate.pivotCount, 1);
     assert.equal(facts.debate.finalPivotDecision, 'amend');
     assert.equal(facts.debate.stopReason, 'converged');
     assert.equal(facts.outcome, 'review-ready');
     assert.ok(events.some((event) => event.stage === 'debate' && event.type === 'circling'));
     assert.ok(events.some((event) => event.stage === 'debate'
       && event.type === 'pivot' && event.decision === 'amend'));
+    assert.equal(plans.length, 4);
+    assert.match(plans[3], /## Pivot amendment/);
+    assert.match(plans[3], /The prior fix approach is circling/);
+    assert.match(plans[3], /Recurring blockers: F1/);
+    assert.match(plans[3], /Round 3: F1/);
+  } finally {
+    rmSync(scr, { recursive: true, force: true });
+  }
+});
+
+test('circling on the final round suppresses an amend that cannot run', async () => {
+  const scr = scratch();
+  const events = [];
+  try {
+    const facts = await run({
+      task: 'do the task', target: makeTarget(), gate: [], gateRetries: 0,
+      scratchRoot: scr, runId: 'debate-final-amend', debateRounds: 3,
+      reporter: (event) => events.push(event),
+      adapters: {
+        runExecutor: writingExecutor,
+        runGate: async () => ({ passed: true, results: [] }),
+        runVerifier: verifierForRounds([blockingReview(), blockingReview(), blockingReview()]),
+      },
+    });
+
+    assert.equal(facts.outcome, 'needs-pivot');
+    assert.equal(facts.debate.roundsRun, 3);
+    assert.equal(facts.debate.circlingDetected, true);
+    assert.equal(facts.debate.stopReason, 'rounds-exhausted');
+    assert.equal(facts.debate.finalPivotDecision, null);
+    assert.equal(facts.debate.pivotCount, 0);
+    assert.ok(events.some((event) => event.stage === 'debate' && event.type === 'circling'));
+    assert.equal(events.some((event) => event.stage === 'debate' && event.type === 'pivot'), false);
+  } finally {
+    rmSync(scr, { recursive: true, force: true });
+  }
+});
+
+test('the fresh pivot still acts when circling is detected on the final round', async () => {
+  const scr = scratch();
+  const events = [];
+  try {
+    const facts = await run({
+      task: 'do the task', target: makeTarget(), gate: [], gateRetries: 0,
+      scratchRoot: scr, runId: 'debate-final-fresh', debateRounds: 3,
+      reporter: (event) => events.push(event),
+      adapters: {
+        runExecutor: writingExecutor,
+        runGate: async () => ({ passed: true, results: [] }),
+        runVerifier: verifierForRounds([blockingReview(), blockingReview(), blockingReview()]),
+        shouldPivot: () => PIVOT_FRESH,
+      },
+    });
+
+    assert.equal(facts.outcome, 'needs-pivot');
+    assert.equal(facts.debate.roundsRun, 3);
+    assert.equal(facts.debate.stopReason, 'pivot');
+    assert.equal(facts.debate.finalPivotDecision, 'fresh');
+    assert.equal(facts.debate.pivotCount, 1);
+    assert.deepEqual(facts.debate.ledger.rounds.map((round) => round.findingIds), [
+      ['F1'], ['F1'], ['F1'],
+    ]);
+    assert.ok(events.some((event) => event.stage === 'debate'
+      && event.type === 'pivot' && event.decision === 'fresh'));
+    assert.notEqual(exitCodeFor(facts.outcome), 0);
   } finally {
     rmSync(scr, { recursive: true, force: true });
   }
@@ -1267,7 +1342,7 @@ test('the fresh pivot stops with needs-pivot and carries the complete ledger', a
   try {
     const facts = await run({
       task: 'do the task', target: makeTarget(), gate: [], gateRetries: 0,
-      scratchRoot: scr, runId: 'debate-fresh', debateRounds: 5,
+      scratchRoot: scr, runId: 'debate-fresh', debateRounds: 4,
       adapters: {
         runExecutor: writingExecutor,
         runGate: async () => ({ passed: true, results: [] }),
@@ -1281,6 +1356,7 @@ test('the fresh pivot stops with needs-pivot and carries the complete ledger', a
     assert.equal(facts.debate.roundsRun, 4);
     assert.equal(facts.debate.pivotCount, 2);
     assert.equal(facts.debate.finalPivotDecision, 'fresh');
+    assert.equal(facts.debate.stopReason, 'pivot');
     assert.deepEqual(facts.debate.ledger.allFindingIds, ['F1']);
     assert.deepEqual(facts.debate.ledger.recurredFindingIds, ['F1']);
     assert.equal(facts.debate.ledger.rounds.length, 4);
@@ -1292,10 +1368,12 @@ test('the fresh pivot stops with needs-pivot and carries the complete ledger', a
 
 test('the conclude pivot stops without reporting success', async () => {
   const scr = scratch();
+  const events = [];
   try {
     const facts = await run({
       task: 'do the task', target: makeTarget(), gate: [], gateRetries: 0,
-      scratchRoot: scr, runId: 'debate-conclude', debateRounds: 5,
+      scratchRoot: scr, runId: 'debate-conclude', debateRounds: 3,
+      reporter: (event) => events.push(event),
       adapters: {
         runExecutor: writingExecutor,
         runGate: async () => ({ passed: true, results: [] }),
@@ -1305,8 +1383,12 @@ test('the conclude pivot stops without reporting success', async () => {
     });
 
     assert.equal(facts.outcome, 'needs-pivot');
+    assert.equal(facts.debate.roundsRun, 3);
     assert.equal(facts.debate.stopReason, 'pivot');
     assert.equal(facts.debate.finalPivotDecision, 'conclude');
+    assert.equal(facts.debate.pivotCount, 1);
+    assert.ok(events.some((event) => event.stage === 'debate'
+      && event.type === 'pivot' && event.decision === 'conclude'));
     assert.notEqual(exitCodeFor(facts.outcome), 0);
   } finally {
     rmSync(scr, { recursive: true, force: true });
