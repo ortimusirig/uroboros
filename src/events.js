@@ -23,6 +23,7 @@ export const EVENT_TYPES = Object.freeze([
   'retry',
   'verdict',
   'stalled',
+  'extended',
   'not_dispatched',
   'waiting',
   'released',
@@ -65,6 +66,7 @@ export const EVENT_PAIRS = Object.freeze([
   'executor/item_completed',
   'executor/retry',
   'executor/stalled',
+  'executor/extended',
   'gate/start',
   'gate/finish',
   'gate/gate_command',
@@ -271,11 +273,31 @@ function command(event) {
   return [oneLine(event.bin), ...args].filter(Boolean).join(' ');
 }
 
+function observedAction(event) {
+  if (event.type === 'file_change' && event.file) return `editing ${oneLine(event.file)}`;
+  if (event.type === 'item_completed') {
+    if (event.itemType === 'command_execution' && event.command) {
+      return `running ${oneLine(event.command)}`;
+    }
+    return `completed ${oneLine(event.itemType || 'item')}`;
+  }
+  return `${oneLine(event.stage)}/${oneLine(event.type)}`;
+}
+
 export function detailFor(event) {
   const attempt = event.attempt === undefined ? '' : ` attempt=${event.attempt}`;
   if (event.type === 'stalled') {
     const last = event.lastEvent ?? {};
+    if (event.tier === 'progress') {
+      return `no completed work for ${oneLine(event.gapMs)}ms `
+        + `last action=${observedAction(last)}`;
+    }
     return `gap=${oneLine(event.gapMs)}ms last=${oneLine(last.stage)}/${oneLine(last.type)}`;
+  }
+  if (event.stage === 'executor' && event.type === 'extended') {
+    const last = event.lastEvent ?? {};
+    return `gap=${oneLine(event.gapMs)}ms extension=${oneLine(event.extensionMs)}ms `
+      + `last=${oneLine(last.stage)}/${oneLine(last.type)}`;
   }
   if (event.stage === 'isolate') {
     if (event.scope === 'campaign-base') {

@@ -202,15 +202,21 @@ embedded Obsidian Bases campaign table.
   and lengthens paths past Windows limits.
 - Model defaults are pinned at their launch boundaries in `src/executor.js` and
   `src/verifier.js`; reports import those same defaults rather than duplicating them.
-- **Executor timeout:** 30 minutes by default; override the millisecond value with
-  `URO_EXECUTOR_TIMEOUT_MS`.
+- **Executor deadline:** 30 minutes by default; override the millisecond value with
+  `URO_EXECUTOR_TIMEOUT_MS`. At each deadline, recent stdout bytes extend a healthy executor
+  by one more interval; an executor with no liveness evidence is terminated.
 - **Verifier timeout:** 10 minutes per Cursor pass by default; override with
   `URO_VERIFIER_TIMEOUT_MS`.
 - **Gate timeout:** 60 minutes per command by default (chosen to accommodate slow test
   suites); override with `URO_GATE_TIMEOUT_MS`.
   All three timeout overrides are positive integer millisecond values.
-- **Stall gap:** 10 minutes since the last event for that stage; override the positive
-  millisecond value with `URO_STALL_THRESHOLD_MS`. Every event resets the gap.
+- **Liveness gap:** five minutes since the executor's last stdout byte; override the positive
+  millisecond value with `URO_STALL_THRESHOLD_MS`. It controls stall reporting, restart policy,
+  and the evidence consulted at an executor deadline.
+- **Progress gap:** five minutes since the last completed executor item; override with
+  `URO_PROGRESS_THRESHOLD_MS`. Progress silence is informational and never kills or restarts.
+- **Executor hard ceiling:** six hours regardless of liveness; override with
+  `URO_EXECUTOR_MAX_MS`.
 - **Stall policy:** `URO_STALL_POLICY=report` by default. It records and reports a stall but
   kills nothing. Opt in with `URO_STALL_POLICY=restart` to stop a stalled executor process
   tree and relaunch it with a stall notice appended to the original plan.

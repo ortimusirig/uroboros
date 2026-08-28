@@ -1,8 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createEvent } from '../src/events.js';
+import { createEvent, formatEventSummary } from '../src/events.js';
 import {
   createGapWatchdog,
+  createProgressWatchdog,
+  DEFAULT_EXECUTOR_MAX_MS,
+  DEFAULT_PROGRESS_THRESHOLD_MS,
   DEFAULT_STALL_POLICY,
   DEFAULT_STALL_RESTARTS,
   DEFAULT_STALL_THRESHOLD_MS,
@@ -84,22 +87,79 @@ test('a silent stage emits one stalled event carrying its stage, gap, and last e
   assert.equal(stalls[0].gapMs, 75);
   assert.equal(stalls[0].lastEvent.type, 'start');
   assert.equal(stalls[0].lastEvent.attempt, 4);
+  assert.equal(stalls[0].setting, 'URO_STALL_THRESHOLD_MS');
   watchdog.dispose();
 });
 
-test('stall configuration defaults to ten-minute report-only with one bounded restart', () => {
+test('stall configuration defaults to five-minute liveness and progress with a six-hour ceiling', () => {
   assert.deepEqual(resolveStallConfig({}), {
     thresholdMs: DEFAULT_STALL_THRESHOLD_MS,
+    progressThresholdMs: DEFAULT_PROGRESS_THRESHOLD_MS,
+    executorMaxMs: DEFAULT_EXECUTOR_MAX_MS,
     policy: DEFAULT_STALL_POLICY,
     restartLimit: DEFAULT_STALL_RESTARTS,
   });
-  assert.equal(DEFAULT_STALL_THRESHOLD_MS, 10 * 60 * 1000);
+  assert.equal(DEFAULT_STALL_THRESHOLD_MS, 5 * 60 * 1000);
+  assert.equal(DEFAULT_PROGRESS_THRESHOLD_MS, 5 * 60 * 1000);
+  assert.equal(DEFAULT_EXECUTOR_MAX_MS, 6 * 60 * 60 * 1000);
   assert.equal(DEFAULT_STALL_POLICY, 'report');
   assert.equal(DEFAULT_STALL_RESTARTS, 1);
   assert.deepEqual(resolveStallConfig({
-    URO_STALL_THRESHOLD_MS: '1234', URO_STALL_POLICY: 'restart', URO_STALL_RESTARTS: '2',
-  }), { thresholdMs: 1234, policy: 'restart', restartLimit: 2 });
+    URO_STALL_THRESHOLD_MS: '1234', URO_PROGRESS_THRESHOLD_MS: '2345',
+    URO_EXECUTOR_MAX_MS: '3456', URO_STALL_POLICY: 'restart', URO_STALL_RESTARTS: '2',
+  }), {
+    thresholdMs: 1234, progressThresholdMs: 2345, executorMaxMs: 3456,
+    policy: 'restart', restartLimit: 2,
+  });
   assert.throws(() => resolveStallConfig({ URO_STALL_POLICY: 'kill' }), /URO_STALL_POLICY/);
   assert.throws(() => resolveStallConfig({ URO_STALL_THRESHOLD_MS: '0' }),
     /URO_STALL_THRESHOLD_MS/);
+  assert.throws(() => resolveStallConfig({ URO_PROGRESS_THRESHOLD_MS: 'soon' }),
+    /URO_PROGRESS_THRESHOLD_MS must be a positive integer number of milliseconds/);
+  assert.throws(() => resolveStallConfig({ URO_EXECUTOR_MAX_MS: '0' }),
+    /URO_EXECUTOR_MAX_MS must be between 1 and 2147483647 milliseconds/);
+});
+
+test('progress silence reports the last action while raw bytes keep liveness from killing', () => {
+  const clock = fakeClock();
+  const events = [];
+  let kills = 0;
+  const liveness = createGapWatchdog({
+    reporter: (item) => events.push(item), runId: 'gap-run', thresholdMs: 100,
+    onStall: () => { kills++; },
+    now: clock.now, setTimer: clock.setTimer, clearTimer: clock.clearTimer,
+  });
+  const progress = createProgressWatchdog({
+    reporter: liveness.reporter, runId: 'gap-run', thresholdMs: 100,
+    now: clock.now, setTimer: clock.setTimer, clearTimer: clock.clearTimer,
+  });
+  try {
+    const started = event(clock, 'start', { attempt: 1 });
+    liveness.reporter(started);
+    progress.observe(started);
+    const completed = event(clock, 'file_change', { attempt: 1, file: 'src/foo.js' });
+    liveness.reporter(completed);
+    progress.observe(completed);
+    for (let index = 0; index < 5; index++) {
+      clock.advance(80);
+      liveness.touch('executor');
+    }
+
+    assert.ok(clock.now() > 100, 'positive setup: total elapsed time exceeds both thresholds');
+    assert.equal(kills, 0, 'raw stdout bytes must keep the liveness tier healthy');
+    const notices = events.filter((item) => item.type === 'stalled' && item.tier === 'progress');
+    assert.equal(notices.length, 1, 'one progress gap produces one informational event');
+    assert.equal(notices[0].gapMs, 100);
+    assert.equal(notices[0].lastEvent.file, 'src/foo.js');
+    assert.equal(notices[0].setting, 'URO_PROGRESS_THRESHOLD_MS');
+    assert.match(formatEventSummary(notices[0]),
+      /no completed work for 100ms.*last action=editing src\/foo[.]js/i);
+
+    clock.advance(100);
+    assert.equal(kills, 1,
+      'positive control: the same liveness watchdog kills after raw bytes stop');
+  } finally {
+    progress.dispose();
+    liveness.dispose();
+  }
 });

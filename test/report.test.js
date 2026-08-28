@@ -186,7 +186,12 @@ test('configured timeouts and timeout events reach facts and markdown', () => {
     branch: 'ccc/timeout', iterations: [], gateStatus: 'not-run', verdict: null,
     outcome: 'timed-out', gateRetries: 0,
     timeouts: { executor: 100, verifier: 200, gate: 300 },
-    timeoutEvents: [{ stage: 'executor', iteration: 1, attempt: 1, timeoutMs: 100 }],
+    timeoutEvents: [{
+      stage: 'executor', iteration: 1, attempt: 1, timeoutMs: 100,
+      reason: 'deadline', gapMs: 75,
+      lastEvent: { stage: 'executor', type: 'item_completed' },
+      setting: 'URO_STALL_THRESHOLD_MS',
+    }],
   });
   assert.deepEqual(timedOut.limits.timeoutsMs, { executor: 100, verifier: 200, gate: 300 });
   assert.equal(timedOut.timeoutEvents[0].stage, 'executor');
@@ -195,4 +200,28 @@ test('configured timeouts and timeout events reach facts and markdown', () => {
   const md = readFileSync(mdPath, 'utf8');
   assert.match(md, /Timeouts \(ms\).*executor 100.*verifier 200.*gate 300/i);
   assert.match(md, /executor: timed out after 100 ms/i);
+  assert.match(md, /75 ms silence after executor\/item_completed/i);
+  assert.match(md, /URO_STALL_THRESHOLD_MS/);
+});
+
+test('hard-ceiling timeout evidence renders the ceiling rather than a silence timeout', () => {
+  const timedOut = buildRunFacts({
+    runId: 'ceiling', target: 'C:/proj', dir: 'C:/ccc/w', isRepo: false,
+    branch: 'ccc/ceiling', iterations: [], gateStatus: 'not-run', verdict: null,
+    outcome: 'timed-out', gateRetries: 0,
+    timeouts: { executor: 100, verifier: 200, gate: 300 },
+    timeoutEvents: [{
+      stage: 'executor', iteration: 1, attempt: 1, timeoutMs: 600,
+      reason: 'hard-ceiling', gapMs: 2,
+      lastEvent: { stage: 'executor', type: 'item_completed' },
+      setting: 'URO_EXECUTOR_MAX_MS',
+    }],
+  });
+  const d = mkdtempSync(join(tmpdir(), 'rep-ceiling-'));
+  const { mdPath } = writeReport({ dir: d, facts: timedOut });
+  const md = readFileSync(mdPath, 'utf8');
+  assert.match(md, /executor: hard ceiling reached after 600 ms/i);
+  assert.match(md, /last stdout gap 2 ms after executor\/item_completed/i);
+  assert.match(md, /raise URO_EXECUTOR_MAX_MS to raise the hard ceiling/i);
+  assert.doesNotMatch(md, /2 ms silence/i);
 });

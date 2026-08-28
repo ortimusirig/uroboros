@@ -5,6 +5,12 @@ import { annotateUsageConsistency, EMPTY_USAGE, normalizeCodexUsage } from './us
 import { resolveStageTimeouts } from './timeouts.js';
 import { StringDecoder } from 'node:string_decoder';
 import { readEnv } from './env-compat.js';
+import {
+  createProgressWatchdog,
+  DEFAULT_EXECUTOR_MAX_MS,
+  DEFAULT_PROGRESS_THRESHOLD_MS,
+  DEFAULT_STALL_THRESHOLD_MS,
+} from './stall-watchdog.js';
 
 export const DEFAULT_EXECUTOR_MODEL = 'gpt-5.6-sol';
 export const DEFAULT_EXECUTOR_EFFORT = 'xhigh';
@@ -87,7 +93,7 @@ export function parseCodexStream(streamText) {
   return { changedFiles, lastMessage, agentMessages, usage };
 }
 
-function createIncrementalReporter({ reporter, runId, attempt }) {
+function createIncrementalReporter({ reporter, runId, attempt, onProgress }) {
   const decoder = new StringDecoder('utf8');
   let pending = '';
 
@@ -100,13 +106,17 @@ function createIncrementalReporter({ reporter, runId, attempt }) {
 
     const item = event.item;
     let reported = false;
+    const completed = (type, fields) => {
+      reportEvent(reporter, runId, 'executor', type, fields);
+      onProgress?.({ runId, stage: 'executor', type, ...fields });
+    };
     if (item.type === 'file_change' && Array.isArray(item.changes)) {
       const seenFiles = new Set();
       for (const change of item.changes) {
         if (!change || typeof change.path !== 'string' || seenFiles.has(change.path)) continue;
         seenFiles.add(change.path);
         reported = true;
-        reportEvent(reporter, runId, 'executor', 'file_change', {
+        completed('file_change', {
           file: change.path, attempt,
         });
       }
@@ -137,7 +147,7 @@ function createIncrementalReporter({ reporter, runId, attempt }) {
           if (text.truncated) fields.textTruncated = true;
         }
       }
-      reportEvent(reporter, runId, 'executor', 'item_completed', fields);
+      completed('item_completed', fields);
     }
   };
 
@@ -176,20 +186,80 @@ export async function runExecutor({
   runId,
   attempt,
   signal,
+  beforeKill,
+  onLiveness,
+  livenessThresholdMs = DEFAULT_STALL_THRESHOLD_MS,
+  progressThresholdMs = DEFAULT_PROGRESS_THRESHOLD_MS,
+  executorMaxMs = DEFAULT_EXECUTOR_MAX_MS,
+  now = Date.now,
+  setTimer = setTimeout,
+  clearTimer = clearTimeout,
+  spawnProcess,
+  killProcessTree,
 }) {
   const args = [...extraArgv, ...buildCodexArgs({ cwd, model, effort })];
-  reportEvent(reporter, runId, 'executor', 'start', { bin, args, attempt });
-  // Executor launches are special: healthy Codex turns often outlive the watchdog gap,
-  // unlike the shorter gate/verify commands. Observe its NDJSON as it arrives so the gap
-  // remains a gap measurement; spawnCapture still retains and returns every original byte.
-  const observer = typeof reporter === 'function'
-    ? createIncrementalReporter({ reporter, runId, attempt })
+  const nowMs = () => {
+    const value = now();
+    return value instanceof Date ? value.getTime() : value;
+  };
+  const startedAt = nowMs();
+  let lastByteAt = null;
+  let lastObservedEvent = {
+    runId, stage: 'executor', type: 'start', bin, args, attempt,
+  };
+  const progress = typeof reporter === 'function'
+    ? createProgressWatchdog({
+      reporter, runId, thresholdMs: progressThresholdMs, now, setTimer, clearTimer,
+    })
     : null;
-  const r = await spawnCapture(bin, args, {
-    cwd, input: plan, timeoutMs, signal,
-    ...(observer ? { onStdout: observer.onStdout } : {}),
+  progress?.observe(lastObservedEvent);
+  reportEvent(reporter, runId, 'executor', 'start', { bin, args, attempt });
+  // Every stdout byte proves liveness, while only a completed item proves progress.
+  // Observation remains additive: spawnCapture still retains and returns every original byte.
+  const observer = createIncrementalReporter({
+    reporter,
+    runId,
+    attempt,
+    onProgress: (event) => {
+      lastObservedEvent = event;
+      progress?.observe(event);
+    },
   });
-  observer?.finish();
+  let r;
+  try {
+    r = await spawnCapture(bin, args, {
+      cwd,
+      input: plan,
+      timeoutMs,
+      signal,
+      beforeKill,
+      spawnProcess,
+      killProcessTree,
+      onStdout: (chunk) => {
+        lastByteAt = nowMs();
+        try { onLiveness?.(); } catch { /* observation cannot alter captured output */ }
+        observer.onStdout(chunk);
+      },
+      executorSupervision: {
+        livenessThresholdMs,
+        maxMs: executorMaxMs,
+        getLiveness: () => ({
+          hasEvidence: lastByteAt !== null,
+          gapMs: nowMs() - (lastByteAt ?? startedAt),
+          lastEvent: lastObservedEvent,
+        }),
+        onExtended: (fields) => {
+          reportEvent(reporter, runId, 'executor', 'extended', { ...fields, attempt });
+        },
+        now,
+        setTimer,
+        clearTimer,
+      },
+    });
+  } finally {
+    if (!r) progress?.dispose();
+  }
+  observer.finish();
   const parsed = parseCodexStream(r.stdout);
   const result = annotateUsageConsistency({
     ...parsed,
@@ -197,9 +267,13 @@ export async function runExecutor({
     timedOut: r.timedOut,
     ...(r.aborted ? { aborted: true } : {}),
     timeoutMs: r.timeoutMs,
+    ...(r.timeoutReason ? { timeoutReason: r.timeoutReason } : {}),
   });
+  progress?.observe({ runId, stage: 'executor', type: 'finish', code: r.code, attempt });
+  progress?.dispose();
   reportEvent(reporter, runId, 'executor', 'finish', {
     code: r.code, tokens: parsed.usage, timedOut: r.timedOut, attempt,
+    ...(r.timeoutReason ? { timeoutReason: r.timeoutReason } : {}),
     usageConsistency: result.usageConsistency.status,
   });
   return result;

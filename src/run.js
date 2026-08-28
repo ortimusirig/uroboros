@@ -27,7 +27,11 @@ import {
 import { resolveTask } from './task.js';
 import { resolveStageTimeouts } from './timeouts.js';
 import { reportEvent } from './events.js';
-import { createGapWatchdog, resolveStallConfig } from './stall-watchdog.js';
+import {
+  createGapWatchdog,
+  resolveExecutorThresholds,
+  resolveStallConfig,
+} from './stall-watchdog.js';
 import { HARNESS_ARTIFACTS } from './artifacts.js';
 import {
   advanceMerge,
@@ -43,25 +47,46 @@ import { probeVerifierLiveness } from './preflight.js';
 
 export { HARNESS_ARTIFACTS } from './artifacts.js';
 
+const PARTIAL_WORK_GIT_TIMEOUT_MS = 30_000;
+
 // Files the harness itself writes into the isolated directory. They must never enter
 // CHANGES.diff (an artifact in the diff would make the `no-op` outcome unreachable) and
 // must never be treated as shippable by the installer's payload check. Both consumers
 // read this one list so a new artifact cannot be added to one and forgotten in the other.
-export async function diffText(dir, baseRef = 'HEAD') {
+export async function diffText(dir, baseRef = 'HEAD', { timeoutMs } = {}) {
   // Stage first so NEW (untracked) files appear — `git diff HEAD` alone omits them.
   // Reset every harness artifact from the index after staging. This removes artifacts
   // another actor pre-staged and avoids passing ignored artifact paths to `git add`.
-  const add = await spawnCapture('git', ['-C', dir, 'add', '-A']);
+  const spawnOptions = timeoutMs === undefined ? {} : { timeoutMs };
+  const add = await spawnCapture('git', ['-C', dir, 'add', '-A'], spawnOptions);
   if (add.code !== 0) throw new Error(`git add failed in ${dir}: ${add.stderr.trim()}`);
   const unstage = await spawnCapture('git', [
     '-C', dir, 'reset', '--quiet', '--', ...HARNESS_ARTIFACTS,
-  ]);
+  ], spawnOptions);
   if (unstage.code !== 0) {
     throw new Error(`git reset failed in ${dir}: ${unstage.stderr.trim()}`);
   }
-  const r = await spawnCapture('git', ['-C', dir, 'diff', '--cached', baseRef]);
+  const r = await spawnCapture(
+    'git', ['-C', dir, 'diff', '--cached', baseRef], spawnOptions,
+  );
   if (r.code !== 0) throw new Error(`git diff failed in ${dir}: ${r.stderr.trim()}`);
   return r.stdout;
+}
+
+async function preservePartialExecutorWork(dir, baseRef = 'HEAD') {
+  const diff = await diffText(dir, baseRef, { timeoutMs: PARTIAL_WORK_GIT_TIMEOUT_MS });
+  if (diff.trim() === '') return null;
+  writeFileSync(join(dir, 'CHANGES.diff'), diff);
+  const commit = await spawnCapture('git', [
+    '-C', dir,
+    '-c', 'user.email=ccc@local',
+    '-c', 'user.name=ccc',
+    'commit', '--no-verify', '-m', 'preserve partial executor work before termination',
+  ], { timeoutMs: PARTIAL_WORK_GIT_TIMEOUT_MS });
+  if (commit.code !== 0) {
+    throw new Error(`git commit failed while preserving executor work: ${commit.stderr.trim()}`);
+  }
+  return diff;
 }
 
 export function mergeVerifierVerdicts(correctnessVerdict, intentVerdict) {
@@ -185,13 +210,20 @@ export async function run(opts) {
   let watchdog = null;
   let eventReporter = reporter;
   let stallConfig = null;
+  const executorThresholds = {
+    ...resolveExecutorThresholds(opts.env ?? process.env),
+    ...(opts.stallThresholdMs === undefined ? {} : { thresholdMs: opts.stallThresholdMs }),
+    ...(opts.progressThresholdMs === undefined
+      ? {} : { progressThresholdMs: opts.progressThresholdMs }),
+    ...(opts.executorMaxMs === undefined ? {} : { executorMaxMs: opts.executorMaxMs }),
+  };
   let activeExecutor = null;
   let stallRestartCount = 0;
   let stallRecords = null;
   if (typeof reporter === 'function') {
     stallConfig = {
       ...resolveStallConfig(opts.env ?? process.env),
-      ...(opts.stallThresholdMs === undefined ? {} : { thresholdMs: opts.stallThresholdMs }),
+      ...executorThresholds,
       ...(opts.stallPolicy === undefined ? {} : { policy: opts.stallPolicy }),
       ...(opts.stallRestartLimit === undefined ? {} : { restartLimit: opts.stallRestartLimit }),
     };
@@ -200,15 +232,15 @@ export async function run(opts) {
       reporter,
       runId,
       thresholdMs: stallConfig.thresholdMs,
-      onStall: (event) => {
+      onStall: async (event) => {
         let action = 'report';
+        const executorSlot = activeExecutor;
         if (stallConfig.policy === 'restart'
-          && activeExecutor
+          && executorSlot?.controller
           && stallRestartCount < stallConfig.restartLimit) {
           stallRestartCount++;
           action = 'restart';
-          activeExecutor.restartEvent = event;
-          activeExecutor.controller.abort(event);
+          executorSlot.restartEvent = event;
         }
         stallRecords.push({
           ts: event.ts,
@@ -216,10 +248,15 @@ export async function run(opts) {
           gapMs: event.gapMs,
           thresholdMs: event.thresholdMs,
           lastEvent: event.lastEvent,
+          setting: event.setting,
           policy: stallConfig.policy,
           action,
           ...(action === 'restart' ? { restart: stallRestartCount } : {}),
         });
+        if (action === 'restart') {
+          await executorSlot.beforeKill(event);
+          if (activeExecutor === executorSlot) executorSlot.controller.abort(event);
+        }
       },
     });
     eventReporter = watchdog.reporter;
@@ -301,7 +338,13 @@ export async function run(opts) {
     if (!exec.timedOut) return;
     timeoutEvents.push({
       stage: 'executor', iteration, attempt,
-      timeoutMs: exec.timeoutMs ?? stageTimeouts.executor,
+      timeoutMs: exec.timeoutReason?.timeoutMs ?? exec.timeoutMs ?? stageTimeouts.executor,
+      ...(exec.timeoutReason?.kind ? { reason: exec.timeoutReason.kind } : {}),
+      ...(Number.isFinite(exec.timeoutReason?.gapMs)
+        ? { gapMs: exec.timeoutReason.gapMs } : {}),
+      ...(exec.timeoutReason?.lastEvent
+        ? { lastEvent: exec.timeoutReason.lastEvent } : {}),
+      ...(exec.timeoutReason?.setting ? { setting: exec.timeoutReason.setting } : {}),
     });
   };
   const recordGateTimeout = (gateResult, iteration, attempt) => {
@@ -334,7 +377,15 @@ export async function run(opts) {
         && stallRestartCount < stallConfig.restartLimit
         ? new AbortController()
         : null;
-      const slot = controller ? { controller, restartEvent: null } : null;
+      let preservation = null;
+      const beforeKill = () => {
+        if (!preservation) {
+          const diffBase = merge === undefined ? iso.baseCommit : merge.mergeBase;
+          preservation = preservePartialExecutorWork(iso.dir, diffBase).catch(() => null);
+        }
+        return preservation;
+      };
+      const slot = { controller, restartEvent: null, beforeKill };
       activeExecutor = slot;
       let result;
       try {
@@ -342,6 +393,11 @@ export async function run(opts) {
           plan: executorPlan, cwd: iso.dir, model: executorModel, effort: executorEffort,
           timeoutMs: stageTimeouts.executor,
           reporter: eventReporter, runId, attempt,
+          beforeKill,
+          onLiveness: () => watchdog?.touch('executor'),
+          livenessThresholdMs: executorThresholds.thresholdMs,
+          progressThresholdMs: executorThresholds.progressThresholdMs,
+          executorMaxMs: executorThresholds.executorMaxMs,
           ...(controller ? { signal: controller.signal } : {}),
         }), { seat: 'executor', iteration: n, attempt });
       } finally {
@@ -451,7 +507,7 @@ export async function run(opts) {
 
       const substantiveDiff = await diffText(
         iso.dir,
-        merge === undefined ? 'HEAD' : merge.mergeBase,
+        merge === undefined ? iso.baseCommit : merge.mergeBase,
       );
       if (substantiveDiff.trim() !== '') break;
 
@@ -534,7 +590,8 @@ export async function run(opts) {
     executor: {
       exitCode: Number.isInteger(exec.exitCode) ? exec.exitCode : null,
       timedOut: executorTimedOut,
-      timeoutMs: exec.timeoutMs ?? stageTimeouts.executor,
+      timeoutMs: exec.timeoutReason?.timeoutMs ?? exec.timeoutMs ?? stageTimeouts.executor,
+      ...(exec.timeoutReason ? { timeoutReason: exec.timeoutReason } : {}),
       ...(exec.usageConsistency ? { usageConsistency: exec.usageConsistency } : {}),
     },
     gate: gateResult, verifier: null, intentVerifier: null };
@@ -569,7 +626,10 @@ export async function run(opts) {
   } else {
     gateStatus = 'passed';
     reportEvent(eventReporter, runId, 'diff', 'start');
-    const diff = await diffText(iso.dir, merge === undefined ? 'HEAD' : merge.mergeBase);
+    const diff = await diffText(
+      iso.dir,
+      merge === undefined ? iso.baseCommit : merge.mergeBase,
+    );
     if (diff.trim() === '') {
       reportEvent(eventReporter, runId, 'diff', 'finish', { verdict: 'empty' });
       // A non-zero exit with no diff is a crashed/aborted executor, not a legitimate no-op.
@@ -675,6 +735,8 @@ export async function run(opts) {
     supervision: stallConfig ? {
       policy: stallConfig.policy,
       thresholdMs: stallConfig.thresholdMs,
+      progressThresholdMs: stallConfig.progressThresholdMs,
+      executorMaxMs: stallConfig.executorMaxMs,
       restartLimit: stallConfig.restartLimit,
       restartCount: stallRestartCount,
       gateRetryCount,

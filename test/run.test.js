@@ -936,6 +936,87 @@ test('a timed-out executor stops the run, is recorded, and maps to a non-zero pr
   rmSync(scr, { recursive: true, force: true });
 });
 
+test('a timed-out executor commits partial work and writes an artifact-free diff before kill', async () => {
+  const scr = scratch();
+  const facts = await run({
+    task: 'Preserve partial work before timeout.', target: makeTarget(), gate: [],
+    gateRetries: 0, scratchRoot: scr, runId: 'partial-timeout', reporter: () => {},
+    adapters: {
+      runExecutor: async (opts) => {
+        writeFileSync(join(opts.cwd, 'partial.js'), 'export const partial = true;\n');
+        writeFileSync(join(opts.cwd, 'events.jsonl'), '{"harness":true}\n');
+        await opts.beforeKill({
+          kind: 'deadline', timeoutMs: 25, gapMs: 25,
+          lastEvent: { stage: 'executor', type: 'start', attempt: opts.attempt },
+          setting: 'URO_STALL_THRESHOLD_MS',
+        });
+        return {
+          changedFiles: ['partial.js'], lastMessage: 'partial work', timedOut: true,
+          timeoutMs: 25, exitCode: -1,
+          timeoutReason: {
+            kind: 'deadline', gapMs: 25,
+            lastEvent: { stage: 'executor', type: 'start', attempt: opts.attempt },
+            setting: 'URO_STALL_THRESHOLD_MS',
+          },
+        };
+      },
+      runGate: async () => { throw new Error('timed-out executor must not run the gate'); },
+      runVerifier: async () => { throw new Error('timed-out executor must not verify'); },
+    },
+  });
+
+  assert.equal(facts.outcome, 'timed-out');
+  const diff = readFileSync(join(facts.dir, 'CHANGES.diff'), 'utf8');
+  assert.match(diff, /partial[.]js/);
+  for (const artifact of HARNESS_ARTIFACTS) {
+    assert.doesNotMatch(diff, new RegExp(artifact.replace('.', '[.]')));
+  }
+  const committed = await spawnCapture('git', [
+    '-C', facts.dir, 'show', '--pretty=', '--name-only', 'HEAD',
+  ]);
+  assert.equal(committed.code, 0, committed.stderr);
+  assert.match(committed.stdout, /partial[.]js/);
+  assert.doesNotMatch(committed.stdout, /events[.]jsonl/);
+  assert.equal(facts.timeoutEvents[0].gapMs, 25);
+  assert.equal(facts.timeoutEvents[0].lastEvent.type, 'start');
+  assert.equal(facts.timeoutEvents[0].setting, 'URO_STALL_THRESHOLD_MS');
+  rmSync(scr, { recursive: true, force: true });
+});
+
+test('a failed partial-work commit is non-fatal and cannot suppress the timeout outcome', async () => {
+  const scr = scratch();
+  const facts = await run({
+    task: 'Keep timeout outcome when preservation fails.', target: makeTarget(), gate: [],
+    gateRetries: 0, scratchRoot: scr, runId: 'partial-commit-fails', reporter: () => {},
+    adapters: {
+      runExecutor: async (opts) => {
+        writeFileSync(join(opts.cwd, 'partial.js'), 'export const incomplete = true;\n');
+        const refDirectory = join(opts.cwd, '.git', 'refs', 'heads', 'uro');
+        mkdirSync(refDirectory, { recursive: true });
+        writeFileSync(join(refDirectory, 'partial-commit-fails.lock'),
+          'force the commit ref update to fail\n');
+        await opts.beforeKill({ kind: 'hard-ceiling', timeoutMs: 50,
+          setting: 'URO_EXECUTOR_MAX_MS' });
+        return { changedFiles: ['partial.js'], lastMessage: 'partial work', timedOut: true,
+          timeoutMs: 25, exitCode: -1,
+          timeoutReason: {
+            kind: 'hard-ceiling', timeoutMs: 50, setting: 'URO_EXECUTOR_MAX_MS',
+          } };
+      },
+      runGate: async () => { throw new Error('timed-out executor must not run the gate'); },
+      runVerifier: async () => { throw new Error('timed-out executor must not verify'); },
+    },
+  });
+
+  assert.equal(facts.outcome, 'timed-out');
+  assert.equal(facts.timeoutEvents[0].timeoutMs, 50,
+    'the hard ceiling, not the ordinary interval, is the recorded elapsed limit');
+  assert.equal(facts.timeoutEvents[0].setting, 'URO_EXECUTOR_MAX_MS');
+  assert.match(readFileSync(join(facts.dir, 'CHANGES.diff'), 'utf8'), /partial[.]js/,
+    'positive control: staging and diff production succeeded before git commit failed');
+  rmSync(scr, { recursive: true, force: true });
+});
+
 test('a timed-out verifier cannot produce a successful outcome', async () => {
   const scr = scratch();
   let calls = 0;

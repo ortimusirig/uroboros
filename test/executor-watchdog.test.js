@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { tmpdir } from 'node:os';
+import { EventEmitter } from 'node:events';
 import { runExecutor } from '../src/executor.js';
 import { createEvent } from '../src/events.js';
 import { createGapWatchdog } from '../src/stall-watchdog.js';
@@ -36,6 +37,16 @@ function executorEvent(clock, runId, type, fields = {}) {
     runId, stage: 'executor', type, fields,
     now: () => new Date(clock.now()),
   });
+}
+
+function fakeChild() {
+  const child = new EventEmitter();
+  child.pid = 12345;
+  child.stdout = new EventEmitter();
+  child.stderr = new EventEmitter();
+  child.stdin = { end() {} };
+  child.kill = () => {};
+  return child;
 }
 
 function executorWithWatchdog({ source, thresholdMs, runId }) {
@@ -106,6 +117,45 @@ test('a healthy executor outliving the threshold stays unstalled when items keep
     } finally {
       watchdog.dispose();
     }
+  });
+
+test('raw bytes keep the real executor coordinator alive while progress silence only reports',
+  async () => {
+    const clock = controlledClock();
+    const child = fakeChild();
+    const events = [];
+    let kills = 0;
+    const pending = runExecutor({
+      plan: 'think without completing an item', cwd: tmpdir(),
+      bin: process.execPath, extraArgv: ['unused'], timeoutMs: 100,
+      reporter: (event) => events.push(event), runId: 'chatty-thinking', attempt: 1,
+      livenessThresholdMs: 50, progressThresholdMs: 100, executorMaxMs: 1000,
+      now: clock.now, setTimer: clock.setTimer, clearTimer: clock.clearTimer,
+      spawnProcess: () => child,
+      killProcessTree: () => { kills++; },
+    });
+    await Promise.resolve();
+
+    clock.advance(40);
+    child.stdout.emit('data', Buffer.from('thinking'));
+    clock.fireDueTimers();
+    clock.advance(40);
+    child.stdout.emit('data', Buffer.from(' more'));
+    clock.fireDueTimers();
+    clock.advance(20);
+    clock.fireDueTimers();
+
+    assert.equal(kills, 0, 'progress silence must never kill the child');
+    assert.equal(events.filter((event) => event.type === 'extended').length, 1,
+      'recent stdout must extend the ordinary deadline');
+    assert.equal(events.filter((event) => event.type === 'stalled'
+      && event.tier === 'progress').length, 1,
+    'progress silence must still emit its informational event');
+
+    child.emit('close', 0, null);
+    const result = await pending;
+    assert.equal(result.timedOut, false);
+    assert.equal(kills, 0);
   });
 
 test('a genuinely silent executor still emits one stall event', async () => {

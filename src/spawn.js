@@ -92,6 +92,119 @@ function killProcessTree(child) {
   }
 }
 
+function timerInteger(value, name) {
+  if (!Number.isSafeInteger(value) || value < 1 || value > 2_147_483_647) {
+    throw new TypeError(`${name} must be a positive safe timer integer`);
+  }
+}
+
+function clockValue(now) {
+  const value = now();
+  return value instanceof Date ? value.getTime() : value;
+}
+
+export function createExecutorDeadline({
+  timeoutMs,
+  livenessThresholdMs,
+  maxMs,
+  getLiveness,
+  onExtended,
+  onKill,
+  now = Date.now,
+  setTimer = setTimeout,
+  clearTimer = clearTimeout,
+}) {
+  timerInteger(timeoutMs, 'timeoutMs');
+  timerInteger(livenessThresholdMs, 'livenessThresholdMs');
+  timerInteger(maxMs, 'maxMs');
+  if (typeof getLiveness !== 'function') throw new TypeError('getLiveness must be a function');
+  if (typeof onKill !== 'function') throw new TypeError('onKill must be a function');
+
+  const startedAt = clockValue(now);
+  let disposed = false;
+  let killed = false;
+  let deadlineTimer = null;
+  let ceilingTimer = null;
+
+  const evidence = () => {
+    const observed = getLiveness() ?? {};
+    const rawGap = Number(observed.gapMs);
+    return {
+      hasEvidence: observed.hasEvidence === true,
+      gapMs: Number.isFinite(rawGap) ? Math.max(0, rawGap) : 0,
+      lastEvent: observed.lastEvent ?? null,
+    };
+  };
+
+  const finish = (reason) => {
+    if (disposed || killed) return;
+    killed = true;
+    if (deadlineTimer !== null) clearTimer(deadlineTimer);
+    if (ceilingTimer !== null) clearTimer(ceilingTimer);
+    deadlineTimer = null;
+    ceilingTimer = null;
+    try { onKill(reason); } catch { /* the termination callback owns its errors */ }
+  };
+
+  const hardCeiling = () => {
+    const observed = evidence();
+    finish({
+      kind: 'hard-ceiling',
+      timeoutMs: maxMs,
+      gapMs: observed.gapMs,
+      lastEvent: observed.lastEvent,
+      setting: 'URO_EXECUTOR_MAX_MS',
+    });
+  };
+
+  const armDeadline = () => {
+    deadlineTimer = setTimer(() => {
+      deadlineTimer = null;
+      if (disposed || killed) return;
+      if (clockValue(now) - startedAt >= maxMs) {
+        hardCeiling();
+        return;
+      }
+      const observed = evidence();
+      if (observed.hasEvidence && observed.gapMs < livenessThresholdMs) {
+        const extension = {
+          gapMs: observed.gapMs,
+          lastEvent: observed.lastEvent,
+          timeoutMs,
+          extensionMs: timeoutMs,
+        };
+        try { onExtended?.(extension); } catch { /* observability cannot alter supervision */ }
+        armDeadline();
+        return;
+      }
+      finish({
+        kind: 'deadline',
+        timeoutMs,
+        gapMs: observed.gapMs,
+        lastEvent: observed.lastEvent,
+        setting: observed.hasEvidence
+          ? 'URO_STALL_THRESHOLD_MS'
+          : 'URO_EXECUTOR_TIMEOUT_MS',
+      });
+    }, timeoutMs);
+  };
+
+  // Arm the unconditional ceiling first so equal timestamps always choose the hard limit.
+  ceilingTimer = setTimer(hardCeiling, maxMs);
+  armDeadline();
+
+  return {
+    dispose() {
+      if (disposed) return;
+      disposed = true;
+      if (deadlineTimer !== null) clearTimer(deadlineTimer);
+      if (ceilingTimer !== null) clearTimer(ceilingTimer);
+      deadlineTimer = null;
+      ceilingTimer = null;
+    },
+  };
+}
+
 export async function spawnCapture(bin, args, opts = {}) {
   const timeoutMs = opts.timeoutMs;
   if (timeoutMs !== undefined && (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1)) {
@@ -120,8 +233,10 @@ export async function spawnCapture(bin, args, opts = {}) {
       cmd = resolved;
     }
   }
+  const spawnProcess = opts.spawnProcess ?? spawn;
+  const terminateProcessTree = opts.killProcessTree ?? killProcessTree;
   return new Promise((resolve, reject) => {
-    const child = spawn(cmd, cmdArgs, {
+    const child = spawnProcess(cmd, cmdArgs, {
       cwd: opts.cwd,
       env: opts.env ?? process.env,
       windowsHide: true,
@@ -133,16 +248,43 @@ export async function spawnCapture(bin, args, opts = {}) {
     let timedOut = false;
     let aborted = false;
     let settled = false;
-    let timer = timeoutMs === undefined ? null : setTimeout(() => {
-      timedOut = true;
-      killProcessTree(child);
-    }, timeoutMs);
+    let childClosed = false;
+    let timeoutReason = null;
+    let killPromise = null;
+    const requestKill = (reason, isTimeout) => {
+      if (settled || killPromise) return killPromise;
+      if (isTimeout) timedOut = true;
+      timeoutReason = isTimeout ? reason : null;
+      killPromise = Promise.resolve()
+        .then(() => opts.beforeKill?.(reason))
+        .catch(() => {})
+        .then(() => {
+          // The child may finish naturally while partial work is being preserved.
+          // Never target a closed PID, which could already have been reused.
+          if (!settled && !childClosed) terminateProcessTree(child);
+        });
+      return killPromise;
+    };
+    let deadline = null;
+    let timer = null;
+    if (timeoutMs !== undefined && opts.executorSupervision) {
+      deadline = createExecutorDeadline({
+        timeoutMs,
+        ...opts.executorSupervision,
+        onKill: (reason) => { requestKill(reason, true); },
+      });
+    } else if (timeoutMs !== undefined) {
+      timer = setTimeout(() => {
+        requestKill({ kind: 'deadline', timeoutMs }, true);
+      }, timeoutMs);
+    }
     const signal = opts.signal;
     const onAbort = () => {
       if (settled || aborted) return;
       aborted = true;
       if (timer) { clearTimeout(timer); timer = null; }
-      killProcessTree(child);
+      deadline?.dispose();
+      requestKill(signal?.reason ?? { kind: 'aborted' }, false);
     };
     if (signal) {
       signal.addEventListener('abort', onAbort, { once: true });
@@ -163,24 +305,35 @@ export async function spawnCapture(bin, args, opts = {}) {
     });
     child.stderr.on('data', (d) => errChunks.push(d));
     child.on('error', (error) => {
+      childClosed = true;
       if (timer) clearTimeout(timer);
+      deadline?.dispose();
       signal?.removeEventListener('abort', onAbort);
       if (!settled) { settled = true; reject(error); }
     });
-    child.on('close', (code, signal) => {
+    child.on('close', (code, closeSignal) => {
+      childClosed = true;
       if (timer) clearTimeout(timer);
+      deadline?.dispose();
       opts.signal?.removeEventListener('abort', onAbort);
       if (settled) return;
-      settled = true;
-      resolve({
-        code: code ?? -1,
-        signal: signal ?? null,
-        stdout: Buffer.concat(outChunks).toString('utf8'),
-        stderr: Buffer.concat(errChunks).toString('utf8'),
-        timedOut,
-        ...(opts.signal ? { aborted } : {}),
-        timeoutMs: timeoutMs ?? null,
-      });
+      const finishClose = () => {
+        if (settled) return;
+        settled = true;
+        resolve({
+          code: code ?? -1,
+          signal: closeSignal ?? null,
+          stdout: Buffer.concat(outChunks).toString('utf8'),
+          stderr: Buffer.concat(errChunks).toString('utf8'),
+          timedOut,
+          ...(opts.signal ? { aborted } : {}),
+          timeoutMs: timeoutMs ?? null,
+          ...(timeoutReason ? { timeoutReason } : {}),
+        });
+      };
+      // A timeout outcome is not complete until its best-effort preservation is.
+      if (killPromise) killPromise.then(finishClose, finishClose);
+      else finishClose();
     });
     if (opts.input !== undefined) child.stdin.end(opts.input);
     else child.stdin.end();

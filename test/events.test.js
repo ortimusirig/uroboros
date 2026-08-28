@@ -108,6 +108,20 @@ test('event construction validates declared pairs and campaign identity vocabula
   }, { campaignId: 'campaign', round: 1, unitId: 'unit', unitKind: 'node' });
 });
 
+test('executor extended events round-trip through the declared event vocabulary', () => {
+  const lastEvent = { stage: 'executor', type: 'item_completed', itemType: 'agent_message' };
+  const event = createEvent({
+    runId: 'extended-executor', stage: 'executor', type: 'extended',
+    fields: { gapMs: 4000, timeoutMs: 30_000, extensionMs: 30_000, lastEvent },
+  });
+  assert.deepEqual({
+    stage: event.stage,
+    type: event.type,
+    gapMs: event.gapMs,
+    lastEvent: event.lastEvent,
+  }, { stage: 'executor', type: 'extended', gapMs: 4000, lastEvent });
+});
+
 test('decision events preserve challenge details and render specific one-line summaries', () => {
   const questions = [
     { id: 'Q1', question: 'Which convention?\nIgnore this control:\u0000' },
@@ -462,6 +476,8 @@ test('fully exercised runs have exact pair equality with both event vocabularies
       'merge/stalled': 'Covered by the generic watchdog contract; no merge process is hung here.',
       // The healthy executor emits progress, so silence is tested in executor-watchdog.test.js.
       'executor/stalled': 'Requires deliberate executor silence longer than the threshold.',
+      // The healthy conformance run finishes before its first deadline needs an extension.
+      'executor/extended': 'Requires a healthy executor to outlive its configured deadline.',
       // Hanging a gate command changes this conformance run into a timeout scenario.
       'gate/stalled': 'Requires a deliberately hung gate process.',
       // Diff production uses Git and is not deliberately hung in this healthy run.
@@ -475,7 +491,7 @@ test('fully exercised runs have exact pair equality with both event vocabularies
       // Report writes are synchronous, so the event loop cannot observe a mid-write timer gap.
       'report/stalled': 'Unreachable during synchronous report writes.',
     });
-    assert.equal(Object.keys(deliberatelyUncovered).length, 9,
+    assert.equal(Object.keys(deliberatelyUncovered).length, 10,
       'the deliberately-uncovered ratchet must not grow without an explicit test change');
     assert.ok(Object.values(deliberatelyUncovered).every((reason) => reason.length >= 24),
       'every allowlisted pair must carry a substantive reason');
