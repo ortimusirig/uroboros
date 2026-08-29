@@ -1,0 +1,1 @@
+[{"bin": "node", "args": ["--test", "test/dashboard.test.js", "test/dashboard-transcript.test.js", "test/dashboard-launcher.test.js"]}]
