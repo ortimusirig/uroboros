@@ -97,9 +97,10 @@ For a simple Graph, keep the flag form: give every task a `--unit-id`, then repe
 `URO_SCRATCH_ROOT` (or the platform default), not a run flag. Unit worktrees live under the
   unit id, so two campaigns that reuse a unit id collide even when they target different
   repositories.
-- **Normal run artifacts persist.** There is no end-of-run or end-of-campaign cleanup for unit
-  worktrees, branches, or event streams, regardless of outcome. Temporary detached test-count
-  worktrees and the disposable doctor and publisher workspaces are cleaned.
+- **Normal run records persist outside their worktrees.** Completed runs copy every produced
+  harness artifact to `URO_ARTIFACT_ROOT` (default `<scratchRoot>/artifacts`) and append a compact
+  `index.jsonl` entry. Unit worktrees still remain until the operator explicitly runs `prune`;
+  nothing prunes automatically at the end of a run or campaign.
 - **Run/batch Git work has no deadline.** Explicit stage timeouts cover the executor, gate, and
   both verifiers; the isolation and campaign Git invocations pass no timeout. Standalone
   `doctor` probes and `publish` commands use their own bounded command timeouts.
@@ -122,7 +123,7 @@ hazard is reuse of a unit id in the flat scratch root.
 
 Install the plugin from a clone by running `node install.mjs`, then paste the two exact Claude
 Code commands it prints: `/plugin marketplace add <absolute-clone-path>` followed by
-`/plugin install uroboros@uroboros`. The plugin registers these nine namespaced slash
+`/plugin install uroboros@uroboros`. The plugin registers these ten namespaced slash
 commands while the direct Node CLI remains available:
 
 - `/uroboros:run`
@@ -130,6 +131,7 @@ commands while the direct Node CLI remains available:
 - `/uroboros:status`
 - `/uroboros:dashboard`
 - `/uroboros:publish`
+- `/uroboros:prune`
 - `/uroboros:doctor`
 - `/uroboros:setup`
 - `/uroboros:init`
@@ -147,6 +149,7 @@ The direct CLI surface is:
     node bin/loop.js status ...
     node bin/loop.js dashboard ...
     node bin/loop.js publish ...
+    node bin/loop.js prune ...
     node bin/loop.js doctor ...
     node bin/loop.js setup ...
     node bin/loop.js init ...
@@ -154,7 +157,7 @@ The direct CLI surface is:
 
 For one plan:
 
-    node bin/loop.js run --task <plan-file-or-prose> --target <folder> --gate <gate.json> [--gate-retries M] [--executor-model MODEL] [--executor-effort EFFORT] [--verifier-model MODEL] [--port PORT] [--open] [--no-dashboard] [--quiet]
+    node bin/loop.js run --task <plan-file-or-prose> --target <folder> --gate <gate.json> [--gate-retries M] [--executor-model MODEL] [--executor-effort EFFORT] [--verifier-model MODEL] [--artifact-root DIRECTORY] [--port PORT] [--open] [--no-dashboard] [--quiet]
 
 For flag-declared Parallel, Candidates, Rounds, or a simple Graph:
 
@@ -167,7 +170,7 @@ base, and one token budget. The engine does not call a planner model.
 For a new project, `init` creates starter `plan.md` and `gate.json` files without overwriting
 either. Use `doctor` for prerequisites and opt into real write/read probes with `doctor --deep`.
 Use `status` or the read-only `dashboard` to observe a run, `publish` only after planner review,
-and `help` to print the command surface.
+`prune --dry-run` to inspect scratch retention, and `help` to print the command surface.
 
 - **Gate config** (`gate.json`): a JSON array of `{ "bin": "...", "args": ["..."] }`;
   pass/fail is by the command's true exit code only.
@@ -175,7 +178,7 @@ and `help` to print the command surface.
 - Cursor performs correctness and intent/assertion verification in read-only plan mode, only
   when the gate passed and the diff is non-empty.
 - Output is `uro-runfacts.json`, `uro-report.md`, `events.jsonl`, and, for changed work,
-  `CHANGES.diff` in the isolated directory.
+  `CHANGES.diff` in the isolated directory and the per-run durable artifact directory.
 - Outcomes include `review-ready`, `no-op`, `gate-failed`, `verifier-failed`, `timed-out`, and
   Merge-only `conflicting-intent`; campaigns also roll up `campaign-failed` and
   `budget-exhausted`.

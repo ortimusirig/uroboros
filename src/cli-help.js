@@ -1,14 +1,15 @@
 export const CLI_COMMANDS = Object.freeze([
-  'run', 'batch', 'status', 'dashboard', 'publish', 'doctor', 'setup', 'init', 'help',
+  'run', 'batch', 'status', 'dashboard', 'publish', 'prune', 'doctor', 'setup', 'init', 'help',
 ]);
 
 export const CLI_USAGE = `Usage:
-  node bin/loop.js run --task <plan-file-or-prose> --target <directory> --gate <gate.json> [--gate-retries <0-3>] [--executor-model <model>] [--executor-effort <effort>] [--verifier-model <model>] [--executor-timeout <ms>] [--verifier-timeout <ms>] [--gate-timeout <ms>] [--port <0-65535>] [--open] [--no-dashboard] [--quiet]
-  node bin/loop.js batch --task <plan> [--task <plan> ...] --target <directory> --gate <gate.json> [--gate-retries <0-3>] [--executor-model <model>] [--executor-effort <effort>] [--verifier-model <model>] [--executor-timeout <ms>] [--verifier-timeout <ms>] [--gate-timeout <ms>] [--concurrency <1-16>] [--token-budget <tokens>] [--rounds <1-3>] [--round <number> ...] [--unit-kind <candidate|node|merge> ...] [--unit-id <id> ...] [--perspective <name> ...] [--depends-on <child=parent> ...] [--port <0-65535>] [--open] [--no-dashboard] [--quiet]
-  node bin/loop.js batch --campaign <file> [--executor-timeout <ms>] [--verifier-timeout <ms>] [--gate-timeout <ms>] [--port <0-65535>] [--open] [--no-dashboard] [--quiet]
+  node bin/loop.js run --task <plan-file-or-prose> --target <directory> --gate <gate.json> [--gate-retries <0-3>] [--executor-model <model>] [--executor-effort <effort>] [--verifier-model <model>] [--executor-timeout <ms>] [--verifier-timeout <ms>] [--gate-timeout <ms>] [--artifact-root <directory>] [--port <0-65535>] [--open] [--no-dashboard] [--quiet]
+  node bin/loop.js batch --task <plan> [--task <plan> ...] --target <directory> --gate <gate.json> [--gate-retries <0-3>] [--executor-model <model>] [--executor-effort <effort>] [--verifier-model <model>] [--executor-timeout <ms>] [--verifier-timeout <ms>] [--gate-timeout <ms>] [--artifact-root <directory>] [--concurrency <1-16>] [--token-budget <tokens>] [--rounds <1-3>] [--round <number> ...] [--unit-kind <candidate|node|merge> ...] [--unit-id <id> ...] [--perspective <name> ...] [--depends-on <child=parent> ...] [--port <0-65535>] [--open] [--no-dashboard] [--quiet]
+  node bin/loop.js batch --campaign <file> [--executor-timeout <ms>] [--verifier-timeout <ms>] [--gate-timeout <ms>] [--artifact-root <directory>] [--port <0-65535>] [--open] [--no-dashboard] [--quiet]
   node bin/loop.js status <run-or-campaign-directory>
   node bin/loop.js dashboard [<run-directory> | --run <run-directory> | --scratch-root <directory>] [--port <0-65535>]
   node bin/loop.js publish <completed-run-directory>
+  node bin/loop.js prune [--keep <n>] [--older-than <days>] [--dry-run] [--scratch-root <directory>] [--artifact-root <directory>]
   node bin/loop.js doctor [--deep] [--scratch-root <directory>] [--repository <directory>]
   node bin/loop.js doctor --fix [--yes] [--scratch-root <directory>] [--repository <directory>]
   node bin/loop.js setup [--yes] [--scratch-root <directory>]
@@ -28,6 +29,7 @@ Commands:
   status     Read human-readable status for a run or campaign.
   dashboard  Serve the optional read-only local dashboard.
   publish    Optionally publish a completed run through GitHub.
+  prune      Remove old disposable run directories while preserving durable artifacts.
   doctor     Check prerequisites; --deep spends agent tokens on write/read probes.
   setup      Prepare prerequisites with consent, then scaffold and run an isolated demo.
   init       Create a starter plan.md and runnable gate.json without overwriting.

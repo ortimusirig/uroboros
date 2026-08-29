@@ -13,6 +13,7 @@ import {
 import { join, relative, resolve, sep } from 'node:path';
 import { reportEvent } from './events.js';
 import { spawnCapture } from './spawn.js';
+import { physicalRunIdFor } from './run-id.js';
 
 const repositoryLocks = new Map();
 
@@ -321,6 +322,7 @@ export async function commitCampaignResult({ dir, branch, unitId }) {
 export async function isolate({
   target,
   runId,
+  physicalRunId: suppliedPhysicalRunId,
   scratchRoot,
   reporter,
   baseRef = 'HEAD',
@@ -334,6 +336,10 @@ export async function isolate({
     throw new Error('branch and branchName must match when both are supplied');
   }
   const branch = suppliedBranch ?? branchName ?? defaultBranchName(runId);
+  const physicalRunId = physicalRunIdFor(runId);
+  if (suppliedPhysicalRunId !== undefined && suppliedPhysicalRunId !== physicalRunId) {
+    throw new Error('physicalRunId must match the directory derived from runId');
+  }
   reportEvent(reporter, runId, 'isolate', 'start', {
     source: target,
     baseRef,
@@ -342,7 +348,7 @@ export async function isolate({
   });
   assertSafeScratchRoot(scratchRoot);
   await validateBranchName(branch);
-  const dir = join(scratchRoot, runId, 'w');
+  const dir = join(scratchRoot, physicalRunId, 'w');
   if (campaignBase && campaignId !== undefined && campaignBase.campaignId !== campaignId) {
     throw new Error(`campaign base belongs to "${campaignBase.campaignId}", not "${campaignId}"`);
   }
@@ -400,7 +406,7 @@ export async function isolate({
     baseRef,
     baseCommit,
     cleanup: async () => {
-      try { rmSync(join(scratchRoot, runId), { recursive: true, force: true }); } catch { /* best effort */ }
+      try { rmSync(join(scratchRoot, physicalRunId), { recursive: true, force: true }); } catch { /* best effort */ }
     },
   };
 }

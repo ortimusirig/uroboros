@@ -1,12 +1,13 @@
 # Usage
 
 ```
-node bin/loop.js run --task <plan-file-or-prose> --target <folder> --gate <gate.json> [--gate-retries M] [--executor-model MODEL] [--executor-effort EFFORT] [--verifier-model MODEL] [--port PORT] [--open] [--no-dashboard] [--quiet]
-node bin/loop.js batch --task <plan-1> --task <plan-2> --target <folder> --gate <gate.json> [--gate-retries M] [--executor-model MODEL] [--executor-effort EFFORT] [--verifier-model MODEL] [--concurrency N] [--token-budget TOKENS] [--rounds N] [--round N ...] [--unit-kind KIND] [--unit-id ID ...] [--perspective NAME ...] [--depends-on CHILD=PARENT ...] [--port PORT] [--open] [--no-dashboard] [--quiet]
-node bin/loop.js batch --campaign <campaign.json> [--port PORT] [--open] [--no-dashboard] [--quiet]
+node bin/loop.js run --task <plan-file-or-prose> --target <folder> --gate <gate.json> [--gate-retries M] [--executor-model MODEL] [--executor-effort EFFORT] [--verifier-model MODEL] [--artifact-root DIRECTORY] [--port PORT] [--open] [--no-dashboard] [--quiet]
+node bin/loop.js batch --task <plan-1> --task <plan-2> --target <folder> --gate <gate.json> [--gate-retries M] [--executor-model MODEL] [--executor-effort EFFORT] [--verifier-model MODEL] [--artifact-root DIRECTORY] [--concurrency N] [--token-budget TOKENS] [--rounds N] [--round N ...] [--unit-kind KIND] [--unit-id ID ...] [--perspective NAME ...] [--depends-on CHILD=PARENT ...] [--port PORT] [--open] [--no-dashboard] [--quiet]
+node bin/loop.js batch --campaign <campaign.json> [--artifact-root DIRECTORY] [--port PORT] [--open] [--no-dashboard] [--quiet]
 node bin/loop.js status <run-or-campaign-directory>
 node bin/loop.js dashboard [<run-directory>] [--scratch-root <directory>] [--port <port>]
 node bin/loop.js publish <completed-run-directory>
+node bin/loop.js prune [--keep N] [--older-than DAYS] [--dry-run] [--scratch-root DIRECTORY] [--artifact-root DIRECTORY]
 node bin/loop.js doctor [--deep] [--scratch-root <directory>] [--repository <directory>]
 node bin/loop.js doctor --fix [--scratch-root <directory>] [--repository <directory>]
 node bin/loop.js setup [--scratch-root <directory>]
@@ -34,11 +35,18 @@ directory is modified.
 | `--executor-model` | no | launch-module default | Codex model ID |
 | `--executor-effort` | no | launch-module default | `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, or `ultra` |
 | `--verifier-model` | no | launch-module default | Cursor model ID |
+| `--artifact-root` | no | `<scratchRoot>/artifacts` | durable per-run records and `index.jsonl` |
 | `--quiet` | no | false | suppress stderr event summaries; `events.jsonl` is still written |
 
 `batch` accepts one or more repeated `--task` options. The target, gate, retry, and model
 options have exactly the same meaning they do for `run`; every task gets its own isolated
 worktree, gate, two read-only verifier passes, run facts, and `events.jsonl`.
+
+`prune` is the only scratch-retention command. It keeps the 20 most recent completed run
+directories by default. `--keep N` changes that count; `--older-than DAYS` adds an age rule,
+and a run is removed only when both rules permit it. `--dry-run` lists candidates without
+deleting them. The configured artifact root is always excluded, so durable records outlive
+their disposable worktrees.
 
 | Batch option | Default | Range / meaning |
 |---|---:|---|

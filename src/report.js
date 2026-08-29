@@ -7,7 +7,9 @@ import { addUsage, EMPTY_USAGE } from './usage.js';
 
 export function buildRunFacts({
   runId,
+  physicalRunId,
   target,
+  targetPath,
   dir,
   isRepo,
   baseRef = 'HEAD',
@@ -49,7 +51,11 @@ export function buildRunFacts({
   debate = null,
 }) {
   const facts = {
-    runId, target, dir, isRepo, baseRef, baseCommit, branch,
+    runId,
+    ...(physicalRunId === undefined ? {} : { physicalRunId }),
+    target,
+    ...(targetPath === undefined ? {} : { targetPath }),
+    dir, isRepo, baseRef, baseCommit, branch,
     model: {
       executor: models?.executor ?? DEFAULT_EXECUTOR_MODEL,
       executorEffort: models?.executorEffort ?? DEFAULT_EXECUTOR_EFFORT,

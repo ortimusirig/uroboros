@@ -227,6 +227,11 @@ export function generateRunJournal(inputPath, options) {
   return writeRunJournalInput(readRunJournalInput(inputPath), options);
 }
 
+function comparablePath(path) {
+  const value = resolve(path);
+  return process.platform === 'win32' ? value.toLowerCase() : value;
+}
+
 export function findRunFacts(scratchRoot) {
   const root = resolve(scratchRoot);
   if (!statSync(root).isDirectory()) throw new TypeError(`scratch root is not a directory: ${root}`);
@@ -246,15 +251,34 @@ export function findRunFacts(scratchRoot) {
   return found;
 }
 
-export function generateRunJournalCampaign(scratchRoot, { reporter, reporterFactory } = {}) {
-  const factsPaths = findRunFacts(scratchRoot);
-  const inputs = factsPaths.map(readRunJournalInput);
-  const runIds = new Set();
-  for (const { facts } of inputs) {
-    if (runIds.has(facts.runId)) {
-      throw new Error(`scratch root contains duplicate runId: ${facts.runId}`);
+export function generateRunJournalCampaign(scratchRoot, {
+  reporter,
+  reporterFactory,
+} = {}) {
+  const discovered = findRunFacts(scratchRoot).map(readRunJournalInput);
+  const grouped = new Map();
+  for (const input of discovered) {
+    const group = grouped.get(input.facts.runId) ?? [];
+    group.push(input);
+    grouped.set(input.facts.runId, group);
+  }
+  const inputs = [];
+  for (const [runId, group] of grouped) {
+    if (group.length === 1) {
+      inputs.push(group[0]);
+      continue;
     }
-    runIds.add(facts.runId);
+    const retained = group.filter((input) => {
+      const durableDirectory = input.facts.artifacts?.directory;
+      return typeof durableDirectory === 'string' && durableDirectory !== ''
+        && comparablePath(dirname(input.factsPath)) === comparablePath(durableDirectory);
+    });
+    const originals = group.filter((input) => !retained.includes(input));
+    if (originals.length === 1 && retained.length === group.length - 1) {
+      inputs.push(originals[0]);
+      continue;
+    }
+    throw new Error(`scratch root contains duplicate runId: ${runId}`);
   }
   return inputs.map((input) => {
     let unitReporter = reporter;

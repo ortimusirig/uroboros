@@ -240,8 +240,12 @@ test('campaign mode recursively regenerates every discovered run', () => {
   ];
   for (const facts of runs) {
     const workDir = join(scratchRoot, facts.runId, 'w');
+    const durableDir = join(scratchRoot, 'artifacts', facts.runId);
+    const retainedFacts = { ...facts, artifacts: { directory: durableDir } };
     mkdirSync(workDir, { recursive: true });
-    writeFileSync(join(workDir, 'uro-runfacts.json'), JSON.stringify(facts));
+    writeFileSync(join(workDir, 'uro-runfacts.json'), JSON.stringify(retainedFacts));
+    mkdirSync(durableDir, { recursive: true });
+    writeFileSync(join(durableDir, 'uro-runfacts.json'), JSON.stringify(retainedFacts));
   }
 
   try {
@@ -252,6 +256,13 @@ test('campaign mode recursively regenerates every discovered run', () => {
       assert.match(note, new RegExp(`^runId: ${JSON.stringify(facts.runId)}$`, 'm'));
       assert.match(note, new RegExp(`^date: ${facts.runId.slice(0, 10)}$`, 'm'));
     }
+    for (const facts of runs) {
+      rmSync(join(scratchRoot, facts.runId), { recursive: true, force: true });
+    }
+    const regeneratedFromDurable = generateRunJournalCampaign(scratchRoot);
+    assert.deepEqual(regeneratedFromDurable.map((entry) => entry.runId),
+      runs.map((facts) => facts.runId),
+      'directory mode must keep finding durable facts after disposable worktrees are pruned');
   } finally {
     for (const facts of runs) rmSync(join(projectRunsDir, `${facts.runId}.md`), { force: true });
     rmSync(root, { recursive: true, force: true });

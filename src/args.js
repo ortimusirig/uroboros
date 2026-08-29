@@ -35,6 +35,7 @@ export const BATCH_FLAG_DEFINITIONS = Object.freeze({
   'executor-timeout': Object.freeze({ type: 'string', scope: 'invocation' }),
   'verifier-timeout': Object.freeze({ type: 'string', scope: 'invocation' }),
   'gate-timeout': Object.freeze({ type: 'string', scope: 'invocation' }),
+  'artifact-root': Object.freeze({ type: 'string', scope: 'invocation' }),
   concurrency: Object.freeze({ type: 'string', scope: 'campaign' }),
   'token-budget': Object.freeze({ type: 'string', scope: 'campaign' }),
   rounds: Object.freeze({ type: 'string', scope: 'campaign' }),
@@ -120,6 +121,21 @@ function normalizeNegativeTimeoutArguments(args) {
   return normalized;
 }
 
+function normalizeNegativePruneArguments(args) {
+  const normalized = [];
+  for (let index = 0; index < args.length; index++) {
+    const argument = args[index];
+    const value = args[index + 1];
+    if ((argument === '--keep' || argument === '--older-than') && /^-\d/.test(value)) {
+      normalized.push(`${argument}=${value}`);
+      index++;
+    } else {
+      normalized.push(argument);
+    }
+  }
+  return normalized;
+}
+
 export function parseArgs(argv) {
   const command = argv[0];
   if (argv.length === 1 && (command === 'help' || command === '--help' || command === '-h')) {
@@ -170,6 +186,30 @@ export function parseArgs(argv) {
       command,
       ...(values.yes === true ? { yes: true } : {}),
       ...(values['scratch-root'] === undefined ? {} : { scratchRoot: values['scratch-root'] }),
+    };
+  }
+  if (command === 'prune') {
+    const { values } = nodeParseArgs({
+      args: normalizeNegativePruneArguments(argv.slice(1)),
+      options: {
+        keep: { type: 'string' },
+        'older-than': { type: 'string' },
+        'dry-run': { type: 'boolean' },
+        'scratch-root': { type: 'string' },
+        'artifact-root': { type: 'string' },
+      },
+      allowPositionals: false,
+      strict: true,
+    });
+    return {
+      command,
+      keep: strictInt(values.keep, 20, 0, Number.MAX_SAFE_INTEGER),
+      ...(values['older-than'] === undefined ? {} : {
+        olderThan: strictInt(values['older-than'], undefined, 0, Number.MAX_SAFE_INTEGER),
+      }),
+      dryRun: values['dry-run'] === true,
+      ...(values['scratch-root'] === undefined ? {} : { scratchRoot: values['scratch-root'] }),
+      ...(values['artifact-root'] === undefined ? {} : { artifactRoot: values['artifact-root'] }),
     };
   }
   if (command === 'init') {
@@ -234,6 +274,7 @@ export function parseArgs(argv) {
       'executor-timeout': { type: 'string' },
       'verifier-timeout': { type: 'string' },
       'gate-timeout': { type: 'string' },
+      'artifact-root': { type: 'string' },
       mode: { type: 'string' },
       quiet: { type: 'boolean' },
       'no-dashboard': { type: 'boolean' },
@@ -254,6 +295,7 @@ export function parseArgs(argv) {
     if (values['no-dashboard']) parsed.noDashboard = true;
     if (values.open) parsed.open = true;
     if (values.port !== undefined) parsed.port = parseDashboardPort(values.port);
+    if (values['artifact-root'] !== undefined) parsed.artifactRoot = values['artifact-root'];
     return assignStageTimeouts(parsed, values);
   }
   for (const req of ['task', 'target', 'gate']) {
@@ -275,6 +317,7 @@ export function parseArgs(argv) {
       executorModel: values['executor-model'],
       executorEffort,
       verifierModel: values['verifier-model'],
+      ...(values['artifact-root'] === undefined ? {} : { artifactRoot: values['artifact-root'] }),
     };
     if (values.mode !== undefined) parsed.mode = values.mode;
     if (values.quiet) parsed.quiet = true;
@@ -400,6 +443,7 @@ export function parseArgs(argv) {
     executorModel: values['executor-model'],
     executorEffort,
     verifierModel: values['verifier-model'],
+    ...(values['artifact-root'] === undefined ? {} : { artifactRoot: values['artifact-root'] }),
     concurrency: strictInt(values.concurrency, DEFAULT_CONCURRENCY, 1, MAX_CONCURRENCY),
     tokenBudget: strictInt(
       values['token-budget'], DEFAULT_TOKEN_BUDGET, 1, Number.MAX_SAFE_INTEGER,

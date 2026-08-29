@@ -22,6 +22,8 @@ import {
 } from '../src/dashboard-launcher.js';
 import { readEnv } from '../src/env-compat.js';
 import { createAutonomousDecisionResolver } from '../src/decision-resolver.js';
+import { pruneScratch } from '../src/prune.js';
+import { physicalRunIdFor } from '../src/run-id.js';
 
 // Short path, outside OneDrive and outside AppData (both are rejected by
 // assertSafeScratchRoot; AppData is MSIX-redirected under a packaged host).
@@ -192,6 +194,27 @@ async function main() {
     }
     return;
   }
+  if (opts.command === 'prune') {
+    try {
+      const result = await pruneScratch({
+        scratchRoot: opts.scratchRoot ?? SCRATCH_ROOT,
+        artifactRoot: opts.artifactRoot,
+        keep: opts.keep,
+        olderThan: opts.olderThan,
+        dryRun: opts.dryRun,
+      });
+      if (opts.dryRun) {
+        for (const directory of result.wouldRemove) {
+          process.stdout.write(`Would remove ${directory}\n`);
+        }
+      }
+      process.stdout.write(`Removed ${result.removed} run directories; kept ${result.kept}.\n`);
+    } catch (error) {
+      process.stderr.write(`prune failed: ${error.message}\n`);
+      process.exitCode = 2;
+    }
+    return;
+  }
   const pf = await preflight({
     task: opts.command === 'run' ? opts.task : undefined,
     tasks: opts.command === 'batch' ? opts.tasks.map((unit) => unit.task) : undefined,
@@ -257,7 +280,7 @@ async function main() {
       scratchRoot: SCRATCH_ROOT,
       reporter: campaignReporter,
       unitReporterFactory: ({ unitId }) => createCliReporter({
-        eventsPath: join(SCRATCH_ROOT, unitId, 'w', 'events.jsonl'),
+        eventsPath: join(SCRATCH_ROOT, physicalRunIdFor(unitId), 'w', 'events.jsonl'),
         quiet: opts.quiet,
       }),
       runOptions: {
@@ -265,6 +288,7 @@ async function main() {
         executorModel: opts.executorModel,
         executorEffort: opts.executorEffort,
         verifierModel: opts.verifierModel,
+        artifactRoot: opts.artifactRoot,
         executorTimeout: opts.executorTimeout,
         verifierTimeout: opts.verifierTimeout,
         gateTimeout: opts.gateTimeout,
@@ -286,6 +310,7 @@ async function main() {
     executorModel: opts.executorModel,
     executorEffort: opts.executorEffort,
     verifierModel: opts.verifierModel,
+    artifactRoot: opts.artifactRoot,
     executorTimeout: opts.executorTimeout,
     verifierTimeout: opts.verifierTimeout,
     gateTimeout: opts.gateTimeout,

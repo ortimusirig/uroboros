@@ -1,5 +1,5 @@
 import { existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { isolate } from './isolation.js';
 import {
   DEFAULT_EXECUTOR_EFFORT,
@@ -32,7 +32,9 @@ import {
   resolveExecutorThresholds,
   resolveStallConfig,
 } from './stall-watchdog.js';
-import { HARNESS_ARTIFACTS } from './artifacts.js';
+import { archiveRunArtifacts, HARNESS_ARTIFACTS } from './artifacts.js';
+import { createRunMarker, releaseRunMarker } from './prune.js';
+import { physicalRunIdFor } from './run-id.js';
 import {
   advanceMerge,
   buildMergeTask,
@@ -134,8 +136,8 @@ export async function diffText(dir, baseRef = 'HEAD', { timeoutMs } = {}) {
   return r.stdout;
 }
 
-async function preservePartialExecutorWork(dir, baseRef = 'HEAD') {
-  const diff = await diffText(dir, baseRef, { timeoutMs: PARTIAL_WORK_GIT_TIMEOUT_MS });
+async function preservePartialExecutorWork(dir, baseRef = 'HEAD', createDiff = diffText) {
+  const diff = await createDiff(dir, baseRef, { timeoutMs: PARTIAL_WORK_GIT_TIMEOUT_MS });
   if (diff.trim() === '') return null;
   writeFileSync(join(dir, 'CHANGES.diff'), diff);
   const commit = await spawnCapture('git', [
@@ -257,6 +259,7 @@ function executorRequestedApproval(result) {
 }
 
 export async function run(opts) {
+  const startedAt = new Date();
   const {
     task, target, gate, gateRetries, scratchRoot, runId,
     baseRef = 'HEAD', branch, branchName, correctsRunId, campaignId, campaignBase,
@@ -270,6 +273,7 @@ export async function run(opts) {
     debateRounds,
     adapters = {}, reporter,
   } = opts;
+  const physicalRunId = physicalRunIdFor(runId);
   if (mode !== 'manual' && mode !== 'autonomous') {
     throw new Error(`invalid mode: ${mode}; expected manual or autonomous`);
   }
@@ -280,6 +284,8 @@ export async function run(opts) {
   const runExecutor = adapters.runExecutor ?? realExecutor;
   const runGate = adapters.runGate ?? realGate;
   const runVerifier = adapters.runVerifier ?? realVerifier;
+  const isolateRun = adapters.isolate ?? isolate;
+  const createDiff = adapters.diffText ?? diffText;
   const detectDebateCircling = adapters.detectCircling ?? detectCircling;
   const selectPivot = adapters.shouldPivot ?? shouldPivot;
   const maxDebateRounds = resolveDebateRounds(opts.env ?? process.env, debateRounds);
@@ -352,10 +358,12 @@ export async function run(opts) {
     eventReporter = watchdog.reporter;
   }
 
+  const runMarker = createRunMarker({ scratchRoot, runId, target });
   try {
-  const iso = await isolate({
+  const iso = await isolateRun({
     target,
     runId,
+    physicalRunId,
     scratchRoot,
     reporter: eventReporter,
     baseRef,
@@ -477,7 +485,7 @@ export async function run(opts) {
       const beforeKill = () => {
         if (!preservation) {
           const diffBase = merge === undefined ? iso.baseCommit : merge.mergeBase;
-          preservation = preservePartialExecutorWork(iso.dir, diffBase).catch(() => null);
+          preservation = preservePartialExecutorWork(iso.dir, diffBase, createDiff).catch(() => null);
         }
         return preservation;
       };
@@ -603,7 +611,7 @@ export async function run(opts) {
       const challenge = detectChallenge({ dir: iso.dir });
       if (!challenge.challenged) break;
 
-      const substantiveDiff = await diffText(
+      const substantiveDiff = await createDiff(
         iso.dir,
         merge === undefined ? iso.baseCommit : merge.mergeBase,
       );
@@ -767,7 +775,7 @@ export async function run(opts) {
     gateStatus = 'passed';
     const refreshDiff = async () => {
       reportEvent(eventReporter, runId, 'diff', 'start');
-      const value = await diffText(
+      const value = await createDiff(
         iso.dir,
         merge === undefined ? iso.baseCommit : merge.mergeBase,
       );
@@ -1110,7 +1118,10 @@ export async function run(opts) {
         : merge.testCounts.source === 'gate-output' ? null : countTestFiles(iso.dir),
     },
   };
-  const facts = buildRunFacts({ runId, target, dir: iso.dir, isRepo: iso.isRepo,
+  const facts = buildRunFacts({ runId,
+    ...(physicalRunId === runId ? {} : { physicalRunId }),
+    target, targetPath: resolve(target),
+    dir: iso.dir, isRepo: iso.isRepo,
     baseRef: iso.baseRef, baseCommit: iso.baseCommit, branch: iso.branch,
     iterations, gateStatus, verdict, verdictSource,
     correctnessVerdict, correctnessVerdictSource, verifierFindings,
@@ -1147,8 +1158,29 @@ export async function run(opts) {
     facts.escalation = 'operator-absent';
   }
   writeReport({ dir: iso.dir, facts, reporter: eventReporter, runId });
+  const endedAt = new Date();
+  try {
+    archiveRunArtifacts({
+      dir: iso.dir,
+      runId,
+      facts,
+      scratchRoot,
+      artifactRoot: opts.artifactRoot,
+      env: opts.env ?? process.env,
+      startedAt,
+      endedAt,
+    });
+  } catch (error) {
+    facts.artifacts = {
+      status: 'failed',
+      error: error instanceof Error ? error.message : String(error),
+    };
+    try { writeFileSync(join(iso.dir, 'uro-runfacts.json'), JSON.stringify(facts, null, 2)); }
+    catch { /* artifact retention is non-fatal */ }
+  }
   return facts;
   } finally {
+    releaseRunMarker(runMarker);
     watchdog?.dispose();
   }
 }

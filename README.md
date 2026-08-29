@@ -111,7 +111,7 @@ billed through this skill.
 Windows is the primary, fully-exercised target. macOS and Linux should work — pure Node,
 POSIX `which`, plain `spawn` — but treat the first Unix run as verification.
 
-After plugin installation, these are the nine namespaced slash commands:
+After plugin installation, these are the ten namespaced slash commands:
 
 ```text
 /uroboros:run
@@ -119,6 +119,7 @@ After plugin installation, these are the nine namespaced slash commands:
 /uroboros:status
 /uroboros:dashboard
 /uroboros:publish
+/uroboros:prune
 /uroboros:doctor
 /uroboros:setup
 /uroboros:init
