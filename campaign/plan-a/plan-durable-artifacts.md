@@ -108,6 +108,46 @@ Pruning is **an explicit operator command only**. Do not prune automatically at
 the end of a run: a run that deletes evidence on its way out is exactly the
 failure mode being fixed.
 
+## Additional requirements — learned from the first attempt
+
+A first attempt at this plan passed a six-file gate and then broke **ten tests**
+elsewhere on main. Both causes are now explicit requirements.
+
+### Do not change `facts.runId`
+
+The first attempt introduced a `physicalRunId` and altered what `facts.runId`
+carries. `src/run-journal.js` derives a note's date from a `YYYY-MM-DD` field or
+a date-prefixed `runId`, and threw `run facts must carry a YYYY-MM-DD date or a
+date-prefixed runId`.
+
+`facts.runId` keeps its current value and format. If a distinct physical
+directory identifier is genuinely needed, add it under a **new** field and leave
+`runId` untouched, and confirm `generateRunJournal` still produces a note for a
+normal run.
+
+### A new command must be documented in the same change
+
+The repository has tests asserting that every command appears in
+`skills/uroboros/SKILL.md` and has a file under `commands/`. The first attempt
+added `prune` and failed both.
+
+Adding `loop prune` therefore also requires:
+
+- a `commands/prune.md` following the shape of the existing command files, and
+- `prune` named in `skills/uroboros/SKILL.md` as a whole token, and
+- the usage text in `src/cli-help.js` listing it alongside the other commands.
+
+### No vacuous absence assertions
+
+The intent seat rejected the first attempt for a test that asserted a durable
+`CHANGES.diff` was **absent** after a no-op run without asserting anything was
+archived at all — so an implementation that never archived would have passed.
+
+Every assertion that something is absent must be paired with a positive control
+proving the surrounding behaviour happened: that the durable directory exists,
+that the other harness files were copied, and that the recorded archive status
+is `ok`.
+
 ## Invariants
 
 - No run outcome, verdict, gate status or exit code may change because of
@@ -137,6 +177,12 @@ failure mode being fixed.
 10. `prune` refuses an unsafe scratch root.
 11. **Positive control:** a run with `URO_ARTIFACT_ROOT` unset still writes to
     the default location, proving the default path is exercised.
+12. The no-diff case asserts the durable directory **was** created and the other
+    harness files **were** copied, alongside `CHANGES.diff` being absent.
+13. `generateRunJournal` still produces a note for a normal run — `facts.runId`
+    keeps its date-prefixed format.
+14. `prune` is present in `commands/`, named in `skills/uroboros/SKILL.md`, and
+    listed in the CLI usage text.
 
 Do not delete, skip, or weaken any existing test.
 

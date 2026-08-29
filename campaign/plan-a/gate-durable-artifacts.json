@@ -1,1 +1,1 @@
-[{"bin": "node", "args": ["--test", "test/run.test.js", "test/args.test.js", "test/cli.test.js", "test/isolation.test.js", "test/artifact-compat.test.js", "test/report.test.js"]}]
+[{"bin": "node", "args": ["--test"]}]
