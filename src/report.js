@@ -175,9 +175,27 @@ export function buildReportMarkdown(facts, {
   const correctnessUnverified = facts.correctnessVerdict === 'UNVERIFIED'
     || (facts.correctnessVerdict === null && facts.verdict === 'UNVERIFIED');
   const intentUnverified = facts.intentVerdict === 'UNVERIFIED';
+  const assumedDecision = facts.assumedDecision
+    ?? (facts.decision?.escalation === 'operator-absent' ? facts.decision : null);
+  const presence = assumedDecision?.presenceEvidence ?? {};
   const md = [
     `# CCC run ${facts.runId}`,
     ``,
+    ...(assumedDecision
+      ? [
+          `## Decision made while the operator was absent`,
+          ``,
+          `This was decided without you. The harness concluded you were away before `
+            + `continuing inside the isolated worktree.`,
+          `- **Presence evidence:** TTY attached: ${presence.ttyAttached ? 'yes' : 'no'}; `
+            + `invocation: ${presence.invocation ?? 'unknown'}; operator wait: `
+            + `${presence.operatorWait ?? 'unknown'}`,
+          `- **Reasoning:** ${assumedDecision.reasoning}`,
+          `- **Answers:** ${(assumedDecision.answers ?? [])
+            .map((answer) => `${answer.id}: ${answer.answer}`).join('; ') || '(none)'}`,
+          ``,
+        ]
+      : []),
     `- **Outcome:** ${facts.outcome}`,
     ...(facts.noOpReason === undefined ? [] : [`- **No-op reason:** ${facts.noOpReason}`]),
     `- **Gate:** ${facts.gateStatus}`,

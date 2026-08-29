@@ -221,6 +221,31 @@ function planWithDecision(plan, questions, resolution) {
     '\n\nProceed with the original task above, incorporating these decisions.';
 }
 
+function validatedResolution(questions, resolution) {
+  const supplied = Array.isArray(resolution?.answers) ? resolution.answers : [];
+  const answers = questions.map((question) => supplied.find((answer) => (
+    answer?.id === question.id
+      && typeof answer.answer === 'string'
+      && answer.answer.trim() !== ''
+  )));
+  if (answers.some((answer) => answer === undefined)) return null;
+
+  const hasAuthorityQuestion = questions.some((question) => question.kind === 'authority');
+  if (!hasAuthorityQuestion) return { answers };
+  const operatorAbsent = resolution?.escalation === 'operator-absent'
+    && resolution?.presenceEvidence?.ttyAttached === false
+    && resolution?.presenceEvidence?.invocation === 'non-interactive'
+    && typeof resolution?.reasoning === 'string'
+    && resolution.reasoning.trim() !== '';
+  if (!operatorAbsent) return null;
+  return {
+    answers,
+    escalation: 'operator-absent',
+    presenceEvidence: resolution.presenceEvidence,
+    reasoning: resolution.reasoning.trim(),
+  };
+}
+
 const APPROVAL_REQUEST = /(?:^|[.!?]\s+|\n\s*)(?:please\s+)?approve\s+(?:this|the)\s+(?:design|plan|proposal|approach)(?=\s*(?:[,.!?;:]|$|\band\b|\bso\b|\bbefore\b))/i;
 
 function executorRequestedApproval(result) {
@@ -571,6 +596,8 @@ export async function run(opts) {
   let executorTimedOut = Boolean(exec.timedOut);
   let challengeRound = 0;
   let decision = null;
+  let resolvedDecision = null;
+  let assumedDecision = null;
   const routeChallenges = async () => {
     while (!executorTimedOut && !conflictingIntent && mergePreparationFailure === null) {
       const challenge = detectChallenge({ dir: iso.dir });
@@ -598,12 +625,41 @@ export async function run(opts) {
         plan,
         task: originalPlan,
       });
-      const answers = Array.isArray(resolution?.answers) ? resolution.answers : [];
-      plan = planWithDecision(plan, challenge.questions, resolution);
+      const validated = validatedResolution(challenge.questions, resolution);
+      if (validated === null) {
+        decision = { questions: challenge.questions, mode, challengeRound };
+        break;
+      }
+      const answeredBy = 'planner';
+      const answers = validated.answers;
+      resolvedDecision = {
+        questions: challenge.questions,
+        answers,
+        answeredBy,
+        mode,
+        challengeRound,
+        ...(validated.escalation === undefined ? {} : {
+          escalation: validated.escalation,
+          presenceEvidence: validated.presenceEvidence,
+          reasoning: validated.reasoning,
+        }),
+      };
+      if (validated.escalation === 'operator-absent') assumedDecision = resolvedDecision;
+      plan = planWithDecision(plan, challenge.questions, { ...resolution, answers });
       unlinkSync(join(iso.dir, 'DECISION.md'));
+      reportEvent(eventReporter, runId, 'decision', 'resolved', { answers, answeredBy });
+      if (validated.escalation === 'operator-absent') {
+        reportEvent(eventReporter, runId, 'decision', 'assumed', {
+          questions: challenge.questions,
+          answers,
+          answeredBy,
+          escalation: validated.escalation,
+          presenceEvidence: validated.presenceEvidence,
+          reasoning: validated.reasoning,
+        });
+      }
       exec = await executePlan(plan);
       executorTimedOut = Boolean(exec.timedOut);
-      reportEvent(eventReporter, runId, 'decision', 'resolved', { answers });
     }
   };
   await routeChallenges();
@@ -1085,6 +1141,11 @@ export async function run(opts) {
       verifier: verifierModel,
     } });
   if (outcome === 'needs-decision') facts.decision = decision;
+  else if (resolvedDecision !== null) facts.decision = resolvedDecision;
+  if (assumedDecision !== null) {
+    facts.assumedDecision = assumedDecision;
+    facts.escalation = 'operator-absent';
+  }
   writeReport({ dir: iso.dir, facts, reporter: eventReporter, runId });
   return facts;
   } finally {

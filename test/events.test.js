@@ -138,7 +138,16 @@ test('decision events preserve challenge details and render specific one-line su
   });
   const resolved = createEvent({
     runId: 'decision-resolved', stage: 'decision', type: 'resolved',
-    fields: { answers },
+    fields: { answers, answeredBy: 'planner' },
+  });
+  const assumed = createEvent({
+    runId: 'decision-assumed', stage: 'decision', type: 'assumed',
+    fields: {
+      questions,
+      answers,
+      presenceEvidence: { ttyAttached: false, invocation: 'non-interactive' },
+      reasoning: 'No TTY was attached.',
+    },
   });
 
   assert.deepEqual({
@@ -150,7 +159,23 @@ test('decision events preserve challenge details and render specific one-line su
     stage: resolved.stage,
     type: resolved.type,
     answers: resolved.answers,
-  }, { stage: 'decision', type: 'resolved', answers });
+    answeredBy: resolved.answeredBy,
+  }, { stage: 'decision', type: 'resolved', answers, answeredBy: 'planner' });
+  assert.deepEqual({
+    stage: assumed.stage,
+    type: assumed.type,
+    questions: assumed.questions,
+    answers: assumed.answers,
+    presenceEvidence: assumed.presenceEvidence,
+    reasoning: assumed.reasoning,
+  }, {
+    stage: 'decision',
+    type: 'assumed',
+    questions,
+    answers,
+    presenceEvidence: { ttyAttached: false, invocation: 'non-interactive' },
+    reasoning: 'No TTY was attached.',
+  });
 
   const challengedSummary = formatEventSummary(challenged);
   const resolvedSummary = formatEventSummary(resolved);
@@ -509,6 +534,48 @@ test('fully exercised runs have exact pair equality with both event vocabularies
       runUnit: async ({ runId }) => success(runId, { inputTokens: 2 }),
     });
 
+    let decisionExecutorCalls = 0;
+    const decisionFacts = await run({
+      task: 'Resolve the authority challenge in isolation.',
+      target: tgt,
+      gate: [],
+      gateRetries: 0,
+      scratchRoot: scr,
+      runId: 'conformance-decision-assumed',
+      mode: 'autonomous',
+      reporter: (event) => unitEvents.push(event),
+      decisionResolver: async () => ({
+        answers: [{ id: 'Q1', answer: 'Proceed only in the isolated worktree.' }],
+        escalation: 'operator-absent',
+        presenceEvidence: {
+          ttyAttached: false,
+          invocation: 'non-interactive',
+          operatorWait: 'not-acknowledged',
+        },
+        reasoning: 'No TTY was attached, so no operator was available to answer.',
+      }),
+      adapters: {
+        runExecutor: async ({ cwd }) => {
+          decisionExecutorCalls++;
+          if (decisionExecutorCalls === 1) {
+            writeFileSync(join(cwd, 'DECISION.md'), [
+              '## Q1',
+              'Kind: authority',
+              'Question: May this proceed in the isolated worktree?',
+              'Recommendation: Proceed only in the isolated worktree.',
+              '',
+            ].join('\n'));
+            return { changedFiles: ['DECISION.md'], lastMessage: 'authority needed' };
+          }
+          writeFileSync(join(cwd, 'assumed.txt'), 'isolated decision\n');
+          return { changedFiles: ['assumed.txt'], lastMessage: 'continued in isolation' };
+        },
+        runGate: async () => ({ passed: true, results: [] }),
+        runVerifier: async () => ({ verdict: 'NO_BLOCKERS', launchFailed: false }),
+      },
+    });
+    assert.equal(decisionFacts.outcome, 'review-ready');
+
     const journalFacts = result.units[0].facts;
     generatedNote = generateRunJournal(join(journalFacts.dir, 'uro-runfacts.json'), {
       reporter: (event) => journalEvents.push(event),
@@ -527,10 +594,6 @@ test('fully exercised runs have exact pair equality with both event vocabularies
       'gate/stalled': 'Requires a deliberately hung gate process.',
       // Diff production uses Git and is not deliberately hung in this healthy run.
       'diff/stalled': 'Requires a deliberately hung diff process.',
-      // The healthy campaign contains no executor challenge that raises questions.
-      'decision/challenged': 'No executor challenge is raised by this healthy campaign.',
-      // Without an executor challenge, the campaign has no answers to resolve.
-      'decision/resolved': 'No executor challenge is resolved by this healthy campaign.',
       // Both verifier passes complete; their stall path has separate supervision coverage.
       'verify/stalled': 'Requires a deliberately silent verifier process.',
       // The clean verifier presents no blocking finding for the executor to resist.
@@ -542,7 +605,7 @@ test('fully exercised runs have exact pair equality with both event vocabularies
       // Report writes are synchronous, so the event loop cannot observe a mid-write timer gap.
       'report/stalled': 'Unreachable during synchronous report writes.',
     });
-    assert.equal(Object.keys(deliberatelyUncovered).length, 13,
+    assert.equal(Object.keys(deliberatelyUncovered).length, 11,
       'the deliberately-uncovered ratchet must not grow without an explicit test change');
     assert.ok(Object.values(deliberatelyUncovered).every((reason) => reason.length >= 24),
       'every allowlisted pair must carry a substantive reason');

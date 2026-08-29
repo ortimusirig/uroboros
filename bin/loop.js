@@ -21,6 +21,7 @@ import {
   launchDashboard,
 } from '../src/dashboard-launcher.js';
 import { readEnv } from '../src/env-compat.js';
+import { createAutonomousDecisionResolver } from '../src/decision-resolver.js';
 
 // Short path, outside OneDrive and outside AppData (both are rejected by
 // assertSafeScratchRoot; AppData is MSIX-redirected under a packaged host).
@@ -290,6 +291,9 @@ async function main() {
     gateTimeout: opts.gateTimeout,
     verifierProbeCompleted: true,
     mode: opts.mode,
+    ...(opts.mode === 'autonomous'
+      ? { decisionResolver: createAutonomousDecisionResolver() }
+      : {}),
     correctsRunId: opts.correctsRunId,
     scratchRoot: SCRATCH_ROOT,
     runId,

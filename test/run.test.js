@@ -60,6 +60,14 @@ Options: follow the task literally, follow the existing convention
 Recommendation: follow the existing convention
 `;
 
+const AUTHORITY_DECISION_CONTENT = `
+## Q1
+Kind: authority
+Question: May the executor choose on the operator's behalf?
+Options: halt, follow the isolated-worktree recommendation
+Recommendation: follow the isolated-worktree recommendation
+`;
+
 test('correctness and intent findings are separately lifted while verdict is merged', async () => {
   const scr = scratch();
   const verifierCalls = [];
@@ -614,11 +622,13 @@ test('a passing verifier preflight probe leaves executor dispatch unchanged', as
 
 test('a sentinel-only executor challenge needs a decision in manual mode', async () => {
   const scr = scratch();
+  const events = [];
   let gateCalls = 0;
   let verifierCalls = 0;
   const facts = await run({
     task: 'do the task', target: makeTarget(), gate: [], gateRetries: 0,
     scratchRoot: scr, runId: 'manual-decision', mode: 'manual',
+    reporter: (event) => events.push(event),
     adapters: {
       runExecutor: async ({ cwd }) => {
         writeFileSync(join(cwd, 'DECISION.md'), DECISION_CONTENT);
@@ -643,22 +653,28 @@ test('a sentinel-only executor challenge needs a decision in manual mode', async
   assert.equal(facts.decision.questions[0].id, 'Q1');
   assert.equal(facts.decision.mode, 'manual');
   assert.equal(facts.decision.challengeRound, 1);
+  assert.equal(events.filter((event) => (
+    event.stage === 'decision' && event.type === 'challenged'
+  )).length, 1);
   rmSync(scr, { recursive: true, force: true });
 });
 
-test('a clean executor run in manual mode preserves no-op', async () => {
+test('a clean executor run is unchanged in every mode', async () => {
   const scr = scratch();
-  const facts = await run({
-    task: 'do the task', target: makeTarget(), gate: [], gateRetries: 0,
-    scratchRoot: scr, runId: 'manual-noop', mode: 'manual',
-    adapters: {
-      runExecutor: async () => ({ changedFiles: [], lastMessage: 'nothing', exitCode: 0 }),
-      runGate: async () => ({ passed: true, results: [] }),
-      runVerifier: async () => { throw new Error('verifier must not launch for no-op'); },
-    },
-  });
-
-  assert.equal(facts.outcome, 'no-op');
+  for (const mode of ['manual', 'autonomous']) {
+    const facts = await run({
+      task: 'do the task', target: makeTarget(), gate: [], gateRetries: 0,
+      scratchRoot: scr, runId: `${mode}-noop`, mode,
+      decisionResolver: async () => { throw new Error('no challenge must not resolve'); },
+      adapters: {
+        runExecutor: async () => ({ changedFiles: [], lastMessage: 'nothing', exitCode: 0 }),
+        runGate: async () => ({ passed: true, results: [] }),
+        runVerifier: async () => { throw new Error('verifier must not launch for no-op'); },
+      },
+    });
+    assert.equal(facts.outcome, 'no-op');
+    assert.equal(facts.decision, undefined);
+  }
   rmSync(scr, { recursive: true, force: true });
 });
 
@@ -699,12 +715,14 @@ test('a sentinel plus substantive files follows the normal gate and verifier pat
 
 test('autonomous mode resolves a sentinel challenge and reruns the executor', async () => {
   const scr = scratch();
+  const events = [];
   const executorPlans = [];
   const resolverCalls = [];
   let executorCalls = 0;
   const facts = await run({
     task: 'do the task', target: makeTarget(), gate: [], gateRetries: 0,
     scratchRoot: scr, runId: 'autonomous-decision', mode: 'autonomous',
+    reporter: (event) => events.push(event),
     decisionResolver: async (input) => {
       resolverCalls.push(input);
       return { answers: [{ id: 'Q1', answer: 'Follow the existing convention.' }] };
@@ -737,6 +755,149 @@ test('autonomous mode resolves a sentinel challenge and reruns the executor', as
   assert.match(executorPlans[1], /Answer: Follow the existing convention\./);
   assert.equal(readFileSync(join(facts.dir, 'TASK.md'), 'utf8'), executorPlans[1]);
   assert.equal(existsSync(join(facts.dir, 'DECISION.md')), false);
+  const resolved = events.find((event) => (
+    event.stage === 'decision' && event.type === 'resolved'
+  ));
+  assert.equal(resolved.answeredBy, 'planner');
+  assert.equal(facts.decision.answeredBy, 'planner');
+  rmSync(scr, { recursive: true, force: true });
+});
+
+test('an authority answer is rejected while operator-presence evidence is present', async () => {
+  const scr = scratch();
+  let executorCalls = 0;
+  const facts = await run({
+    task: 'do the task', target: makeTarget(), gate: [], gateRetries: 0,
+    scratchRoot: scr, runId: 'authority-present', mode: 'autonomous',
+    decisionResolver: async () => ({
+      answers: [{ id: 'Q1', answer: 'follow the recommendation' }],
+      escalation: 'operator-absent',
+      presenceEvidence: { ttyAttached: true, invocation: 'interactive' },
+      reasoning: 'The operator is actually present.',
+    }),
+    adapters: {
+      runExecutor: async ({ cwd }) => {
+        executorCalls++;
+        writeFileSync(join(cwd, 'DECISION.md'), AUTHORITY_DECISION_CONTENT);
+        return { changedFiles: ['DECISION.md'], lastMessage: 'need authority', exitCode: 0 };
+      },
+      runGate: async () => { throw new Error('gate must not run'); },
+      runVerifier: async () => { throw new Error('verifier must not run'); },
+    },
+  });
+
+  assert.equal(facts.outcome, 'needs-decision');
+  assert.equal(executorCalls, 1);
+  assert.equal(facts.decision.questions[0].kind, 'authority');
+  rmSync(scr, { recursive: true, force: true });
+});
+
+test('an authority question with no TTY is recorded as an operator-absent assumption', async () => {
+  const scr = scratch();
+  const events = [];
+  let executorCalls = 0;
+  const presenceEvidence = {
+    ttyAttached: false,
+    invocation: 'non-interactive',
+    operatorWait: 'not-acknowledged',
+  };
+  const reasoning = 'No TTY was attached, so there was no operator available to answer.';
+  const facts = await run({
+    task: 'do the task', target: makeTarget(), gate: [], gateRetries: 0,
+    scratchRoot: scr, runId: 'authority-absent', mode: 'autonomous',
+    reporter: (event) => events.push(event),
+    decisionResolver: async () => ({
+      answers: [{ id: 'Q1', answer: 'follow the isolated-worktree recommendation' }],
+      escalation: 'operator-absent',
+      presenceEvidence,
+      reasoning,
+    }),
+    adapters: {
+      runExecutor: async ({ cwd }) => {
+        executorCalls++;
+        if (executorCalls === 1) {
+          writeFileSync(join(cwd, 'DECISION.md'), AUTHORITY_DECISION_CONTENT);
+          return { changedFiles: ['DECISION.md'], lastMessage: 'need authority', exitCode: 0 };
+        }
+        writeFileSync(join(cwd, 'new.txt'), 'resolved authority work');
+        return { changedFiles: ['new.txt'], lastMessage: 'continued safely', exitCode: 0 };
+      },
+      runGate: async () => ({ passed: true, results: [] }),
+      runVerifier: async () => ({ verdict: 'NO_BLOCKERS', launchFailed: false }),
+    },
+  });
+
+  assert.equal(facts.outcome, 'review-ready');
+  assert.equal(executorCalls, 2);
+  assert.equal(facts.decision.escalation, 'operator-absent');
+  assert.equal(facts.escalation, 'operator-absent');
+  assert.equal(facts.decision.answeredBy, 'planner');
+  assert.deepEqual(facts.decision.presenceEvidence, presenceEvidence);
+  assert.equal(facts.decision.reasoning, reasoning);
+  const assumed = events.find((event) => (
+    event.stage === 'decision' && event.type === 'assumed'
+  ));
+  assert.deepEqual(assumed.questions, facts.decision.questions);
+  assert.deepEqual(assumed.answers, facts.decision.answers);
+  assert.deepEqual(assumed.presenceEvidence, presenceEvidence);
+  assert.equal(assumed.reasoning, reasoning);
+  const report = readFileSync(join(facts.dir, 'uro-report.md'), 'utf8');
+  assert.match(report, /This was decided without you/);
+  assert.ok(report.indexOf('This was decided without you') < report.indexOf('## What changed'));
+  assert.match(report, /TTY attached: no; invocation: non-interactive/);
+  rmSync(scr, { recursive: true, force: true });
+});
+
+test('challenge-round exhaustion halts instead of starting another executor', async () => {
+  const scr = scratch();
+  let executorCalls = 0;
+  let resolverCalls = 0;
+  const facts = await run({
+    task: 'do the task', target: makeTarget(), gate: [], gateRetries: 0,
+    scratchRoot: scr, runId: 'challenge-exhaustion', mode: 'autonomous', challengeRounds: 2,
+    decisionResolver: async () => {
+      resolverCalls++;
+      return { answers: [{ id: 'Q1', answer: 'follow the recommendation' }] };
+    },
+    adapters: {
+      runExecutor: async ({ cwd }) => {
+        executorCalls++;
+        writeFileSync(join(cwd, 'DECISION.md'), DECISION_CONTENT);
+        return { changedFiles: ['DECISION.md'], lastMessage: 'challenge again', exitCode: 0 };
+      },
+      runGate: async () => { throw new Error('gate must not run'); },
+      runVerifier: async () => { throw new Error('verifier must not run'); },
+    },
+  });
+
+  assert.equal(facts.outcome, 'needs-decision');
+  assert.equal(facts.decision.challengeRound, 2);
+  assert.equal(executorCalls, 2);
+  assert.equal(resolverCalls, 1);
+  rmSync(scr, { recursive: true, force: true });
+});
+
+test('a resolver returning no answers halts without rerunning the executor', async () => {
+  const scr = scratch();
+  let executorCalls = 0;
+  const facts = await run({
+    task: 'do the task', target: makeTarget(), gate: [], gateRetries: 0,
+    scratchRoot: scr, runId: 'empty-resolution', mode: 'autonomous',
+    decisionResolver: async () => ({ answers: [] }),
+    adapters: {
+      runExecutor: async ({ cwd }) => {
+        executorCalls++;
+        writeFileSync(join(cwd, 'DECISION.md'), DECISION_CONTENT);
+        return { changedFiles: ['DECISION.md'], lastMessage: 'need a decision', exitCode: 0 };
+      },
+      runGate: async () => { throw new Error('gate must not run'); },
+      runVerifier: async () => { throw new Error('verifier must not run'); },
+    },
+  });
+
+  assert.equal(facts.outcome, 'needs-decision');
+  assert.equal(executorCalls, 1);
+  assert.equal(existsSync(join(facts.dir, 'DECISION.md')), true);
   rmSync(scr, { recursive: true, force: true });
 });
 
