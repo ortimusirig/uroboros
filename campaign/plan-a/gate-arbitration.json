@@ -1,0 +1,1 @@
+[{"bin": "node", "args": ["--test", "test/run.test.js", "test/events.test.js", "test/decision.test.js", "test/report.test.js", "test/cli.test.js", "test/args.test.js"]}]
