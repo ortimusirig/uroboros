@@ -12,6 +12,8 @@ import { pathToFileURL } from 'node:url';
 import { URO_DASHBOARD_MARKER } from './dashboard-config.js';
 import { CAMPAIGN_EVENTS_FILENAME, readEventStream } from './event-stream.js';
 import { resolveArtifact } from './artifacts.js';
+import { renderDashboardBoard } from './dashboard-board.js';
+import { addUsage, EMPTY_USAGE } from './usage.js';
 import {
   escapeHtml,
   renderRunTranscript,
@@ -55,6 +57,9 @@ function emptyRun(directory, overrides = {}) {
     verifiers: { correctness: null, intent: null },
     gateCommands: [],
     gateResult: 'pending',
+    outcome: null,
+    debateRoundCount: 0,
+    tokenTotal: 0,
     diff: emptyDiff(),
     ...overrides,
   };
@@ -177,6 +182,14 @@ function lastTimestamp(events) {
   return null;
 }
 
+function usageTokenTotal(usage) {
+  const input = typeof usage?.inputTokens === 'number' && Number.isFinite(usage.inputTokens)
+    ? Math.max(0, usage.inputTokens) : 0;
+  const output = typeof usage?.outputTokens === 'number' && Number.isFinite(usage.outputTokens)
+    ? Math.max(0, usage.outputTokens) : 0;
+  return input + output;
+}
+
 export function extractTaskTitle(text) {
   if (typeof text !== 'string') return null;
   const lines = text.split(/\r?\n/);
@@ -268,9 +281,15 @@ function digestRunDirectory(runDirectory) {
   const events = stream.events.filter((event) => event?.runId === stream.runId);
   const verifiers = { correctness: null, intent: null };
   const gateCommands = [];
+  let eventUsage = EMPTY_USAGE;
+  let eventDebateRoundCount = 0;
   let gateResult = 'pending';
 
   for (const event of events) {
+    eventUsage = addUsage(eventUsage, event.tokens);
+    if (event.stage === 'debate' && Number.isSafeInteger(event.debateRound)) {
+      eventDebateRoundCount = Math.max(eventDebateRoundCount, event.debateRound);
+    }
     if (event.stage === 'verify' && event.type === 'finish'
       && (event.pass === 'correctness' || event.pass === 'intent')) {
       verifiers[event.pass] = {
@@ -302,6 +321,10 @@ function digestRunDirectory(runDirectory) {
 
   const facts = readRunFacts(stream.eventsPath);
   const completedVerifiers = enrichVerifiersFromFacts(verifiers, facts);
+  const recordedTokenUsage = facts?.tokens?.total;
+  const tokenUsage = recordedTokenUsage !== null && typeof recordedTokenUsage === 'object'
+    && !Array.isArray(recordedTokenUsage)
+    ? recordedTokenUsage : eventUsage;
   if (gateResult === 'pending' && (facts?.gateStatus === 'passed' || facts?.gateStatus === 'failed')) {
     gateResult = facts.gateStatus;
   }
@@ -369,6 +392,10 @@ function digestRunDirectory(runDirectory) {
     verifiers: completedVerifiers,
     gateCommands,
     gateResult,
+    outcome: typeof facts?.outcome === 'string' ? facts.outcome : null,
+    debateRoundCount: Number.isSafeInteger(facts?.debate?.roundsRun)
+      ? facts.debate.roundsRun : eventDebateRoundCount,
+    tokenTotal: usageTokenTotal(tokenUsage),
     diff: readDiffPreview(worktreeDirectory),
   };
 }
@@ -512,6 +539,10 @@ export function renderTranscriptDetail(run) {
   return renderRunTranscript(run, renderUnifiedDiff);
 }
 
+export function renderBoardDetail(snapshot) {
+  return renderDashboardBoard(snapshot);
+}
+
 export function snapshotForClient(snapshot) {
   return {
     mode: snapshot.mode,
@@ -536,20 +567,22 @@ function clientScript() {
   return String.raw`
 const connection=document.getElementById('connection');
 const root=document.getElementById('runs');
-const state={snapshot:JSON.parse(document.getElementById('initial-dashboard-data').textContent),runId:null};
+const state={snapshot:JSON.parse(document.getElementById('initial-dashboard-data').textContent),runId:null,view:'transcript'};
 function esc(value){return String(value==null?'':value).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;').replaceAll("'",'&#39;')}
 function label(stateValue){if(stateValue==='running')return'Live';if(stateValue==='finished')return'Finished';if(stateValue==='error')return'Read error';return'Waiting'}
 function mostRecent(runs){return runs.reduce(function(latest,run){if(latest===null)return run;const runTime=Date.parse(run.lastEventTs||run.startTs||'');const latestTime=Date.parse(latest.lastEventTs||latest.startTs||'');if(!Number.isFinite(runTime))return latest;return!Number.isFinite(latestTime)||runTime>latestTime?run:latest},null)}
 function defaultRunId(){const runs=state.snapshot.runs;const run=mostRecent(runs.filter(function(item){return item.state==='running'}))||mostRecent(runs.filter(function(item){return item.state==='waiting'}))||runs[0];return run?run.runId:null}
 function syncPicker(){const picker=document.getElementById('run-picker');if(!picker)return;const wanted=state.runId&&state.snapshot.runs.some(function(run){return run.runId===state.runId})?state.runId:defaultRunId();picker.innerHTML=state.snapshot.runs.map(function(run){return'<option value="'+esc(run.runId)+'">'+esc(run.runId)+' — '+esc(label(run.state))+'</option>'}).join('');picker.disabled=state.snapshot.runs.length===0;if(wanted!==null)picker.value=wanted;state.runId=wanted}
-async function refreshTranscript(){const target=document.getElementById('transcript-body');if(!target)return;if(state.runId===null){target.innerHTML='<div class="transcript-layout"><section class="transcript-pane"><p class="empty">No run is available yet.</p></section><aside class="inspector-pane"><p class="muted">Nothing to inspect.</p></aside></div>';return}target.setAttribute('aria-busy','true');try{const response=await fetch('/detail?runId='+encodeURIComponent(state.runId),{cache:'no-store'});target.innerHTML=response.ok?await response.text():'<p class="empty">That run is no longer available.</p>'}catch(error){target.innerHTML='<p class="empty">Could not load run: '+esc(error.message)+'</p>'}finally{target.removeAttribute('aria-busy')}}
+let transcriptRequest=0;
+async function refreshTranscript(){const request=++transcriptRequest;const target=document.getElementById('transcript-body');if(!target)return;const requestedRunId=state.runId;if(requestedRunId===null){target.removeAttribute('aria-busy');target.innerHTML='<div class="transcript-layout"><section class="transcript-pane"><p class="empty">No run is available yet.</p></section><aside class="inspector-pane"><p class="muted">Nothing to inspect.</p></aside></div>';return}target.setAttribute('aria-busy','true');try{const response=await fetch('/detail?runId='+encodeURIComponent(requestedRunId),{cache:'no-store'});const html=response.ok?await response.text():'<p class="empty">That run is no longer available.</p>';if(request===transcriptRequest)target.innerHTML=html}catch(error){if(request===transcriptRequest)target.innerHTML='<p class="empty">Could not load run: '+esc(error.message)+'</p>'}finally{if(request===transcriptRequest)target.removeAttribute('aria-busy')}}
+function showDashboardTab(name){state.view=name;document.querySelectorAll('[data-dashboard-tab]').forEach(function(button){button.setAttribute('aria-selected',String(button.dataset.dashboardTab===name))});document.querySelectorAll('[data-dashboard-panel]').forEach(function(panel){panel.hidden=panel.dataset.dashboardPanel!==name})}
 function showInspectorTab(name){document.querySelectorAll('[data-inspector-tab]').forEach(function(button){button.setAttribute('aria-pressed',String(button.dataset.inspectorTab===name))});document.querySelectorAll('[data-inspector-panel]').forEach(function(panel){panel.hidden=panel.dataset.inspectorPanel!==name})}
 function diffKey(value){return String(value||'').replace(/\\/g,'/').replace(/^(?:[.][/]|[ab][/])/,'')}
 root.addEventListener('change',function(event){if(event.target.id==='run-picker'){state.runId=event.target.value;refreshTranscript()}});
-root.addEventListener('click',function(event){const tab=event.target.closest('[data-inspector-tab]');if(tab){showInspectorTab(tab.dataset.inspectorTab);return}const file=event.target.closest('[data-file-diff]');if(!file)return;showInspectorTab('diff');const wanted=diffKey(file.dataset.fileDiff);document.querySelectorAll('[data-diff-path]').forEach(function(section){const match=diffKey(section.dataset.diffPath)===wanted;section.hidden=!match;if(match){section.open=true;section.scrollIntoView({behavior:'smooth',block:'start'})}})});
+root.addEventListener('click',function(event){const dashboardTab=event.target.closest('[data-dashboard-tab]');if(dashboardTab){showDashboardTab(dashboardTab.dataset.dashboardTab);return}const boardRun=event.target.closest('[data-board-run]');if(boardRun){state.runId=boardRun.dataset.boardRun;syncPicker();showDashboardTab('transcript');refreshTranscript();return}const tab=event.target.closest('[data-inspector-tab]');if(tab){showInspectorTab(tab.dataset.inspectorTab);return}const file=event.target.closest('[data-file-diff]');if(!file)return;showInspectorTab('diff');const wanted=diffKey(file.dataset.fileDiff);document.querySelectorAll('[data-diff-path]').forEach(function(section){const match=diffKey(section.dataset.diffPath)===wanted;section.hidden=!match;if(match){section.open=true;section.scrollIntoView({behavior:'smooth',block:'start'})}})});
 const picker=document.getElementById('run-picker');state.runId=picker&&!picker.disabled?picker.value:null;
 const stream=new EventSource('/events');
-stream.addEventListener('snapshot',function(event){state.snapshot=JSON.parse(event.data).snapshot;syncPicker();refreshTranscript();connection.textContent='Live'});
+stream.addEventListener('snapshot',function(event){const payload=JSON.parse(event.data);state.snapshot=payload.snapshot;const board=document.getElementById('board-body');if(board&&typeof payload.boardHtml==='string')board.innerHTML=payload.boardHtml;syncPicker();refreshTranscript();connection.textContent='Live'});
 stream.onopen=function(){connection.textContent='Live'};
 stream.onerror=function(){connection.textContent='Reconnecting…'};
 `;
@@ -574,6 +607,35 @@ body>header p{margin:.15rem 0 0;color:var(--muted);word-break:break-all}
 main{padding:1rem;min-height:calc(100vh - 70px);max-width:1800px;margin:0 auto;width:100%}
 button,select{font:inherit}
 button{color:inherit}
+.dashboard-tabs{display:flex;gap:.25rem;margin-bottom:1rem;border-bottom:1px solid var(--line)}
+.dashboard-tabs button{border:0;border-bottom:3px solid transparent;background:transparent;padding:.6rem .85rem;cursor:pointer;color:var(--muted)}
+.dashboard-tabs button[aria-selected="true"]{border-color:var(--ink);color:var(--ink);font-weight:700}
+.board-grid{display:grid;grid-template-columns:repeat(5,minmax(220px,1fr));gap:.8rem;align-items:start;overflow-x:auto;padding-bottom:.5rem}
+.board-column{min-height:14rem;background:var(--soft);border:1px solid var(--line);border-radius:7px;padding:.65rem}
+.board-column>header{display:flex;align-items:center;justify-content:space-between;gap:.5rem;margin-bottom:.65rem}
+.board-column h2{font-size:.85rem;margin:0}
+.board-column>header span{min-width:1.6rem;text-align:center;border-radius:999px;background:var(--card);color:var(--muted);font-size:.75rem;padding:.05rem .4rem}
+.board-empty{color:var(--muted);margin:.5rem 0;padding:.6rem;border:1px dashed var(--line);border-radius:5px;background:var(--card)}
+.board-card{background:var(--card);border:1px solid var(--line);border-top:3px solid var(--warn);border-radius:6px;margin:.55rem 0;overflow:hidden}
+.board-card.passed{border-top-color:var(--ok)}
+.board-card.failed{border-top-color:var(--bad)}
+.board-card-select{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:.5rem;width:100%;border:0;background:transparent;padding:.7rem;text-align:left;cursor:pointer}
+.board-card-select:hover{background:var(--soft)}
+.board-card-select:focus-visible{outline:2px solid var(--ink);outline-offset:-2px}
+.board-card-identity{display:flex;min-width:0;flex-direction:column;gap:.1rem}
+.board-card-identity strong{overflow-wrap:anywhere}
+.board-card-identity code{color:var(--muted);font-size:.72rem;overflow-wrap:anywhere}
+.board-outcome{align-self:start;border:1px solid currentColor;border-radius:999px;padding:.08rem .4rem;font-size:.7rem;white-space:nowrap}
+.board-outcome.passed,.result.passed,.result.clean{color:var(--ok)}
+.board-outcome.failed,.result.failed,.result.issues{color:var(--bad)}
+.board-outcome.pending,.result.pending,.result.unknown{color:var(--warn)}
+.board-consensus{grid-column:1/-1;border-left:3px solid var(--line);padding:.2rem .4rem;background:var(--soft);font-size:.75rem}
+.board-consensus.agreement{border-color:var(--ok)}
+.board-consensus.disagreement{border-color:var(--bad);color:var(--bad)}
+.board-metrics{grid-column:1/-1;display:flex;flex-direction:column;gap:.2rem;margin:.1rem 0 0;font-size:.75rem}
+.board-metric{display:flex;justify-content:space-between;gap:.6rem}
+.board-metric>span:first-child{color:var(--muted)}
+.board-metric>span:last-child{text-align:right;overflow-wrap:anywhere;font-variant-numeric:tabular-nums}
 .transcript-header{display:flex;align-items:center;justify-content:space-between;gap:1rem;background:var(--card);border:1px solid var(--line);border-radius:7px;padding:.7rem .85rem;margin-bottom:1rem}
 .transcript-header small,.muted{color:var(--muted)}
 .run-picker-label{display:flex;align-items:center;gap:.55rem;font-weight:650;min-width:min(620px,75vw)}
@@ -649,7 +711,12 @@ button{color:inherit}
 </head>
 <body>
 <header><div><h1>${URO_DASHBOARD_MARKER}</h1><p>${escapeHtml(snapshot.sourcePath)}</p></div><span id="connection" class="connection">Connecting…</span></header>
-<main id="runs">${renderDashboardContent(snapshot)}</main>
+<main id="runs"><nav class="dashboard-tabs" role="tablist" aria-label="Dashboard views">
+<button type="button" role="tab" data-dashboard-tab="transcript" aria-selected="true">Transcript</button>
+<button type="button" role="tab" data-dashboard-tab="board" aria-selected="false">Board</button>
+</nav>
+<section role="tabpanel" data-dashboard-panel="transcript">${renderDashboardContent(snapshot)}</section>
+<section role="tabpanel" data-dashboard-panel="board" hidden><div id="board-body">${renderDashboardBoard(snapshot)}</div></section></main>
 <script id="initial-dashboard-data" type="application/json">${jsonForInlineScript(snapshotForClient(snapshot))}</script>
 <script>${clientScript()}</script>
 </body>

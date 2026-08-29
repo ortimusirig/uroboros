@@ -9,7 +9,7 @@ export function escapeHtml(value) {
     .replaceAll("'", '&#39;');
 }
 
-function oneLine(value) {
+export function oneLine(value) {
   return String(value ?? '').replace(/[\r\n\u0000]+/g, ' ').trim();
 }
 
