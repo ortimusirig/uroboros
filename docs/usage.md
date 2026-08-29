@@ -1,7 +1,36 @@
 # Usage
 
+## Sequential queues
+
+`loop queue --file <path>` reads a JSON list of `{ task, gate, name? }` units and runs
+them one at a time against the current working directory. Paths in the list are
+resolved relative to the queue file. Run `loop queue --file queue.json --dry-run`
+before an unattended session to validate every task and gate path without launching
+an agent.
+
+The default mode is `manual`. `--mode autonomous` is passed to each `loop run`, so the
+planner can resolve executor challenges. A safe result still requires all three
+signals: `gateStatus: passed`, correctness `NO_BLOCKERS`, and intent `NO_BLOCKERS`.
+Any other outcome or verdict stops the queue; it is never retried or skipped.
+
+Use `--max-runs <n>` to bound the number of attempted units and `--token-budget <n>`
+to bound observed input-plus-output tokens. After the first unit, the runner forecasts
+the next unit from the observed average cost and stops before that forecast would cross
+the budget. A run already in flight always finishes and an approved result is landed
+before the budget stop takes effect.
+
+The target must be a clean Git worktree before execution. Approved diffs are checked
+with a non-mutating Git apply first, applied and committed only for their touched paths,
+and never pushed. `queue-log.jsonl` beside the queue file receives one JSON line per
+attempted unit. The final summary reports landed units, the stop reason, total tokens,
+and—above the totals—any decisions assumed while the operator was absent. When the
+log is inside the target worktree, its exact untracked path is exempted from the clean-tree
+check so a later unit or invocation does not self-block; tracked changes to that path are
+still treated as dirty. Keep the queue definition tracked or outside the target worktree.
+
 ```
 node bin/loop.js run --task <plan-file-or-prose> --target <folder> --gate <gate.json> [--gate-retries M] [--executor-model MODEL] [--executor-effort EFFORT] [--verifier-model MODEL] [--artifact-root DIRECTORY] [--port PORT] [--open] [--no-dashboard] [--quiet]
+node bin/loop.js queue --file <queue.json> [--mode <manual|autonomous>] [--max-runs N] [--token-budget TOKENS] [--dry-run]
 node bin/loop.js batch --task <plan-1> --task <plan-2> --target <folder> --gate <gate.json> [--gate-retries M] [--executor-model MODEL] [--executor-effort EFFORT] [--verifier-model MODEL] [--artifact-root DIRECTORY] [--concurrency N] [--token-budget TOKENS] [--rounds N] [--round N ...] [--unit-kind KIND] [--unit-id ID ...] [--perspective NAME ...] [--depends-on CHILD=PARENT ...] [--port PORT] [--open] [--no-dashboard] [--quiet]
 node bin/loop.js batch --campaign <campaign.json> [--artifact-root DIRECTORY] [--port PORT] [--open] [--no-dashboard] [--quiet]
 node bin/loop.js status <run-or-campaign-directory>

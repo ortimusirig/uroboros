@@ -88,8 +88,31 @@ One `loop run` is one pass:
 plan.md ──► Codex writes (isolated copy) ──► gate (exit codes) ──► bounded review/fix loop ──► report
 ```
 
-Your target folder is never modified. Work lands on a branch in an isolated copy, and you
-review a diff.
+Run approved plans sequentially with `loop queue`. Relative task and gate paths are
+resolved beside the queue file; the current directory is the target repository:
+
+```json
+[
+  { "name": "first", "task": "plan-first.md", "gate": "gate-first.json" },
+  { "name": "second", "task": "plan-second.md", "gate": "gate-second.json" }
+]
+```
+
+```bash
+loop queue --file queue.json --mode autonomous --max-runs 3 --token-budget 50000
+```
+
+The queue stops on the first non-approved result. A change lands only when the gate
+passed and both verifier seats reported `NO_BLOCKERS`; `ISSUES` and `UNVERIFIED` always
+stop the queue. Each landed unit is committed locally, nothing is pushed, and
+`queue-log.jsonl` is appended beside the queue file. Use `--dry-run` to validate and
+print every resolved path without starting a run or spending tokens.
+An untracked `queue-log.jsonl` inside the target is the sole clean-tree exception; the
+queue definition itself must be tracked or kept outside the target repository.
+
+A single `loop run` never modifies the target folder: work lands on a branch in an
+isolated copy for review. `loop queue` is the explicit automation that applies and commits
+only fully approved diffs to the clean target, one at a time.
 
 ## Why this shape
 
@@ -111,10 +134,11 @@ billed through this skill.
 Windows is the primary, fully-exercised target. macOS and Linux should work — pure Node,
 POSIX `which`, plain `spawn` — but treat the first Unix run as verification.
 
-After plugin installation, these are the ten namespaced slash commands:
+After plugin installation, these are the eleven namespaced slash commands:
 
 ```text
 /uroboros:run
+/uroboros:queue
 /uroboros:batch
 /uroboros:status
 /uroboros:dashboard

@@ -340,3 +340,49 @@ test('iterative rounds reject non-candidate batch shapes during argument parsing
     '--perspective', 'minimal-change', '--unit-kind', 'node', '--rounds', '2',
   ]), /iterative.*only candidate/i);
 });
+
+test('queue defaults to manual mode with unbounded limits', () => {
+  assert.deepEqual(parseArgs(['queue', '--file', 'queue.json']), {
+    command: 'queue',
+    file: 'queue.json',
+    mode: 'manual',
+    dryRun: false,
+  });
+});
+
+test('queue parses autonomous mode, limits, and dry-run', () => {
+  assert.deepEqual(parseArgs([
+    'queue',
+    '--file', 'queue.json',
+    '--mode', 'autonomous',
+    '--max-runs', '3',
+    '--token-budget', '25000',
+    '--dry-run',
+  ]), {
+    command: 'queue',
+    file: 'queue.json',
+    mode: 'autonomous',
+    maxRuns: 3,
+    tokenBudget: 25000,
+    dryRun: true,
+  });
+});
+
+test('queue rejects missing files, invalid modes, and non-positive or fractional limits', () => {
+  assert.throws(() => parseArgs(['queue']), /missing required option: --file/);
+  assert.throws(
+    () => parseArgs(['queue', '--file', 'q.json', '--mode', 'automatic']),
+    /invalid --mode.*manual, autonomous/,
+  );
+  for (const [flag, value] of [
+    ['--max-runs', '0'],
+    ['--max-runs', '1.5'],
+    ['--token-budget', '0'],
+    ['--token-budget', '1.5'],
+  ]) {
+    assert.throws(
+      () => parseArgs(['queue', '--file', 'q.json', flag, value]),
+      /value out of range/,
+    );
+  }
+});

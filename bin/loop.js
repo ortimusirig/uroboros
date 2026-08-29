@@ -24,6 +24,7 @@ import { readEnv } from '../src/env-compat.js';
 import { createAutonomousDecisionResolver } from '../src/decision-resolver.js';
 import { pruneScratch } from '../src/prune.js';
 import { physicalRunIdFor } from '../src/run-id.js';
+import { executeQueueCommand } from '../src/queue-cli.js';
 
 // Short path, outside OneDrive and outside AppData (both are rejected by
 // assertSafeScratchRoot; AppData is MSIX-redirected under a packaged host).
@@ -73,6 +74,19 @@ async function main() {
   }
   if (opts.command === 'help') {
     process.stdout.write(`${CLI_USAGE}\n`);
+    return;
+  }
+  if (opts.command === 'queue') {
+    try {
+      const result = await executeQueueCommand(opts, { target: process.cwd() });
+      process.stdout.write(result.summary);
+      if (result.stop !== null && !['max-runs', 'token-budget'].includes(result.stop.kind)) {
+        process.exitCode = 1;
+      }
+    } catch (error) {
+      process.stderr.write(`queue failed: ${error.message}\n`);
+      process.exitCode = 2;
+    }
     return;
   }
   if (opts.command === 'doctor') {

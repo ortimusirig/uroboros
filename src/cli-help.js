@@ -1,9 +1,10 @@
 export const CLI_COMMANDS = Object.freeze([
-  'run', 'batch', 'status', 'dashboard', 'publish', 'prune', 'doctor', 'setup', 'init', 'help',
+  'run', 'queue', 'batch', 'status', 'dashboard', 'publish', 'prune', 'doctor', 'setup', 'init', 'help',
 ]);
 
 export const CLI_USAGE = `Usage:
   node bin/loop.js run --task <plan-file-or-prose> --target <directory> --gate <gate.json> [--gate-retries <0-3>] [--executor-model <model>] [--executor-effort <effort>] [--verifier-model <model>] [--executor-timeout <ms>] [--verifier-timeout <ms>] [--gate-timeout <ms>] [--artifact-root <directory>] [--port <0-65535>] [--open] [--no-dashboard] [--quiet]
+  node bin/loop.js queue --file <queue.json> [--mode <manual|autonomous>] [--max-runs <n>] [--token-budget <tokens>] [--dry-run]
   node bin/loop.js batch --task <plan> [--task <plan> ...] --target <directory> --gate <gate.json> [--gate-retries <0-3>] [--executor-model <model>] [--executor-effort <effort>] [--verifier-model <model>] [--executor-timeout <ms>] [--verifier-timeout <ms>] [--gate-timeout <ms>] [--artifact-root <directory>] [--concurrency <1-16>] [--token-budget <tokens>] [--rounds <1-3>] [--round <number> ...] [--unit-kind <candidate|node|merge> ...] [--unit-id <id> ...] [--perspective <name> ...] [--depends-on <child=parent> ...] [--port <0-65535>] [--open] [--no-dashboard] [--quiet]
   node bin/loop.js batch --campaign <file> [--executor-timeout <ms>] [--verifier-timeout <ms>] [--gate-timeout <ms>] [--artifact-root <directory>] [--port <0-65535>] [--open] [--no-dashboard] [--quiet]
   node bin/loop.js status <run-or-campaign-directory>
@@ -25,6 +26,7 @@ Shapes (choose by how the plans relate):
 
 Commands:
   run        Execute one isolated Codex/gate/Cursor pass with a live read-only dashboard.
+  queue      Run and safely land queue units in order; never retry, skip, or push.
   batch      Execute one or more isolated plans as a campaign with a live dashboard.
   status     Read human-readable status for a run or campaign.
   dashboard  Serve the optional read-only local dashboard.

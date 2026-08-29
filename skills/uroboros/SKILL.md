@@ -123,10 +123,11 @@ hazard is reuse of a unit id in the flat scratch root.
 
 Install the plugin from a clone by running `node install.mjs`, then paste the two exact Claude
 Code commands it prints: `/plugin marketplace add <absolute-clone-path>` followed by
-`/plugin install uroboros@uroboros`. The plugin registers these ten namespaced slash
+`/plugin install uroboros@uroboros`. The plugin registers these eleven namespaced slash
 commands while the direct Node CLI remains available:
 
 - `/uroboros:run`
+- `/uroboros:queue`
 - `/uroboros:batch`
 - `/uroboros:status`
 - `/uroboros:dashboard`
@@ -145,6 +146,7 @@ load this skill so invoking them cannot bypass the governing law.
 The direct CLI surface is:
 
     node bin/loop.js run ...
+    node bin/loop.js queue ...
     node bin/loop.js batch ...
     node bin/loop.js status ...
     node bin/loop.js dashboard ...
@@ -158,6 +160,14 @@ The direct CLI surface is:
 For one plan:
 
     node bin/loop.js run --task <plan-file-or-prose> --target <folder> --gate <gate.json> [--gate-retries M] [--executor-model MODEL] [--executor-effort EFFORT] [--verifier-model MODEL] [--artifact-root DIRECTORY] [--port PORT] [--open] [--no-dashboard] [--quiet]
+
+For an ordered queue whose approved units should land in the current clean Git worktree:
+
+    node bin/loop.js queue --file <queue.json> [--mode manual|autonomous] [--max-runs N] [--token-budget TOKENS] [--dry-run]
+
+Queue units run strictly in order. Each change lands only after a passed gate and two
+`NO_BLOCKERS` seats; any other outcome stops without retrying or skipping. The queue commits
+locally and never pushes.
 
 For flag-declared Parallel, Candidates, Rounds, or a simple Graph:
 
@@ -174,7 +184,8 @@ Use `status` or the read-only `dashboard` to observe a run, `publish` only after
 
 - **Gate config** (`gate.json`): a JSON array of `{ "bin": "...", "args": ["..."] }`;
   pass/fail is by the command's true exit code only.
-- Codex writes inside a Git-isolated copy; the source working tree is not touched.
+- Codex writes inside a Git-isolated copy. `run` leaves the source working tree untouched;
+  `queue` is the explicit exception that applies and commits fully approved diffs.
 - Cursor performs correctness and intent/assertion verification in read-only plan mode, only
   when the gate passed and the diff is non-empty.
 - Output is `uro-runfacts.json`, `uro-report.md`, `events.jsonl`, and, for changed work,

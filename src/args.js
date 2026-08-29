@@ -212,6 +212,37 @@ export function parseArgs(argv) {
       ...(values['artifact-root'] === undefined ? {} : { artifactRoot: values['artifact-root'] }),
     };
   }
+  if (command === 'queue') {
+    const { values } = nodeParseArgs({
+      args: argv.slice(1),
+      options: {
+        file: { type: 'string' },
+        mode: { type: 'string' },
+        'max-runs': { type: 'string' },
+        'token-budget': { type: 'string' },
+        'dry-run': { type: 'boolean' },
+      },
+      allowPositionals: false,
+      strict: true,
+    });
+    if (!values.file) throw new Error('missing required option: --file');
+    const mode = values.mode ?? 'manual';
+    if (!RUN_MODES.has(mode)) {
+      throw new Error(`invalid --mode: ${mode}; expected one of: manual, autonomous`);
+    }
+    return {
+      command,
+      file: values.file,
+      mode,
+      ...(values['max-runs'] === undefined ? {} : {
+        maxRuns: strictInt(values['max-runs'], undefined, 1, Number.MAX_SAFE_INTEGER),
+      }),
+      ...(values['token-budget'] === undefined ? {} : {
+        tokenBudget: strictInt(values['token-budget'], undefined, 1, Number.MAX_SAFE_INTEGER),
+      }),
+      dryRun: values['dry-run'] === true,
+    };
+  }
   if (command === 'init') {
     if (argv.length !== 2 || !argv[1]) {
       throw new Error('usage: init <directory>');
