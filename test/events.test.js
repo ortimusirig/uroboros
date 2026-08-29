@@ -28,6 +28,7 @@ import { runCampaign } from '../src/campaign.js';
 import { runExecutor as realExecutor } from '../src/executor.js';
 import { runGate as realGate } from '../src/gate.js';
 import { run } from '../src/run.js';
+import { runPlan } from '../src/plan.js';
 import { generateRunJournal } from '../src/run-journal.js';
 import { runVerifier as realVerifier } from '../src/verifier.js';
 
@@ -231,6 +232,24 @@ test('every debate event pair round-trips and is retained in events.jsonl', () =
     assert.deepEqual(retainedPairs, debatePairs.sort());
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('every plan event pair round-trips through the declared vocabulary', () => {
+  assert.ok(EVENT_STAGES.includes('plan'));
+  assert.ok(EVENT_TYPES.includes('gate'));
+  const pairs = EVENT_PAIRS.filter((pair) => pair.startsWith('plan/')).sort();
+  assert.deepEqual(pairs, [
+    'plan/converged', 'plan/finish', 'plan/gate', 'plan/round', 'plan/start',
+  ]);
+  for (const pair of pairs) {
+    const [, type] = pair.split('/');
+    assert.doesNotThrow(() => createEvent({
+      runId: `plan-${type}`,
+      stage: 'plan',
+      type,
+      fields: { planRound: 1, converged: type === 'converged' },
+    }));
   }
 });
 
@@ -438,6 +457,8 @@ test('fully exercised runs have exact pair equality with both event vocabularies
   const unitEvents = [];
   const auxiliaryCampaignEvents = [];
   const journalEvents = [];
+  const planEvents = [];
+  let planTarget;
   let generatedNote;
   const success = (runId, tokens = {}) => ({
     runId,
@@ -581,6 +602,19 @@ test('fully exercised runs have exact pair equality with both event vocabularies
       reporter: (event) => journalEvents.push(event),
     }).notePath;
 
+    planTarget = mkdtempSync(join(process.cwd(), '.ccc-test-event-plan-'));
+    await runPlan({
+      goal: 'Exercise plan event conformance',
+      target: planTarget,
+      out: join(planTarget, 'generated'),
+      reporter: (event) => planEvents.push(event),
+      adapters: {
+        draft: async () => ({ plan: 'event conformance\n', gate: [] }),
+        runPlanGate: async () => ({ passed: true, failures: [] }),
+        review: async () => 'NO_BLOCKERS',
+      },
+    });
+
     const deliberatelyUncovered = Object.freeze({
       // A real isolation stall requires withholding Git completion past the watchdog threshold.
       'isolate/stalled': 'Covered by the watchdog fault-injection suite, not this healthy run.',
@@ -615,6 +649,7 @@ test('fully exercised runs have exact pair equality with both event vocabularies
       ...unitEvents,
       ...auxiliaryCampaignEvents,
       ...journalEvents,
+      ...planEvents,
     ];
     assert.doesNotThrow(() => assertEventConformance(allEvents, {
       allowUnemitted: Object.keys(deliberatelyUncovered),
@@ -636,6 +671,7 @@ test('fully exercised runs have exact pair equality with both event vocabularies
     }), /missing:.*future-stage\/start/);
   } finally {
     if (generatedNote) rmSync(generatedNote, { force: true });
+    if (planTarget) rmSync(planTarget, { recursive: true, force: true });
     rmSync(tgt, { recursive: true, force: true });
     rmSync(scr, { recursive: true, force: true });
   }

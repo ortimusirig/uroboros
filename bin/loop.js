@@ -25,6 +25,7 @@ import { createAutonomousDecisionResolver } from '../src/decision-resolver.js';
 import { pruneScratch } from '../src/prune.js';
 import { physicalRunIdFor } from '../src/run-id.js';
 import { executeQueueCommand } from '../src/queue-cli.js';
+import { runPlan } from '../src/plan.js';
 
 // Short path, outside OneDrive and outside AppData (both are rejected by
 // assertSafeScratchRoot; AppData is MSIX-redirected under a packaged host).
@@ -85,6 +86,30 @@ async function main() {
       }
     } catch (error) {
       process.stderr.write(`queue failed: ${error.message}\n`);
+      process.exitCode = 2;
+    }
+    return;
+  }
+  if (opts.command === 'plan') {
+    const runId = `plan-${new Date().toISOString().replace(/[:.]/g, '-')}-${randomUUID().slice(0, 8)}`;
+    const reporter = (event) => {
+      try { process.stderr.write(`${formatEventSummary(event)}\n`); } catch { /* drop sink */ }
+    };
+    try {
+      const result = await runPlan({
+        goal: opts.goal,
+        target: opts.target,
+        out: opts.out,
+        rounds: opts.rounds,
+        plannerModel: opts.plannerModel,
+        dryRun: opts.dryRun,
+        runId,
+        reporter,
+      });
+      process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+      if (!result.dryRun && !result.converged) process.exitCode = 1;
+    } catch (error) {
+      process.stderr.write(`plan failed: ${error.message}\n`);
       process.exitCode = 2;
     }
     return;

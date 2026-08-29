@@ -350,6 +350,25 @@ test('queue defaults to manual mode with unbounded limits', () => {
   });
 });
 
+test('plan parses its goal, target, output, rounds, model, and dry-run', () => {
+  assert.deepEqual(parseArgs([
+    'plan', '--goal', 'Improve the parser', '--target', 'repo', '--out', 'generated',
+    '--rounds', '5', '--planner-model', 'gpt-plan', '--dry-run',
+  ]), {
+    command: 'plan',
+    goal: 'Improve the parser',
+    target: 'repo',
+    out: 'generated',
+    rounds: 5,
+    plannerModel: 'gpt-plan',
+    dryRun: true,
+  });
+  assert.throws(() => parseArgs(['plan', '--goal', 'x', '--target', 'repo']), /--out/);
+  assert.throws(() => parseArgs([
+    'plan', '--goal', 'x', '--target', 'repo', '--out', 'generated', '--rounds', '0',
+  ]), /value out of range/);
+});
+
 test('queue parses autonomous mode, limits, and dry-run', () => {
   assert.deepEqual(parseArgs([
     'queue',

@@ -80,6 +80,139 @@ function readLog(path) {
   return readFileSync(path, 'utf8').trim().split(/\r?\n/).filter(Boolean).map(JSON.parse);
 }
 
+function makeGoalFixture(unit = {
+  name: 'goal-unit', goal: 'Implement the planned behavior', out: 'generated/goal-unit',
+}) {
+  const directory = mkdtempSync(join(process.cwd(), '.ccc-test-goal-queue-'));
+  const target = join(directory, 'target');
+  mkdirSync(target);
+  const file = join(directory, 'queue.json');
+  writeFileSync(file, JSON.stringify([unit]));
+  return {
+    directory, target, file, logPath: join(directory, 'queue-log.jsonl'),
+    cleanup: () => rmSync(directory, { recursive: true, force: true }),
+  };
+}
+
+test('a goal unit converges its plan before launching and landing implementation', async () => {
+  const fixture = makeGoalFixture();
+  const planLaunches = [];
+  const runtime = fakeRuntime([reviewReady('run-goal')], {
+    launchPlan: async (request) => {
+      planLaunches.push(request);
+      return {
+        converged: true, rounds: 2, reason: 'converged',
+        planPath: join(request.unit.out, 'plan.md'),
+        gatePath: join(request.unit.out, 'gate.json'),
+      };
+    },
+  });
+  try {
+    const result = await runQueue({
+      file: fixture.file, target: fixture.target, dependencies: runtime.dependencies,
+    });
+    assert.equal(planLaunches.length, 1);
+    assert.equal(runtime.launches.length, 1);
+    assert.match(runtime.launches[0].unit.task, /generated[\\/]goal-unit[\\/]plan[.]md$/);
+    assert.match(runtime.launches[0].unit.gate, /generated[\\/]goal-unit[\\/]gate[.]json$/);
+    assert.equal(runtime.landings.length, 1);
+    assert.ok(runtime.landings[0].allowedDirtyPaths.includes(runtime.launches[0].unit.task));
+    assert.ok(runtime.landings[0].allowedDirtyPaths.includes(runtime.launches[0].unit.gate));
+    assert.equal(result.landedCount, 1);
+    const log = readLog(fixture.logPath)[0];
+    assert.deepEqual({
+      planRounds: log.planRounds,
+      planConverged: log.planConverged,
+      implementationOutcome: log.implementationOutcome,
+    }, { planRounds: 2, planConverged: true, implementationOutcome: 'review-ready' });
+  } finally { fixture.cleanup(); }
+});
+
+test('a non-converged goal plan stops before implementation starts', async () => {
+  const fixture = makeGoalFixture();
+  let runLaunches = 0;
+  try {
+    const result = await runQueue({
+      file: fixture.file,
+      target: fixture.target,
+      dependencies: {
+        assertCleanTarget: async () => {},
+        launchPlan: async () => ({ converged: false, rounds: 3, reason: 'rounds-exhausted' }),
+        launchRun: async () => { runLaunches++; },
+      },
+    });
+    assert.equal(runLaunches, 0);
+    assert.equal(result.stop.kind, 'plan-not-converged');
+    const log = readLog(fixture.logPath)[0];
+    assert.equal(log.planRounds, 3);
+    assert.equal(log.planConverged, false);
+    assert.equal(log.implementationOutcome, null);
+  } finally { fixture.cleanup(); }
+});
+
+test('queue rejects units carrying both shapes or neither before anything starts', async () => {
+  for (const unit of [
+    { name: 'both', task: 'plan.md', gate: 'gate.json', goal: 'Do work', out: 'generated' },
+    { name: 'neither' },
+  ]) {
+    const fixture = makeGoalFixture(unit);
+    let starts = 0;
+    try {
+      await assert.rejects(runQueue({
+        file: fixture.file,
+        target: fixture.target,
+        dependencies: {
+          assertCleanTarget: async () => { starts++; },
+          launchPlan: async () => { starts++; },
+          launchRun: async () => { starts++; },
+        },
+      }), /either task\+gate or goal\+out/);
+      assert.equal(starts, 0);
+    } finally { fixture.cleanup(); }
+  }
+});
+
+test('goal-unit dry-run validates output and starts no plan or implementation', async () => {
+  const fixture = makeGoalFixture();
+  let starts = 0;
+  try {
+    const result = await runQueue({
+      file: fixture.file,
+      target: fixture.target,
+      dryRun: true,
+      dependencies: {
+        assertCleanTarget: async () => { starts++; },
+        launchPlan: async () => { starts++; },
+        launchRun: async () => { starts++; },
+      },
+    });
+    assert.equal(starts, 0);
+    assert.match(result.summary, /goal: Implement the planned behavior/);
+    assert.match(result.summary, /out: .*generated[\\/]goal-unit/);
+    assert.equal(existsSync(join(fixture.directory, 'generated', 'goal-unit')), false);
+  } finally { fixture.cleanup(); }
+});
+
+test('goal-unit dry-run refuses an output that would overwrite plan.md', async () => {
+  const fixture = makeGoalFixture();
+  try {
+    const out = join(fixture.directory, 'generated', 'goal-unit');
+    mkdirSync(out, { recursive: true });
+    writeFileSync(join(out, 'plan.md'), 'existing plan\n');
+    let starts = 0;
+    await assert.rejects(runQueue({
+      file: fixture.file,
+      target: fixture.target,
+      dryRun: true,
+      dependencies: {
+        launchPlan: async () => { starts++; },
+        launchRun: async () => { starts++; },
+      },
+    }), /refusing to overwrite.*plan[.]md/i);
+    assert.equal(starts, 0);
+  } finally { fixture.cleanup(); }
+});
+
 test('three approved units land in order and the summary reports all three', async () => {
   const fixture = makeFixture();
   try {

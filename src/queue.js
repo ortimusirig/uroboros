@@ -5,8 +5,9 @@ import {
   statSync,
 } from 'node:fs';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
+import { assertPlanOutputAvailable, resolveGoal } from './plan.js';
 
-const QUEUE_UNIT_KEYS = new Set(['name', 'task', 'gate']);
+const QUEUE_UNIT_KEYS = new Set(['name', 'task', 'gate', 'goal', 'out']);
 const QUEUE_MODES = new Set(['manual', 'autonomous']);
 
 function isRecord(value) {
@@ -55,6 +56,31 @@ export function loadQueueFile(file) {
     }
     if (raw.name !== undefined && (typeof raw.name !== 'string' || raw.name.trim() === '')) {
       throw new TypeError(`queue unit ${index + 1} name must be a non-empty string`);
+    }
+    const hasTaskShape = Object.hasOwn(raw, 'task') || Object.hasOwn(raw, 'gate');
+    const hasGoalShape = Object.hasOwn(raw, 'goal') || Object.hasOwn(raw, 'out');
+    if (hasTaskShape === hasGoalShape) {
+      throw new Error(
+        `queue unit ${index + 1} must carry either task+gate or goal+out, never both or neither`,
+      );
+    }
+    if (hasGoalShape) {
+      if (!Object.hasOwn(raw, 'goal') || !Object.hasOwn(raw, 'out')) {
+        throw new Error(`queue unit ${index + 1} goal units require both goal and out`);
+      }
+      const goal = resolveGoal(raw.goal, { baseDirectory: directory });
+      const out = declaredPath(raw.out, 'out', directory, index);
+      assertPlanOutputAvailable(out);
+      return {
+        index: index + 1,
+        kind: 'goal',
+        name: raw.name?.trim() ?? (goal.source ? basename(goal.source) : `goal-${index + 1}`),
+        goal: goal.source ?? goal.text,
+        out,
+      };
+    }
+    if (!Object.hasOwn(raw, 'task') || !Object.hasOwn(raw, 'gate')) {
+      throw new Error(`queue unit ${index + 1} task units require both task and gate`);
     }
     const task = declaredPath(raw.task, 'task', directory, index);
     const gate = declaredPath(raw.gate, 'gate', directory, index);
@@ -185,8 +211,9 @@ export function formatQueueSummary({
       'Dry run — resolved queue:',
       ...units.flatMap((unit) => [
         `${unit.index}. ${unit.name}`,
-        `   task: ${unit.task}`,
-        `   gate: ${unit.gate}`,
+        ...(unit.kind === 'goal'
+          ? [`   goal: ${unit.goal}`, `   out: ${unit.out}`]
+          : [`   task: ${unit.task}`, `   gate: ${unit.gate}`]),
       ]),
       `Units: ${units.length}`,
       'Runs started: 0',
@@ -265,6 +292,7 @@ export async function runQueue({
 
   const assertCleanTarget = dependencies.assertCleanTarget ?? missingDependency('assertCleanTarget');
   const launchRun = dependencies.launchRun ?? missingDependency('launchRun');
+  const launchPlan = dependencies.launchPlan ?? missingDependency('launchPlan');
   const readRunFacts = dependencies.readRunFacts ?? missingDependency('readRunFacts');
   const landDiff = dependencies.landDiff ?? missingDependency('landDiff');
   const appendLog = dependencies.appendLog ?? appendQueueLog;
@@ -277,6 +305,7 @@ export async function runQueue({
   let totalTokens = zeroTokens;
   let stop = null;
   const assumedDecisions = [];
+  const allowedQueuePaths = [queue.logPath];
 
   for (const unit of queue.units) {
     if (maxRuns !== undefined && attemptedCount >= maxRuns) {
@@ -305,14 +334,58 @@ export async function runQueue({
     const startedAt = now();
     let facts;
     let launch;
+    let planResult = null;
+    let implementationUnit = unit;
     try {
-      launch = await launchRun({ unit, target: resolve(target), mode });
+      if (unit.kind === 'goal') {
+        planResult = await launchPlan({ unit, target: resolve(target) });
+        if (planResult?.converged !== true) {
+          const durationMs = Math.max(0, now() - startedAt);
+          const reason = `plan did not converge: ${planResult?.reason ?? 'unknown reason'}`;
+          stop = {
+            kind: 'plan-not-converged',
+            unit: unit.name,
+            unitIndex: unit.index,
+            reason,
+            outcome: null,
+            questions: [],
+          };
+          appendLog(queue.logPath, {
+            name: unit.name,
+            runId: null,
+            planRounds: planResult?.rounds ?? null,
+            planConverged: false,
+            planOutcome: planResult?.reason ?? 'unknown',
+            implementationOutcome: null,
+            gateStatus: null,
+            correctnessVerdict: null,
+            intentVerdict: null,
+            tokens: zeroTokens,
+            durationMs,
+            landed: false,
+            stoppedOn: true,
+            stopReason: reason,
+          });
+          break;
+        }
+        implementationUnit = {
+          ...unit,
+          task: planResult.planPath ?? join(unit.out, 'plan.md'),
+          gate: planResult.gatePath ?? join(unit.out, 'gate.json'),
+        };
+        allowedQueuePaths.push(implementationUnit.task, implementationUnit.gate);
+      }
+      launch = await launchRun({ unit: implementationUnit, target: resolve(target), mode });
       facts = await readRunFacts(launch);
     } catch (error) {
       const durationMs = Math.max(0, now() - startedAt);
-      const reason = `run launch or facts read failed: ${error?.message ?? String(error)}`;
+      const failedDuringPlanning = unit.kind === 'goal' && planResult === null;
+      const failureStage = failedDuringPlanning
+        ? 'plan launch failed'
+        : 'implementation launch or facts read failed';
+      const reason = `${failureStage}: ${error?.message ?? String(error)}`;
       stop = {
-        kind: 'run-failed',
+        kind: failedDuringPlanning ? 'plan-failed' : 'run-failed',
         unit: unit.name,
         unitIndex: unit.index,
         reason,
@@ -331,6 +404,12 @@ export async function runQueue({
         landed: false,
         stoppedOn: true,
         stopReason: reason,
+        ...(unit.kind === 'goal' ? {
+          planRounds: planResult?.rounds ?? null,
+          planConverged: planResult?.converged === true,
+          planOutcome: planResult?.reason ?? null,
+          implementationOutcome: null,
+        } : {}),
       });
       break;
     }
@@ -368,7 +447,7 @@ export async function runQueue({
           diffPath: join(launch.runDirectory, 'CHANGES.diff'),
           unit,
           runId: facts?.runId ?? launch?.runId ?? 'unknown',
-          allowedDirtyPaths: [queue.logPath],
+          allowedDirtyPaths: allowedQueuePaths,
         });
         landed = true;
         landedCount++;
@@ -412,6 +491,12 @@ export async function runQueue({
         escalation: 'operator-absent',
         questions: assumedQuestions,
         answers: assumedAnswers,
+      } : {}),
+      ...(unit.kind === 'goal' ? {
+        planRounds: planResult?.rounds ?? null,
+        planConverged: planResult?.converged === true,
+        planOutcome: planResult?.reason ?? null,
+        implementationOutcome: facts?.outcome ?? null,
       } : {}),
     });
 

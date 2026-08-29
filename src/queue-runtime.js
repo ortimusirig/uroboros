@@ -55,6 +55,38 @@ export async function launchLoopRun({ unit, target, mode }, {
   };
 }
 
+export async function launchLoopPlan({ unit, target }, {
+  runCommand = spawnCapture,
+  loopPath = DEFAULT_LOOP_PATH,
+  nodePath = process.execPath,
+} = {}) {
+  const resolvedTarget = resolve(target);
+  const result = await runCommand(nodePath, [
+    loopPath,
+    'plan',
+    '--goal', unit.goal,
+    '--target', resolvedTarget,
+    '--out', unit.out,
+  ], { cwd: resolvedTarget });
+
+  let planResult;
+  try {
+    planResult = JSON.parse(result.stdout);
+  } catch {
+    const detail = messageFrom(result, 'no JSON was written to stdout');
+    throw new Error(`loop plan did not return readable results: ${detail}`);
+  }
+  if (planResult === null || typeof planResult !== 'object' || Array.isArray(planResult)
+    || typeof planResult.converged !== 'boolean'
+    || !Number.isSafeInteger(planResult.rounds) || planResult.rounds < 0) {
+    throw new Error('loop plan did not return readable results: convergence or rounds is missing');
+  }
+  if (planResult.converged && result.code !== 0) {
+    throw new Error(`loop plan reported convergence but exited ${result.code}`);
+  }
+  return { ...planResult, exitCode: result.code };
+}
+
 export function readRunFacts({ runDirectory }) {
   const factsPath = join(runDirectory, 'uro-runfacts.json');
   try {
@@ -250,6 +282,7 @@ export async function landQueueDiff({
 export function createQueueRuntime(options = {}) {
   return {
     assertCleanTarget: (target, request = {}) => assertCleanTarget(target, { ...options, ...request }),
+    launchPlan: (request) => launchLoopPlan(request, options),
     launchRun: (request) => launchLoopRun(request, options),
     readRunFacts,
     landDiff: (request) => landQueueDiff(request, options),

@@ -181,6 +181,7 @@ export async function runExecutor({
   extraArgv = [],
   model = DEFAULT_EXECUTOR_MODEL,
   effort = DEFAULT_EXECUTOR_EFFORT,
+  sandbox = SANDBOX,
   timeoutMs = resolveStageTimeouts().executor,
   reporter,
   runId,
@@ -197,7 +198,7 @@ export async function runExecutor({
   spawnProcess,
   killProcessTree,
 }) {
-  const args = [...extraArgv, ...buildCodexArgs({ cwd, model, effort })];
+  const args = [...extraArgv, ...buildCodexArgs({ cwd, model, effort, sandbox })];
   const nowMs = () => {
     const value = now();
     return value instanceof Date ? value.getTime() : value;

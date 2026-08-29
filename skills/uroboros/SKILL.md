@@ -1,6 +1,6 @@
 ---
 name: uroboros
-description: Plan and supervise isolated Codex implementation, true-exit-code gates, Cursor review, and Single, Parallel, Graph, Candidates, or Rounds campaigns; use for campaign execution, diagnostics with doctor, status or dashboard inspection, project initialization, and publishing completed units.
+description: Plan and supervise isolated Codex implementation, true-exit-code gates, Cursor review, and Single, Parallel, Graph, Candidates, or Rounds campaigns; use plan to debate a goal, for campaign execution, diagnostics with doctor, status or dashboard inspection, project initialization, and publishing completed units.
 ---
 
 # uroboros
@@ -123,10 +123,11 @@ hazard is reuse of a unit id in the flat scratch root.
 
 Install the plugin from a clone by running `node install.mjs`, then paste the two exact Claude
 Code commands it prints: `/plugin marketplace add <absolute-clone-path>` followed by
-`/plugin install uroboros@uroboros`. The plugin registers these eleven namespaced slash
+`/plugin install uroboros@uroboros`. The plugin registers these twelve namespaced slash
 commands while the direct Node CLI remains available:
 
 - `/uroboros:run`
+- `/uroboros:plan`
 - `/uroboros:queue`
 - `/uroboros:batch`
 - `/uroboros:status`
@@ -146,6 +147,7 @@ load this skill so invoking them cannot bypass the governing law.
 The direct CLI surface is:
 
     node bin/loop.js run ...
+    node bin/loop.js plan ...
     node bin/loop.js queue ...
     node bin/loop.js batch ...
     node bin/loop.js status ...
@@ -160,6 +162,10 @@ The direct CLI surface is:
 For one plan:
 
     node bin/loop.js run --task <plan-file-or-prose> --target <folder> --gate <gate.json> [--gate-retries M] [--executor-model MODEL] [--executor-effort EFFORT] [--verifier-model MODEL] [--artifact-root DIRECTORY] [--port PORT] [--open] [--no-dashboard] [--quiet]
+
+To debate a goal into a mechanically checked plan and gate without modifying the target:
+
+    node bin/loop.js plan --goal <prose-or-file> --target <folder> --out <folder> [--rounds N] [--planner-model MODEL] [--dry-run]
 
 For an ordered queue whose approved units should land in the current clean Git worktree:
 

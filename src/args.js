@@ -243,6 +243,33 @@ export function parseArgs(argv) {
       dryRun: values['dry-run'] === true,
     };
   }
+  if (command === 'plan') {
+    const { values } = nodeParseArgs({
+      args: argv.slice(1),
+      options: {
+        goal: { type: 'string' },
+        target: { type: 'string' },
+        out: { type: 'string' },
+        rounds: { type: 'string' },
+        'planner-model': { type: 'string' },
+        'dry-run': { type: 'boolean' },
+      },
+      allowPositionals: false,
+      strict: true,
+    });
+    for (const required of ['goal', 'target', 'out']) {
+      if (!values[required]) throw new Error(`missing required option: --${required}`);
+    }
+    return {
+      command,
+      goal: values.goal,
+      target: values.target,
+      out: values.out,
+      rounds: strictInt(values.rounds, 3, 1, Number.MAX_SAFE_INTEGER),
+      ...(values['planner-model'] === undefined ? {} : { plannerModel: values['planner-model'] }),
+      dryRun: values['dry-run'] === true,
+    };
+  }
   if (command === 'init') {
     if (argv.length !== 2 || !argv[1]) {
       throw new Error('usage: init <directory>');

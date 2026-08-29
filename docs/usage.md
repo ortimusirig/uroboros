@@ -2,11 +2,12 @@
 
 ## Sequential queues
 
-`loop queue --file <path>` reads a JSON list of `{ task, gate, name? }` units and runs
-them one at a time against the current working directory. Paths in the list are
-resolved relative to the queue file. Run `loop queue --file queue.json --dry-run`
-before an unattended session to validate every task and gate path without launching
-an agent.
+`loop queue --file <path>` reads a JSON list whose units contain either
+`{ task, gate, name? }` or `{ goal, out, name? }`, and runs them one at a time against the
+current working directory. Paths in the list are resolved relative to the queue file. A goal
+unit runs `loop plan` first and starts implementation only after the plan debate converges.
+Run `loop queue --file queue.json --dry-run` before an unattended session to validate every
+input and goal output path without launching an agent.
 
 The default mode is `manual`. `--mode autonomous` is passed to each `loop run`, so the
 planner can resolve executor challenges. A safe result still requires all three
@@ -30,6 +31,7 @@ still treated as dirty. Keep the queue definition tracked or outside the target 
 
 ```
 node bin/loop.js run --task <plan-file-or-prose> --target <folder> --gate <gate.json> [--gate-retries M] [--executor-model MODEL] [--executor-effort EFFORT] [--verifier-model MODEL] [--artifact-root DIRECTORY] [--port PORT] [--open] [--no-dashboard] [--quiet]
+node bin/loop.js plan --goal <prose-or-file> --target <folder> --out <folder> [--rounds N] [--planner-model MODEL] [--dry-run]
 node bin/loop.js queue --file <queue.json> [--mode <manual|autonomous>] [--max-runs N] [--token-budget TOKENS] [--dry-run]
 node bin/loop.js batch --task <plan-1> --task <plan-2> --target <folder> --gate <gate.json> [--gate-retries M] [--executor-model MODEL] [--executor-effort EFFORT] [--verifier-model MODEL] [--artifact-root DIRECTORY] [--concurrency N] [--token-budget TOKENS] [--rounds N] [--round N ...] [--unit-kind KIND] [--unit-id ID ...] [--perspective NAME ...] [--depends-on CHILD=PARENT ...] [--port PORT] [--open] [--no-dashboard] [--quiet]
 node bin/loop.js batch --campaign <campaign.json> [--artifact-root DIRECTORY] [--port PORT] [--open] [--no-dashboard] [--quiet]
@@ -43,6 +45,17 @@ node bin/loop.js setup [--scratch-root <directory>]
 node bin/loop.js init <directory>
 node bin/loop.js help
 ```
+
+The corresponding plugin commands are `/uroboros:run`, `/uroboros:plan`,
+`/uroboros:queue`, `/uroboros:batch`, `/uroboros:status`, `/uroboros:dashboard`,
+`/uroboros:publish`, `/uroboros:prune`, `/uroboros:doctor`, `/uroboros:setup`,
+`/uroboros:init`, and `/uroboros:help`. Install them with
+`/plugin marketplace add <absolute-clone-path>` and `/plugin install uroboros@uroboros`.
+
+`loop plan` runs the drafting seat read-only against the target, executes the proposed gate,
+checks cited paths and lines, named test files, required sections, and absence-assertion positive
+controls, then asks a read-only verifier for structured findings. It writes `plan.md` and
+`gate.json` under `--out` only after convergence; exhaustion and pivot conclusion write neither.
 
 `--help` and `-h` remain aliases for `help`.
 

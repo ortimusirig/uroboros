@@ -5,6 +5,7 @@ import test from 'node:test';
 import {
   assertCleanTarget,
   landQueueDiff,
+  launchLoopPlan,
   launchLoopRun,
   readRunFacts,
 } from '../src/queue-runtime.js';
@@ -50,6 +51,30 @@ test('the production launcher composes loop run and accepts facts from a stoppin
     runDirectory: 'C:/scratch/run-17/w',
     exitCode: 1,
   });
+});
+
+test('the production plan launcher composes loop plan and accepts non-convergence', async () => {
+  const calls = [];
+  const runCommand = async (bin, args, options) => {
+    calls.push({ bin, args, options });
+    return {
+      code: 1,
+      stdout: JSON.stringify({ converged: false, rounds: 3, reason: 'rounds-exhausted' }),
+      stderr: '',
+    };
+  };
+  const result = await launchLoopPlan({
+    unit: { goal: 'Improve the parser', out: 'C:/plans/x' },
+    target: 'C:/repo',
+  }, { runCommand, loopPath: 'C:/tools/loop.js', nodePath: 'C:/node.exe' });
+
+  assert.deepEqual(calls[0].args, [
+    'C:/tools/loop.js', 'plan', '--goal', 'Improve the parser',
+    '--target', resolve('C:/repo'), '--out', 'C:/plans/x',
+  ]);
+  assert.equal(calls[0].options.cwd, resolve('C:/repo'));
+  assert.equal(result.converged, false);
+  assert.equal(result.exitCode, 1);
 });
 
 test('the production launcher refuses output that cannot identify completed run facts', async () => {

@@ -88,13 +88,14 @@ One `loop run` is one pass:
 plan.md ──► Codex writes (isolated copy) ──► gate (exit codes) ──► bounded review/fix loop ──► report
 ```
 
-Run approved plans sequentially with `loop queue`. Relative task and gate paths are
-resolved beside the queue file; the current directory is the target repository:
+Run approved plans sequentially with `loop queue`. Relative task, gate, goal-file, and output
+paths are resolved beside the queue file; the current directory is the target repository.
+Each unit carries either `task` plus `gate`, or `goal` plus `out`:
 
 ```json
 [
   { "name": "first", "task": "plan-first.md", "gate": "gate-first.json" },
-  { "name": "second", "task": "plan-second.md", "gate": "gate-second.json" }
+  { "name": "second", "goal": "Add the second behavior", "out": "campaign/generated/second" }
 ]
 ```
 
@@ -102,7 +103,9 @@ resolved beside the queue file; the current directory is the target repository:
 loop queue --file queue.json --mode autonomous --max-runs 3 --token-budget 50000
 ```
 
-The queue stops on the first non-approved result. A change lands only when the gate
+For a goal unit, `loop plan` first debates a draft with a read-only drafting seat, a mechanical
+plan gate, and a read-only reviewer. Implementation never starts unless that plan converges.
+The queue stops on the first non-approved result. A change lands only when the code gate
 passed and both verifier seats reported `NO_BLOCKERS`; `ISSUES` and `UNVERIFIED` always
 stop the queue. Each landed unit is committed locally, nothing is pushed, and
 `queue-log.jsonl` is appended beside the queue file. Use `--dry-run` to validate and
@@ -134,10 +137,11 @@ billed through this skill.
 Windows is the primary, fully-exercised target. macOS and Linux should work — pure Node,
 POSIX `which`, plain `spawn` — but treat the first Unix run as verification.
 
-After plugin installation, these are the eleven namespaced slash commands:
+After plugin installation, these are the twelve namespaced slash commands:
 
 ```text
 /uroboros:run
+/uroboros:plan
 /uroboros:queue
 /uroboros:batch
 /uroboros:status
@@ -160,6 +164,7 @@ usable plan before spending tokens.
 
 ```sh
 node bin/loop.js run --task plan.md --target . --gate gate.json
+node bin/loop.js plan --goal "Add the requested behavior" --target . --out campaign/generated/example
 ```
 
 For the full command surface, every flag, campaign shapes, outcomes, and configuration, see

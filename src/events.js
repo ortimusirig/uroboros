@@ -13,6 +13,7 @@ export const EVENT_STAGES = Object.freeze([
   'debate',
   'report',
   'journal',
+  'plan',
 ]);
 
 export const EVENT_TYPES = Object.freeze([
@@ -40,6 +41,7 @@ export const EVENT_TYPES = Object.freeze([
   'converged',
   'circling',
   'pivot',
+  'gate',
 ]);
 
 export const UNIT_KINDS = Object.freeze(['candidate', 'node', 'merge']);
@@ -98,6 +100,11 @@ export const EVENT_PAIRS = Object.freeze([
   'report/stalled',
   'journal/start',
   'journal/finish',
+  'plan/start',
+  'plan/round',
+  'plan/gate',
+  'plan/converged',
+  'plan/finish',
 ]);
 
 // The aggregate stream is intentionally smaller than a unit stream: the orchestrator is
