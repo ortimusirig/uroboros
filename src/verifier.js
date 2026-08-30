@@ -1,10 +1,15 @@
 import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
+import { StringDecoder } from 'node:string_decoder';
 import { spawnCapture } from './spawn.js';
 import { reportEvent } from './events.js';
 import { annotateUsageConsistency, normalizeCursorUsage } from './usage.js';
 import { resolveStageTimeouts } from './timeouts.js';
 import { resolveSuperpowersDir } from './superpowers.js';
+import {
+  createProgressWatchdog,
+  resolveExecutorThresholds,
+} from './stall-watchdog.js';
 
 export const DEFAULT_VERIFIER_MODEL = 'cursor-grok-4.5-high';
 
@@ -221,6 +226,10 @@ export function deriveVerdictFromEvidence(evidence) {
     return { verdict: artifactVerdict, source: 'plan',
       judgedText: plan.text ?? '', judgedTextTruncated: plan.truncated === true };
   }
+  if (evidence?.termination) {
+    return { verdict: 'UNVERIFIED', source: 'none',
+      judgedText: plan.text ?? '', judgedTextTruncated: plan.truncated === true };
+  }
   const hasSubstantiveEvidence = [result.text, assistant.text, plan.text]
     .some((text) => typeof text === 'string' && text.trim() !== '');
   // With no winning marker, the plan candidate is the final text examined before
@@ -326,27 +335,144 @@ function extractResultUsage(streamText) {
   return normalizeCursorUsage(rawUsage);
 }
 
+function createVerifierStreamObserver(onEvent) {
+  const decoder = new StringDecoder('utf8');
+  let pending = '';
+
+  const observeLine = (line) => {
+    const source = line.trim();
+    if (source === '') return;
+    try { onEvent(JSON.parse(source)); } catch { /* partial/non-JSON output is still liveness */ }
+  };
+  const consumeCompleteLines = () => {
+    let newline;
+    while ((newline = pending.indexOf('\n')) !== -1) {
+      observeLine(pending.slice(0, newline));
+      pending = pending.slice(newline + 1);
+    }
+  };
+
+  return {
+    onStdout(chunk) {
+      pending += decoder.write(chunk);
+      consumeCompleteLines();
+    },
+    finish() {
+      pending += decoder.end();
+      consumeCompleteLines();
+      if (pending !== '') observeLine(pending);
+      pending = '';
+    },
+  };
+}
+
 export async function runVerifier({
   cwd,
   bin = 'agent',
   prompt = DEFAULT_PROMPT,
   extraArgv = [],
   model = DEFAULT_VERIFIER_MODEL,
-  timeoutMs = resolveStageTimeouts().verifier,
+  timeoutMs,
   reporter,
   runId,
   pass,
   env = process.env,
   home = homedir(),
   superpowersDir,
+  signal,
+  beforeKill,
+  onLiveness,
+  livenessThresholdMs,
+  progressThresholdMs,
+  now = Date.now,
+  setTimer = setTimeout,
+  clearTimer = clearTimeout,
+  spawnProcess,
+  killProcessTree,
 }) {
+  const resolvedTimeoutMs = timeoutMs === undefined
+    ? resolveStageTimeouts(env).verifier
+    : timeoutMs;
+  const thresholds = resolveExecutorThresholds(env);
+  const resolvedLivenessThresholdMs = livenessThresholdMs ?? thresholds.thresholdMs;
+  const resolvedProgressThresholdMs = progressThresholdMs ?? thresholds.progressThresholdMs;
   const args = [...extraArgv, ...buildCursorArgs({
     prompt, model, env, home, superpowersDir,
   })];
   assertNoForbiddenFlags(args);
+  const nowMs = () => {
+    const value = now();
+    return value instanceof Date ? value.getTime() : value;
+  };
+  const startedAt = nowMs();
+  let lastByteAt = null;
+  let lastObservedEvent = { runId, stage: 'verify', type: 'start', pass };
+  const progress = typeof reporter === 'function'
+    ? createProgressWatchdog({
+      reporter, runId, stage: 'verify', pass, thresholdMs: resolvedProgressThresholdMs,
+      now, setTimer, clearTimer,
+    })
+    : null;
+  progress?.observe(lastObservedEvent);
   reportEvent(reporter, runId, 'verify', 'start', { bin, args, model, pass });
-  const r = await spawnCapture(bin, args, { cwd, timeoutMs });
-  const { verdict, text, source, planText, evidence } = parseVerdictDetail(r.stdout);
+  const observer = createVerifierStreamObserver((event) => {
+    lastObservedEvent = {
+      runId,
+      stage: 'verify',
+      type: typeof event?.type === 'string' ? event.type : 'stream',
+      pass,
+      ...(typeof event?.subtype === 'string' ? { subtype: event.subtype } : {}),
+    };
+    if (event?.type === 'item.completed') {
+      progress?.observe({ ...lastObservedEvent, type: 'item_completed' });
+    }
+  });
+  let r;
+  try {
+    r = await spawnCapture(bin, args, {
+      cwd,
+      timeoutMs: resolvedTimeoutMs,
+      timeoutSetting: 'URO_VERIFIER_TIMEOUT_MS',
+      signal,
+      beforeKill,
+      spawnProcess,
+      killProcessTree,
+      now,
+      setTimer,
+      clearTimer,
+      onStdout: (chunk) => {
+        lastByteAt = nowMs();
+        try { onLiveness?.(); } catch { /* observation cannot alter captured output */ }
+        observer.onStdout(chunk);
+      },
+      livenessSupervision: {
+        thresholdMs: resolvedLivenessThresholdMs,
+        getLiveness: () => ({
+          gapMs: nowMs() - (lastByteAt ?? startedAt),
+          lastEvent: lastObservedEvent,
+        }),
+        now,
+        setTimer,
+        clearTimer,
+      },
+    });
+  } finally {
+    if (!r) progress?.dispose();
+  }
+  observer.finish();
+  const detail = parseVerdictDetail(r.stdout);
+  const evidenceWithTermination = r.timedOut
+    ? { ...detail.evidence, termination: r.timeoutReason ?? { kind: 'deadline' } }
+    : detail.evidence;
+  const derived = deriveVerdictFromEvidence(evidenceWithTermination);
+  const evidence = {
+    ...evidenceWithTermination,
+    source: derived.source,
+    judgedText: derived.judgedText,
+    judgedTextTruncated: derived.judgedTextTruncated,
+  };
+  const { text, planText } = detail;
+  const { verdict, source } = derived;
   const exitCode = r.code;
   const launchFailed = r.timedOut || (exitCode !== 0 && !hasVerdictEvidence(r.stdout));
   const usage = extractResultUsage(r.stdout);
@@ -354,6 +480,7 @@ export async function runVerifier({
   // path where the verifier actually ran, mirroring how stderr is kept when it did not.
   const unannotatedResult = launchFailed
     ? { verdict, exitCode, launchFailed, timedOut: r.timedOut, timeoutMs: r.timeoutMs,
+        ...(r.timeoutReason ? { timeoutReason: r.timeoutReason } : {}),
         stderr: r.stderr.slice(0, 500), verdictSource: source,
         verdictEvidence: evidence, usage }
     : {
@@ -362,6 +489,7 @@ export async function runVerifier({
         launchFailed,
         timedOut: r.timedOut,
         timeoutMs: r.timeoutMs,
+        ...(r.timeoutReason ? { timeoutReason: r.timeoutReason } : {}),
         findings: text.trim().slice(0, FINDINGS_LIMIT),
         verdictSource: source,
         plan: evidence.candidates.plan.present ? planText : null,
@@ -369,6 +497,8 @@ export async function runVerifier({
         usage,
       };
   const result = annotateVerifierConsistency(annotateUsageConsistency(unannotatedResult));
+  progress?.observe({ runId, stage: 'verify', type: 'finish', pass, code: exitCode });
+  progress?.dispose();
   reportEvent(reporter, runId, 'verify', 'finish', {
     code: exitCode,
     verdict,

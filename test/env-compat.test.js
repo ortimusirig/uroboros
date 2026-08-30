@@ -117,3 +117,16 @@ test('an unprefixed variable outside the alias list is ignored without warning',
   assert.equal(value, undefined);
   assert.deepEqual(warnings, []);
 });
+
+test('the optional debate round bound keeps the unprefixed-variable warning', () => {
+  resetDeprecationWarnings();
+  const warnings = [];
+  const value = readEnv(
+    { DEBATE_ROUNDS: '7' },
+    'DEBATE_ROUNDS',
+    { warn: (message) => warnings.push(message) },
+  );
+  assert.equal(value, undefined);
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /DEBATE_ROUNDS.*URO_DEBATE_ROUNDS/);
+});

@@ -4,7 +4,6 @@ import { createEvent, formatEventSummary } from '../src/events.js';
 import {
   createGapWatchdog,
   createProgressWatchdog,
-  DEFAULT_EXECUTOR_MAX_MS,
   DEFAULT_PROGRESS_THRESHOLD_MS,
   DEFAULT_STALL_POLICY,
   DEFAULT_STALL_RESTARTS,
@@ -91,24 +90,22 @@ test('a silent stage emits one stalled event carrying its stage, gap, and last e
   watchdog.dispose();
 });
 
-test('stall configuration defaults to five-minute liveness and progress with a six-hour ceiling', () => {
+test('stall configuration defaults to five-minute liveness and progress with no elapsed ceiling', () => {
   assert.deepEqual(resolveStallConfig({}), {
     thresholdMs: DEFAULT_STALL_THRESHOLD_MS,
     progressThresholdMs: DEFAULT_PROGRESS_THRESHOLD_MS,
-    executorMaxMs: DEFAULT_EXECUTOR_MAX_MS,
     policy: DEFAULT_STALL_POLICY,
     restartLimit: DEFAULT_STALL_RESTARTS,
   });
   assert.equal(DEFAULT_STALL_THRESHOLD_MS, 5 * 60 * 1000);
   assert.equal(DEFAULT_PROGRESS_THRESHOLD_MS, 5 * 60 * 1000);
-  assert.equal(DEFAULT_EXECUTOR_MAX_MS, 6 * 60 * 60 * 1000);
   assert.equal(DEFAULT_STALL_POLICY, 'report');
   assert.equal(DEFAULT_STALL_RESTARTS, 1);
   assert.deepEqual(resolveStallConfig({
     URO_STALL_THRESHOLD_MS: '1234', URO_PROGRESS_THRESHOLD_MS: '2345',
-    URO_EXECUTOR_MAX_MS: '3456', URO_STALL_POLICY: 'restart', URO_STALL_RESTARTS: '2',
+    URO_STALL_POLICY: 'restart', URO_STALL_RESTARTS: '2',
   }), {
-    thresholdMs: 1234, progressThresholdMs: 2345, executorMaxMs: 3456,
+    thresholdMs: 1234, progressThresholdMs: 2345,
     policy: 'restart', restartLimit: 2,
   });
   assert.throws(() => resolveStallConfig({ URO_STALL_POLICY: 'kill' }), /URO_STALL_POLICY/);
@@ -116,8 +113,6 @@ test('stall configuration defaults to five-minute liveness and progress with a s
     /URO_STALL_THRESHOLD_MS/);
   assert.throws(() => resolveStallConfig({ URO_PROGRESS_THRESHOLD_MS: 'soon' }),
     /URO_PROGRESS_THRESHOLD_MS must be a positive integer number of milliseconds/);
-  assert.throws(() => resolveStallConfig({ URO_EXECUTOR_MAX_MS: '0' }),
-    /URO_EXECUTOR_MAX_MS must be between 1 and 2147483647 milliseconds/);
 });
 
 test('progress silence reports the last action while raw bytes keep liveness from killing', () => {

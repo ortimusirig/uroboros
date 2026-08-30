@@ -1,20 +1,16 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  DEFAULT_EXECUTOR_TIMEOUT_MS,
   DEFAULT_GATE_TIMEOUT_MS,
-  DEFAULT_VERIFIER_TIMEOUT_MS,
   resolveStageTimeouts,
 } from '../src/timeouts.js';
 
-test('stage timeout defaults are 30m executor, 10m verifier, and 60m gate', () => {
+test('agent seats default to no elapsed timeout while the gate keeps sixty minutes', () => {
   assert.deepEqual(resolveStageTimeouts({}), {
-    executor: DEFAULT_EXECUTOR_TIMEOUT_MS,
-    verifier: DEFAULT_VERIFIER_TIMEOUT_MS,
+    executor: undefined,
+    verifier: undefined,
     gate: DEFAULT_GATE_TIMEOUT_MS,
   });
-  assert.equal(DEFAULT_EXECUTOR_TIMEOUT_MS, 30 * 60 * 1000);
-  assert.equal(DEFAULT_VERIFIER_TIMEOUT_MS, 10 * 60 * 1000);
   assert.equal(DEFAULT_GATE_TIMEOUT_MS, 60 * 60 * 1000);
 });
 

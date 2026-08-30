@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { EventEmitter } from 'node:events';
-import { createExecutorDeadline, spawnCapture, commandExists } from '../src/spawn.js';
+import { createLivenessDeadline, spawnCapture, commandExists } from '../src/spawn.js';
 
 function controlledClock() {
   let time = 0;
@@ -35,22 +35,17 @@ function controlledClock() {
   };
 }
 
-function deadlineHarness({ timeoutMs = 100, thresholdMs = 50, maxMs = 1000 } = {}) {
+function livenessHarness({ thresholdMs = 50 } = {}) {
   const clock = controlledClock();
-  const extended = [];
   const killed = [];
   let lastByteAt = null;
   let lastEvent = { stage: 'executor', type: 'start', attempt: 1 };
-  const deadline = createExecutorDeadline({
-    timeoutMs,
-    livenessThresholdMs: thresholdMs,
-    maxMs,
+  const deadline = createLivenessDeadline({
+    thresholdMs,
     getLiveness: () => ({
-      hasEvidence: lastByteAt !== null,
       gapMs: clock.now() - (lastByteAt ?? 0),
       lastEvent,
     }),
-    onExtended: (evidence) => extended.push(evidence),
     onKill: (reason) => killed.push(reason),
     now: clock.now,
     setTimer: clock.setTimer,
@@ -59,7 +54,6 @@ function deadlineHarness({ timeoutMs = 100, thresholdMs = 50, maxMs = 1000 } = {
   return {
     clock,
     deadline,
-    extended,
     killed,
     byte(event = lastEvent) {
       lastByteAt = clock.now();
@@ -78,12 +72,10 @@ function fakeChild() {
   return child;
 }
 
-function executorSupervision(clock) {
+function livenessSupervision(clock) {
   return {
-    livenessThresholdMs: 50,
-    maxMs: 1000,
+    thresholdMs: 50,
     getLiveness: () => ({
-      hasEvidence: false,
       gapMs: clock.now(),
       lastEvent: { stage: 'executor', type: 'start' },
     }),
@@ -93,67 +85,62 @@ function executorSupervision(clock) {
   };
 }
 
-test('bytes arriving beyond the first deadline extend it and emit the observed gap', () => {
-  const harness = deadlineHarness();
-  harness.clock.advance(80);
-  harness.byte({ stage: 'executor', type: 'item_completed', itemType: 'command_execution' });
-  harness.clock.advance(20);
-
+test('bytes keep liveness alive for arbitrarily many thresholds', () => {
+  const harness = livenessHarness();
+  for (let index = 0; index < 100; index++) {
+    harness.clock.advance(40);
+    harness.byte({ stage: 'executor', type: 'item_completed', itemType: 'command_execution' });
+  }
+  assert.equal(harness.clock.now(), 4000,
+    'positive setup: total elapsed time far exceeds one liveness threshold');
   assert.equal(harness.killed.length, 0);
-  assert.equal(harness.extended.length, 1);
-  assert.equal(harness.extended[0].gapMs, 20);
-  assert.equal(harness.extended[0].extensionMs, 100);
-  assert.equal(harness.extended[0].lastEvent.itemType, 'command_execution');
-  harness.clock.advance(20);
-  assert.equal(harness.clock.now(), 120,
-    'positive control: the executor remains alive beyond its original 100 ms deadline');
-  assert.equal(harness.killed.length, 0);
+  harness.clock.advance(50);
+  assert.equal(harness.killed.length, 1,
+    'positive control: a real full silence gap still kills');
   harness.deadline.dispose();
 });
 
-test('deadline silence past liveness kills with gap, last event, and controlling setting', () => {
-  const harness = deadlineHarness({ thresholdMs: 30 });
-  harness.clock.advance(60);
+test('silence past liveness kills with gap, last event, and controlling setting', () => {
+  const harness = livenessHarness({ thresholdMs: 30 });
+  harness.clock.advance(20);
   harness.byte({ stage: 'executor', type: 'item_completed', itemType: 'file_change' });
-  harness.clock.advance(40);
+  harness.clock.advance(30);
 
-  assert.equal(harness.extended.length, 0);
   assert.deepEqual(harness.killed, [{
-    kind: 'deadline',
-    timeoutMs: 100,
-    gapMs: 40,
+    kind: 'liveness',
+    timeoutMs: 30,
+    gapMs: 30,
     lastEvent: { stage: 'executor', type: 'item_completed', itemType: 'file_change' },
     setting: 'URO_STALL_THRESHOLD_MS',
   }]);
 });
 
-test('hard ceiling kills a continuously chatty executor', () => {
-  const harness = deadlineHarness({ timeoutMs: 100, thresholdMs: 50, maxMs: 250 });
-  for (let elapsed = 0; elapsed < 240; elapsed += 40) {
-    harness.clock.advance(40);
+test('no hard ceiling kills a continuously chatty executor', () => {
+  const thresholdMs = 5 * 60 * 1000;
+  const harness = livenessHarness({ thresholdMs });
+  for (let elapsed = 0; elapsed < 7 * 60 * 60 * 1000; elapsed += 4 * 60 * 1000) {
+    harness.clock.advance(4 * 60 * 1000);
     harness.byte();
   }
-  assert.equal(harness.extended.length, 2,
-    'positive control: chatty liveness must cross and extend two ordinary deadlines');
+  assert.ok(harness.clock.now() > 6 * 60 * 60 * 1000,
+    'positive setup: the removed ceiling is crossed');
   assert.equal(harness.killed.length, 0);
 
-  harness.clock.advance(10);
+  harness.clock.advance(thresholdMs);
   assert.equal(harness.killed.length, 1);
-  assert.equal(harness.killed[0].kind, 'hard-ceiling');
-  assert.equal(harness.killed[0].timeoutMs, 250);
-  assert.equal(harness.killed[0].setting, 'URO_EXECUTOR_MAX_MS');
+  assert.equal(harness.killed[0].kind, 'liveness');
+  assert.equal(harness.killed[0].setting, 'URO_STALL_THRESHOLD_MS');
 });
 
-test('without liveness evidence the original deadline still kills before the gap threshold', () => {
-  const harness = deadlineHarness({ timeoutMs: 100, thresholdMs: 500, maxMs: 1000 });
-  harness.clock.advance(100);
+test('a seat with no output is killed at the liveness threshold', () => {
+  const harness = livenessHarness({ thresholdMs: 500 });
+  harness.clock.advance(500);
 
-  assert.equal(harness.extended.length, 0);
   assert.equal(harness.killed.length, 1);
-  assert.equal(harness.killed[0].kind, 'deadline');
-  assert.equal(harness.killed[0].gapMs, 100);
+  assert.equal(harness.killed[0].kind, 'liveness');
+  assert.equal(harness.killed[0].gapMs, 500);
   assert.equal(harness.killed[0].lastEvent.type, 'start');
-  assert.equal(harness.killed[0].setting, 'URO_EXECUTOR_TIMEOUT_MS');
+  assert.equal(harness.killed[0].setting, 'URO_STALL_THRESHOLD_MS');
 });
 
 test('spawnCapture awaits preservation before invoking the injected process-tree kill', async () => {
@@ -161,18 +148,17 @@ test('spawnCapture awaits preservation before invoking the injected process-tree
   const child = fakeChild();
   const order = [];
   const pending = spawnCapture(process.execPath, ['unused'], {
-    timeoutMs: 100,
     beforeKill: async () => { order.push('preserve'); },
     spawnProcess: () => child,
     killProcessTree: () => {
       order.push('kill');
       child.emit('close', null, 'SIGKILL');
     },
-    executorSupervision: executorSupervision(clock),
+    livenessSupervision: livenessSupervision(clock),
   });
 
   await Promise.resolve();
-  clock.advance(100);
+  clock.advance(50);
   const result = await pending;
   assert.deepEqual(order, ['preserve', 'kill']);
   assert.equal(result.timedOut, true);
@@ -184,7 +170,6 @@ test('child close during preservation waits for preservation and never kills a c
   const order = [];
   let releasePreservation;
   const pending = spawnCapture(process.execPath, ['unused'], {
-    timeoutMs: 100,
     beforeKill: () => new Promise((resolve) => {
       order.push('preserve-start');
       releasePreservation = () => {
@@ -194,13 +179,13 @@ test('child close during preservation waits for preservation and never kills a c
     }),
     spawnProcess: () => child,
     killProcessTree: () => { order.push('kill'); },
-    executorSupervision: executorSupervision(clock),
+    livenessSupervision: livenessSupervision(clock),
   });
   let resolved = false;
   pending.then(() => { resolved = true; });
 
   await Promise.resolve();
-  clock.advance(100);
+  clock.advance(50);
   await Promise.resolve();
   child.emit('close', 0, null);
   await Promise.resolve();

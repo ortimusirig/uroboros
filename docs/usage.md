@@ -195,9 +195,10 @@ become a success.
 
 ## Iterating
 
-One `loop run` invocation can perform up to the configured number of debate rounds. Each
-structured blocking review finding is converted into executor work, followed by the full gate
-and both verifier seats. A `needs-pivot` result returns control to the campaign or operator.
+One `loop run` invocation debates until the reviews converge or the pivot ladder stops it.
+Structured blocking review findings are converted into executor work, followed by the full gate
+and both verifier seats. `URO_DEBATE_ROUNDS` is an optional operator cap; the tool supplies no
+round limit of its own. A `needs-pivot` result returns control to the campaign or operator.
 
 ## Optional flat event view with Logdy
 
@@ -256,27 +257,26 @@ embedded Obsidian Bases campaign table.
   and lengthens paths past Windows limits.
 - Model defaults are pinned at their launch boundaries in `src/executor.js` and
   `src/verifier.js`; reports import those same defaults rather than duplicating them.
-- **Executor deadline:** 30 minutes by default; override the millisecond value with
-  `URO_EXECUTOR_TIMEOUT_MS`. At each deadline, recent stdout bytes extend a healthy executor
-  by one more interval; an executor with no liveness evidence is terminated.
-- **Verifier timeout:** 10 minutes per Cursor pass by default; override with
-  `URO_VERIFIER_TIMEOUT_MS`.
+- **Executor elapsed timeout:** none by default. Set `URO_EXECUTOR_TIMEOUT_MS` or pass
+  `--executor-timeout` to impose an operator-owned millisecond limit.
+- **Verifier elapsed timeout:** none by default. Set `URO_VERIFIER_TIMEOUT_MS` or pass
+  `--verifier-timeout` to impose an operator-owned millisecond limit on each Cursor pass.
 - **Gate timeout:** 60 minutes per command by default (chosen to accommodate slow test
   suites); override with `URO_GATE_TIMEOUT_MS`.
-  All three timeout overrides are positive integer millisecond values.
-- **Liveness gap:** five minutes since the executor's last stdout byte; override the positive
-  millisecond value with `URO_STALL_THRESHOLD_MS`. It controls stall reporting, restart policy,
-  and the evidence consulted at an executor deadline.
-- **Progress gap:** five minutes since the last completed executor item; override with
-  `URO_PROGRESS_THRESHOLD_MS`. Progress silence is informational and never kills or restarts.
-- **Executor hard ceiling:** six hours regardless of liveness; override with
-  `URO_EXECUTOR_MAX_MS`.
-- **Stall policy:** `URO_STALL_POLICY=report` by default. It records and reports a stall but
-  kills nothing. Opt in with `URO_STALL_POLICY=restart` to stop a stalled executor process
-  tree and relaunch it with a stall notice appended to the original plan.
+  All timeout overrides are positive integer millisecond values.
+- **Liveness gap:** five minutes since the last stdout byte at the executor or either verifier
+  pass; override the positive millisecond value with `URO_STALL_THRESHOLD_MS`. Silence kills
+  the seat and records the gap, last parsed event, and governing setting. There is no hard
+  elapsed ceiling.
+- **Progress gap:** five minutes since the last completed item; override with
+  `URO_PROGRESS_THRESHOLD_MS`. Progress silence is informational and never kills or restarts
+  while stdout bytes continue to prove liveness.
+- **Stall policy:** `URO_STALL_POLICY=report` records the executor liveness kill without a
+  relaunch. Set `URO_STALL_POLICY=restart` to relaunch that killed executor with a stall notice
+  appended to the original plan. Verifier passes are never rewritten into findings after a kill.
 - **Stall restart bound:** one restart by default; set `URO_STALL_RESTARTS` to `0`-`3`.
   Stall restarts and gate retries have separate limits and counters in the run facts.
-- **Debate rounds:** two review rounds by default; set `URO_DEBATE_ROUNDS` to an integer
-  from `1` through `5`. Unresolved blocking findings at the bound stop with `needs-pivot`.
+- **Debate rounds:** unbounded by default; set `URO_DEBATE_ROUNDS` to any positive integer to
+  impose an operator-owned cap. `loop plan --rounds` has the same optional-cap semantics.
 - **Terminal heartbeat:** pass `--quiet` to suppress event summaries on stderr without
   disabling the isolated `events.jsonl` stream.

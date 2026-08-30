@@ -1,7 +1,5 @@
 import { readEnv } from './env-compat.js';
 
-export const DEFAULT_EXECUTOR_TIMEOUT_MS = 30 * 60 * 1000;
-export const DEFAULT_VERIFIER_TIMEOUT_MS = 10 * 60 * 1000;
 export const DEFAULT_GATE_TIMEOUT_MS = 60 * 60 * 1000;
 
 const MAX_TIMEOUT_MS = 2_147_483_647;
@@ -34,10 +32,10 @@ function resolveStageTimeout(env, overrides, stage, suffix, fallback) {
 export function resolveStageTimeouts(env = process.env, overrides = {}) {
   return {
     executor: resolveStageTimeout(
-      env, overrides, 'executor', 'EXECUTOR_TIMEOUT_MS', DEFAULT_EXECUTOR_TIMEOUT_MS,
+      env, overrides, 'executor', 'EXECUTOR_TIMEOUT_MS', undefined,
     ),
     verifier: resolveStageTimeout(
-      env, overrides, 'verifier', 'VERIFIER_TIMEOUT_MS', DEFAULT_VERIFIER_TIMEOUT_MS,
+      env, overrides, 'verifier', 'VERIFIER_TIMEOUT_MS', undefined,
     ),
     gate: resolveStageTimeout(env, overrides, 'gate', 'GATE_TIMEOUT_MS', DEFAULT_GATE_TIMEOUT_MS),
   };

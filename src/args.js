@@ -265,7 +265,9 @@ export function parseArgs(argv) {
       goal: values.goal,
       target: values.target,
       out: values.out,
-      rounds: strictInt(values.rounds, 3, 1, Number.MAX_SAFE_INTEGER),
+      ...(values.rounds === undefined ? {} : {
+        rounds: strictInt(values.rounds, undefined, 1, Number.MAX_SAFE_INTEGER),
+      }),
       ...(values['planner-model'] === undefined ? {} : { plannerModel: values['planner-model'] }),
       dryRun: values['dry-run'] === true,
     };

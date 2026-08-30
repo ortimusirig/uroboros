@@ -26,8 +26,6 @@ import { parseReview } from './review.js';
 import { resolveStageTimeouts } from './timeouts.js';
 import { runVerifier } from './verifier.js';
 
-export const DEFAULT_PLAN_ROUNDS = 3;
-
 function isFile(path) {
   try { return statSync(path).isFile(); } catch { return false; }
 }
@@ -234,7 +232,7 @@ export async function runPlan({
   goal,
   target,
   out,
-  rounds = DEFAULT_PLAN_ROUNDS,
+  rounds,
   plannerModel,
   verifierModel,
   gateTimeout = resolveStageTimeouts().gate,
@@ -246,7 +244,9 @@ export async function runPlan({
   baseDirectory = process.cwd(),
   adapters = {},
 } = {}) {
-  if (!Number.isSafeInteger(rounds) || rounds < 1) throw new TypeError('rounds must be a positive integer');
+  if (rounds !== undefined && (!Number.isSafeInteger(rounds) || rounds < 1)) {
+    throw new TypeError('rounds must be a positive integer');
+  }
   const request = validatePlanRequest({ goal, target, out, baseDirectory });
   reportEvent(reporter, runId, 'plan', 'start', {
     target: request.target, out: request.out, rounds, goalSource: request.goalSource,
@@ -267,7 +267,7 @@ export async function runPlan({
   let pivotCount = 0;
   let lastGate = null;
 
-  for (let round = 1; round <= rounds; round++) {
+  for (let round = 1; rounds === undefined || round <= rounds; round++) {
     const input = draftingPrompt({
       goal: request.goal,
       round,

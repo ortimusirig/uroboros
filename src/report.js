@@ -127,7 +127,6 @@ export function buildRunFacts({
     facts.limits.stall = {
       thresholdMs: supervision.thresholdMs,
       progressThresholdMs: supervision.progressThresholdMs,
-      executorMaxMs: supervision.executorMaxMs,
       policy: supervision.policy,
       restartLimit: supervision.restartLimit,
     };
@@ -236,7 +235,7 @@ export function buildReportMarkdown(facts, {
     ...(facts.limits?.stall
       ? [
           `- **Stall policy:** ${facts.limits.stall.policy}; gap ${facts.limits.stall.thresholdMs} ms`,
-          `- **Progress notice:** ${facts.limits.stall.progressThresholdMs} ms; executor ceiling ${facts.limits.stall.executorMaxMs} ms`,
+          `- **Progress notice:** ${facts.limits.stall.progressThresholdMs} ms`,
           `- **Retries used:** gate ${facts.retryCounts?.gate ?? 0}/${facts.limits.gateRetries}; ` +
             `stall ${facts.retryCounts?.stall ?? 0}/${facts.limits.stall.restartLimit}`,
         ]
@@ -342,24 +341,12 @@ export function buildReportMarkdown(facts, {
         ? `, command ${[event.bin, ...(event.args ?? [])].join(' ')}`
         : '';
       const last = event.lastEvent ?? {};
-      if (event.reason === 'hard-ceiling') {
-        const evidence = Number.isFinite(event.gapMs)
-          ? `; last stdout gap ${event.gapMs} ms after `
-            + `${last.stage ?? 'unknown'}/${last.type ?? 'unknown'}`
-          : '';
-        const setting = event.setting
-          ? `; raise ${event.setting} to raise the hard ceiling`
-          : '';
-        md.push(`- ${event.stage}${pass}: hard ceiling reached after ${event.timeoutMs} ms `
-          + `(iteration ${event.iteration}${attempt}${command})${evidence}${setting}`);
-      } else {
-        const evidence = Number.isFinite(event.gapMs)
-          ? `; ${event.gapMs} ms silence after ${last.stage ?? 'unknown'}/${last.type ?? 'unknown'}`
-            + (event.setting ? `; raise ${event.setting} to allow a longer gap` : '')
-          : '';
-        md.push(`- ${event.stage}${pass}: timed out after ${event.timeoutMs} ms `
-          + `(iteration ${event.iteration}${attempt}${command})${evidence}`);
-      }
+      const evidence = Number.isFinite(event.gapMs)
+        ? `; ${event.gapMs} ms silence after ${last.stage ?? 'unknown'}/${last.type ?? 'unknown'}`
+          + (event.setting ? `; raise ${event.setting} to allow a longer gap` : '')
+        : '';
+      md.push(`- ${event.stage}${pass}: timed out after ${event.timeoutMs} ms `
+        + `(iteration ${event.iteration}${attempt}${command})${evidence}`);
     }
   }
   if ((facts.stallEvents ?? []).length > 0) {

@@ -103,34 +103,26 @@ function clockValue(now) {
   return value instanceof Date ? value.getTime() : value;
 }
 
-export function createExecutorDeadline({
-  timeoutMs,
-  livenessThresholdMs,
-  maxMs,
+export function createLivenessDeadline({
+  thresholdMs,
   getLiveness,
-  onExtended,
   onKill,
   now = Date.now,
   setTimer = setTimeout,
   clearTimer = clearTimeout,
 }) {
-  timerInteger(timeoutMs, 'timeoutMs');
-  timerInteger(livenessThresholdMs, 'livenessThresholdMs');
-  timerInteger(maxMs, 'maxMs');
+  timerInteger(thresholdMs, 'thresholdMs');
   if (typeof getLiveness !== 'function') throw new TypeError('getLiveness must be a function');
   if (typeof onKill !== 'function') throw new TypeError('onKill must be a function');
 
-  const startedAt = clockValue(now);
   let disposed = false;
   let killed = false;
-  let deadlineTimer = null;
-  let ceilingTimer = null;
+  let timer = null;
 
   const evidence = () => {
     const observed = getLiveness() ?? {};
     const rawGap = Number(observed.gapMs);
     return {
-      hasEvidence: observed.hasEvidence === true,
       gapMs: Number.isFinite(rawGap) ? Math.max(0, rawGap) : 0,
       lastEvent: observed.lastEvent ?? null,
     };
@@ -139,68 +131,38 @@ export function createExecutorDeadline({
   const finish = (reason) => {
     if (disposed || killed) return;
     killed = true;
-    if (deadlineTimer !== null) clearTimer(deadlineTimer);
-    if (ceilingTimer !== null) clearTimer(ceilingTimer);
-    deadlineTimer = null;
-    ceilingTimer = null;
+    if (timer !== null) clearTimer(timer);
+    timer = null;
     try { onKill(reason); } catch { /* the termination callback owns its errors */ }
   };
 
-  const hardCeiling = () => {
-    const observed = evidence();
-    finish({
-      kind: 'hard-ceiling',
-      timeoutMs: maxMs,
-      gapMs: observed.gapMs,
-      lastEvent: observed.lastEvent,
-      setting: 'URO_EXECUTOR_MAX_MS',
-    });
-  };
-
-  const armDeadline = () => {
-    deadlineTimer = setTimer(() => {
-      deadlineTimer = null;
+  const arm = (delayMs = thresholdMs) => {
+    timer = setTimer(() => {
+      timer = null;
       if (disposed || killed) return;
-      if (clockValue(now) - startedAt >= maxMs) {
-        hardCeiling();
-        return;
-      }
       const observed = evidence();
-      if (observed.hasEvidence && observed.gapMs < livenessThresholdMs) {
-        const extension = {
-          gapMs: observed.gapMs,
-          lastEvent: observed.lastEvent,
-          timeoutMs,
-          extensionMs: timeoutMs,
-        };
-        try { onExtended?.(extension); } catch { /* observability cannot alter supervision */ }
-        armDeadline();
+      if (observed.gapMs < thresholdMs) {
+        arm(thresholdMs - observed.gapMs);
         return;
       }
       finish({
-        kind: 'deadline',
-        timeoutMs,
+        kind: 'liveness',
+        timeoutMs: thresholdMs,
         gapMs: observed.gapMs,
         lastEvent: observed.lastEvent,
-        setting: observed.hasEvidence
-          ? 'URO_STALL_THRESHOLD_MS'
-          : 'URO_EXECUTOR_TIMEOUT_MS',
+        setting: 'URO_STALL_THRESHOLD_MS',
       });
-    }, timeoutMs);
+    }, delayMs);
   };
 
-  // Arm the unconditional ceiling first so equal timestamps always choose the hard limit.
-  ceilingTimer = setTimer(hardCeiling, maxMs);
-  armDeadline();
+  arm();
 
   return {
     dispose() {
       if (disposed) return;
       disposed = true;
-      if (deadlineTimer !== null) clearTimer(deadlineTimer);
-      if (ceilingTimer !== null) clearTimer(ceilingTimer);
-      deadlineTimer = null;
-      ceilingTimer = null;
+      if (timer !== null) clearTimer(timer);
+      timer = null;
     },
   };
 }
@@ -241,7 +203,8 @@ export async function spawnCapture(bin, args, opts = {}) {
       env: opts.env ?? process.env,
       windowsHide: true,
       windowsVerbatimArguments: verbatim,
-      detached: timeoutMs !== undefined && process.platform !== 'win32',
+      detached: (timeoutMs !== undefined || opts.livenessSupervision !== undefined)
+        && process.platform !== 'win32',
     });
     const outChunks = [];
     const errChunks = [];
@@ -265,25 +228,31 @@ export async function spawnCapture(bin, args, opts = {}) {
         });
       return killPromise;
     };
-    let deadline = null;
+    let livenessDeadline = null;
     let timer = null;
-    if (timeoutMs !== undefined && opts.executorSupervision) {
-      deadline = createExecutorDeadline({
-        timeoutMs,
-        ...opts.executorSupervision,
+    const setTimer = opts.setTimer ?? setTimeout;
+    const clearTimer = opts.clearTimer ?? clearTimeout;
+    if (opts.livenessSupervision) {
+      livenessDeadline = createLivenessDeadline({
+        ...opts.livenessSupervision,
         onKill: (reason) => { requestKill(reason, true); },
       });
-    } else if (timeoutMs !== undefined) {
-      timer = setTimeout(() => {
-        requestKill({ kind: 'deadline', timeoutMs }, true);
+    }
+    if (timeoutMs !== undefined) {
+      timer = setTimer(() => {
+        requestKill({
+          kind: 'deadline',
+          timeoutMs,
+          ...(opts.timeoutSetting ? { setting: opts.timeoutSetting } : {}),
+        }, true);
       }, timeoutMs);
     }
     const signal = opts.signal;
     const onAbort = () => {
       if (settled || aborted) return;
       aborted = true;
-      if (timer) { clearTimeout(timer); timer = null; }
-      deadline?.dispose();
+      if (timer) { clearTimer(timer); timer = null; }
+      livenessDeadline?.dispose();
       requestKill(signal?.reason ?? { kind: 'aborted' }, false);
     };
     if (signal) {
@@ -306,15 +275,15 @@ export async function spawnCapture(bin, args, opts = {}) {
     child.stderr.on('data', (d) => errChunks.push(d));
     child.on('error', (error) => {
       childClosed = true;
-      if (timer) clearTimeout(timer);
-      deadline?.dispose();
+      if (timer) clearTimer(timer);
+      livenessDeadline?.dispose();
       signal?.removeEventListener('abort', onAbort);
       if (!settled) { settled = true; reject(error); }
     });
     child.on('close', (code, closeSignal) => {
       childClosed = true;
-      if (timer) clearTimeout(timer);
-      deadline?.dispose();
+      if (timer) clearTimer(timer);
+      livenessDeadline?.dispose();
       opts.signal?.removeEventListener('abort', onAbort);
       if (settled) return;
       const finishClose = () => {

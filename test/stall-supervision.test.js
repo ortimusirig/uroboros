@@ -31,7 +31,7 @@ function executorEvent(opts, type, fields = {}) {
   });
 }
 
-test('report policy records a real stall, never supplies a kill signal, and keeps normal outcome',
+test('report policy records a required liveness kill without scheduling a restart',
   async () => {
     const scr = scratch();
     const tgt = target();
@@ -43,17 +43,23 @@ test('report policy records a real stall, never supplies a kill signal, and keep
         stallPolicy: 'report', stallThresholdMs: 25, stallRestartLimit: 1,
         adapters: {
           runExecutor: async (opts) => {
-            assert.equal(opts.signal, undefined, 'report policy must allocate no kill signal');
+            assert.equal(opts.signal, undefined, 'report policy must allocate no restart signal');
             executorEvent(opts, 'start');
             await delay(70);
-            executorEvent(opts, 'finish', { code: 0 });
-            return { changedFiles: [], lastMessage: 'finished after thinking', timedOut: false };
+            executorEvent(opts, 'finish', { code: -1, timedOut: true });
+            return {
+              changedFiles: [], lastMessage: 'killed after silence', timedOut: true,
+              timeoutMs: 25, exitCode: -1,
+              timeoutReason: { kind: 'liveness', timeoutMs: 25, gapMs: 25,
+                lastEvent: { stage: 'executor', type: 'start' },
+                setting: 'URO_STALL_THRESHOLD_MS' },
+            };
           },
           runGate: async () => ({ passed: true, results: [] }),
           runVerifier: async () => { throw new Error('a no-op must not verify'); },
         },
       });
-      assert.equal(facts.outcome, 'no-op');
+      assert.equal(facts.outcome, 'timed-out');
       assert.equal(facts.retryCounts.stall, 0);
       assert.ok(facts.stallEvents.some((event) => event.stage === 'executor'));
       assert.ok(events.some((event) => event.stage === 'executor' && event.type === 'stalled'),
@@ -65,7 +71,7 @@ test('report policy records a real stall, never supplies a kill signal, and keep
     }
   });
 
-test('restart kills the stalled attempt, augments its replacement plan, and stops at its bound',
+test('restart relaunches once, then a second silence remains a terminal liveness kill',
   async () => {
     const scr = scratch();
     const tgt = target();
@@ -94,7 +100,13 @@ test('restart kills the stalled attempt, augments its replacement plan, and stop
               'the exhausted restart budget must not arm another destructive action');
             await delay(70);
             executorEvent(opts, 'finish', { code: 0 });
-            return { changedFiles: [], lastMessage: 'completed', timedOut: false };
+            return {
+              changedFiles: [], lastMessage: 'killed after second silence', timedOut: true,
+              timeoutMs: 25, exitCode: -1,
+              timeoutReason: { kind: 'liveness', timeoutMs: 25, gapMs: 25,
+                lastEvent: { stage: 'executor', type: 'start' },
+                setting: 'URO_STALL_THRESHOLD_MS' },
+            };
           },
           runGate: async () => ({ passed: true, results: [] }),
           runVerifier: async () => { throw new Error('a no-op must not verify'); },
@@ -112,7 +124,7 @@ test('restart kills the stalled attempt, augments its replacement plan, and stop
       assert.ok(facts.stallEvents.some((event) => event.stage === 'executor'
         && event.action === 'report'),
       'positive control: the second silence is observed but cannot exceed the kill bound');
-      assert.equal(facts.outcome, 'no-op');
+      assert.equal(facts.outcome, 'timed-out');
     } finally {
       rmSync(tgt, { recursive: true, force: true });
       rmSync(scr, { recursive: true, force: true });

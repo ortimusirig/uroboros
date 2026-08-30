@@ -9,9 +9,7 @@ import { readEnv } from './env-compat.js';
 import { resolveSuperpowersDir } from './superpowers.js';
 import {
   createProgressWatchdog,
-  DEFAULT_EXECUTOR_MAX_MS,
-  DEFAULT_PROGRESS_THRESHOLD_MS,
-  DEFAULT_STALL_THRESHOLD_MS,
+  resolveExecutorThresholds,
 } from './stall-watchdog.js';
 
 export const DEFAULT_EXECUTOR_MODEL = 'gpt-5.6-sol';
@@ -195,16 +193,15 @@ export async function runExecutor({
   model = DEFAULT_EXECUTOR_MODEL,
   effort = DEFAULT_EXECUTOR_EFFORT,
   sandbox = SANDBOX,
-  timeoutMs = resolveStageTimeouts().executor,
+  timeoutMs,
   reporter,
   runId,
   attempt,
   signal,
   beforeKill,
   onLiveness,
-  livenessThresholdMs = DEFAULT_STALL_THRESHOLD_MS,
-  progressThresholdMs = DEFAULT_PROGRESS_THRESHOLD_MS,
-  executorMaxMs = DEFAULT_EXECUTOR_MAX_MS,
+  livenessThresholdMs,
+  progressThresholdMs,
   now = Date.now,
   setTimer = setTimeout,
   clearTimer = clearTimeout,
@@ -214,6 +211,12 @@ export async function runExecutor({
   home = homedir(),
   superpowersDir,
 }) {
+  const resolvedTimeoutMs = timeoutMs === undefined
+    ? resolveStageTimeouts(env).executor
+    : timeoutMs;
+  const thresholds = resolveExecutorThresholds(env);
+  const resolvedLivenessThresholdMs = livenessThresholdMs ?? thresholds.thresholdMs;
+  const resolvedProgressThresholdMs = progressThresholdMs ?? thresholds.progressThresholdMs;
   const args = [...extraArgv, ...buildCodexArgs({
     cwd, model, effort, sandbox, env, home, superpowersDir,
   })];
@@ -228,7 +231,7 @@ export async function runExecutor({
   };
   const progress = typeof reporter === 'function'
     ? createProgressWatchdog({
-      reporter, runId, thresholdMs: progressThresholdMs, now, setTimer, clearTimer,
+      reporter, runId, thresholdMs: resolvedProgressThresholdMs, now, setTimer, clearTimer,
     })
     : null;
   progress?.observe(lastObservedEvent);
@@ -249,9 +252,13 @@ export async function runExecutor({
     r = await spawnCapture(bin, args, {
       cwd,
       input: plan,
-      timeoutMs,
+      timeoutMs: resolvedTimeoutMs,
       signal,
       beforeKill,
+      timeoutSetting: 'URO_EXECUTOR_TIMEOUT_MS',
+      now,
+      setTimer,
+      clearTimer,
       spawnProcess,
       killProcessTree,
       onStdout: (chunk) => {
@@ -259,17 +266,12 @@ export async function runExecutor({
         try { onLiveness?.(); } catch { /* observation cannot alter captured output */ }
         observer.onStdout(chunk);
       },
-      executorSupervision: {
-        livenessThresholdMs,
-        maxMs: executorMaxMs,
+      livenessSupervision: {
+        thresholdMs: resolvedLivenessThresholdMs,
         getLiveness: () => ({
-          hasEvidence: lastByteAt !== null,
           gapMs: nowMs() - (lastByteAt ?? startedAt),
           lastEvent: lastObservedEvent,
         }),
-        onExtended: (fields) => {
-          reportEvent(reporter, runId, 'executor', 'extended', { ...fields, attempt });
-        },
         now,
         setTimer,
         clearTimer,

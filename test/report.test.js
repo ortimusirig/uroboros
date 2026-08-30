@@ -247,24 +247,23 @@ test('configured timeouts and timeout events reach facts and markdown', () => {
   assert.match(md, /URO_STALL_THRESHOLD_MS/);
 });
 
-test('hard-ceiling timeout evidence renders the ceiling rather than a silence timeout', () => {
+test('verifier liveness timeout evidence renders the pass, gap, and governing setting', () => {
   const timedOut = buildRunFacts({
-    runId: 'ceiling', target: 'C:/proj', dir: 'C:/ccc/w', isRepo: false,
-    branch: 'ccc/ceiling', iterations: [], gateStatus: 'not-run', verdict: null,
+    runId: 'verifier-silence', target: 'C:/proj', dir: 'C:/ccc/w', isRepo: false,
+    branch: 'ccc/verifier-silence', iterations: [], gateStatus: 'not-run', verdict: null,
     outcome: 'timed-out', gateRetries: 0,
-    timeouts: { executor: 100, verifier: 200, gate: 300 },
+    timeouts: { executor: null, verifier: null, gate: 300 },
     timeoutEvents: [{
-      stage: 'executor', iteration: 1, attempt: 1, timeoutMs: 600,
-      reason: 'hard-ceiling', gapMs: 2,
-      lastEvent: { stage: 'executor', type: 'item_completed' },
-      setting: 'URO_EXECUTOR_MAX_MS',
+      stage: 'verifier', pass: 'intent', iteration: 1, timeoutMs: 300_000,
+      reason: 'liveness', gapMs: 300_000,
+      lastEvent: { stage: 'verify', type: 'assistant' },
+      setting: 'URO_STALL_THRESHOLD_MS',
     }],
   });
-  const d = mkdtempSync(join(tmpdir(), 'rep-ceiling-'));
+  const d = mkdtempSync(join(tmpdir(), 'rep-verifier-silence-'));
   const { mdPath } = writeReport({ dir: d, facts: timedOut });
   const md = readFileSync(mdPath, 'utf8');
-  assert.match(md, /executor: hard ceiling reached after 600 ms/i);
-  assert.match(md, /last stdout gap 2 ms after executor\/item_completed/i);
-  assert.match(md, /raise URO_EXECUTOR_MAX_MS to raise the hard ceiling/i);
-  assert.doesNotMatch(md, /2 ms silence/i);
+  assert.match(md, /verifier \(intent pass\): timed out after 300000 ms/i);
+  assert.match(md, /300000 ms silence after verify\/assistant/i);
+  assert.match(md, /URO_STALL_THRESHOLD_MS/i);
 });

@@ -121,9 +121,12 @@ For a simple Graph, keep the flag form: give every task a `--unit-id`, then repe
   harness artifact to `URO_ARTIFACT_ROOT` (default `<scratchRoot>/artifacts`) and append a compact
   `index.jsonl` entry. Unit worktrees still remain until the operator explicitly runs `prune`;
   nothing prunes automatically at the end of a run or campaign.
-- **Run/batch Git work has no deadline.** Explicit stage timeouts cover the executor, gate, and
-  both verifiers; the isolation and campaign Git invocations pass no timeout. Standalone
-  `doctor` probes and `publish` commands use their own bounded command timeouts.
+- **Agent seats have no elapsed deadline by default.** Executor and verifier elapsed limits
+  exist only when the operator sets their timeout flags or environment variables; silence past
+  `URO_STALL_THRESHOLD_MS` kills either seat. The gate retains its default timeout because a
+  quiet build may be healthy and cannot spend through a token budget. Isolation and campaign Git
+  invocations pass no timeout. Standalone `doctor` probes and `publish` commands use their own
+  bounded command timeouts.
 - **Ordinary seats do not receive campaign context.** The executor and either verifier are not
   told about sibling units, the dependency Graph, or the campaign. A perspective value reaches
   no seat; its presence only infers a candidate set. Derived Merge is the exception: its
@@ -249,8 +252,7 @@ Keep watching the event stream or dashboard. On roughly a 30-minute cadence, als
 `loop status <run-directory>`:
 
 - Events arrive and files or gates advance: slow, not stuck. Leave it.
-- No events, still within the stage timeout, and below the stall threshold: probably thinking.
-  Leave it.
+- No events, but still below the stall threshold: probably thinking. Leave it.
 - No events beyond the threshold: stalled. Intervene.
 - Events arrive while the same files are rewritten without gate progress: circling. Intervene.
 

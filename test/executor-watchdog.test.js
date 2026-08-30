@@ -127,9 +127,9 @@ test('raw bytes keep the real executor coordinator alive while progress silence 
     let kills = 0;
     const pending = runExecutor({
       plan: 'think without completing an item', cwd: tmpdir(),
-      bin: process.execPath, extraArgv: ['unused'], timeoutMs: 100,
+      bin: process.execPath, extraArgv: ['unused'], env: {},
       reporter: (event) => events.push(event), runId: 'chatty-thinking', attempt: 1,
-      livenessThresholdMs: 50, progressThresholdMs: 100, executorMaxMs: 1000,
+      livenessThresholdMs: 50, progressThresholdMs: 100,
       now: clock.now, setTimer: clock.setTimer, clearTimer: clock.clearTimer,
       spawnProcess: () => child,
       killProcessTree: () => { kills++; },
@@ -146,8 +146,8 @@ test('raw bytes keep the real executor coordinator alive while progress silence 
     clock.fireDueTimers();
 
     assert.equal(kills, 0, 'progress silence must never kill the child');
-    assert.equal(events.filter((event) => event.type === 'extended').length, 1,
-      'recent stdout must extend the ordinary deadline');
+    assert.equal(events.filter((event) => event.type === 'extended').length, 0,
+      'there is no elapsed deadline to extend');
     assert.equal(events.filter((event) => event.type === 'stalled'
       && event.tier === 'progress').length, 1,
     'progress silence must still emit its informational event');

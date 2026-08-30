@@ -4,7 +4,6 @@ import { parseTimeoutMs } from './timeouts.js';
 
 export const DEFAULT_STALL_THRESHOLD_MS = 5 * 60 * 1000;
 export const DEFAULT_PROGRESS_THRESHOLD_MS = 5 * 60 * 1000;
-export const DEFAULT_EXECUTOR_MAX_MS = 6 * 60 * 60 * 1000;
 export const DEFAULT_STALL_POLICY = 'report';
 export const DEFAULT_STALL_RESTARTS = 1;
 
@@ -51,7 +50,6 @@ export function resolveExecutorThresholds(env = process.env) {
     progressThresholdMs: timeoutFromEnv(
       env, 'PROGRESS_THRESHOLD_MS', DEFAULT_PROGRESS_THRESHOLD_MS,
     ),
-    executorMaxMs: timeoutFromEnv(env, 'EXECUTOR_MAX_MS', DEFAULT_EXECUTOR_MAX_MS),
   };
 }
 
@@ -176,6 +174,8 @@ export function createProgressWatchdog({
   reporter,
   runId,
   thresholdMs,
+  stage = 'executor',
+  pass,
   now = Date.now,
   setTimer = setTimeout,
   clearTimer = clearTimeout,
@@ -212,7 +212,7 @@ export function createProgressWatchdog({
       current.timer = null;
       deliver(createEvent({
         runId,
-        stage: 'executor',
+        stage,
         type: 'stalled',
         fields: {
           tier: 'progress',
@@ -220,6 +220,7 @@ export function createProgressWatchdog({
           thresholdMs,
           lastEvent: current.lastEvent,
           setting: 'URO_PROGRESS_THRESHOLD_MS',
+          ...(pass === undefined ? {} : { pass }),
         },
         now: () => new Date(clockValue(now)),
       }));
@@ -239,7 +240,7 @@ export function createProgressWatchdog({
 
   return {
     observe(event) {
-      if (disposed || !event || event.runId !== runId || event.stage !== 'executor') return;
+      if (disposed || !event || event.runId !== runId || event.stage !== stage) return;
       if (event.type === 'finish') {
         if (state?.timer !== null && state?.timer !== undefined) clearTimer(state.timer);
         state = null;

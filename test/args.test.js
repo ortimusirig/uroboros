@@ -367,6 +367,11 @@ test('plan parses its goal, target, output, rounds, model, and dry-run', () => {
   assert.throws(() => parseArgs([
     'plan', '--goal', 'x', '--target', 'repo', '--out', 'generated', '--rounds', '0',
   ]), /value out of range/);
+  const unbounded = parseArgs([
+    'plan', '--goal', 'x', '--target', 'repo', '--out', 'generated',
+  ]);
+  assert.equal(Object.hasOwn(unbounded, 'rounds'), false,
+    'omitting --rounds must not invent a planning bound');
 });
 
 test('queue parses autonomous mode, limits, and dry-run', () => {

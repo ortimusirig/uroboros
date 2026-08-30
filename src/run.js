@@ -58,24 +58,21 @@ import {
 import { detectReview, parseReview } from './review.js';
 import { buildFixPlan, validateFindings } from './fix-plan.js';
 import { resolveSuperpowersDir } from './superpowers.js';
+import { readEnv } from './env-compat.js';
 
 export { HARNESS_ARTIFACTS } from './artifacts.js';
 
 const PARTIAL_WORK_GIT_TIMEOUT_MS = 30_000;
-export const DEFAULT_DEBATE_ROUNDS = 2;
-export const MAX_DEBATE_ROUNDS = 5;
 
 export function resolveDebateRounds(env = process.env, override) {
-  const raw = override ?? env?.URO_DEBATE_ROUNDS;
-  if (raw === undefined) return DEFAULT_DEBATE_ROUNDS;
+  const raw = override ?? readEnv(env, 'DEBATE_ROUNDS');
+  if (raw === undefined) return undefined;
   if ((typeof raw !== 'number' && (typeof raw !== 'string' || !/^\d+$/.test(raw)))
     || !Number.isSafeInteger(Number(raw))) {
-    throw new Error(`URO_DEBATE_ROUNDS must be an integer between 1 and ${MAX_DEBATE_ROUNDS}`);
+    throw new Error('URO_DEBATE_ROUNDS must be a positive integer');
   }
   const value = Number(raw);
-  if (value < 1 || value > MAX_DEBATE_ROUNDS) {
-    throw new Error(`URO_DEBATE_ROUNDS must be between 1 and ${MAX_DEBATE_ROUNDS}`);
-  }
+  if (value < 1) throw new Error('URO_DEBATE_ROUNDS must be a positive integer');
   return value;
 }
 
@@ -297,7 +294,7 @@ export async function run(opts) {
   const originalPlan = resolveTask(task);
   let plan = originalPlan;
   const commands = Array.isArray(gate) ? gate : JSON.parse(readFileSync(gate, 'utf8'));
-  const stageTimeouts = resolveStageTimeouts(process.env, opts);
+  const stageTimeouts = resolveStageTimeouts(opts.env ?? process.env, opts);
   const probeVerifier = adapters.probeVerifier
     ?? (adapters.runVerifier === undefined ? probeVerifierLiveness : null);
   if (!verifierProbeCompleted && probeVerifier) {
@@ -306,8 +303,8 @@ export async function run(opts) {
       ?? `verifier liveness probe failed for ${verifierBin}`}`);
   }
 
-  // The reporter is the feature boundary. Without one, do not resolve watchdog settings,
-  // allocate its state, arm timers, or create abort controllers.
+  // The reporter is the policy/restart boundary. Seat liveness thresholds are always resolved,
+  // but without a reporter the run allocates no event watchdog or restart controller.
   let watchdog = null;
   let eventReporter = reporter;
   let stallConfig = null;
@@ -316,7 +313,6 @@ export async function run(opts) {
     ...(opts.stallThresholdMs === undefined ? {} : { thresholdMs: opts.stallThresholdMs }),
     ...(opts.progressThresholdMs === undefined
       ? {} : { progressThresholdMs: opts.progressThresholdMs }),
-    ...(opts.executorMaxMs === undefined ? {} : { executorMaxMs: opts.executorMaxMs }),
   };
   let activeExecutor = null;
   let stallRestartCount = 0;
@@ -501,13 +497,13 @@ export async function run(opts) {
         result = observeUsage(await runExecutor({
           plan: executorPlan, cwd: iso.dir, model: executorModel, effort: executorEffort,
           superpowersDir,
+          env: opts.env ?? process.env,
           timeoutMs: stageTimeouts.executor,
           reporter: eventReporter, runId, attempt,
           beforeKill,
           onLiveness: () => watchdog?.touch('executor'),
           livenessThresholdMs: executorThresholds.thresholdMs,
           progressThresholdMs: executorThresholds.progressThresholdMs,
-          executorMaxMs: executorThresholds.executorMaxMs,
           ...(controller ? { signal: controller.signal } : {}),
         }), { seat: 'executor', iteration: n, attempt });
       } finally {
@@ -816,23 +812,40 @@ export async function run(opts) {
         const v = annotateVerifierConsistency(observeUsage(await runVerifier({
           cwd: iso.dir, bin: verifierBin, model: verifierModel, prompt: DEFAULT_PROMPT,
           superpowersDir,
+          env: opts.env ?? process.env,
           timeoutMs: stageTimeouts.verifier,
           reporter: eventReporter, runId, pass: 'correctness',
+          onLiveness: () => watchdog?.touch('verify'),
+          livenessThresholdMs: executorThresholds.thresholdMs,
+          progressThresholdMs: executorThresholds.progressThresholdMs,
         }), { seat: 'verifier', pass: 'correctness', iteration: n }));
         const intentVerifier = annotateVerifierConsistency(observeUsage(await runVerifier({
           cwd: iso.dir, bin: verifierBin, model: verifierModel, prompt: INTENT_PROMPT,
           superpowersDir,
+          env: opts.env ?? process.env,
           timeoutMs: stageTimeouts.verifier,
           reporter: eventReporter, runId, pass: 'intent',
+          onLiveness: () => watchdog?.touch('verify'),
+          livenessThresholdMs: executorThresholds.thresholdMs,
+          progressThresholdMs: executorThresholds.progressThresholdMs,
         }), { seat: 'verifier', pass: 'intent', iteration: n }));
-        if (v.timedOut) {
-          timeoutEvents.push({ stage: 'verifier', pass: 'correctness', iteration: n,
-            timeoutMs: v.timeoutMs ?? stageTimeouts.verifier });
-        }
-        if (intentVerifier.timedOut) {
-          timeoutEvents.push({ stage: 'verifier', pass: 'intent', iteration: n,
-            timeoutMs: intentVerifier.timeoutMs ?? stageTimeouts.verifier });
-        }
+        const recordVerifierTimeout = (result, pass) => {
+          if (!result.timedOut) return;
+          timeoutEvents.push({
+            stage: 'verifier', pass, iteration: n,
+            timeoutMs: result.timeoutReason?.timeoutMs
+              ?? result.timeoutMs ?? stageTimeouts.verifier,
+            ...(result.timeoutReason?.kind ? { reason: result.timeoutReason.kind } : {}),
+            ...(Number.isFinite(result.timeoutReason?.gapMs)
+              ? { gapMs: result.timeoutReason.gapMs } : {}),
+            ...(result.timeoutReason?.lastEvent
+              ? { lastEvent: result.timeoutReason.lastEvent } : {}),
+            ...(result.timeoutReason?.setting
+              ? { setting: result.timeoutReason.setting } : {}),
+          });
+        };
+        recordVerifierTimeout(v, 'correctness');
+        recordVerifierTimeout(intentVerifier, 'intent');
         verifierUsage = addUsage(verifierUsage, v.usage);
         verifierUsage = addUsage(verifierUsage, intentVerifier.usage);
         iter.verifier = v;
@@ -905,7 +918,8 @@ export async function run(opts) {
           }
           // AMEND promises another executor/review round, so it is not a taken pivot
           // when the configured round bound makes that retry impossible.
-          if (pivotDecision === PIVOT_AMEND && debateRound >= maxDebateRounds) {
+          if (pivotDecision === PIVOT_AMEND && maxDebateRounds !== undefined
+            && debateRound >= maxDebateRounds) {
             outcome = 'needs-pivot';
             debateStopReason = 'rounds-exhausted';
             break;
@@ -926,7 +940,7 @@ export async function run(opts) {
           amendPlan = true;
         }
 
-        if (debateRound >= maxDebateRounds) {
+        if (maxDebateRounds !== undefined && debateRound >= maxDebateRounds) {
           outcome = 'needs-pivot';
           debateStopReason = 'rounds-exhausted';
           break;
@@ -1079,7 +1093,7 @@ export async function run(opts) {
   }));
   const debate = {
     roundsRun: debateRoundHistory.length,
-    maxRounds: maxDebateRounds,
+    maxRounds: maxDebateRounds ?? null,
     findingsPerRound: debateRoundHistory.map((roundRecord) => [...roundRecord.findingIds]),
     roundHistory: debateRoundHistory.map((roundRecord) => ({
       ...roundRecord,
@@ -1146,7 +1160,6 @@ export async function run(opts) {
       policy: stallConfig.policy,
       thresholdMs: stallConfig.thresholdMs,
       progressThresholdMs: stallConfig.progressThresholdMs,
-      executorMaxMs: stallConfig.executorMaxMs,
       restartLimit: stallConfig.restartLimit,
       restartCount: stallRestartCount,
       gateRetryCount,

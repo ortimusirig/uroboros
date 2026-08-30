@@ -1164,12 +1164,13 @@ test('a failed partial-work commit is non-fatal and cannot suppress the timeout 
         mkdirSync(refDirectory, { recursive: true });
         writeFileSync(join(refDirectory, 'partial-commit-fails.lock'),
           'force the commit ref update to fail\n');
-        await opts.beforeKill({ kind: 'hard-ceiling', timeoutMs: 50,
-          setting: 'URO_EXECUTOR_MAX_MS' });
+        await opts.beforeKill({ kind: 'liveness', timeoutMs: 50, gapMs: 50,
+          setting: 'URO_STALL_THRESHOLD_MS' });
         return { changedFiles: ['partial.js'], lastMessage: 'partial work', timedOut: true,
           timeoutMs: 25, exitCode: -1,
           timeoutReason: {
-            kind: 'hard-ceiling', timeoutMs: 50, setting: 'URO_EXECUTOR_MAX_MS',
+            kind: 'liveness', timeoutMs: 50, gapMs: 50,
+            setting: 'URO_STALL_THRESHOLD_MS',
           } };
       },
       runGate: async () => { throw new Error('timed-out executor must not run the gate'); },
@@ -1179,8 +1180,9 @@ test('a failed partial-work commit is non-fatal and cannot suppress the timeout 
 
   assert.equal(facts.outcome, 'timed-out');
   assert.equal(facts.timeoutEvents[0].timeoutMs, 50,
-    'the hard ceiling, not the ordinary interval, is the recorded elapsed limit');
-  assert.equal(facts.timeoutEvents[0].setting, 'URO_EXECUTOR_MAX_MS');
+    'the silence threshold is the recorded limit');
+  assert.equal(facts.timeoutEvents[0].gapMs, 50);
+  assert.equal(facts.timeoutEvents[0].setting, 'URO_STALL_THRESHOLD_MS');
   assert.match(readFileSync(join(facts.dir, 'CHANGES.diff'), 'utf8'), /partial[.]js/,
     'positive control: staging and diff production succeeded before git commit failed');
   rmSync(scr, { recursive: true, force: true });
@@ -1196,14 +1198,20 @@ test('a timed-out verifier cannot produce a successful outcome', async () => {
       runExecutor: writingExecutor,
       runGate: async () => ({ passed: true, results: [] }),
       runVerifier: async () => ++calls === 1
-        ? { verdict: 'NO_BLOCKERS', launchFailed: false, timedOut: true, timeoutMs: 40 }
+        ? { verdict: 'UNVERIFIED', launchFailed: true, timedOut: true, timeoutMs: null,
+            timeoutReason: { kind: 'liveness', timeoutMs: 40, gapMs: 40,
+              lastEvent: { stage: 'verify', type: 'assistant' },
+              setting: 'URO_STALL_THRESHOLD_MS' } }
         : { verdict: 'NO_BLOCKERS', launchFailed: false, timedOut: false },
     },
   });
   assert.equal(facts.outcome, 'timed-out');
   assert.notEqual(exitCodeFor(facts.outcome), 0);
   assert.deepEqual(facts.timeoutEvents, [
-    { stage: 'verifier', pass: 'correctness', iteration: 1, timeoutMs: 40 },
+    { stage: 'verifier', pass: 'correctness', iteration: 1, timeoutMs: 40,
+      reason: 'liveness', gapMs: 40,
+      lastEvent: { stage: 'verify', type: 'assistant' },
+      setting: 'URO_STALL_THRESHOLD_MS' },
   ]);
   rmSync(scr, { recursive: true, force: true });
 });
@@ -1509,7 +1517,7 @@ test('the fresh pivot stops with needs-pivot and carries the complete ledger', a
   try {
     const facts = await run({
       task: 'do the task', target: makeTarget(), gate: [], gateRetries: 0,
-      scratchRoot: scr, runId: 'debate-fresh', debateRounds: 4,
+      scratchRoot: scr, runId: 'debate-fresh',
       adapters: {
         runExecutor: writingExecutor,
         runGate: async () => ({ passed: true, results: [] }),
@@ -1666,10 +1674,9 @@ test('suggestions alone converge without another executor or gate round', async 
   }
 });
 
-test('debate round setting defaults to two and rejects values outside one through five', () => {
-  assert.equal(resolveDebateRounds({}), 2);
-  assert.equal(resolveDebateRounds({ URO_DEBATE_ROUNDS: '5' }), 5);
-  assert.throws(() => resolveDebateRounds({ URO_DEBATE_ROUNDS: '0' }), /between 1 and 5/);
-  assert.throws(() => resolveDebateRounds({ URO_DEBATE_ROUNDS: '6' }), /between 1 and 5/);
-  assert.throws(() => resolveDebateRounds({ URO_DEBATE_ROUNDS: '2.5' }), /integer between 1 and 5/);
+test('debate rounds are unbounded by default and accept any positive operator bound', () => {
+  assert.equal(resolveDebateRounds({}), undefined);
+  assert.equal(resolveDebateRounds({ URO_DEBATE_ROUNDS: '50' }), 50);
+  assert.throws(() => resolveDebateRounds({ URO_DEBATE_ROUNDS: '0' }), /positive integer/);
+  assert.throws(() => resolveDebateRounds({ URO_DEBATE_ROUNDS: '2.5' }), /positive integer/);
 });

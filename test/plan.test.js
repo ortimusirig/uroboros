@@ -121,12 +121,12 @@ test('suggestions alone converge without driving another round', async () => {
   } finally { item.cleanup(); }
 });
 
-test('recurring findings take amend, fresh, and conclude pivot paths', async () => {
+test('without --rounds recurring findings run until the pivot ladder concludes', async () => {
   const item = fixture();
   const inputs = [];
   try {
     const result = await runPlan({
-      goal: 'Escape a circular plan', target: item.target, out: item.out, rounds: 8,
+      goal: 'Escape a circular plan', target: item.target, out: item.out,
       adapters: {
         draft: async (request) => { inputs.push(request.input); return draft(); },
         runPlanGate: async () => ({
