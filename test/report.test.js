@@ -26,6 +26,16 @@ test('buildRunFacts records pins and outcome', () => {
   assert.equal(facts.limits.gateRetries, 2);
   assert.deepEqual(facts.limits.timeoutsMs, { executor: null, verifier: null, gate: null });
   assert.deepEqual(facts.timeoutEvents, []);
+  assert.equal(facts.skills, null);
+});
+
+test('buildRunFacts records the resolved skills path', () => {
+  const withSkills = buildRunFacts({
+    runId: 'skills', target: 'C:/proj', dir: 'C:/uro/w', isRepo: true,
+    branch: 'uro/skills', iterations: [], gateStatus: 'passed', verdict: null,
+    outcome: 'no-op', gateRetries: 0, skills: 'C:/plugins/superpowers/6.3.0',
+  });
+  assert.equal(withSkills.skills, 'C:/plugins/superpowers/6.3.0');
 });
 
 test('buildRunFacts records model overrides actually used for a run', () => {

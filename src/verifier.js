@@ -1,8 +1,10 @@
 import { fileURLToPath } from 'node:url';
+import { homedir } from 'node:os';
 import { spawnCapture } from './spawn.js';
 import { reportEvent } from './events.js';
 import { annotateUsageConsistency, normalizeCursorUsage } from './usage.js';
 import { resolveStageTimeouts } from './timeouts.js';
+import { resolveSuperpowersDir } from './superpowers.js';
 
 export const DEFAULT_VERIFIER_MODEL = 'cursor-grok-4.5-high';
 
@@ -30,15 +32,28 @@ export function assertUsablePrompt(prompt) {
   if (prompt.trim() === '') throw new Error('verifier prompt must not be empty');
 }
 
-export function buildCursorArgs({ model = DEFAULT_VERIFIER_MODEL, prompt = DEFAULT_PROMPT } = {}) {
+export function buildCursorArgs({
+  model = DEFAULT_VERIFIER_MODEL,
+  prompt = DEFAULT_PROMPT,
+  env = process.env,
+  home = homedir(),
+  superpowersDir,
+} = {}) {
   assertUsablePrompt(prompt);
+  const resolvedSuperpowersDir = superpowersDir === undefined
+    ? resolveSuperpowersDir({ env, home })
+    : superpowersDir;
   // --trust clears Cursor's "Workspace Trust Required" gate for READING the checkout; without
   // it the agent exits 1 with no output and every review is UNVERIFIED. It is
   // NOT one of the forbidden flags (--force/--yolo/-f/--approve-mcps auto-APPROVE actions);
   // --mode plan keeps the agent read-only regardless. Verified live (exit 0, NO_BLOCKERS).
   const args = [
     '-p', prompt, '--output-format', 'stream-json', '--mode', 'plan', '--trust',
-    '--plugin-dir', VERIFIER_PLUGIN_DIR, '--model', model,
+    '--plugin-dir', VERIFIER_PLUGIN_DIR,
+    ...(resolvedSuperpowersDir === null
+      ? []
+      : ['--plugin-dir', resolvedSuperpowersDir]),
+    '--model', model,
   ];
   assertNoForbiddenFlags(args);
   return args;
@@ -321,8 +336,13 @@ export async function runVerifier({
   reporter,
   runId,
   pass,
+  env = process.env,
+  home = homedir(),
+  superpowersDir,
 }) {
-  const args = [...extraArgv, ...buildCursorArgs({ prompt, model })];
+  const args = [...extraArgv, ...buildCursorArgs({
+    prompt, model, env, home, superpowersDir,
+  })];
   assertNoForbiddenFlags(args);
   reportEvent(reporter, runId, 'verify', 'start', { bin, args, model, pass });
   const r = await spawnCapture(bin, args, { cwd, timeoutMs });

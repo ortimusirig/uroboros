@@ -211,6 +211,30 @@ test('publish guard blocklist fails when URO_PUBLISH_BLOCKLIST is unset', async 
   assert.match(outcome.detail, /publish refuses/);
 });
 
+test('superpowers doctor check reports resolution or actionable optional absence', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'uro-superpowers-doctor-'));
+  const check = doctorCheck('superpowers-plugin');
+  const emptyHome = join(root, 'empty-home');
+  const configured = join(root, 'configured-superpowers');
+  mkdirSync(emptyHome);
+  mkdirSync(configured);
+  try {
+    const absent = await check.probe({ env: {}, home: emptyHome, bins: {} });
+    assert.equal(absent.status, 'FAIL');
+    assert.match(absent.detail, /not found/);
+    assert.equal(check.kind, 'optional');
+    assert.match(check.remediation.prose, /URO_SUPERPOWERS_DIR/);
+
+    const found = await check.probe({
+      env: { URO_SUPERPOWERS_DIR: configured }, home: emptyHome, bins: {},
+    });
+    assert.equal(found.status, 'PASS');
+    assert.match(found.detail, new RegExp(resolve(configured).replaceAll('\\', '\\\\')));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('publish guard blocklist fails when its injected path does not exist', async () => {
   const root = mkdtempSync(join(tmpdir(), 'ccc-doctor-missing-blocklist-'));
   try {
@@ -304,6 +328,7 @@ test('doctor leads with the same unhealthy verdict it repeats at the tail', asyn
       repository: fixture.repository,
       nodeVersion: '23.1.2',
       bins: fixture.bins,
+      home: fixture.root,
     });
     assert.equal(result.ok, false, 'a failing required check must make doctor unhealthy');
     assertMatchingLeadingAndTrailingVerdicts(
@@ -370,6 +395,7 @@ test('doctor all-pass output is byte-identical to its committed golden', async (
       repository: fixture.repository,
       nodeVersion: '24.9.0',
       bins: fixture.bins,
+      home: fixture.root,
     });
     const expected = golden('doctor-all-pass.txt', {
       SCRATCH_ROOT: resolve(fixture.scratchRoot),
@@ -408,6 +434,7 @@ test('doctor all-fail output is byte-identical to its committed golden', async (
       repository: fixture.repository,
       nodeVersion: '23.1.2',
       bins: fixture.bins,
+      home: fixture.root,
     });
     const cursorInstallProse = process.platform === 'win32'
       ? "run `irm 'https://cursor.com/install?win32=true' | iex` in Windows PowerShell, reopen the terminal, confirm the binary is `agent`, and run `agent login`."

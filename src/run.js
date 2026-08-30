@@ -1,4 +1,5 @@
 import { existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { isolate } from './isolation.js';
 import {
@@ -56,6 +57,7 @@ import {
 } from './debate.js';
 import { detectReview, parseReview } from './review.js';
 import { buildFixPlan, validateFindings } from './fix-plan.js';
+import { resolveSuperpowersDir } from './superpowers.js';
 
 export { HARNESS_ARTIFACTS } from './artifacts.js';
 
@@ -289,6 +291,9 @@ export async function run(opts) {
   const detectDebateCircling = adapters.detectCircling ?? detectCircling;
   const selectPivot = adapters.shouldPivot ?? shouldPivot;
   const maxDebateRounds = resolveDebateRounds(opts.env ?? process.env, debateRounds);
+  const superpowersDir = opts.superpowersDir === undefined
+    ? resolveSuperpowersDir({ env: opts.env ?? process.env, home: opts.home ?? homedir() })
+    : opts.superpowersDir;
   const originalPlan = resolveTask(task);
   let plan = originalPlan;
   const commands = Array.isArray(gate) ? gate : JSON.parse(readFileSync(gate, 'utf8'));
@@ -495,6 +500,7 @@ export async function run(opts) {
       try {
         result = observeUsage(await runExecutor({
           plan: executorPlan, cwd: iso.dir, model: executorModel, effort: executorEffort,
+          superpowersDir,
           timeoutMs: stageTimeouts.executor,
           reporter: eventReporter, runId, attempt,
           beforeKill,
@@ -809,11 +815,13 @@ export async function run(opts) {
         debateRound++;
         const v = annotateVerifierConsistency(observeUsage(await runVerifier({
           cwd: iso.dir, bin: verifierBin, model: verifierModel, prompt: DEFAULT_PROMPT,
+          superpowersDir,
           timeoutMs: stageTimeouts.verifier,
           reporter: eventReporter, runId, pass: 'correctness',
         }), { seat: 'verifier', pass: 'correctness', iteration: n }));
         const intentVerifier = annotateVerifierConsistency(observeUsage(await runVerifier({
           cwd: iso.dir, bin: verifierBin, model: verifierModel, prompt: INTENT_PROMPT,
+          superpowersDir,
           timeoutMs: stageTimeouts.verifier,
           reporter: eventReporter, runId, pass: 'intent',
         }), { seat: 'verifier', pass: 'intent', iteration: n }));
@@ -1150,7 +1158,9 @@ export async function run(opts) {
       executor: executorModel,
       executorEffort,
       verifier: verifierModel,
-    } });
+    },
+    skills: superpowersDir,
+  });
   if (outcome === 'needs-decision') facts.decision = decision;
   else if (resolvedDecision !== null) facts.decision = resolvedDecision;
   if (assumedDecision !== null) {

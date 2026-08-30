@@ -288,8 +288,10 @@ test('omitted model flags travel through the CLI path to both agents and run-fac
   const verifierCalls = [];
   const cliOpts = parseArgs(['run', '--task', 'do the task', '--target', makeTarget(),
     '--gate', 'unused-gate.json']);
+  const superpowersDir = 'C:/plugins/superpowers/6.3.0';
   const facts = await run({
     ...cliOpts, gate: [], scratchRoot: scr, runId: 'default-models',
+    superpowersDir,
     adapters: {
       runExecutor: async (opts) => {
         executorCalls.push(opts);
@@ -305,13 +307,17 @@ test('omitted model flags travel through the CLI path to both agents and run-fac
 
   assert.equal(executorCalls[0].model, DEFAULT_EXECUTOR_MODEL);
   assert.equal(executorCalls[0].effort, DEFAULT_EXECUTOR_EFFORT);
+  assert.equal(executorCalls[0].superpowersDir, superpowersDir);
   assert.deepEqual(verifierCalls.map((call) => call.model),
     [DEFAULT_VERIFIER_MODEL, DEFAULT_VERIFIER_MODEL]);
+  assert.deepEqual(verifierCalls.map((call) => call.superpowersDir),
+    [superpowersDir, superpowersDir]);
   assert.deepEqual(facts.model, {
     executor: DEFAULT_EXECUTOR_MODEL,
     executorEffort: DEFAULT_EXECUTOR_EFFORT,
     verifier: DEFAULT_VERIFIER_MODEL,
   });
+  assert.equal(facts.skills, superpowersDir);
   rmSync(scr, { recursive: true, force: true });
 });
 

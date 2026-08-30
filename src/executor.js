@@ -4,7 +4,9 @@ import { encodeRecordedText } from './execution-record.js';
 import { annotateUsageConsistency, EMPTY_USAGE, normalizeCodexUsage } from './usage.js';
 import { resolveStageTimeouts } from './timeouts.js';
 import { StringDecoder } from 'node:string_decoder';
+import { homedir } from 'node:os';
 import { readEnv } from './env-compat.js';
+import { resolveSuperpowersDir } from './superpowers.js';
 import {
   createProgressWatchdog,
   DEFAULT_EXECUTOR_MAX_MS,
@@ -52,9 +54,18 @@ export function buildCodexArgs({
   model = DEFAULT_EXECUTOR_MODEL,
   effort = DEFAULT_EXECUTOR_EFFORT,
   sandbox = SANDBOX,
+  env = process.env,
+  home = homedir(),
+  superpowersDir,
 }) {
+  const resolvedSuperpowersDir = superpowersDir === undefined
+    ? resolveSuperpowersDir({ env, home })
+    : superpowersDir;
   return [
     'exec', '--json',
+    ...(resolvedSuperpowersDir === null
+      ? []
+      : ['--plugin-dir', resolvedSuperpowersDir]),
     '-m', model,
     '-c', `model_reasoning_effort=${effort}`,
     '-c', 'mcp_servers={}',
@@ -197,8 +208,13 @@ export async function runExecutor({
   clearTimer = clearTimeout,
   spawnProcess,
   killProcessTree,
+  env = process.env,
+  home = homedir(),
+  superpowersDir,
 }) {
-  const args = [...extraArgv, ...buildCodexArgs({ cwd, model, effort, sandbox })];
+  const args = [...extraArgv, ...buildCodexArgs({
+    cwd, model, effort, sandbox, env, home, superpowersDir,
+  })];
   const nowMs = () => {
     const value = now();
     return value instanceof Date ? value.getTime() : value;

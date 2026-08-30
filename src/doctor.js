@@ -1,4 +1,5 @@
 import { resolve } from 'node:path';
+import { homedir } from 'node:os';
 import {
   cleanupDoctorProbeState,
   createDoctorProbeState,
@@ -28,6 +29,8 @@ export async function runDoctor({
   consent,
   remediationExecutor,
   write = () => {},
+  env,
+  home = homedir(),
 } = {}) {
   if (typeof scratchRoot !== 'string' || scratchRoot === '') {
     throw new TypeError('doctor scratchRoot must be a non-empty string');
@@ -47,6 +50,8 @@ export async function runDoctor({
     nodeVersion,
     bins,
     state,
+    home,
+    ...(env === undefined ? {} : { env }),
   };
   let requiredFailed = false;
 

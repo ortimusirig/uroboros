@@ -15,6 +15,7 @@ import { assertSafeScratchRoot } from './isolation.js';
 import { commandExists, spawnCapture } from './spawn.js';
 import { buildCursorArgs } from './verifier.js';
 import { readEnv } from './env-compat.js';
+import { resolveSuperpowersDir } from './superpowers.js';
 
 const MINIMUM_NODE_MAJOR = 24;
 const CHEAP_PROBE_TIMEOUT_MS = 30_000;
@@ -513,6 +514,39 @@ export const DOCTOR_CHECKS = Object.freeze([
       } catch (error) {
         return { status: 'FAIL', detail: error.message, remediationKey: 'failed' };
       }
+    },
+  }),
+  Object.freeze({
+    id: 'superpowers-plugin',
+    phase: 'optional',
+    kind: 'optional',
+    name: 'Superpowers plugin',
+    remediation: remediation(
+      'install superpowers in a Claude or Codex plugin cache, or set `URO_SUPERPOWERS_DIR` to its installed plugin directory.',
+      null,
+      false,
+    ),
+    probe: async (context) => {
+      let path;
+      try {
+        path = resolveSuperpowersDir({
+          env: doctorEnvironment(context),
+          home: context.home,
+        });
+      } catch (error) {
+        return {
+          status: 'FAIL',
+          detail: error instanceof Error ? error.message : String(error),
+          remediationKey: 'default',
+        };
+      }
+      return path === null
+        ? {
+            status: 'FAIL',
+            detail: 'not found in the Claude or Codex plugin caches; the loop remains usable without it',
+            remediationKey: 'default',
+          }
+        : { status: 'PASS', detail: `resolved from ${path}` };
     },
   }),
   Object.freeze({

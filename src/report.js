@@ -49,6 +49,7 @@ export function buildRunFacts({
   unitKind,
   merge,
   debate = null,
+  skills = null,
 }) {
   const facts = {
     runId,
@@ -61,6 +62,7 @@ export function buildRunFacts({
       executorEffort: models?.executorEffort ?? DEFAULT_EXECUTOR_EFFORT,
       verifier: models?.verifier ?? DEFAULT_VERIFIER_MODEL,
     },
+    skills: skills ?? null,
     limits: {
       gateRetries,
       timeoutsMs: {

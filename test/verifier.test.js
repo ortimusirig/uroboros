@@ -235,6 +235,35 @@ test('runVerifier identifies a non-zero empty stream as a launch failure', async
   assert.match(r.stderr, /fake agent failed/);
 });
 
+test('buildCursorArgs carries both plugin directories and remains guarded', () => {
+  const superpowersDir = mkdtempSync(join(tmpdir(), 'uro-cursor-superpowers-'));
+  try {
+    const args = buildCursorArgs({
+      env: { URO_SUPERPOWERS_DIR: superpowersDir }, home: tmpdir(),
+    });
+    const pluginDirectories = args.flatMap((arg, index) => (
+      arg === '--plugin-dir' ? [args[index + 1]] : []
+    ));
+    assert.deepEqual(pluginDirectories, [expectedPluginDir, superpowersDir]);
+    assert.equal(args[args.indexOf('--mode') + 1], 'plan');
+    assert.ok(args.includes('--trust'));
+    assert.doesNotThrow(() => assertNoForbiddenFlags(args));
+  } finally {
+    rmSync(superpowersDir, { recursive: true, force: true });
+  }
+});
+
+test('buildCursorArgs without superpowers is byte-identical to the previous invocation', () => {
+  assert.deepEqual(buildCursorArgs({ superpowersDir: null }), [
+    '-p', DEFAULT_PROMPT,
+    '--output-format', 'stream-json',
+    '--mode', 'plan',
+    '--trust',
+    '--plugin-dir', expectedPluginDir,
+    '--model', DEFAULT_VERIFIER_MODEL,
+  ]);
+});
+
 test('runVerifier returns ISSUES otherwise', async () => {
   const r = await runVerifier({ cwd: process.cwd(), bin: process.execPath,
     extraArgv: [fakeAgent, 'dirty'] });

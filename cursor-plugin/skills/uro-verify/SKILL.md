@@ -6,6 +6,18 @@ disable-model-invocation: true
 
 # uro-verify
 
+## Superpowers decision points
+
+Use the superpowers skills at these reviewer decision points. Invoke each name exactly as
+written; a misspelt name does not load the skill.
+
+- Bootstrap the reviewer with `superpowers:using-superpowers`.
+- Before review, use `superpowers:brainstorming` for failure-mode analysis.
+- When findings persist, use `superpowers:systematic-debugging` to diagnose them.
+- Before reporting a finding, use `superpowers:verification-before-completion` to prove it is
+  real rather than a false positive.
+- While reviewing the executor's code, use `superpowers:requesting-code-review`.
+
 Read the files named by the prompt and apply the matching audit below. Review only; do not
 modify the workspace.
 

@@ -33,6 +33,26 @@ Monitor continuously and intervene only when a run is stuck: **stalled** means n
 the stall threshold; **circling** means events still arrive but the same files are rewritten with
 no gate progress. Slow is not stuck.
 
+## Debate protocol with superpowers
+
+Claude is the hub of the debate protocol and uses these exact skills at its decision points:
+
+- Before fix plans, pivots, or validation, run `superpowers:brainstorming`.
+- When writing `FIX_PLAN.md`, pivot plans, or reframed approaches, run
+  `superpowers:writing-plans`.
+- To execute the debate protocol, run `superpowers:executing-plans`.
+- To validate test designs, run `superpowers:test-driven-development`.
+- To diagnose why the loop is stuck, run `superpowers:systematic-debugging`.
+- To verify that convergence is genuine, run `superpowers:verification-before-completion`.
+- When reading reviews to validate them, run `superpowers:receiving-code-review`.
+- After fixes, run `superpowers:requesting-code-review` to request Cursor re-review.
+
+A plan written for this loop must run `superpowers:writing-plans`' spec-coverage self-review.
+It must name the design document it implementsâ€”for this protocol,
+`docs/superpowers/specs/2026-08-25-three-way-debate-loop-design.md`â€”and enumerate every
+section of that design it does not implement. This check is mandatory even when the omitted
+sections are already described as out of scope elsewhere in the plan.
+
 ## Planner briefing
 
 ### Campaign shapes

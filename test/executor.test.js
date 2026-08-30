@@ -79,6 +79,32 @@ test('buildCodexArgs accepts explicit model and effort overrides', () => {
   assert.ok(a.includes('model_reasoning_effort=medium'));
 });
 
+test('buildCodexArgs adds a resolved superpowers plugin directory', () => {
+  const superpowersDir = mkdtempSync(join(tmpdir(), 'uro-codex-superpowers-'));
+  try {
+    const args = buildCodexArgs({
+      cwd: 'C:/w', env: { URO_SUPERPOWERS_DIR: superpowersDir }, home: tmpdir(),
+    });
+    assert.equal(args[args.indexOf('--plugin-dir') + 1], superpowersDir);
+  } finally {
+    rmSync(superpowersDir, { recursive: true, force: true });
+  }
+});
+
+test('buildCodexArgs without superpowers is byte-identical to the previous invocation', () => {
+  assert.deepEqual(buildCodexArgs({
+    cwd: 'C:/w', sandbox: 'workspace-write', superpowersDir: null,
+  }), [
+    'exec', '--json',
+    '-m', DEFAULT_EXECUTOR_MODEL,
+    '-c', `model_reasoning_effort=${DEFAULT_EXECUTOR_EFFORT}`,
+    '-c', 'mcp_servers={}',
+    '-s', 'workspace-write',
+    '-C', 'C:/w',
+    '-',
+  ]);
+});
+
 test('executor preamble names the approved-work and decision protocol', () => {
   assert.match(EXECUTOR_PREAMBLE, /plan below is approved/i);
   assert.match(EXECUTOR_PREAMBLE, /implement it/i);

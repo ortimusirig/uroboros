@@ -15,6 +15,8 @@ PASS [required] Cursor read probe: returned the unpredictable contents of a scra
 
 Optional features (these do not affect loop health):
 INFO [optional] GitHub publishing: optional; the loop is fully usable without it.
+FAIL [optional] Superpowers plugin: not found in the Claude or Codex plugin caches; the loop remains usable without it
+  Next: install superpowers in a Claude or Codex plugin cache, or set `URO_SUPERPOWERS_DIR` to its installed plugin directory.
 PASS [optional] GitHub CLI installed: {{GH_BIN}} was found
 PASS [optional] GitHub authentication: `gh auth status` exited 0
 PASS [optional] GitHub remote: {{REPOSITORY}} has a github.com remote
