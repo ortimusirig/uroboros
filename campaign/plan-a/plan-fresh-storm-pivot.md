@@ -1,4 +1,4 @@
-# FRESH must re-plan, and re-plan by STORM
+# Approach selection uses STORM — for the initial plan and for FRESH
 
 ## IMPLEMENT THIS NOW
 
@@ -101,23 +101,41 @@ The debate ledger continues across the pivot. A FRESH that produces the same
 failing findings must still be able to reach `CONCLUDE`; re-planning may not
 reset the escalation.
 
-### 2. Re-planning uses STORM, not a single draft
+### 2. STORM wherever an approach is being chosen
 
-Ordinary planning drafts once and iterates. **FRESH does not**, because FRESH
-means the approach itself failed — iterating on it is the very thing that
-produced the circling.
+Two moments choose an approach with no proof it works, and both use STORM:
 
-So re-planning generates **N candidates from genuinely distinct perspectives**,
-per Mode A:
+| Moment | Evidence available | Mode |
+|---|---|---|
+| **Initial plan** | **none** — nothing has been tried | **STORM** |
+| **Fix plan** (round 2+) | a specific named finding | single draft — targeted repair |
+| **FRESH pivot** | the ledger — what already failed | **STORM** |
+
+The initial plan is the one with the *least* evidence and the *most*
+consequence: everything downstream is built on it, and it is drafted before a
+single round has run. FRESH at least knows what failed. So if diversity is worth
+buying anywhere, it is worth buying there first.
+
+A fix plan is different in kind. It is surgery on a defect the reviewer has
+already named; three framings of "add the missing null guard F1 identified" is
+cost without benefit. Fix plans keep single-draft iteration.
+
+`loop plan` therefore generates candidates by default for an initial plan.
+`--candidates 1` restores single-draft behaviour for a caller who wants it.
+
+In both STORM moments, generation follows Mode A:
 
 - The perspectives must be **materially different framings**, not rewordings —
   the campaigns spec is explicit that *"N candidates that are secretly one
   approach is N times the cost for nothing."*
-- **The ledger is the input that makes them informed.** Each candidate is told
-  which findings recurred, which resolved, and which framing already failed, and
-  is required to differ from it.
-- `N` defaults to **3** and is settable by `--pivot-candidates`, bounded to a
-  small maximum.
+- **For a FRESH pivot, the ledger is the input that makes them informed.** Each
+  candidate is told which findings recurred, which resolved, and which framing
+  already failed, and is required to differ from it. **For an initial plan there
+  is no ledger** — candidates differ by declared perspective alone, and each must
+  state its perspective explicitly so a reviewer can tell they are not one
+  approach in three costumes.
+- `N` defaults to **3**, settable by `--candidates` for initial planning and
+  `--pivot-candidates` for a pivot, each bounded to a small maximum.
 - Candidates are generated through the existing planning path so they inherit
   the plan gate and its checks. **A candidate that fails the plan gate is
   discarded, not selected.**
@@ -177,8 +195,14 @@ Use injected seams; no test may spawn a real agent.
 9b. With the arbiter unavailable, `shouldPivot`'s deterministic ladder still
     applies — degradation, not absence.
 9c. Every pivot decision records the arbiter's stated reasoning.
-10. **Positive control:** a run that never circles creates no branch, generates
-    no candidates, and emits no `pivot/*` events.
+10. **Positive control:** a run that never circles creates no branch and emits no
+    `pivot/*` events.
+10a. `loop plan` generates candidates for an initial plan, each with a declared
+     distinct perspective, and one is selected.
+10b. `--candidates 1` restores single-draft initial planning — the regression
+     control for callers who do not want the cost.
+10c. A **fix plan** is single-draft: assert no candidates are generated when the
+     loop is repairing a named finding.
 11. Every new `pivot/*` pair round-trips through `createEvent` without throwing.
 12. Facts record each candidate's perspective, its plan-gate result, and the
     selection.
@@ -188,9 +212,8 @@ Do not delete, skip, or weaken any existing test.
 ## Out of scope
 
 - The arbiter, the capability veto, Cursor's scoped write.
-- Using STORM for ordinary planning. Initial plans and fix-plan replans keep the
-  single-draft iteration; STORM is reserved for FRESH, where the approach itself
-  has failed and distinct framings are the point.
+- Using STORM for fix plans. A fix plan repairs a finding the reviewer has
+  already named; distinct framings there are cost without benefit.
 - Running candidates concurrently to completion, as campaign Mode A does. Here
   candidates are *planned* in parallel and one is selected; only the selected
   plan is implemented.
