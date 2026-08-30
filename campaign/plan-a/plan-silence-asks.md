@@ -56,8 +56,35 @@ That judgement is what must be automated — not a larger number.
 
 ### 1. Silence triggers a question, not a kill
 
-When a seat goes silent past `URO_STALL_THRESHOLD_MS`, the harness does **not**
+When a seat goes silent past the current check interval, the harness does **not**
 kill it. It **asks**.
+
+The **first** check interval defaults to **15 minutes**, not five. Five was
+chosen when silence meant death and a fast kill seemed safer; now that silence
+only starts a conversation, checking sooner buys nothing and costs a judgement
+each time. `URO_STALL_THRESHOLD_MS` still overrides it.
+
+### 1a. The judge sets the next interval — the cadence is judged too
+
+A fixed check interval is the same species of invented number as the caps already
+removed. So it is not fixed.
+
+When the judge answers **working**, it also states **when to check again**, and
+the harness honours it.
+
+- A seat that has just delegated a large piece of work warrants a long next
+  interval; one that looked marginal warrants a short one. **Only something
+  reading the evidence can tell those apart.**
+- The stated interval and its reasoning are recorded, so an operator can always
+  see that a judge asked for forty minutes and why.
+- If the judge names no interval, the previous one is reused. It is never
+  silently shortened.
+- Only the **first** interval is a configured number. Every one after it is a
+  judgement.
+
+This is deliberate: the same rule that governs *whether* to kill now governs
+*when to look*. A tool that judges the decision but hardcodes the cadence has
+only moved the arbitrary number one level up.
 
 A judge — the arbiter seat when available, otherwise a fresh read-only instance
 of an available seat — is given the evidence and asked one question:
@@ -77,9 +104,10 @@ The evidence handed to it:
 
 The judge answers **working** or **stuck**, with its reasoning.
 
-- **working** → the seat is left alone, the gap timer resets, and
-  `executor/extended` is emitted carrying the reasoning. It may be asked again
-  after another interval; being asked twice is not evidence of death.
+- **working** → the seat is left alone, the timer resets **to the interval the
+  judge named**, and `executor/extended` is emitted carrying both the reasoning
+  and that interval. It may be asked again later; being asked twice is not
+  evidence of death.
 - **stuck** → kill, exactly as today, recording the gap, the last event, and the
   judge's reasoning.
 
@@ -143,6 +171,12 @@ real binary.
    **stuck**.
 6. A seat judged working twice in succession is not killed for having been asked
    twice.
+6a. The **first** check fires at 15 minutes by default, not five.
+6b. A judge answering **working** with a next interval has that interval honoured
+    — assert the following check fires at the judged time, not the default.
+6c. A judge naming no interval reuses the previous one; the interval is never
+    silently shortened.
+6d. The judged interval and its reasoning appear in the facts.
 7. No judge available falls back to killing, and the facts record the kill as
    unjudged.
 8. The judge is given the process tree, the last agent message, and recent
