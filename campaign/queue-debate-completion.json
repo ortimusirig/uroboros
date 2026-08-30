@@ -1,0 +1,7 @@
+[
+  {"name":"no-caps",             "task":"plan-a/plan-no-caps.md",             "gate":"plan-a/gate-no-caps.json"},
+  {"name":"superpowers-seats",   "task":"plan-a/plan-superpowers-all-seats.md","gate":"plan-a/gate-superpowers-all-seats.json"},
+  {"name":"cursor-scoped-write", "task":"plan-a/plan-cursor-scoped-write.md", "gate":"plan-a/gate-cursor-scoped-write.json"},
+  {"name":"claude-seat",         "task":"plan-a/plan-claude-seat.md",         "gate":"plan-a/gate-claude-seat.json"},
+  {"name":"fresh-storm-pivot",   "task":"plan-a/plan-fresh-storm-pivot.md",   "gate":"plan-a/gate-fresh-storm-pivot.json"}
+]
