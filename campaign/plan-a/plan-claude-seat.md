@@ -120,8 +120,31 @@ yourself."*
   finding: it does not go through validation, is not demoted for lacking a test,
   and **the arbiter cannot overrule it.** A seat is the sole authority on its own
   capabilities.
-- The objection is recorded with the seat's stated reason, and the plan is
-  redrafted.
+
+**A veto must be constructive. A bare refusal is not an acceptable answer.**
+
+Every capability veto carries three parts:
+
+| Part | Required |
+|---|---|
+| **what** it cannot do | always |
+| **why** — the specific limitation | always |
+| **what would work instead**, or an explicit "I do not know an alternative" | always |
+
+A refusal that names no remedy and does not admit ignorance of one is
+**incomplete**: the seat is asked again, specifically for the alternative, and
+both answers are recorded. The plan is redrafted from the remedy, not merely
+abandoned.
+
+This is not optional politeness. It is where the value is. When asked about
+`--plugin-dir`, the executor volunteered both halves unprompted — *"there is no
+`codex exec --plugin-dir` flag"*, and then the working mechanism: register
+through the plugin marketplace and launch with the same `CODEX_HOME`. **The seat
+that blocks a plan is usually the one that knows how to unblock it**, because the
+limitation and the workaround are the same knowledge.
+
+A veto that stops the conversation is a failure of the veto, not a success. The
+purpose is a better next draft, not a closed door.
 
 This exists because both halves of a shipped change were refuted by the seats
 that were never asked: the executor knew it had no `--plugin-dir` flag, and the
@@ -187,6 +210,10 @@ Use injected seams; no test may spawn a real binary.
    executor's recommendation.
 7. A capability veto from any seat fails the plan, is recorded with its reason,
    and **cannot be overruled by the arbiter**.
+7a. A veto carries a remedy, or an explicit statement that no alternative is
+    known; a bare refusal is treated as incomplete and the seat is re-asked.
+7b. The redraft is built from the veto's remedy — assert the next draft reflects
+    it, not merely that the previous plan was discarded.
 8. With no `URO_DEBATE_ROUNDS`, a debate that keeps producing findings runs past
    two rounds — **the uncapping regression control**.
 9. Circling still fires and the pivot ladder still terminates the loop.
