@@ -59,6 +59,7 @@ import { detectReview, parseReview } from './review.js';
 import { buildFixPlan, validateFindings } from './fix-plan.js';
 import { resolveSuperpowersDir } from './superpowers.js';
 import { readEnv } from './env-compat.js';
+import { createLivenessJudge } from './liveness-judge.js';
 
 export { HARNESS_ARTIFACTS } from './artifacts.js';
 
@@ -287,6 +288,10 @@ export async function run(opts) {
   const createDiff = adapters.diffText ?? diffText;
   const detectDebateCircling = adapters.detectCircling ?? detectCircling;
   const selectPivot = adapters.shouldPivot ?? shouldPivot;
+  const productionLivenessJudge = adapters.runExecutor === undefined;
+  const livenessJudgeConfigured = typeof adapters.judgeLiveness === 'function'
+    || productionLivenessJudge;
+  let judgeLiveness = adapters.judgeLiveness ?? null;
   const maxDebateRounds = resolveDebateRounds(opts.env ?? process.env, debateRounds);
   const superpowersDir = opts.superpowersDir === undefined
     ? resolveSuperpowersDir({ env: opts.env ?? process.env, home: opts.home ?? homedir() })
@@ -317,6 +322,7 @@ export async function run(opts) {
   let activeExecutor = null;
   let stallRestartCount = 0;
   let stallRecords = null;
+  let livenessChecks = null;
   if (typeof reporter === 'function') {
     stallConfig = {
       ...resolveStallConfig(opts.env ?? process.env),
@@ -325,6 +331,7 @@ export async function run(opts) {
       ...(opts.stallRestartLimit === undefined ? {} : { restartLimit: opts.stallRestartLimit }),
     };
     stallRecords = [];
+    livenessChecks = [];
     watchdog = createGapWatchdog({
       reporter,
       runId,
@@ -332,7 +339,8 @@ export async function run(opts) {
       onStall: async (event) => {
         let action = 'report';
         const executorSlot = activeExecutor;
-        if (stallConfig.policy === 'restart'
+        if (!livenessJudgeConfigured
+          && stallConfig.policy === 'restart'
           && executorSlot?.controller
           && stallRestartCount < stallConfig.restartLimit) {
           stallRestartCount++;
@@ -374,6 +382,16 @@ export async function run(opts) {
     campaignId,
     campaignBase,
   });
+  if (judgeLiveness === null && productionLivenessJudge) {
+    judgeLiveness = createLivenessJudge({
+      cwd: iso.dir,
+      model: executorModel,
+      effort: executorEffort,
+      env: opts.env ?? process.env,
+      home: opts.home ?? homedir(),
+      superpowersDir,
+    });
+  }
   const mergeConflicts = [];
   const mergeResolutions = [];
   let mergeProgress = null;
@@ -450,6 +468,11 @@ export async function run(opts) {
       ...(exec.timeoutReason?.lastEvent
         ? { lastEvent: exec.timeoutReason.lastEvent } : {}),
       ...(exec.timeoutReason?.setting ? { setting: exec.timeoutReason.setting } : {}),
+      ...(typeof exec.timeoutReason?.reasoning === 'string'
+        ? { reasoning: exec.timeoutReason.reasoning } : {}),
+      ...(typeof exec.timeoutReason?.judged === 'boolean'
+        ? { judged: exec.timeoutReason.judged } : {}),
+      ...(exec.timeoutReason?.unjudged ? { unjudged: true } : {}),
     });
   };
   const recordGateTimeout = (gateResult, iteration, attempt) => {
@@ -502,6 +525,15 @@ export async function run(opts) {
           reporter: eventReporter, runId, attempt,
           beforeKill,
           onLiveness: () => watchdog?.touch('executor'),
+          judgeLiveness: judgeLiveness ?? undefined,
+          onLivenessDecision: (decision) => {
+            livenessChecks?.push({ attempt, iteration: n, ...decision });
+            if (decision?.status !== 'stuck'
+              || stallConfig?.policy !== 'restart'
+              || stallRestartCount >= stallConfig.restartLimit) return;
+            stallRestartCount++;
+            slot.restartEvent = decision;
+          },
           livenessThresholdMs: executorThresholds.thresholdMs,
           progressThresholdMs: executorThresholds.progressThresholdMs,
           ...(controller ? { signal: controller.signal } : {}),
@@ -816,6 +848,10 @@ export async function run(opts) {
           timeoutMs: stageTimeouts.verifier,
           reporter: eventReporter, runId, pass: 'correctness',
           onLiveness: () => watchdog?.touch('verify'),
+          judgeLiveness: judgeLiveness ?? undefined,
+          onLivenessDecision: (decision) => {
+            livenessChecks?.push({ iteration: n, pass: 'correctness', ...decision });
+          },
           livenessThresholdMs: executorThresholds.thresholdMs,
           progressThresholdMs: executorThresholds.progressThresholdMs,
         }), { seat: 'verifier', pass: 'correctness', iteration: n }));
@@ -826,6 +862,10 @@ export async function run(opts) {
           timeoutMs: stageTimeouts.verifier,
           reporter: eventReporter, runId, pass: 'intent',
           onLiveness: () => watchdog?.touch('verify'),
+          judgeLiveness: judgeLiveness ?? undefined,
+          onLivenessDecision: (decision) => {
+            livenessChecks?.push({ iteration: n, pass: 'intent', ...decision });
+          },
           livenessThresholdMs: executorThresholds.thresholdMs,
           progressThresholdMs: executorThresholds.progressThresholdMs,
         }), { seat: 'verifier', pass: 'intent', iteration: n }));
@@ -842,6 +882,11 @@ export async function run(opts) {
               ? { lastEvent: result.timeoutReason.lastEvent } : {}),
             ...(result.timeoutReason?.setting
               ? { setting: result.timeoutReason.setting } : {}),
+            ...(typeof result.timeoutReason?.reasoning === 'string'
+              ? { reasoning: result.timeoutReason.reasoning } : {}),
+            ...(typeof result.timeoutReason?.judged === 'boolean'
+              ? { judged: result.timeoutReason.judged } : {}),
+            ...(result.timeoutReason?.unjudged ? { unjudged: true } : {}),
           });
         };
         recordVerifierTimeout(v, 'correctness');
@@ -1164,6 +1209,7 @@ export async function run(opts) {
       restartCount: stallRestartCount,
       gateRetryCount,
       stallEvents: stallRecords,
+      livenessChecks,
     } : null,
     ...(unitKind === undefined ? {} : { unitKind }),
     ...(mergeFacts === null ? {} : { merge: mergeFacts }),

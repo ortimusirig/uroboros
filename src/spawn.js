@@ -61,6 +61,95 @@ function killWindowsTreeFallback(child) {
   inspector.on('close', () => { clearTimeout(timer); finish(); });
 }
 
+function inspectWithProcess(bin, args, parse, timeoutMs = 5000) {
+  return new Promise((resolve) => {
+    let output = '';
+    let errorOutput = '';
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(value);
+    };
+    let inspector;
+    try {
+      inspector = spawn(bin, args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    } catch (error) {
+      resolve({ available: false, error: error?.message ?? String(error), descendants: [] });
+      return;
+    }
+    const timer = setTimeout(() => {
+      inspector.kill();
+      finish({ available: false, error: `process-tree inspection exceeded ${timeoutMs}ms`, descendants: [] });
+    }, timeoutMs);
+    inspector.stdout.on('data', (chunk) => { output += chunk; });
+    inspector.stderr.on('data', (chunk) => { errorOutput += chunk; });
+    inspector.on('error', (error) => finish({
+      available: false, error: error?.message ?? String(error), descendants: [],
+    }));
+    inspector.on('close', (code) => {
+      if (code !== 0) {
+        finish({
+          available: false,
+          error: errorOutput.trim() || `process-tree inspection exited ${code}`,
+          descendants: [],
+        });
+        return;
+      }
+      try { finish(parse(output)); }
+      catch (error) {
+        finish({ available: false, error: error?.message ?? String(error), descendants: [] });
+      }
+    });
+  });
+}
+
+export function inspectProcessTree(child) {
+  const rootPid = Number(child?.pid);
+  if (!Number.isInteger(rootPid) || rootPid < 1) {
+    return Promise.resolve({ available: false, rootPid: null, descendants: [] });
+  }
+  if (process.platform === 'win32') {
+    return inspectWithProcess('powershell.exe', [
+      '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+      '-File', WINDOWS_TREE_SCRIPT, String(rootPid), '-Detailed',
+    ], (output) => {
+      const source = output.trim();
+      const parsed = source === '' ? [] : JSON.parse(source);
+      const rows = Array.isArray(parsed) ? parsed : [parsed];
+      const descendants = rows.map((row) => ({
+        pid: Number(row.pid),
+        name: String(row.name ?? ''),
+        responding: row.responding !== false,
+      })).filter((row) => Number.isInteger(row.pid) && row.pid > 0);
+      return { available: true, rootPid, liveDescendantCount: descendants.length, descendants };
+    });
+  }
+  return inspectWithProcess('ps', ['-eo', 'pid=,ppid=,stat=,comm='], (output) => {
+    const rows = output.split(/\r?\n/).map((line) => {
+      const match = /^\s*(\d+)\s+(\d+)\s+(\S+)\s+(.+?)\s*$/.exec(line);
+      return match ? {
+        pid: Number(match[1]), parentPid: Number(match[2]),
+        status: match[3], name: match[4],
+      } : null;
+    }).filter(Boolean);
+    const descendants = [];
+    const parents = new Set([rootPid]);
+    let added;
+    do {
+      added = false;
+      for (const row of rows) {
+        if (parents.has(row.pid) || !parents.has(row.parentPid)) continue;
+        parents.add(row.pid);
+        descendants.push(row);
+        added = true;
+      }
+    } while (added);
+    return { available: true, rootPid, liveDescendantCount: descendants.length, descendants };
+  });
+}
+
 function killProcessTree(child) {
   if (!child.pid) return;
   if (process.platform === 'win32') {
@@ -107,17 +196,27 @@ export function createLivenessDeadline({
   thresholdMs,
   getLiveness,
   onKill,
+  judge,
+  getProcessTree,
+  getWorktreeActivity,
+  onEvent,
+  onDecision,
+  judgeTimeoutMs = 60_000,
   now = Date.now,
   setTimer = setTimeout,
   clearTimer = clearTimeout,
 }) {
   timerInteger(thresholdMs, 'thresholdMs');
+  timerInteger(judgeTimeoutMs, 'judgeTimeoutMs');
   if (typeof getLiveness !== 'function') throw new TypeError('getLiveness must be a function');
   if (typeof onKill !== 'function') throw new TypeError('onKill must be a function');
 
   let disposed = false;
   let killed = false;
   let timer = null;
+  let judging = false;
+  let intervalMs = thresholdMs;
+  let checkCount = 0;
 
   const evidence = () => {
     const observed = getLiveness() ?? {};
@@ -125,7 +224,23 @@ export function createLivenessDeadline({
     return {
       gapMs: Number.isFinite(rawGap) ? Math.max(0, rawGap) : 0,
       lastEvent: observed.lastEvent ?? null,
+      lastEvents: Array.isArray(observed.lastEvents) ? observed.lastEvents : [],
+      lastAgentMessage: typeof observed.lastAgentMessage === 'string'
+        ? observed.lastAgentMessage
+        : '',
+      seat: typeof observed.seat === 'string'
+        ? observed.seat
+        : observed.lastEvent?.stage ?? 'unknown',
+      ...(observed.pass === undefined ? {} : { pass: observed.pass }),
     };
+  };
+
+  const notify = (type, fields) => {
+    try { onEvent?.(type, fields); } catch { /* observability cannot decide liveness */ }
+  };
+
+  const decide = (decision) => {
+    try { onDecision?.(decision); } catch { /* decision recording is best effort */ }
   };
 
   const finish = (reason) => {
@@ -136,24 +251,171 @@ export function createLivenessDeadline({
     try { onKill(reason); } catch { /* the termination callback owns its errors */ }
   };
 
-  const arm = (delayMs = thresholdMs) => {
+  const unavailable = (observed, reason, gathered = {}) => {
+    const reasoning = `Liveness check was unjudged: ${reason}`;
+    const decision = {
+      status: 'stuck',
+      judged: false,
+      unjudged: true,
+      reasoning,
+      gapMs: observed.gapMs,
+      intervalMs,
+      checkCount,
+      seat: observed.seat,
+      lastEvent: observed.lastEvent,
+      ...gathered,
+    };
+    notify('stuck', decision);
+    decide(decision);
+    finish({
+      kind: 'liveness',
+      timeoutMs: intervalMs,
+      gapMs: observed.gapMs,
+      lastEvent: observed.lastEvent,
+      setting: 'URO_STALL_THRESHOLD_MS',
+      judged: false,
+      unjudged: true,
+      reasoning,
+    });
+  };
+
+  const boundedOperation = (operation) => new Promise((resolve) => {
+    let settled = false;
+    const judgeTimer = setTimer(() => {
+      if (settled) return;
+      settled = true;
+      resolve({ available: false, reason: `liveness judge exceeded its ${judgeTimeoutMs}ms bound` });
+    }, judgeTimeoutMs);
+    Promise.resolve()
+      .then(operation)
+      .then((value) => {
+        if (settled) return;
+        settled = true;
+        clearTimer(judgeTimer);
+        resolve(value);
+      }, (error) => {
+        if (settled) return;
+        settled = true;
+        clearTimer(judgeTimer);
+        resolve({
+          available: false,
+          reason: `liveness judge failed: ${error?.message ?? String(error)}`,
+        });
+      });
+  });
+
+  const ask = async (observed) => {
+    checkCount++;
+    notify('asked', {
+      seat: observed.seat, gapMs: observed.gapMs, intervalMs,
+      checkCount, judgeAvailable: typeof judge === 'function',
+      lastEvent: observed.lastEvent,
+    });
+    if (typeof judge !== 'function') {
+      unavailable(observed, 'no liveness judge was available');
+      return;
+    }
+
+    judging = true;
+    const sinceMs = clockValue(now) - observed.gapMs;
+    const result = await boundedOperation(async () => {
+      const [processTree, worktreeActivity] = await Promise.all([
+        typeof getProcessTree === 'function'
+          ? Promise.resolve().then(() => getProcessTree()).catch((error) => ({
+            available: false, error: error?.message ?? String(error), descendants: [],
+          }))
+          : Promise.resolve({ available: false, descendants: [] }),
+        typeof getWorktreeActivity === 'function'
+          ? Promise.resolve().then(() => getWorktreeActivity(sinceMs)).catch((error) => ({
+            available: false, error: error?.message ?? String(error), changed: false,
+            changedFiles: [], sinceMs,
+          }))
+          : Promise.resolve({ available: false, changed: false, changedFiles: [], sinceMs }),
+      ]);
+      const input = {
+        seat: observed.seat,
+        ...(observed.pass === undefined ? {} : { pass: observed.pass }),
+        askedAt: new Date(clockValue(now)).toISOString(),
+        gapMs: observed.gapMs,
+        currentIntervalMs: intervalMs,
+        checkCount,
+        lastEvents: observed.lastEvents,
+        lastEvent: observed.lastEvent,
+        lastAgentMessage: observed.lastAgentMessage,
+        processTree,
+        worktreeActivity,
+      };
+      return { judgement: await judge(input), processTree, worktreeActivity };
+    });
+    judging = false;
+    if (disposed || killed) return;
+    if (result?.available === false) {
+      unavailable(observed, result.reason);
+      return;
+    }
+    const { judgement, processTree, worktreeActivity } = result;
+    if (!judgement || judgement.available === false
+      || (judgement.status !== 'working' && judgement.status !== 'stuck')
+      || typeof judgement.reasoning !== 'string' || judgement.reasoning.trim() === '') {
+      unavailable(observed, judgement?.reason
+        ?? 'the liveness judge returned no readable working/stuck judgement', {
+        processTree, worktreeActivity,
+      });
+      return;
+    }
+
+    const reasoning = judgement.reasoning.trim();
+    if (judgement.status === 'working') {
+      const previousIntervalMs = intervalMs;
+      if (judgement.nextIntervalMs !== undefined) {
+        try { timerInteger(judgement.nextIntervalMs, 'nextIntervalMs'); }
+        catch (error) {
+          unavailable(observed, error.message, { processTree, worktreeActivity });
+          return;
+        }
+        intervalMs = judgement.nextIntervalMs;
+      }
+      const decision = {
+        status: 'working', judged: true, reasoning,
+        gapMs: observed.gapMs, intervalMs, previousIntervalMs,
+        nextIntervalMs: intervalMs,
+        intervalReused: judgement.nextIntervalMs === undefined,
+        checkCount, seat: observed.seat,
+        lastEvent: observed.lastEvent, processTree, worktreeActivity,
+      };
+      notify('working', decision);
+      decide(decision);
+      arm(intervalMs);
+      return;
+    }
+
+    const decision = {
+      status: 'stuck', judged: true, reasoning,
+      gapMs: observed.gapMs, intervalMs,
+      checkCount, seat: observed.seat,
+      lastEvent: observed.lastEvent, processTree, worktreeActivity,
+    };
+    notify('stuck', decision);
+    decide(decision);
+    finish({
+      kind: 'liveness', timeoutMs: intervalMs,
+      gapMs: observed.gapMs, lastEvent: observed.lastEvent,
+      setting: 'URO_STALL_THRESHOLD_MS', judged: true, reasoning,
+    });
+  };
+
+  function arm(delayMs = intervalMs) {
     timer = setTimer(() => {
       timer = null;
-      if (disposed || killed) return;
+      if (disposed || killed || judging) return;
       const observed = evidence();
-      if (observed.gapMs < thresholdMs) {
-        arm(thresholdMs - observed.gapMs);
+      if (observed.gapMs < intervalMs) {
+        arm(intervalMs - observed.gapMs);
         return;
       }
-      finish({
-        kind: 'liveness',
-        timeoutMs: thresholdMs,
-        gapMs: observed.gapMs,
-        lastEvent: observed.lastEvent,
-        setting: 'URO_STALL_THRESHOLD_MS',
-      });
+      void ask(observed);
     }, delayMs);
-  };
+  }
 
   arm();
 
@@ -235,6 +497,8 @@ export async function spawnCapture(bin, args, opts = {}) {
     if (opts.livenessSupervision) {
       livenessDeadline = createLivenessDeadline({
         ...opts.livenessSupervision,
+        getProcessTree: opts.livenessSupervision.getProcessTree
+          ?? (() => inspectProcessTree(child)),
         onKill: (reason) => { requestKill(reason, true); },
       });
     }

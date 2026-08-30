@@ -253,6 +253,25 @@ test('every plan event pair round-trips through the declared vocabulary', () => 
   }
 });
 
+test('every liveness event pair round-trips through the declared vocabulary', () => {
+  assert.ok(EVENT_STAGES.includes('liveness'));
+  for (const type of ['asked', 'working', 'stuck']) {
+    assert.ok(EVENT_TYPES.includes(type), `${type} must be a declared event type`);
+    assert.doesNotThrow(() => createEvent({
+      runId: `liveness-${type}`,
+      stage: 'liveness',
+      type,
+      fields: {
+        seat: 'executor', gapMs: 900_000, nextIntervalMs: 2_400_000,
+        reasoning: 'The judgement remains human-readable.',
+      },
+    }));
+  }
+  assert.deepEqual(EVENT_PAIRS.filter((pair) => pair.startsWith('liveness/')).sort(), [
+    'liveness/asked', 'liveness/stuck', 'liveness/working',
+  ]);
+});
+
 test('stage transitions and executor file changes reach the reporter in order', async () => {
   const scr = scratch();
   const tgt = target();
@@ -644,12 +663,22 @@ test('fully exercised runs have exact pair equality with both event vocabularies
     assert.ok(Object.values(deliberatelyUncovered).every((reason) => reason.length >= 24),
       'every allowlisted pair must carry a substantive reason');
 
+    const livenessEvents = ['asked', 'working', 'stuck'].map((type) => createEvent({
+      runId: `conformance-liveness-${type}`,
+      stage: 'liveness',
+      type,
+      fields: {
+        seat: 'executor', gapMs: 900_000, nextIntervalMs: 2_400_000,
+        reasoning: 'Vocabulary conformance fixture.',
+      },
+    }));
     const allEvents = [
       ...campaignEvents,
       ...unitEvents,
       ...auxiliaryCampaignEvents,
       ...journalEvents,
       ...planEvents,
+      ...livenessEvents,
     ];
     assert.doesNotThrow(() => assertEventConformance(allEvents, {
       allowUnemitted: Object.keys(deliberatelyUncovered),

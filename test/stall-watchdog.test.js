@@ -90,14 +90,14 @@ test('a silent stage emits one stalled event carrying its stage, gap, and last e
   watchdog.dispose();
 });
 
-test('stall configuration defaults to five-minute liveness and progress with no elapsed ceiling', () => {
+test('stall configuration defaults to fifteen-minute liveness and five-minute progress with no elapsed ceiling', () => {
   assert.deepEqual(resolveStallConfig({}), {
     thresholdMs: DEFAULT_STALL_THRESHOLD_MS,
     progressThresholdMs: DEFAULT_PROGRESS_THRESHOLD_MS,
     policy: DEFAULT_STALL_POLICY,
     restartLimit: DEFAULT_STALL_RESTARTS,
   });
-  assert.equal(DEFAULT_STALL_THRESHOLD_MS, 5 * 60 * 1000);
+  assert.equal(DEFAULT_STALL_THRESHOLD_MS, 15 * 60 * 1000);
   assert.equal(DEFAULT_PROGRESS_THRESHOLD_MS, 5 * 60 * 1000);
   assert.equal(DEFAULT_STALL_POLICY, 'report');
   assert.equal(DEFAULT_STALL_RESTARTS, 1);

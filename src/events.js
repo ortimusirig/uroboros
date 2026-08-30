@@ -9,6 +9,7 @@ export const EVENT_STAGES = Object.freeze([
   'gate',
   'diff',
   'decision',
+  'liveness',
   'verify',
   'debate',
   'report',
@@ -36,6 +37,9 @@ export const EVENT_TYPES = Object.freeze([
   'challenged',
   'resolved',
   'assumed',
+  'asked',
+  'working',
+  'stuck',
   'round',
   'resist',
   'converged',
@@ -86,6 +90,9 @@ export const EVENT_PAIRS = Object.freeze([
   'decision/challenged',
   'decision/resolved',
   'decision/assumed',
+  'liveness/asked',
+  'liveness/working',
+  'liveness/stuck',
   'verify/start',
   'verify/finish',
   'verify/verdict',
@@ -374,6 +381,13 @@ export function detailFor(event) {
     }
     const answers = Array.isArray(event.answers) ? event.answers : [];
     return `answers=${answers.length}`;
+  }
+  if (event.stage === 'liveness') {
+    const interval = event.nextIntervalMs === undefined
+      ? ''
+      : ` next-check=${oneLine(event.nextIntervalMs)}ms`;
+    return `${event.type} seat=${oneLine(event.seat)} gap=${oneLine(event.gapMs)}ms${interval}`
+      + (event.reasoning ? ` reasoning=${oneLine(event.reasoning)}` : '');
   }
   if (event.stage === 'verify') {
     const pass = event.pass ? ` pass=${oneLine(event.pass)}` : '';

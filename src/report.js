@@ -135,6 +135,9 @@ export function buildRunFacts({
       stall: supervision.restartCount,
     };
     facts.stallEvents = Array.isArray(supervision.stallEvents) ? supervision.stallEvents : [];
+    facts.livenessChecks = Array.isArray(supervision.livenessChecks)
+      ? supervision.livenessChecks
+      : [];
   }
   return facts;
 }
@@ -343,10 +346,24 @@ export function buildReportMarkdown(facts, {
       const last = event.lastEvent ?? {};
       const evidence = Number.isFinite(event.gapMs)
         ? `; ${event.gapMs} ms silence after ${last.stage ?? 'unknown'}/${last.type ?? 'unknown'}`
-          + (event.setting ? `; raise ${event.setting} to allow a longer gap` : '')
+          + (event.setting ? `; governed initially by ${event.setting}` : '')
+          + (event.judged === false ? '; unjudged fallback' : '')
+          + (event.reasoning ? `; reason: ${event.reasoning}` : '')
         : '';
       md.push(`- ${event.stage}${pass}: timed out after ${event.timeoutMs} ms `
         + `(iteration ${event.iteration}${attempt}${command})${evidence}`);
+    }
+  }
+  if ((facts.livenessChecks ?? []).length > 0) {
+    md.push(``, `## Liveness judgements`);
+    for (const check of facts.livenessChecks) {
+      const pass = check.pass ? `/${check.pass}` : '';
+      const interval = check.status === 'working'
+        ? `; next check in ${check.nextIntervalMs} ms`
+        : '';
+      const provenance = check.judged === false ? 'unjudged fallback' : 'judged';
+      md.push(`- ${check.seat ?? 'seat'}${pass}: ${check.status} (${provenance})${interval}; `
+        + `reason: ${check.reasoning}`);
     }
   }
   if ((facts.stallEvents ?? []).length > 0) {

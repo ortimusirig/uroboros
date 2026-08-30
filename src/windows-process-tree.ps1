@@ -1,4 +1,4 @@
-param([int]$RootPid)
+param([int]$RootPid, [switch]$Detailed)
 
 # taskkill /T is the fast path. This fallback enumerates descendants without WMI/CIM,
 # which can be denied in constrained hosts even when terminating our own child is allowed.
@@ -66,4 +66,18 @@ public static class CccProcessTree {
 }
 '@
 
-[CccProcessTree]::Descendants([uint32]$RootPid)
+$descendants = [CccProcessTree]::Descendants([uint32]$RootPid)
+if ($Detailed) {
+  @($descendants | ForEach-Object {
+    $process = Get-Process -Id $_ -ErrorAction SilentlyContinue
+    if ($null -ne $process) {
+      [pscustomobject]@{
+        pid = [int]$_
+        name = $process.ProcessName
+        responding = $process.Responding
+      }
+    }
+  }) | ConvertTo-Json -Compress
+} else {
+  $descendants
+}

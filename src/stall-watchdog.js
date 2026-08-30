@@ -2,14 +2,16 @@ import { createEvent } from './events.js';
 import { readEnv } from './env-compat.js';
 import { parseTimeoutMs } from './timeouts.js';
 
-export const DEFAULT_STALL_THRESHOLD_MS = 5 * 60 * 1000;
+export const DEFAULT_STALL_THRESHOLD_MS = 15 * 60 * 1000;
 export const DEFAULT_PROGRESS_THRESHOLD_MS = 5 * 60 * 1000;
 export const DEFAULT_STALL_POLICY = 'report';
 export const DEFAULT_STALL_RESTARTS = 1;
 
 const MAX_TIMER_MS = 2_147_483_647;
 const POLICIES = new Set(['report', 'restart']);
-const SUPERVISION_EVENT_TYPES = new Set(['stalled', 'extended']);
+const SUPERVISION_EVENT_TYPES = new Set([
+  'stalled', 'extended', 'asked', 'working', 'stuck',
+]);
 
 function integerFromEnv(env, suffix, fallback, minimum, maximum) {
   const name = `URO_${suffix}`;

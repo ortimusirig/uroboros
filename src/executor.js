@@ -7,6 +7,7 @@ import { StringDecoder } from 'node:string_decoder';
 import { homedir } from 'node:os';
 import { readEnv } from './env-compat.js';
 import { resolveSuperpowersDir } from './superpowers.js';
+import { inspectWorktreeActivity } from './liveness-evidence.js';
 import {
   createProgressWatchdog,
   resolveExecutorThresholds,
@@ -104,7 +105,9 @@ export function parseCodexStream(streamText) {
   return { changedFiles, lastMessage, agentMessages, usage };
 }
 
-function createIncrementalReporter({ reporter, runId, attempt, onProgress }) {
+function createIncrementalReporter({
+  reporter, runId, attempt, onProgress, onAgentMessage,
+}) {
   const decoder = new StringDecoder('utf8');
   let pending = '';
 
@@ -151,6 +154,7 @@ function createIncrementalReporter({ reporter, runId, attempt, onProgress }) {
         fields.errorMessage = item.message;
       }
       if (itemType === 'agent_message') {
+        if (typeof item.text === 'string') onAgentMessage?.(item.text);
         const text = encodeRecordedText(item.text);
         if (text.text !== '') {
           fields.text = text.text;
@@ -207,6 +211,11 @@ export async function runExecutor({
   clearTimer = clearTimeout,
   spawnProcess,
   killProcessTree,
+  judgeLiveness,
+  livenessJudgeTimeoutMs,
+  getProcessTree,
+  getWorktreeActivity,
+  onLivenessDecision,
   env = process.env,
   home = homedir(),
   superpowersDir,
@@ -226,8 +235,17 @@ export async function runExecutor({
   };
   const startedAt = nowMs();
   let lastByteAt = null;
+  let lastAgentMessage = '';
   let lastObservedEvent = {
     runId, stage: 'executor', type: 'start', bin, args, attempt,
+  };
+  const lastEvents = [{
+    ...lastObservedEvent,
+    ts: new Date(startedAt).toISOString(),
+  }];
+  const rememberEvent = (event) => {
+    lastEvents.push({ ...event, ts: new Date(nowMs()).toISOString() });
+    if (lastEvents.length > 10) lastEvents.shift();
   };
   const progress = typeof reporter === 'function'
     ? createProgressWatchdog({
@@ -244,8 +262,10 @@ export async function runExecutor({
     attempt,
     onProgress: (event) => {
       lastObservedEvent = event;
+      rememberEvent(event);
       progress?.observe(event);
     },
+    onAgentMessage: (message) => { lastAgentMessage = message; },
   });
   let r;
   try {
@@ -268,9 +288,35 @@ export async function runExecutor({
       },
       livenessSupervision: {
         thresholdMs: resolvedLivenessThresholdMs,
+        judge: judgeLiveness,
+        ...(livenessJudgeTimeoutMs === undefined ? {} : {
+          judgeTimeoutMs: livenessJudgeTimeoutMs,
+        }),
+        ...(getProcessTree === undefined ? {} : { getProcessTree }),
+        getWorktreeActivity: getWorktreeActivity
+          ?? (typeof judgeLiveness === 'function'
+            ? (sinceMs) => inspectWorktreeActivity(cwd, sinceMs)
+            : undefined),
+        onEvent: (type, fields) => {
+          reportEvent(reporter, runId, 'liveness', type, fields);
+          if (type === 'working') {
+            reportEvent(reporter, runId, 'executor', 'extended', {
+              gapMs: fields.gapMs,
+              extensionMs: fields.nextIntervalMs,
+              nextIntervalMs: fields.nextIntervalMs,
+              reasoning: fields.reasoning,
+              lastEvent: fields.lastEvent,
+              checkCount: fields.checkCount,
+            });
+          }
+        },
+        onDecision: onLivenessDecision,
         getLiveness: () => ({
           gapMs: nowMs() - (lastByteAt ?? startedAt),
           lastEvent: lastObservedEvent,
+          lastEvents: [...lastEvents],
+          lastAgentMessage,
+          seat: 'executor',
         }),
         now,
         setTimer,

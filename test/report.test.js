@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { buildRunFacts, writeReport } from '../src/report.js';
+import { buildReportMarkdown, buildRunFacts, writeReport } from '../src/report.js';
 import { DEFAULT_EXECUTOR_EFFORT, DEFAULT_EXECUTOR_MODEL } from '../src/executor.js';
 import { DEFAULT_VERIFIER_MODEL } from '../src/verifier.js';
 import { EMPTY_USAGE } from '../src/usage.js';
@@ -36,6 +36,31 @@ test('buildRunFacts records the resolved skills path', () => {
     outcome: 'no-op', gateRetries: 0, skills: 'C:/plugins/superpowers/6.3.0',
   });
   assert.equal(withSkills.skills, 'C:/plugins/superpowers/6.3.0');
+});
+
+test('buildRunFacts retains the judged interval and its reasoning', () => {
+  const judged = buildRunFacts({
+    runId: 'judged-liveness', target: 'C:/proj', dir: 'C:/uro/w', isRepo: true,
+    branch: 'uro/judged', iterations: [], gateStatus: 'passed', verdict: null,
+    outcome: 'no-op', gateRetries: 0,
+    supervision: {
+      thresholdMs: 900_000, progressThresholdMs: 300_000,
+      policy: 'report', restartLimit: 1, restartCount: 0, gateRetryCount: 0,
+      stallEvents: [],
+      livenessChecks: [{
+        status: 'working', judged: true, nextIntervalMs: 2_400_000,
+        reasoning: 'A live delegated child is compiling the requested change.',
+      }],
+    },
+  });
+  assert.deepEqual(judged.livenessChecks, [{
+    status: 'working', judged: true, nextIntervalMs: 2_400_000,
+    reasoning: 'A live delegated child is compiling the requested change.',
+  }]);
+  const markdown = buildReportMarkdown(judged);
+  assert.match(markdown, /Liveness judgements/);
+  assert.match(markdown, /next check in 2400000 ms/);
+  assert.match(markdown, /live delegated child is compiling/);
 });
 
 test('buildRunFacts records model overrides actually used for a run', () => {

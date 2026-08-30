@@ -6,6 +6,7 @@ import { reportEvent } from './events.js';
 import { annotateUsageConsistency, normalizeCursorUsage } from './usage.js';
 import { resolveStageTimeouts } from './timeouts.js';
 import { resolveSuperpowersDir } from './superpowers.js';
+import { inspectWorktreeActivity } from './liveness-evidence.js';
 import {
   createProgressWatchdog,
   resolveExecutorThresholds,
@@ -389,6 +390,11 @@ export async function runVerifier({
   clearTimer = clearTimeout,
   spawnProcess,
   killProcessTree,
+  judgeLiveness,
+  livenessJudgeTimeoutMs,
+  getProcessTree,
+  getWorktreeActivity,
+  onLivenessDecision,
 }) {
   const resolvedTimeoutMs = timeoutMs === undefined
     ? resolveStageTimeouts(env).verifier
@@ -406,7 +412,13 @@ export async function runVerifier({
   };
   const startedAt = nowMs();
   let lastByteAt = null;
+  let lastAgentMessage = '';
   let lastObservedEvent = { runId, stage: 'verify', type: 'start', pass };
+  const lastEvents = [{ ...lastObservedEvent, ts: new Date(startedAt).toISOString() }];
+  const rememberEvent = (event) => {
+    lastEvents.push({ ...event, ts: new Date(nowMs()).toISOString() });
+    if (lastEvents.length > 10) lastEvents.shift();
+  };
   const progress = typeof reporter === 'function'
     ? createProgressWatchdog({
       reporter, runId, stage: 'verify', pass, thresholdMs: resolvedProgressThresholdMs,
@@ -423,6 +435,15 @@ export async function runVerifier({
       pass,
       ...(typeof event?.subtype === 'string' ? { subtype: event.subtype } : {}),
     };
+    rememberEvent(lastObservedEvent);
+    if (event?.type === 'result' && typeof event.result === 'string') {
+      lastAgentMessage = event.result;
+    } else if (event?.type === 'assistant' && Array.isArray(event.message?.content)) {
+      lastAgentMessage = event.message.content
+        .filter((part) => part?.type === 'text' && typeof part.text === 'string')
+        .map((part) => part.text)
+        .join('\n');
+    }
     if (event?.type === 'item.completed') {
       progress?.observe({ ...lastObservedEvent, type: 'item_completed' });
     }
@@ -447,9 +468,26 @@ export async function runVerifier({
       },
       livenessSupervision: {
         thresholdMs: resolvedLivenessThresholdMs,
+        judge: judgeLiveness,
+        ...(livenessJudgeTimeoutMs === undefined ? {} : {
+          judgeTimeoutMs: livenessJudgeTimeoutMs,
+        }),
+        ...(getProcessTree === undefined ? {} : { getProcessTree }),
+        getWorktreeActivity: getWorktreeActivity
+          ?? (typeof judgeLiveness === 'function'
+            ? (sinceMs) => inspectWorktreeActivity(cwd, sinceMs)
+            : undefined),
+        onEvent: (type, fields) => {
+          reportEvent(reporter, runId, 'liveness', type, fields);
+        },
+        onDecision: onLivenessDecision,
         getLiveness: () => ({
           gapMs: nowMs() - (lastByteAt ?? startedAt),
           lastEvent: lastObservedEvent,
+          lastEvents: [...lastEvents],
+          lastAgentMessage,
+          seat: 'verifier',
+          pass,
         }),
         now,
         setTimer,

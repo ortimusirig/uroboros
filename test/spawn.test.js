@@ -112,6 +112,9 @@ test('silence past liveness kills with gap, last event, and controlling setting'
     gapMs: 30,
     lastEvent: { stage: 'executor', type: 'item_completed', itemType: 'file_change' },
     setting: 'URO_STALL_THRESHOLD_MS',
+    judged: false,
+    unjudged: true,
+    reasoning: 'Liveness check was unjudged: no liveness judge was available',
   }]);
 });
 

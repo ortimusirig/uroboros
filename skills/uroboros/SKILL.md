@@ -122,11 +122,12 @@ For a simple Graph, keep the flag form: give every task a `--unit-id`, then repe
   `index.jsonl` entry. Unit worktrees still remain until the operator explicitly runs `prune`;
   nothing prunes automatically at the end of a run or campaign.
 - **Agent seats have no elapsed deadline by default.** Executor and verifier elapsed limits
-  exist only when the operator sets their timeout flags or environment variables; silence past
-  `URO_STALL_THRESHOLD_MS` kills either seat. The gate retains its default timeout because a
-  quiet build may be healthy and cannot spend through a token budget. Isolation and campaign Git
-  invocations pass no timeout. Standalone `doctor` probes and `publish` commands use their own
-  bounded command timeouts.
+  exist only when the operator sets their timeout flags or environment variables. Silence past
+  the first `URO_STALL_THRESHOLD_MS` interval asks a separate read-only liveness judge; a working
+  judgement chooses the next interval, while a stuck or unavailable judgement kills the seat.
+  The gate retains its default timeout because a quiet build may be healthy and cannot spend
+  through a token budget. Isolation and campaign Git invocations pass no timeout. Standalone
+  `doctor` probes and `publish` commands use their own bounded command timeouts.
 - **Ordinary seats do not receive campaign context.** The executor and either verifier are not
   told about sibling units, the dependency Graph, or the campaign. A perspective value reaches
   no seat; its presence only infers a candidate set. Derived Merge is the exception: its

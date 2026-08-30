@@ -264,16 +264,19 @@ embedded Obsidian Bases campaign table.
 - **Gate timeout:** 60 minutes per command by default (chosen to accommodate slow test
   suites); override with `URO_GATE_TIMEOUT_MS`.
   All timeout overrides are positive integer millisecond values.
-- **Liveness gap:** five minutes since the last stdout byte at the executor or either verifier
-  pass; override the positive millisecond value with `URO_STALL_THRESHOLD_MS`. Silence kills
-  the seat and records the gap, last parsed event, and governing setting. There is no hard
-  elapsed ceiling.
+- **Liveness check:** the first check occurs after fifteen minutes without a stdout byte at the
+  executor or either verifier pass; override that first positive millisecond interval with
+  `URO_STALL_THRESHOLD_MS`. Silence asks a separate read-only judge using recent events, the
+  last agent message, live process descendants, and worktree activity. A working judgement
+  chooses the next check interval; a stuck judgement kills the seat. If no judge is available,
+  the seat is killed and the facts identify the decision as unjudged. There is no hard elapsed
+  ceiling.
 - **Progress gap:** five minutes since the last completed item; override with
   `URO_PROGRESS_THRESHOLD_MS`. Progress silence is informational and never kills or restarts
   while stdout bytes continue to prove liveness.
-- **Stall policy:** `URO_STALL_POLICY=report` records the executor liveness kill without a
-  relaunch. Set `URO_STALL_POLICY=restart` to relaunch that killed executor with a stall notice
-  appended to the original plan. Verifier passes are never rewritten into findings after a kill.
+- **Stall policy:** `URO_STALL_POLICY=report` records a stuck executor without a relaunch. Set
+  `URO_STALL_POLICY=restart` to relaunch that executor with a stall notice appended to the
+  original plan. Verifier passes are never rewritten into findings after a kill.
 - **Stall restart bound:** one restart by default; set `URO_STALL_RESTARTS` to `0`-`3`.
   Stall restarts and gate retries have separate limits and counters in the run facts.
 - **Debate rounds:** unbounded by default; set `URO_DEBATE_ROUNDS` to any positive integer to
