@@ -79,13 +79,20 @@ test('buildCodexArgs accepts explicit model and effort overrides', () => {
   assert.ok(a.includes('model_reasoning_effort=medium'));
 });
 
-test('buildCodexArgs adds a resolved superpowers plugin directory', () => {
+test('buildCodexArgs never passes --plugin-dir, which Codex rejects', () => {
+  // Codex discovers plugins from its own config; it has no --plugin-dir flag and
+  // exits 2 with "unexpected argument '--plugin-dir'". That flag belongs to the
+  // Cursor CLI. Passing it here made every executor invocation fail, so the args
+  // must stay free of it even when a superpowers directory resolves.
   const superpowersDir = mkdtempSync(join(tmpdir(), 'uro-codex-superpowers-'));
   try {
     const args = buildCodexArgs({
       cwd: 'C:/w', env: { URO_SUPERPOWERS_DIR: superpowersDir }, home: tmpdir(),
     });
-    assert.equal(args[args.indexOf('--plugin-dir') + 1], superpowersDir);
+    assert.ok(!args.includes('--plugin-dir'), 'Codex rejects --plugin-dir');
+    assert.ok(!args.includes(superpowersDir), 'the resolved path is not an argument');
+    assert.deepEqual(args, buildCodexArgs({ cwd: 'C:/w', superpowersDir: null }),
+      'a resolved directory must not change the argument list');
   } finally {
     rmSync(superpowersDir, { recursive: true, force: true });
   }

@@ -58,14 +58,16 @@ export function buildCodexArgs({
   home = homedir(),
   superpowersDir,
 }) {
-  const resolvedSuperpowersDir = superpowersDir === undefined
+  // Codex discovers plugins from its own config under CODEX_HOME; it has no
+  // --plugin-dir flag and exits 2 on one ("unexpected argument '--plugin-dir'").
+  // That flag belongs to the Cursor CLI, and passing it here broke every run.
+  // Superpowers reaches the executor through Codex's plugin cache, so the
+  // resolved path is recorded for provenance and never injected as an argument.
+  void (superpowersDir === undefined
     ? resolveSuperpowersDir({ env, home })
-    : superpowersDir;
+    : superpowersDir);
   return [
     'exec', '--json',
-    ...(resolvedSuperpowersDir === null
-      ? []
-      : ['--plugin-dir', resolvedSuperpowersDir]),
     '-m', model,
     '-c', `model_reasoning_effort=${effort}`,
     '-c', 'mcp_servers={}',
