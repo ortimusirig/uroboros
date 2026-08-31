@@ -15,6 +15,10 @@ const VERIFIED_SUPERPOWERS = {
 
 const runPlan = (options) => executePlan({
   ...options,
+  // The pre-STORM cases below are single-draft regression controls. Dedicated
+  // tests exercise the new default candidate set explicitly.
+  candidates: options.candidates ?? 1,
+  pivotCandidates: options.pivotCandidates ?? 1,
   adapters: {
     verifySuperpowers: async () => VERIFIED_SUPERPOWERS,
     ...options.adapters,
@@ -68,6 +72,92 @@ test('a one-round convergence writes both artifacts and emits plan/converged', a
     assert.deepEqual(events.map((event) => `${event.stage}/${event.type}`), [
       'plan/start', 'plan/gate', 'plan/round', 'plan/converged', 'plan/finish',
     ]);
+  } finally { item.cleanup(); }
+});
+
+test('initial planning defaults to three distinct STORM perspectives and selects one', async () => {
+  const item = fixture();
+  const requests = [];
+  const selections = [];
+  try {
+    const result = await executePlan({
+      goal: 'Choose an implementation approach', target: item.target, out: item.out,
+      adapters: {
+        verifySuperpowers: async () => VERIFIED_SUPERPOWERS,
+        draft: async (request) => {
+          requests.push(request);
+          return { plan: `${planText}\nSelected source: ${request.candidateId}\n`, gate: [] };
+        },
+        runPlanGate: passingGate,
+        review: async () => 'NO_BLOCKERS',
+        selectPlanCandidate: async (request) => {
+          selections.push(request);
+          return { selectedCandidateId: 'candidate-2' };
+        },
+      },
+    });
+
+    assert.equal(result.converged, true);
+    assert.equal(requests.length, 3);
+    assert.equal(new Set(requests.map((request) => request.perspective)).size, 3);
+    for (const request of requests) {
+      assert.match(request.input, /Declared perspective:/);
+      assert.equal(request.mode, 'initial');
+    }
+    assert.equal(selections.length, 1);
+    assert.equal(result.candidateHistory[0].selectedCandidateId, 'candidate-2');
+    assert.match(readFileSync(result.planPath, 'utf8'), /Selected source: candidate-2/);
+  } finally { item.cleanup(); }
+});
+
+test('--candidates 1 restores single-draft initial planning', async () => {
+  const item = fixture();
+  let drafts = 0;
+  let selections = 0;
+  try {
+    const result = await runPlan({
+      goal: 'Use one draft', target: item.target, out: item.out, candidates: 1,
+      adapters: {
+        draft: async (request) => {
+          drafts++;
+          assert.equal(request.candidateId, undefined);
+          return draft();
+        },
+        runPlanGate: passingGate,
+        review: async () => 'NO_BLOCKERS',
+        selectPlanCandidate: async () => { selections++; return 'candidate-1'; },
+      },
+    });
+    assert.equal(result.converged, true);
+    assert.equal(drafts, 1);
+    assert.equal(selections, 0);
+    assert.deepEqual(result.candidateHistory, []);
+  } finally { item.cleanup(); }
+});
+
+test('a named-finding fix round remains single-draft after initial STORM selection', async () => {
+  const item = fixture();
+  const requests = [];
+  let reviews = 0;
+  try {
+    const result = await runPlan({
+      goal: 'Repair a named finding', target: item.target, out: item.out, candidates: 3,
+      rounds: 2,
+      adapters: {
+        draft: async (request) => { requests.push(request); return draft(); },
+        runPlanGate: passingGate,
+        review: async () => reviews++ === 0 ? [
+          '## F1', 'Severity: blocking', 'Category: correctness',
+          'Description: Repair the named edge.', 'Test: test/edge.test.js',
+        ].join('\n') : 'NO_BLOCKERS',
+        selectPlanCandidate: async () => ({ selectedCandidateId: 'candidate-1' }),
+      },
+    });
+    assert.equal(result.converged, true);
+    assert.equal(requests.filter((request) => request.mode === 'initial').length, 3);
+    const fixRequests = requests.filter((request) => request.mode === undefined);
+    assert.equal(fixRequests.length, 1);
+    assert.match(fixRequests[0].input, /F1 \(blocking\): Repair the named edge/);
   } finally { item.cleanup(); }
 });
 

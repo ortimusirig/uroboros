@@ -55,6 +55,14 @@ const writingExecutor = async ({ cwd }) => {
   return { changedFiles: ['new.txt'], lastMessage: 'wrote new.txt' };
 };
 const noopExecutor = async () => ({ changedFiles: [], lastMessage: 'nothing to do' });
+const freshPlanningAdapters = {
+  draftPlanCandidate: async ({ candidateId }) => ({
+    plan: `Fresh implementation plan from ${candidateId}.\n`,
+    gate: [],
+  }),
+  runPlanGate: async () => ({ passed: true, failures: [] }),
+  selectPlanCandidate: async () => ({ selectedCandidateId: 'candidate-1' }),
+};
 
 const DECISION_CONTENT = `
 ## Q1
@@ -1508,52 +1516,65 @@ test('the fresh pivot still acts when circling is detected on the final round', 
       scratchRoot: scr, runId: 'debate-final-fresh', debateRounds: 3,
       reporter: (event) => events.push(event),
       adapters: {
+        ...freshPlanningAdapters,
         runExecutor: writingExecutor,
         runGate: async () => ({ passed: true, results: [] }),
-        runVerifier: verifierForRounds([blockingReview(), blockingReview(), blockingReview()]),
-        shouldPivot: () => PIVOT_FRESH,
+        runVerifier: verifierForRounds([
+          blockingReview(), blockingReview(), blockingReview(), blockingReview(),
+        ]),
+        shouldPivot: (pivotCount) => pivotCount === 0 ? PIVOT_FRESH : PIVOT_CONCLUDE,
       },
     });
 
     assert.equal(facts.outcome, 'needs-pivot');
-    assert.equal(facts.debate.roundsRun, 3);
+    assert.equal(facts.debate.roundsRun, 4);
     assert.equal(facts.debate.stopReason, 'pivot');
-    assert.equal(facts.debate.finalPivotDecision, 'fresh');
-    assert.equal(facts.debate.pivotCount, 1);
+    assert.equal(facts.debate.finalPivotDecision, 'conclude');
+    assert.equal(facts.debate.pivotCount, 2);
     assert.deepEqual(facts.debate.ledger.rounds.map((round) => round.findingIds), [
-      ['F1'], ['F1'], ['F1'],
+      ['F1'], ['F1'], ['F1'], ['F1'],
     ]);
+    assert.equal(facts.debate.pivotHistory[0].decision, PIVOT_FRESH);
+    assert.equal(facts.debate.pivotHistory[0].selectedCandidateId, 'candidate-1');
     assert.ok(events.some((event) => event.stage === 'debate'
       && event.type === 'pivot' && event.decision === 'fresh'));
+    assert.ok(events.some((event) => event.stage === 'pivot'
+      && event.type === 'selected' && event.candidateId === 'candidate-1'));
     assert.notEqual(exitCodeFor(facts.outcome), 0);
   } finally {
     rmSync(scr, { recursive: true, force: true });
   }
 });
 
-test('the fresh pivot stops with needs-pivot and carries the complete ledger', async () => {
+test('a fresh pivot replans and continued circling concludes with the complete ledger', async () => {
   const scr = scratch();
   try {
     const facts = await run({
       task: 'do the task', target: makeTarget(), gate: [], gateRetries: 0,
       scratchRoot: scr, runId: 'debate-fresh',
       adapters: {
+        ...freshPlanningAdapters,
         runExecutor: writingExecutor,
         runGate: async () => ({ passed: true, results: [] }),
         runVerifier: verifierForRounds([
           blockingReview(), blockingReview(), blockingReview(), blockingReview(),
+          blockingReview(),
         ]),
       },
     });
 
     assert.equal(facts.outcome, 'needs-pivot');
-    assert.equal(facts.debate.roundsRun, 4);
-    assert.equal(facts.debate.pivotCount, 2);
-    assert.equal(facts.debate.finalPivotDecision, 'fresh');
+    assert.equal(facts.debate.roundsRun, 5);
+    assert.equal(facts.debate.pivotCount, 3);
+    assert.equal(facts.debate.finalPivotDecision, 'conclude');
     assert.equal(facts.debate.stopReason, 'pivot');
+    assert.deepEqual(facts.debate.pivotHistory.map((pivot) => pivot.decision), [
+      'amend', 'fresh', 'conclude',
+    ]);
+    assert.equal(facts.debate.pivotHistory[1].selectedCandidateId, 'candidate-1');
     assert.deepEqual(facts.debate.ledger.allFindingIds, ['F1']);
     assert.deepEqual(facts.debate.ledger.recurredFindingIds, ['F1']);
-    assert.equal(facts.debate.ledger.rounds.length, 4);
+    assert.equal(facts.debate.ledger.rounds.length, 5);
     assert.notEqual(exitCodeFor(facts.outcome), 0);
   } finally {
     rmSync(scr, { recursive: true, force: true });

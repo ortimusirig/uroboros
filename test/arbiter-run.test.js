@@ -155,17 +155,34 @@ test('unavailable pivot arbitration records fallback as unjudged and the ladder 
   const item = fixture();
   try {
     const options = baseOptions(item, {
-      adapters: { runVerifier: verifierSequence([blocking, blocking, blocking, blocking]) },
+      adapters: {
+        runVerifier: verifierSequence([
+          blocking, blocking, blocking, blocking, blocking,
+        ]),
+        createFreshPivotBranch: async ({ baseCommit, branch }) => ({
+          branch,
+          branchPoint: baseCommit,
+          reviewPaths: [],
+        }),
+        draftPlanCandidate: async ({ candidateId }) => ({
+          plan: `Fresh fallback plan from ${candidateId}.\n`,
+          gate: [],
+        }),
+        runPlanGate: async () => ({ passed: true, failures: [] }),
+        selectPlanCandidate: async () => ({ selectedCandidateId: 'candidate-1' }),
+      },
     });
     const facts = await run(options);
     assert.equal(facts.outcome, 'needs-pivot');
-    assert.equal(facts.debate.roundsRun, 4);
+    assert.equal(facts.debate.roundsRun, 5);
     assert.deepEqual(facts.debate.pivotHistory.map(({ decision, unjudged }) => ({
       decision, unjudged,
     })), [
       { decision: 'amend', unjudged: true },
       { decision: 'fresh', unjudged: true },
+      { decision: 'conclude', unjudged: true },
     ]);
+    assert.equal(facts.debate.pivotHistory[1].selectedCandidateId, 'candidate-1');
   } finally { item.cleanup(); }
 });
 

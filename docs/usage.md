@@ -30,11 +30,11 @@ check so a later unit or invocation does not self-block; tracked changes to that
 still treated as dirty. Keep the queue definition tracked or outside the target worktree.
 
 ```
-node bin/loop.js run --task <plan-file-or-prose> --target <folder> --gate <gate.json> [--gate-retries M] [--executor-model MODEL] [--executor-effort EFFORT] [--verifier-model MODEL] [--arbiter-model MODEL] [--arbiter-timeout MS] [--artifact-root DIRECTORY] [--mutate] [--port PORT] [--open] [--no-dashboard] [--quiet]
+node bin/loop.js run --task <plan-file-or-prose> --target <folder> --gate <gate.json> [--gate-retries M] [--pivot-candidates N] [--executor-model MODEL] [--executor-effort EFFORT] [--verifier-model MODEL] [--arbiter-model MODEL] [--arbiter-timeout MS] [--artifact-root DIRECTORY] [--mutate] [--port PORT] [--open] [--no-dashboard] [--quiet]
 node bin/loop.js mutate --target <folder> [--base REF] [--tests COMMAND] [--dry-run]
-node bin/loop.js plan --goal <prose-or-file> --target <folder> --out <folder> [--rounds N] [--planner-model MODEL] [--verifier-model MODEL] [--arbiter-model MODEL] [--dry-run]
+node bin/loop.js plan --goal <prose-or-file> --target <folder> --out <folder> [--rounds N] [--candidates N] [--pivot-candidates N] [--planner-model MODEL] [--verifier-model MODEL] [--arbiter-model MODEL] [--dry-run]
 node bin/loop.js queue --file <queue.json> [--mode <manual|autonomous>] [--max-runs N] [--token-budget TOKENS] [--dry-run]
-node bin/loop.js batch --task <plan-1> --task <plan-2> --target <folder> --gate <gate.json> [--gate-retries M] [--executor-model MODEL] [--executor-effort EFFORT] [--verifier-model MODEL] [--arbiter-model MODEL] [--arbiter-timeout MS] [--artifact-root DIRECTORY] [--concurrency N] [--token-budget TOKENS] [--rounds N] [--round N ...] [--unit-kind KIND] [--unit-id ID ...] [--perspective NAME ...] [--depends-on CHILD=PARENT ...] [--port PORT] [--open] [--no-dashboard] [--quiet]
+node bin/loop.js batch --task <plan-1> --task <plan-2> --target <folder> --gate <gate.json> [--gate-retries M] [--pivot-candidates N] [--executor-model MODEL] [--executor-effort EFFORT] [--verifier-model MODEL] [--arbiter-model MODEL] [--arbiter-timeout MS] [--artifact-root DIRECTORY] [--concurrency N] [--token-budget TOKENS] [--rounds N] [--round N ...] [--unit-kind KIND] [--unit-id ID ...] [--perspective NAME ...] [--depends-on CHILD=PARENT ...] [--port PORT] [--open] [--no-dashboard] [--quiet]
 node bin/loop.js batch --campaign <campaign.json> [--arbiter-timeout MS] [--artifact-root DIRECTORY] [--port PORT] [--open] [--no-dashboard] [--quiet]
 node bin/loop.js status <run-or-campaign-directory>
 node bin/loop.js dashboard [<run-directory>] [--scratch-root <directory>] [--port <port>]
@@ -57,6 +57,10 @@ The corresponding plugin commands are `/uroboros:run`, `/uroboros:mutate`, `/uro
 checks cited paths and lines, named test files, required sections, and absence-assertion positive
 controls, then asks a read-only verifier for structured findings. It writes `plan.md` and
 `gate.json` under `--out` only after convergence; exhaustion and pivot conclusion write neither.
+Initial planning generates three distinct-perspective candidates and selects among the plans
+that pass the plan gate. Use `--candidates 1` for the previous single-draft behavior. A FRESH
+pivot uses the same process with the debate ledger and defaults to three candidates; configure
+that count with `--pivot-candidates` (1–5).
 
 `--help` and `-h` remain aliases for `help`.
 
@@ -86,6 +90,7 @@ directory is modified.
 | `--target` | yes | — | folder to work on, git repo or not |
 | `--gate` | yes | — | path to gate config |
 | `--gate-retries` | no | 2 | 0–3 |
+| `--pivot-candidates` | no | 3 | 1–5 fresh-plan candidates |
 | `--corrects` | no | none | records that this run's plan corrects the named prior run; display only |
 | `--executor-model` | no | launch-module default | Codex model ID |
 | `--executor-effort` | no | launch-module default | `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, or `ultra` |
@@ -145,7 +150,8 @@ The [committed campaign design spec](superpowers/specs/2026-08-15-v3-orchestrate
 For a Graph, prefer `batch --campaign <campaign.json>` so topology and unit identities are one
 declaration. The JSON object contains `target`, `gate`, optional campaign settings, and `units`;
 each unit declares `id`, a task-file path in `task`, and optional `dependsOn`. Relative paths are
-resolved from the campaign file's directory. For a small Graph, the equivalent flag form remains
+resolved from the campaign file's directory. Set optional `pivotCandidates` from 1–5 to control
+FRESH re-planning for every unit. For a small Graph, the equivalent flag form remains
 available: give each task a `--unit-id` and repeat `--depends-on CHILD=PARENT` for every edge.
 
 Dependencies are a declared DAG topology: roots fan out up to the concurrency limit, while a
@@ -213,7 +219,10 @@ become a success.
 One `loop run` invocation debates until the reviews converge or the pivot ladder stops it.
 Structured blocking review findings are converted into executor work, followed by the full gate
 and both verifier seats. `URO_DEBATE_ROUNDS` is an optional operator cap; the tool supplies no
-round limit of its own. A `needs-pivot` result returns control to the campaign or operator.
+round limit of its own. On FRESH, the run creates a branch at the pre-debate commit, restores
+the accumulated `__uro_review/` tests byte-for-byte, generates ledger-informed STORM plans, and
+executes only the selected gate-passing plan. The ledger is not reset. `needs-pivot` returns
+control only when the arbiter concludes or no viable FRESH plan survives.
 
 Claude is spawned read-only to validate each blocking finding, answer autonomous challenges,
 and judge pivots from the ledger and attempted remedies. Invalid findings are retained as

@@ -15,6 +15,7 @@ const EXECUTOR_EFFORTS = new Set([
   'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra',
 ]);
 const RUN_MODES = new Set(['manual', 'autonomous']);
+const MAX_PLAN_CANDIDATES = 5;
 const UNIT_KIND_SET = new Set(UNIT_KINDS);
 const STAGE_TIMEOUT_FLAGS = new Set([
   '--executor-timeout', '--verifier-timeout', '--arbiter-timeout', '--gate-timeout',
@@ -29,6 +30,7 @@ export const BATCH_FLAG_DEFINITIONS = Object.freeze({
   target: Object.freeze({ type: 'string', scope: 'campaign' }),
   gate: Object.freeze({ type: 'string', scope: 'campaign' }),
   'gate-retries': Object.freeze({ type: 'string', scope: 'campaign' }),
+  'pivot-candidates': Object.freeze({ type: 'string', scope: 'campaign' }),
   'executor-model': Object.freeze({ type: 'string', scope: 'campaign' }),
   'executor-effort': Object.freeze({ type: 'string', scope: 'campaign' }),
   'verifier-model': Object.freeze({ type: 'string', scope: 'campaign' }),
@@ -254,6 +256,8 @@ export function parseArgs(argv) {
         target: { type: 'string' },
         out: { type: 'string' },
         rounds: { type: 'string' },
+        candidates: { type: 'string' },
+        'pivot-candidates': { type: 'string' },
         'planner-model': { type: 'string' },
         'verifier-model': { type: 'string' },
         'arbiter-model': { type: 'string' },
@@ -273,6 +277,10 @@ export function parseArgs(argv) {
       ...(values.rounds === undefined ? {} : {
         rounds: strictInt(values.rounds, undefined, 1, Number.MAX_SAFE_INTEGER),
       }),
+      candidates: strictInt(values.candidates, 3, 1, MAX_PLAN_CANDIDATES),
+      pivotCandidates: strictInt(
+        values['pivot-candidates'], 3, 1, MAX_PLAN_CANDIDATES,
+      ),
       ...(values['planner-model'] === undefined ? {} : { plannerModel: values['planner-model'] }),
       ...(values['verifier-model'] === undefined ? {} : { verifierModel: values['verifier-model'] }),
       ...(values['arbiter-model'] === undefined ? {} : { arbiterModel: values['arbiter-model'] }),
@@ -365,6 +373,7 @@ export function parseArgs(argv) {
       'arbiter-timeout': { type: 'string' },
       'gate-timeout': { type: 'string' },
       'artifact-root': { type: 'string' },
+      'pivot-candidates': { type: 'string' },
       mode: { type: 'string' },
       mutate: { type: 'boolean' },
       quiet: { type: 'boolean' },
@@ -409,6 +418,11 @@ export function parseArgs(argv) {
       executorEffort,
       verifierModel: values['verifier-model'],
       arbiterModel: values['arbiter-model'],
+      ...(values['pivot-candidates'] === undefined ? {} : {
+        pivotCandidates: strictInt(
+          values['pivot-candidates'], undefined, 1, MAX_PLAN_CANDIDATES,
+        ),
+      }),
       ...(values['artifact-root'] === undefined ? {} : { artifactRoot: values['artifact-root'] }),
     };
     if (values.mode !== undefined) parsed.mode = values.mode;
@@ -533,6 +547,11 @@ export function parseArgs(argv) {
     target: values.target,
     gate: values.gate,
     gateRetries: clampInt(values['gate-retries'], 2, 0, 3),
+    ...(values['pivot-candidates'] === undefined ? {} : {
+      pivotCandidates: strictInt(
+        values['pivot-candidates'], undefined, 1, MAX_PLAN_CANDIDATES,
+      ),
+    }),
     executorModel: values['executor-model'],
     executorEffort,
     verifierModel: values['verifier-model'],

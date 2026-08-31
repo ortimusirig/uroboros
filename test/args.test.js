@@ -66,6 +66,20 @@ test('applies the retry default and leaves model defaults to run()', () => {
   assert.equal(Object.hasOwn(r, 'maxIterations'), false);
 });
 
+test('run and batch accept a bounded fresh-pivot candidate count', () => {
+  const run = parseArgs([
+    'run', '--task', 'p', '--target', 't', '--gate', 'g', '--pivot-candidates', '5',
+  ]);
+  const batch = parseArgs([
+    'batch', '--task', 'p', '--target', 't', '--gate', 'g', '--pivot-candidates', '1',
+  ]);
+  assert.equal(run.pivotCandidates, 5);
+  assert.equal(batch.pivotCandidates, 1);
+  assert.throws(() => parseArgs([
+    'run', '--task', 'p', '--target', 't', '--gate', 'g', '--pivot-candidates', '6',
+  ]), /range \[1-5\]/);
+});
+
 test('run parses each stage timeout flag and the values reach timeout resolution', () => {
   const parsed = parseArgs([
     'run', '--task', 'p', '--target', 't', '--gate', 'g',
@@ -383,6 +397,8 @@ test('plan parses its goal, target, output, rounds, model, and dry-run', () => {
     target: 'repo',
     out: 'generated',
     rounds: 5,
+    candidates: 3,
+    pivotCandidates: 3,
     plannerModel: 'gpt-plan',
     dryRun: true,
   });
@@ -395,6 +411,18 @@ test('plan parses its goal, target, output, rounds, model, and dry-run', () => {
   ]);
   assert.equal(Object.hasOwn(unbounded, 'rounds'), false,
     'omitting --rounds must not invent a planning bound');
+  assert.equal(unbounded.candidates, 3);
+  assert.equal(unbounded.pivotCandidates, 3);
+  const configured = parseArgs([
+    'plan', '--goal', 'x', '--target', 'repo', '--out', 'generated',
+    '--candidates', '1', '--pivot-candidates', '5',
+  ]);
+  assert.equal(configured.candidates, 1);
+  assert.equal(configured.pivotCandidates, 5);
+  assert.throws(() => parseArgs([
+    'plan', '--goal', 'x', '--target', 'repo', '--out', 'generated',
+    '--candidates', '6',
+  ]), /range \[1-5\]/);
 });
 
 test('queue parses autonomous mode, limits, and dry-run', () => {

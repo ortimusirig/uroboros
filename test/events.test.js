@@ -264,6 +264,20 @@ test('every plan event pair round-trips through the declared vocabulary', () => 
   }
 });
 
+test('every fresh-pivot event pair round-trips through the declared vocabulary', () => {
+  assert.ok(EVENT_STAGES.includes('pivot'));
+  for (const type of ['replan_start', 'candidate', 'selected', 'exhausted']) {
+    assert.ok(EVENT_TYPES.includes(type), `${type} must be a declared event type`);
+    assert.ok(EVENT_PAIRS.includes(`pivot/${type}`));
+    assert.doesNotThrow(() => createEvent({
+      runId: `pivot-${type}`,
+      stage: 'pivot',
+      type,
+      fields: { candidateId: 'candidate-1', perspective: 'boundary redesign' },
+    }));
+  }
+});
+
 test('every arbiter and capability event pair round-trips through the vocabulary', () => {
   for (const pair of [
     'arbiter/start', 'arbiter/finish', 'arbiter/overruled', 'capability/vetoed',
@@ -712,6 +726,12 @@ test('fully exercised runs have exact pair equality with both event vocabularies
       runId: `conformance-${stage}-${type}`, stage, type,
       fields: { judgement: 'finding', findingId: 'F1', seat: 'executor' },
     }));
+    const pivotEvents = ['replan_start', 'candidate', 'selected', 'exhausted'].map((type) => (
+      createEvent({
+        runId: `conformance-pivot-${type}`, stage: 'pivot', type,
+        fields: { candidateId: 'candidate-1', perspective: 'boundary redesign' },
+      })
+    ));
     const allEvents = [
       ...campaignEvents,
       ...unitEvents,
@@ -721,6 +741,7 @@ test('fully exercised runs have exact pair equality with both event vocabularies
       ...livenessEvents,
       ...mutationEvents,
       ...arbiterEvents,
+      ...pivotEvents,
     ];
     assert.doesNotThrow(() => assertEventConformance(allEvents, {
       allowUnemitted: Object.keys(deliberatelyUncovered),

@@ -18,6 +18,7 @@ export const EVENT_STAGES = Object.freeze([
   'mutate',
   'arbiter',
   'capability',
+  'pivot',
 ]);
 
 export const EVENT_TYPES = Object.freeze([
@@ -54,6 +55,10 @@ export const EVENT_TYPES = Object.freeze([
   'scope_violation',
   'overruled',
   'vetoed',
+  'replan_start',
+  'candidate',
+  'selected',
+  'exhausted',
 ]);
 
 export const UNIT_KINDS = Object.freeze(['candidate', 'node', 'merge']);
@@ -130,6 +135,10 @@ export const EVENT_PAIRS = Object.freeze([
   'arbiter/finish',
   'arbiter/overruled',
   'capability/vetoed',
+  'pivot/replan_start',
+  'pivot/candidate',
+  'pivot/selected',
+  'pivot/exhausted',
 ]);
 
 // The aggregate stream is intentionally smaller than a unit stream: the orchestrator is

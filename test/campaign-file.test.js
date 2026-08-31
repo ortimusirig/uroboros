@@ -258,6 +258,13 @@ test('unknown top-level and misspelled dependency keys discriminate from correct
     assert.doesNotThrow(() => loadCampaignFile(writeCampaign(root, 'known-top', {
       ...baseDocument(), concurrency: 2,
     })));
+    const configuredPivot = loadCampaignFile(writeCampaign(root, 'pivot-candidates', {
+      ...baseDocument(), pivotCandidates: 5,
+    }));
+    assert.equal(configuredPivot.pivotCandidates, 5);
+    assert.throws(() => loadCampaignFile(writeCampaign(root, 'invalid-pivot-candidates', {
+      ...baseDocument(), pivotCandidates: 6,
+    })), /pivotCandidates.*between 1 and 5/i);
 
     assert.throws(() => loadCampaignFile(writeCampaign(root, 'wrong-edge-key', baseDocument([
       { id: 'A', task: 'tasks/a.md', unitKind: 'node' },

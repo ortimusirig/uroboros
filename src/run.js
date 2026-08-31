@@ -83,6 +83,12 @@ import {
   createMutationJudge,
   runMutate as realMutation,
 } from './mutate.js';
+import {
+  DEFAULT_PLAN_CANDIDATES,
+  planCandidateFacts,
+  runPlanCandidateSet,
+  validatePlanCandidateCount,
+} from './plan.js';
 
 export { HARNESS_ARTIFACTS } from './artifacts.js';
 
@@ -133,6 +139,77 @@ function amendFixPlanWithLedger(fixPlan, ledger) {
     + 'approach for the recurring blockers while preserving the original task and tests.\n\n'
     + `Recurring blockers: ${[...ledger.stuckFindings()].join(', ') || '(count plateau)'}\n\n`
     + `Round history:\n${history.join('\n')}\n`;
+}
+
+async function checkedGit(cwd, args, action, spawn = spawnCapture) {
+  const result = await spawn('git', ['-C', cwd, ...args]);
+  if (result.code !== 0) {
+    throw new Error(`${action} failed: ${result.stderr.trim()}`);
+  }
+  return result.stdout.trim();
+}
+
+export async function createFreshPivotBranch({
+  cwd,
+  baseCommit,
+  branch,
+  captureSnapshot = captureReviewSnapshot,
+  restoreSnapshot = restoreReviewSnapshot,
+  spawn = spawnCapture,
+} = {}) {
+  if (typeof cwd !== 'string' || cwd === '') throw new TypeError('fresh pivot cwd is required');
+  if (typeof baseCommit !== 'string' || baseCommit === '') {
+    throw new TypeError('fresh pivot baseCommit is required');
+  }
+  if (typeof branch !== 'string' || branch === '') throw new TypeError('fresh pivot branch is required');
+
+  const snapshot = await captureSnapshot({ cwd, prefix: REVIEW_DIR });
+  let operationError;
+  try {
+    // The failed implementation is deliberately abandoned. Clear the disposable
+    // worktree before creating the replacement branch at the immutable base; the
+    // debate ledger and append-only event history retain the evidence that matters.
+    // events.jsonl is append-only run history, not part of the discarded solution.
+    // Preserve it across the destructive branch reset so pre-pivot evidence remains visible.
+    await checkedGit(
+      cwd,
+      ['clean', '-ffd', '-x', '-e', 'events.jsonl'],
+      'fresh pivot clean',
+      spawn,
+    );
+    await checkedGit(
+      cwd,
+      ['switch', '--discard-changes', '-c', branch, baseCommit],
+      'fresh pivot branch creation',
+      spawn,
+    );
+    await checkedGit(cwd, ['reset', '--hard', baseCommit], 'fresh pivot reset', spawn);
+  } catch (error) {
+    operationError = error;
+  }
+
+  let restoration;
+  try {
+    restoration = await restoreSnapshot({ snapshot });
+  } catch (error) {
+    throw new WorktreeRestorationError(
+      `failed to restore reviewer tests after creating ${branch}`,
+      { cause: error },
+    );
+  }
+  if (operationError) throw operationError;
+  const branchPoint = await checkedGit(
+    cwd, ['rev-parse', 'HEAD'], 'fresh pivot branch inspection', spawn,
+  );
+  if (branchPoint !== baseCommit) {
+    throw new Error(`fresh pivot branch ${branch} started at ${branchPoint}, expected ${baseCommit}`);
+  }
+  return {
+    branch,
+    branchPoint,
+    restoredPaths: restoration?.restoredPaths ?? [],
+    reviewPaths: [...(snapshot.entries?.keys?.() ?? [])].sort(),
+  };
 }
 
 // Files the harness itself writes into the isolated directory. They must never enter
@@ -295,7 +372,7 @@ export async function run(opts) {
     arbiterModel = DEFAULT_ARBITER_MODEL,
     arbiterBin = 'claude',
     mode = 'manual', decisionResolver, challengeRounds = 2,
-    debateRounds, tokenBudget,
+    debateRounds, tokenBudget, pivotCandidates = DEFAULT_PLAN_CANDIDATES,
     adapters = {}, reporter,
   } = opts;
   const physicalRunId = physicalRunIdFor(runId);
@@ -309,6 +386,7 @@ export async function run(opts) {
     && (!Number.isSafeInteger(tokenBudget) || tokenBudget < 1)) {
     throw new Error('tokenBudget must be a positive safe integer');
   }
+  validatePlanCandidateCount(pivotCandidates, 'pivotCandidates');
   const maxChallengeRounds = Math.min(challengeRounds, 2);
   const runExecutor = adapters.runExecutor ?? realExecutor;
   const runGate = adapters.runGate ?? realGate;
@@ -320,6 +398,13 @@ export async function run(opts) {
   const createDiff = adapters.diffText ?? diffText;
   const detectDebateCircling = adapters.detectCircling ?? detectCircling;
   const selectPivot = adapters.shouldPivot ?? shouldPivot;
+  const createFreshBranch = adapters.createFreshPivotBranch
+    ?? adapters.createFreshBranch
+    ?? createFreshPivotBranch;
+  const generatePlanCandidates = adapters.runPlanCandidateSet
+    ?? adapters.runPlanCandidates
+    ?? adapters.replan
+    ?? runPlanCandidateSet;
   // Injected executor runs are test/embedding seams. They must opt into an arbiter
   // explicitly, so an otherwise hermetic test can never launch the real Claude CLI.
   const runArbiterSeat = adapters.runArbiter
@@ -495,6 +580,8 @@ export async function run(opts) {
     plan = buildMergeTask(originalPlan, merge, activeConflict);
   }
   const iterations = [];
+  let activeBranch = iso.branch;
+  let freshPivotCount = 0;
   let gateStatus = 'failed';
   let verdict = null;
   let outcome = 'gate-failed';
@@ -1258,6 +1345,7 @@ export async function run(opts) {
         });
 
         let amendPlan = false;
+        let freshPlan = null;
         if (circling) {
           debateCirclingDetected = true;
           const stuckFindingIds = [...debateLedger.stuckFindings()];
@@ -1294,11 +1382,22 @@ export async function run(opts) {
           }
           finalPivotDecision = pivotDecision;
           debatePivotCount++;
-          pivotHistory.push({
+          const ledgerAtPivot = {
+            rounds: Array.from({ length: debateLedger.currentRound }, (_, index) => ({
+              round: index + 1,
+              findingIds: debateLedger.round(index + 1),
+            })),
+            allFindingIds: [...debateLedger.allFindings()],
+            recurredFindingIds: [...debateLedger.stuckFindings()],
+            resolvedFindingIds: [...debateLedger.resolvedFindings()],
+          };
+          const pivotRecord = {
             decision: pivotDecision,
             unjudged,
+            ledger: ledgerAtPivot,
             ...(pivotJudgement.reason ? { reason: pivotJudgement.reason } : {}),
-          });
+          };
+          pivotHistory.push(pivotRecord);
           reportEvent(eventReporter, runId, 'debate', 'pivot', {
             debateRound,
             decision: pivotDecision,
@@ -1306,21 +1405,158 @@ export async function run(opts) {
             stuckFindingIds,
             ...(unjudged ? { unjudged: true } : { judged: true, reason: pivotJudgement.reason }),
           });
-          if (pivotDecision === PIVOT_FRESH || pivotDecision === PIVOT_CONCLUDE) {
+          if (pivotDecision === PIVOT_CONCLUDE) {
             outcome = 'needs-pivot';
             debateStopReason = 'pivot';
             break;
           }
-          amendPlan = true;
+          if (pivotDecision === PIVOT_FRESH) {
+            freshPivotCount++;
+            const freshBranch = `${iso.branch}-fresh-${freshPivotCount}`;
+            reportEvent(eventReporter, runId, 'pivot', 'replan_start', {
+              debateRound,
+              branch: freshBranch,
+              branchPoint: iso.baseCommit,
+              candidateCount: pivotCandidates,
+              recurringFindingIds: ledgerAtPivot.recurredFindingIds,
+            });
+            const branchResult = await createFreshBranch({
+              cwd: iso.dir,
+              baseCommit: iso.baseCommit,
+              branch: freshBranch,
+              captureSnapshot: adapters.captureReviewSnapshot ?? captureReviewSnapshot,
+              restoreSnapshot: adapters.restoreReviewSnapshot ?? restoreReviewSnapshot,
+            });
+            activeBranch = branchResult?.branch ?? freshBranch;
+            pivotRecord.branch = activeBranch;
+            pivotRecord.branchPoint = branchResult?.branchPoint ?? iso.baseCommit;
+            pivotRecord.reviewPaths = branchResult?.reviewPaths ?? [...accumulatedReviewTests].sort();
+
+            const injectedCandidateDraft = adapters.draftPlanCandidate
+              ?? adapters.planDraft
+              ?? (adapters.runExecutor === undefined
+                ? undefined
+                : async () => { throw new Error('fresh planning adapter unavailable'); });
+            const generated = await generatePlanCandidates({
+              goal: originalPlan,
+              target: iso.dir,
+              count: pivotCandidates,
+              mode: 'fresh',
+              round: debateRound,
+              ledger: ledgerAtPivot,
+              failedPlan: plan,
+              pivot: 'Start from the pre-debate snapshot with a genuinely different implementation strategy.',
+              plannerModel: executorModel,
+              timeoutMs: stageTimeouts.executor,
+              gateTimeout: stageTimeouts.gate,
+              runId,
+              env: runEnvironment,
+              ...(injectedCandidateDraft === undefined ? {} : { draft: injectedCandidateDraft }),
+              ...(adapters.runPlanGate === undefined
+                ? {}
+                : { checkGate: adapters.runPlanGate }),
+              ...((adapters.selectPlanCandidate ?? adapters.selectCandidate) === undefined
+                ? {}
+                : { select: adapters.selectPlanCandidate ?? adapters.selectCandidate }),
+            });
+            for (const [candidateIndex, candidate] of (generated?.candidates ?? []).entries()) {
+              if (candidate?.usage === undefined) continue;
+              const observed = observeUsage(
+                { usage: candidate.usage },
+                {
+                  seat: 'executor', pass: 'pivot-plan', iteration: n,
+                  candidateId: candidate.id ?? `candidate-${candidateIndex + 1}`,
+                },
+              );
+              executorUsage = addUsage(executorUsage, observed.usage);
+            }
+            if (generated?.selectionUsage !== undefined) {
+              const observed = observeUsage(
+                { usage: generated.selectionUsage },
+                { seat: 'executor', pass: 'pivot-selection', iteration: n },
+              );
+              executorUsage = addUsage(executorUsage, observed.usage);
+            }
+            const normalizedCandidates = (generated?.candidates ?? []).map((candidate, index) => ({
+              ...candidate,
+              id: candidate.id ?? `candidate-${index + 1}`,
+              perspective: candidate.perspective ?? `candidate perspective ${index + 1}`,
+              gateResult: candidate.gateResult ?? candidate.planGate ?? {
+                passed: candidate.gatePassed === true,
+                failures: candidate.failures ?? [],
+              },
+            }));
+            let selectedCandidate = generated?.selected ?? null;
+            if (selectedCandidate === null && generated?.selectedCandidateId) {
+              selectedCandidate = normalizedCandidates.find(
+                (candidate) => candidate.id === generated.selectedCandidateId,
+              ) ?? null;
+            }
+            if (selectedCandidate === null && typeof generated?.plan === 'string') {
+              selectedCandidate = {
+                id: generated.selectedCandidateId ?? 'candidate-1',
+                perspective: generated.perspective ?? 'selected fresh perspective',
+                plan: generated.plan,
+                gate: generated.gate ?? [],
+                gateResult: generated.planGate ?? { passed: true, failures: [] },
+              };
+              if (normalizedCandidates.length === 0) normalizedCandidates.push(selectedCandidate);
+            }
+            if (selectedCandidate !== null) {
+              selectedCandidate = normalizedCandidates.find(
+                (candidate) => candidate.id === selectedCandidate.id,
+              ) ?? selectedCandidate;
+            }
+            const selectedId = selectedCandidate?.id ?? null;
+            const candidateFacts = normalizedCandidates.map((candidate) => (
+              planCandidateFacts(candidate, selectedId)
+            ));
+            pivotRecord.candidates = candidateFacts;
+            pivotRecord.selectedCandidateId = selectedId;
+            for (const candidate of candidateFacts) {
+              reportEvent(eventReporter, runId, 'pivot', 'candidate', {
+                debateRound,
+                candidateId: candidate.id,
+                perspective: candidate.perspective,
+                gatePassed: candidate.gatePassed,
+                failures: candidate.failures,
+              });
+            }
+            if (generated?.exhausted === true || selectedCandidate === null) {
+              pivotRecord.exhausted = true;
+              pivotRecord.escalatedTo = PIVOT_CONCLUDE;
+              finalPivotDecision = PIVOT_CONCLUDE;
+              outcome = 'needs-pivot';
+              debateStopReason = 'pivot-exhausted';
+              reportEvent(eventReporter, runId, 'pivot', 'exhausted', {
+                debateRound,
+                branch: activeBranch,
+                decision: PIVOT_CONCLUDE,
+                candidateCount: candidateFacts.length,
+                reason: 'every fresh plan candidate failed the plan gate',
+              });
+              break;
+            }
+            pivotRecord.exhausted = false;
+            freshPlan = selectedCandidate.plan;
+            reportEvent(eventReporter, runId, 'pivot', 'selected', {
+              debateRound,
+              branch: activeBranch,
+              candidateId: selectedCandidate.id,
+              perspective: selectedCandidate.perspective,
+            });
+          } else {
+            amendPlan = true;
+          }
         }
 
-        if (maxDebateRounds !== undefined && debateRound >= maxDebateRounds) {
+        if (freshPlan === null && maxDebateRounds !== undefined && debateRound >= maxDebateRounds) {
           outcome = 'needs-pivot';
           debateStopReason = 'rounds-exhausted';
           break;
         }
 
-        let fixPlan = buildFixPlan({
+        let fixPlan = freshPlan ?? buildFixPlan({
           findings: blockingFindings,
           accepted: validation.accepted,
           rejected: validation.rejected,
@@ -1540,7 +1776,7 @@ export async function run(opts) {
     ...(physicalRunId === runId ? {} : { physicalRunId }),
     target, targetPath: resolve(target),
     dir: iso.dir, isRepo: iso.isRepo,
-    baseRef: iso.baseRef, baseCommit: iso.baseCommit, branch: iso.branch,
+    baseRef: iso.baseRef, baseCommit: iso.baseCommit, branch: activeBranch,
     iterations, gateStatus, verdict, verdictSource,
     correctnessVerdict, correctnessVerdictSource, verifierFindings,
     verifierPlan, verifierEvidence, verifierConsistency,
