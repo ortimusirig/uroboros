@@ -22,8 +22,8 @@ when a run lands.
 
 | # | Plan | Gate | Status |
 |---|---|---|---|
-| 1 | `plan-a/plan-superpowers-all-seats.md` | `gate-superpowers-all-seats.json` | 🔄 running |
-| 2 | `plan-a/plan-cursor-scoped-write.md` | `gate-cursor-scoped-write.json` | ⏳ queued |
+| 1 | `plan-a/plan-superpowers-all-seats.md` | `gate-superpowers-all-seats.json` | ✅ shipped `1d6a46e` |
+| 2 | `plan-a/plan-cursor-scoped-write.md` | `gate-cursor-scoped-write.json` | 🔄 running |
 | 3 | `plan-a/plan-claude-seat.md` | `gate-claude-seat.json` | ⏳ queued |
 | 4 | `plan-a/plan-fresh-storm-pivot.md` | `gate-fresh-storm-pivot.json` | ⏳ queued |
 | 5 | `plan-a/plan-board-filters.md` | `gate-board-filters.json` | ⏳ queued |
