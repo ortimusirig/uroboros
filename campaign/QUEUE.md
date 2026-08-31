@@ -1,9 +1,4 @@
-# Plan queue — worked by the planner (Claude), not by hand
-
-State lives here so the queue survives a context break. Update the status column
-when a run lands.
-
-| # | Plan | Gate | Status |
+✅ shipped `c24e8a3` |||||| # | Plan | Gate | Status |
 |---|---|---|---|
 | 1 | `campaign/plan-a/plan-events-vocabulary.md` | `gate-events-vocabulary.json` | ✅ shipped `f728c9f` |
 | 2 | `campaign/plan-a/plan-verifier-unverified.md` | `gate-verifier-unverified.json` | ✅ shipped `80520e5` |
@@ -95,3 +90,21 @@ Measured per model:
 The outage exposed a real defect, fixed in `515d70d`: a seat that emitted
 prose and then died was recorded as `ISSUES` rather than `UNVERIFIED`, making
 a billing outage look like a code problem.
+
+## Queue complete — 2026-08-31
+
+All five units shipped. Four harness defects were found by running the queue
+and fixed along the way:
+
+| commit | defect |
+|---|---|
+| `515d70d` | a seat killed mid-review by a quota outage was recorded as ISSUES, not UNVERIFIED |
+| `82bf502` | the executor discarded its own stderr, so a death left no account of why |
+| `18607b4` | that capture kept the head of stderr; the cause is written last |
+| (in `1d6a46e`) | superpowers resolution was seat-blind and handed Cursor a directory it silently ignored |
+
+Every landed unit was verified by counterfactual rather than by a green
+suite. Seat findings that proved real: unit 4 (three ungated requirements,
+both seats, contradicting each other on one) and unit 5 (transcript default
+disagreeing with the board). `loop mutate` exists to catch this class
+mechanically and should be run against these diffs next.
