@@ -217,3 +217,37 @@ Do not delete, skip, or weaken any existing test.
 - Running candidates concurrently to completion, as campaign Mode A does. Here
   candidates are *planned* in parallel and one is selected; only the selected
   plan is implemented.
+
+---
+
+## Measured 2026-08-31 — §0 is already done; do not reimplement it
+
+Queue unit 3 (`26e07d1`) landed the arbiter seat and with it the whole of
+**§0 "The arbiter decides when to pivot — not a counter"**. Verified in the
+code before this run:
+
+- `src/run.js` (~1279) and `src/plan.js` (~652) both call the arbiter, take
+  `pivotJudgement.decision` when the verdict is `answered`, and fall back to
+  `shouldPivot(pivotCount)` only when `unjudged` — recording that it was
+  unjudged.
+- `shouldPivot` survives **deliberately**, as that fallback. It is not a
+  leftover to delete.
+- `detectCircling` is untouched and stays untouched: it measures whether
+  findings are decreasing, which is evidence.
+- `arbiter/start`, `arbiter/finish` and `arbiter/overruled` are already
+  declared in `EVENT_STAGES` and `EVENT_PAIRS` and round-trip through
+  `createEvent`.
+
+Counterfactuals run against the landed code: making the overrule path
+unreachable fails 2 tests, and making the decision resolver ignore the
+arbiter fails 2 tests. §0 is load-bearing, not decorative.
+
+### What actually remains
+
+**§1 FRESH re-plans instead of stopping** and **§2 STORM wherever an approach
+is being chosen**. There is currently **no occurrence of STORM anywhere in
+`src/`** — that part is entirely unbuilt and is the substance of this unit.
+
+Treat §0 as an invariant to preserve rather than work to perform. Changing
+the pivot-judging code, deleting `shouldPivot`, or re-deriving the arbiter
+plumbing would regress a shipped unit.
