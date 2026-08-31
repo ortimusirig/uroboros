@@ -18,6 +18,7 @@ import { isSafePhysicalRunId, physicalRunIdFor } from './run-id.js';
 export const HARNESS_ARTIFACTS = Object.freeze([
   'TASK.md',
   'DECISION.md',
+  '__uro_review/',
   'CHANGES.diff',
   'uro-report.md',
   'uro-runfacts.json',

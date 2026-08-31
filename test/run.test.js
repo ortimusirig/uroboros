@@ -1252,6 +1252,16 @@ test('diffText throws when git fails (non-git dir)', async () => {
   await assert.rejects(() => diffText(d), /git (add|diff) failed/);
 });
 
+function writeHarnessArtifact(directory, artifact, content) {
+  if (artifact.endsWith('/')) {
+    const artifactDirectory = join(directory, artifact);
+    mkdirSync(artifactDirectory, { recursive: true });
+    writeFileSync(join(artifactDirectory, 'REVIEW.md'), content);
+    return;
+  }
+  writeFileSync(join(directory, artifact), content);
+}
+
 test('diffText unstages every pre-staged harness artifact and retains real changes', async () => {
   const d = makeTarget();
   await spawnCapture('git', ['-C', d, 'init', '-b', 'main']);
@@ -1260,12 +1270,15 @@ test('diffText unstages every pre-staged harness artifact and retains real chang
     'commit', '-m', 'baseline']);
   writeFileSync(join(d, 'feature.js'), 'export const enabled = true;\n');
   for (const artifact of HARNESS_ARTIFACTS) {
-    writeFileSync(join(d, artifact), `harness-only ${artifact}\n`);
+    writeHarnessArtifact(d, artifact, `harness-only ${artifact}\n`);
   }
   const staged = await spawnCapture('git', ['-C', d, 'add', '-A']);
   assert.equal(staged.code, 0, staged.stderr);
   const stagedNames = await spawnCapture('git', ['-C', d, 'diff', '--cached', '--name-only']);
-  assert.ok(HARNESS_ARTIFACTS.every((artifact) => stagedNames.stdout.split(/\r?\n/).includes(artifact)),
+  const stagedPaths = stagedNames.stdout.split(/\r?\n/);
+  assert.ok(HARNESS_ARTIFACTS.every((artifact) => artifact.endsWith('/')
+    ? stagedPaths.some((path) => path.startsWith(artifact))
+    : stagedPaths.includes(artifact)),
     'positive control: every harness artifact must be staged before diffText runs');
 
   const diff = await diffText(d);
@@ -1285,7 +1298,7 @@ test('diffText succeeds when gitignore lists every harness artifact', async () =
     'commit', '-m', 'baseline']);
   writeFileSync(join(d, 'feature.js'), 'export const ignoredArtifactsStayIgnored = true;\n');
   for (const artifact of HARNESS_ARTIFACTS) {
-    writeFileSync(join(d, artifact), `ignored harness-only ${artifact}\n`);
+    writeHarnessArtifact(d, artifact, `ignored harness-only ${artifact}\n`);
   }
   const ignored = await spawnCapture('git', ['-C', d, 'check-ignore', ...HARNESS_ARTIFACTS]);
   assert.equal(ignored.code, 0, ignored.stderr);

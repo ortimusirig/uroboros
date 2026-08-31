@@ -27,13 +27,28 @@ const FORBIDDEN = ['--force', '--yolo', '-f', '--approve-mcps'];
 export const VERIFIER_PLUGIN_DIR = fileURLToPath(new URL('../cursor-plugin', import.meta.url));
 
 export function assertNoForbiddenFlags(args) {
-  for (const f of FORBIDDEN) {
-    if (args.includes(f)) throw new Error(`forbidden verifier flag: ${f}`);
+  for (const argument of args) {
+    let option = argument;
+    if (typeof argument === 'string' && argument.startsWith('--')) {
+      [option] = argument.split('=', 1);
+    } else if (typeof argument === 'string' && argument.startsWith('-f=')) {
+      option = '-f';
+    }
+    if (FORBIDDEN.includes(option)) {
+      throw new Error(`forbidden verifier flag: ${option}`);
+    }
   }
+}
+
+function assertReviewHasNoMode(args) {
+  const mode = args.find((argument) => argument === '--mode'
+    || (typeof argument === 'string' && argument.startsWith('--mode=')));
+  if (mode !== undefined) throw new Error('review pass must omit --mode');
 }
 
 export const DEFAULT_PROMPT = '/uro-verify Read CHANGES.diff and judge the change for correctness and blocking bugs; make the final line exactly NO_BLOCKERS or exactly ISSUES.';
 export const INTENT_PROMPT = '/uro-verify Read TASK.md and CHANGES.diff and judge whether the diff fully implements every TASK.md requirement and whether new or changed assertions detect broken behavior; make the final line exactly NO_BLOCKERS or exactly ISSUES.';
+export const REVIEW_PROMPT = '/uro-review Review TASK.md and CHANGES.diff, then write __uro_review/REVIEW.md and every referenced executable test under __uro_review/tests/; write nothing outside __uro_review/.';
 
 export function assertUsablePrompt(prompt) {
   if (prompt.includes('"')) throw new Error('verifier prompt must not contain a double quote');
@@ -67,6 +82,38 @@ export function buildCursorArgs({
   // --mode plan keeps the agent read-only regardless. Verified live (exit 0, NO_BLOCKERS).
   const args = [
     '-p', prompt, '--output-format', 'stream-json', '--mode', 'plan', '--trust',
+    '--plugin-dir', VERIFIER_PLUGIN_DIR,
+    ...(resolvedSuperpowersDir === null
+      ? []
+      : ['--plugin-dir', resolvedSuperpowersDir]),
+    '--model', model,
+  ];
+  assertNoForbiddenFlags(args);
+  return args;
+}
+
+export function buildCursorReviewArgs({
+  model = DEFAULT_VERIFIER_MODEL,
+  prompt = REVIEW_PROMPT,
+  env = process.env,
+  home = homedir(),
+  superpowersDir,
+} = {}) {
+  assertUsablePrompt(prompt);
+  const resolvedSuperpowersDir = superpowersDir === undefined
+    ? resolveSuperpowersDir({ seat: 'cursor', env, home })
+    : superpowersDir;
+  if (resolvedSuperpowersDir !== null) {
+    const inspected = inspectSuperpowersDirectory({
+      path: resolvedSuperpowersDir,
+      seat: 'cursor',
+    });
+    if (!inspected.ok) {
+      throw new Error(`Cursor superpowers plugin directory is unusable: ${inspected.reason}`);
+    }
+  }
+  const args = [
+    '-p', prompt, '--output-format', 'stream-json', '--trust', '--sandbox', 'enabled',
     '--plugin-dir', VERIFIER_PLUGIN_DIR,
     ...(resolvedSuperpowersDir === null
       ? []
@@ -377,6 +424,73 @@ function createVerifierStreamObserver(onEvent) {
       pending = '';
     },
   };
+}
+
+export async function runReviewPass({
+  cwd,
+  bin = 'agent',
+  prompt = REVIEW_PROMPT,
+  extraArgv = [],
+  model = DEFAULT_VERIFIER_MODEL,
+  timeoutMs,
+  reporter,
+  runId,
+  env = process.env,
+  home = homedir(),
+  superpowersDir,
+  signal,
+  beforeKill,
+  onLiveness,
+  spawnProcess,
+  killProcessTree,
+  now = Date.now,
+  setTimer = setTimeout,
+  clearTimer = clearTimeout,
+}) {
+  const resolvedTimeoutMs = timeoutMs === undefined
+    ? resolveStageTimeouts(env).verifier
+    : timeoutMs;
+  const args = [...extraArgv, ...buildCursorReviewArgs({
+    prompt, model, env, home, superpowersDir,
+  })];
+  assertNoForbiddenFlags(args);
+  assertReviewHasNoMode(args);
+  const launchEnv = { ...process.env, ...env };
+  reportEvent(reporter, runId, 'verify', 'start', { bin, args, model, pass: 'review' });
+  const result = await spawnCapture(bin, args, {
+    cwd,
+    env: launchEnv,
+    timeoutMs: resolvedTimeoutMs,
+    timeoutSetting: 'URO_VERIFIER_TIMEOUT_MS',
+    signal,
+    beforeKill,
+    spawnProcess,
+    killProcessTree,
+    now,
+    setTimer,
+    clearTimer,
+    onStdout: () => {
+      try { onLiveness?.(); } catch { /* observation cannot alter the review pass */ }
+    },
+  });
+  const usage = extractResultUsage(result.stdout);
+  const review = annotateUsageConsistency({
+    exitCode: result.code,
+    launchFailed: result.timedOut || result.code !== 0,
+    timedOut: result.timedOut,
+    timeoutMs: result.timeoutMs,
+    ...(result.timeoutReason ? { timeoutReason: result.timeoutReason } : {}),
+    ...(result.code === 0 ? {} : { stderr: result.stderr.slice(0, 500) }),
+    usage,
+  });
+  reportEvent(reporter, runId, 'verify', 'finish', {
+    code: result.code,
+    pass: 'review',
+    timedOut: result.timedOut,
+    tokens: usage,
+    usageConsistency: review.usageConsistency.status,
+  });
+  return review;
 }
 
 export async function runVerifier({

@@ -16,6 +16,7 @@ import {
   assertNoForbiddenFlags,
   assertUsablePrompt,
   buildCursorArgs,
+  buildCursorReviewArgs,
   DEFAULT_PROMPT,
   DEFAULT_VERIFIER_MODEL,
   extractPlanArtifact,
@@ -26,6 +27,8 @@ import {
   FINDINGS_LIMIT,
   INTENT_PROMPT,
   PLAN_LIMIT,
+  REVIEW_PROMPT,
+  runReviewPass,
   VERIFIER_PLUGIN_DIR,
 } from '../src/verifier.js';
 import { EMPTY_USAGE } from '../src/usage.js';
@@ -260,6 +263,10 @@ test('buildCursorArgs rejects a quote-bearing prompt', () => {
 
 test('assertNoForbiddenFlags throws on a write flag', () => {
   assert.throws(() => assertNoForbiddenFlags(['-p', '--force']), /force/);
+  for (const flag of ['--force=true', '--yolo=true', '--approve-mcps=true', '-f=true']) {
+    assert.throws(() => assertNoForbiddenFlags(['-p', flag]), /forbidden verifier flag/,
+      `${flag} must not bypass the approval guard`);
+  }
 });
 
 test('runVerifier rejects forbidden flags for correctness and intent launches', async () => {
@@ -285,6 +292,73 @@ test('runVerifier identifies a non-zero empty stream as a launch failure', async
   assert.equal(r.launchFailed, true);
   assert.notEqual(r.exitCode, 0);
   assert.match(r.stderr, /fake agent failed/);
+});
+
+test('review launch is write-capable while both verdict launches remain read-only', () => {
+  const reviewArgs = buildCursorReviewArgs({ superpowersDir: null });
+  assert.equal(reviewArgs.includes('--mode'), false,
+    'the review writer must omit Cursor read-only plan mode');
+  assert.deepEqual(reviewArgs.slice(reviewArgs.indexOf('--sandbox'), reviewArgs.indexOf('--sandbox') + 2),
+    ['--sandbox', 'enabled']);
+  assert.match(REVIEW_PROMPT, /^\/uro-review\b/);
+
+  for (const prompt of [DEFAULT_PROMPT, INTENT_PROMPT]) {
+    const verdictArgs = buildCursorArgs({ prompt, superpowersDir: null });
+    assert.equal(verdictArgs[verdictArgs.indexOf('--mode') + 1], 'plan',
+      'correctness and intent must retain read-only plan mode');
+  }
+});
+
+test('review launch arguments remain guarded against forbidden approval flags', () => {
+  const reviewArgs = buildCursorReviewArgs({ superpowersDir: null });
+  assert.doesNotThrow(() => assertNoForbiddenFlags(reviewArgs));
+  assert.throws(() => assertNoForbiddenFlags([...reviewArgs, '--force']), /force/);
+});
+
+test('runReviewPass launches the separate sandboxed writer without verdict mode', async () => {
+  const child = fakeChild();
+  const events = [];
+  const pending = runReviewPass({
+    cwd: process.cwd(),
+    bin: process.execPath,
+    superpowersDir: null,
+    runId: 'review-writer',
+    reporter: (event) => events.push(event),
+    spawnProcess: (_bin, _args, _options) => child,
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  child.emit('close', 0, null);
+  const result = await pending;
+
+  const args = events.find((event) => event.type === 'start')?.args;
+  assert.equal(args.includes('--mode'), false);
+  assert.deepEqual(args.slice(args.indexOf('--sandbox'), args.indexOf('--sandbox') + 2),
+    ['--sandbox', 'enabled']);
+  assert.equal(result.launchFailed, false);
+});
+
+test('runReviewPass rejects a forbidden flag before spawning the writer', async () => {
+  let spawned = false;
+  await assert.rejects(() => runReviewPass({
+    cwd: process.cwd(),
+    superpowersDir: null,
+    extraArgv: ['--force'],
+    spawnProcess: () => { spawned = true; return fakeChild(); },
+  }), /forbidden verifier flag/);
+  assert.equal(spawned, false);
+});
+
+test('runReviewPass rejects every --mode spelling before spawning the writer', async () => {
+  for (const extraArgv of [['--mode', 'plan'], ['--mode=plan']]) {
+    let spawned = false;
+    await assert.rejects(() => runReviewPass({
+      cwd: process.cwd(),
+      superpowersDir: null,
+      extraArgv,
+      spawnProcess: () => { spawned = true; return fakeChild(); },
+    }), /review pass must omit --mode/);
+    assert.equal(spawned, false);
+  }
 });
 
 test('raw stdout resets the verifier liveness gap through the runVerifier observer', async () => {

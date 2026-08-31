@@ -660,6 +660,10 @@ test('fully exercised runs have exact pair equality with both event vocabularies
       'diff/stalled': 'Requires a deliberately hung diff process.',
       // Both verifier passes complete; their stall path has separate supervision coverage.
       'verify/stalled': 'Requires a deliberately silent verifier process.',
+      // Scope violations are exercised with injected file mutation in review-protection.test.js.
+      'verify/scope_violation': 'Requires a reviewer to write outside its dedicated artifact directory.',
+      // The healthy executor follows the review-file restriction in this conformance run.
+      'executor/scope_violation': 'Requires an executor to modify or delete a protected reviewer file.',
       // The clean verifier presents no blocking finding for the executor to resist.
       'debate/resist': 'Requires at least one structured blocking review finding.',
       // Healthy conformance converges on its first review and therefore cannot circle.
@@ -669,7 +673,7 @@ test('fully exercised runs have exact pair equality with both event vocabularies
       // Report writes are synchronous, so the event loop cannot observe a mid-write timer gap.
       'report/stalled': 'Unreachable during synchronous report writes.',
     });
-    assert.equal(Object.keys(deliberatelyUncovered).length, 11,
+    assert.equal(Object.keys(deliberatelyUncovered).length, 13,
       'the deliberately-uncovered ratchet must not grow without an explicit test change');
     assert.ok(Object.values(deliberatelyUncovered).every((reason) => reason.length >= 24),
       'every allowlisted pair must carry a substantive reason');

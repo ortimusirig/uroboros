@@ -8,12 +8,13 @@ import {
   EXECUTOR_PREAMBLE,
   runExecutor as realExecutor,
 } from './executor.js';
-import { runGate as realGate } from './gate.js';
+import { buildReviewerTestCommands, runGate as realGate } from './gate.js';
 import {
   annotateVerifierConsistency,
   DEFAULT_PROMPT,
   DEFAULT_VERIFIER_MODEL,
   INTENT_PROMPT,
+  runReviewPass as realReviewPass,
   runVerifier as realVerifier,
 } from './verifier.js';
 import { buildRunFacts, writeReport } from './report.js';
@@ -55,8 +56,14 @@ import {
   PIVOT_FRESH,
   shouldPivot,
 } from './debate.js';
-import { detectReview, parseReview } from './review.js';
+import { detectReview, parseReview, REVIEW_DIR } from './review.js';
 import { buildFixPlan, validateFindings } from './fix-plan.js';
+import {
+  captureReviewSnapshot,
+  restoreReviewSnapshot,
+  runProtectedOperation,
+  WorktreeRestorationError,
+} from './review-protection.js';
 import {
   applySuperpowersRequirement,
   verifySuperpowersSeats,
@@ -292,6 +299,8 @@ export async function run(opts) {
   const runExecutor = adapters.runExecutor ?? realExecutor;
   const runGate = adapters.runGate ?? realGate;
   const runVerifier = adapters.runVerifier ?? realVerifier;
+  const runReview = adapters.runReview
+    ?? (adapters.runVerifier === undefined ? realReviewPass : null);
   const runMutation = adapters.runMutation ?? realMutation;
   const isolateRun = adapters.isolate ?? isolate;
   const createDiff = adapters.diffText ?? diffText;
@@ -485,6 +494,9 @@ export async function run(opts) {
   let debatePivotCount = 0;
   let finalPivotDecision = null;
   let debateStopReason = 'not-started';
+  const accumulatedReviewTests = new Set();
+  const reviewerRestorations = [];
+  const executorRestorations = [];
 
   const recordExecutorTimeout = (exec, iteration, attempt) => {
     if (!exec.timedOut) return;
@@ -546,26 +558,44 @@ export async function run(opts) {
       activeExecutor = slot;
       let result;
       try {
-        result = observeUsage(await runExecutor({
-          plan: executorPlan, cwd: iso.dir, model: executorModel, effort: executorEffort,
-          env: runEnvironment,
-          timeoutMs: stageTimeouts.executor,
-          reporter: eventReporter, runId, attempt,
-          beforeKill,
-          onLiveness: () => watchdog?.touch('executor'),
-          judgeLiveness: judgeLiveness ?? undefined,
-          onLivenessDecision: (decision) => {
-            livenessChecks?.push({ attempt, iteration: n, ...decision });
-            if (decision?.status !== 'stuck'
-              || stallConfig?.policy !== 'restart'
-              || stallRestartCount >= stallConfig.restartLimit) return;
-            stallRestartCount++;
-            slot.restartEvent = decision;
+        const protectedExecution = await runProtectedOperation({
+          cwd: iso.dir,
+          scope: 'inside',
+          prefix: REVIEW_DIR,
+          stage: 'executor',
+          role: 'executor',
+          runId,
+          reporter: eventReporter,
+          captureSnapshot: adapters.captureReviewSnapshot ?? captureReviewSnapshot,
+          restoreSnapshot: adapters.restoreReviewSnapshot ?? restoreReviewSnapshot,
+          onRestore: (paths) => {
+            if (paths.length > 0) {
+              executorRestorations.push({ iteration: n, attempt, paths: [...paths] });
+            }
           },
-          livenessThresholdMs: executorThresholds.thresholdMs,
-          progressThresholdMs: executorThresholds.progressThresholdMs,
-          ...(controller ? { signal: controller.signal } : {}),
-        }), { seat: 'executor', iteration: n, attempt });
+          operation: () => runExecutor({
+            plan: executorPlan, cwd: iso.dir, model: executorModel, effort: executorEffort,
+            env: runEnvironment,
+            timeoutMs: stageTimeouts.executor,
+            reporter: eventReporter, runId, attempt,
+            beforeKill,
+            onLiveness: () => watchdog?.touch('executor'),
+            judgeLiveness: judgeLiveness ?? undefined,
+            onLivenessDecision: (decision) => {
+              livenessChecks?.push({ attempt, iteration: n, ...decision });
+              if (decision?.status !== 'stuck'
+                || stallConfig?.policy !== 'restart'
+                || stallRestartCount >= stallConfig.restartLimit) return;
+              stallRestartCount++;
+              slot.restartEvent = decision;
+            },
+            livenessThresholdMs: executorThresholds.thresholdMs,
+            progressThresholdMs: executorThresholds.progressThresholdMs,
+            ...(controller ? { signal: controller.signal } : {}),
+          }),
+        });
+        result = observeUsage(protectedExecution.result,
+          { seat: 'executor', iteration: n, attempt });
       } finally {
         if (activeExecutor === slot) activeExecutor = null;
       }
@@ -735,13 +765,15 @@ export async function run(opts) {
   await routeChallenges();
   // Gate retries rerun the executor within this single controller-driven pass.
   let gateResult = null;
-  const mergeGateCommands = merge === undefined
-    ? commands
-    : [...commands, testCountFloorCommand(merge.testCounts.required)];
+  const gateCommands = () => [
+    ...commands,
+    ...buildReviewerTestCommands(commands, [...accumulatedReviewTests]),
+    ...(merge === undefined ? [] : [testCountFloorCommand(merge.testCounts.required)]),
+  ];
   if (decision === null && !executorTimedOut && !conflictingIntent
     && mergePreparationFailure === null) {
     gateResult = await runGate({
-      commands: mergeGateCommands, cwd: iso.dir, timeoutMs: stageTimeouts.gate,
+      commands: gateCommands(), cwd: iso.dir, timeoutMs: stageTimeouts.gate,
       reporter: eventReporter, runId, attempt: 1,
       captureTestCount,
     });
@@ -775,7 +807,7 @@ export async function run(opts) {
     await routeChallenges();
     if (decision === null && !executorTimedOut) {
       gateResult = await runGate({
-        commands: mergeGateCommands, cwd: iso.dir, timeoutMs: stageTimeouts.gate,
+        commands: gateCommands(), cwd: iso.dir, timeoutMs: stageTimeouts.gate,
         reporter: eventReporter, runId, attempt: retries + 1,
         captureTestCount,
       });
@@ -869,6 +901,64 @@ export async function run(opts) {
       let debateRound = 0;
       while (true) {
         debateRound++;
+        let reviewer = { launchFailed: false, timedOut: false, skipped: true };
+        if (runReview !== null) {
+          try {
+            const protectedReview = await runProtectedOperation({
+              cwd: iso.dir,
+              scope: 'outside',
+              prefix: REVIEW_DIR,
+              stage: 'verify',
+              role: 'reviewer',
+              runId,
+              reporter: eventReporter,
+              captureSnapshot: adapters.captureWorktreeSnapshot,
+              restoreSnapshot: adapters.restoreWorktreeSnapshot,
+              onRestore: (paths) => {
+                if (paths.length > 0) {
+                  reviewerRestorations.push({ debateRound, paths: [...paths] });
+                }
+              },
+              operation: () => runReview({
+                cwd: iso.dir,
+                bin: verifierBin,
+                model: verifierModel,
+                superpowersDir: cursorSuperpowersDir,
+                env: runEnvironment,
+                timeoutMs: stageTimeouts.verifier,
+                reporter: eventReporter,
+                runId,
+                pass: 'review',
+                onLiveness: () => watchdog?.touch('verify'),
+              }),
+            });
+            reviewer = protectedReview.result ?? reviewer;
+          } catch (error) {
+            if (error instanceof WorktreeRestorationError) throw error;
+            reviewer = {
+              launchFailed: true,
+              timedOut: false,
+              error: error instanceof Error ? error.message : String(error),
+            };
+          }
+          const detected = detectReview({ dir: iso.dir });
+          if (detected.reviewed) {
+            for (const testFile of detected.testFiles) accumulatedReviewTests.add(testFile);
+          }
+          if (reviewer.usage !== undefined) {
+            reviewer = observeUsage(reviewer,
+              { seat: 'verifier', pass: 'review', iteration: n });
+            verifierUsage = addUsage(verifierUsage, reviewer.usage);
+          }
+          if (reviewer.timedOut) {
+            timeoutEvents.push({
+              stage: 'verifier', pass: 'review', iteration: n,
+              timeoutMs: reviewer.timeoutReason?.timeoutMs
+                ?? reviewer.timeoutMs ?? stageTimeouts.verifier,
+            });
+          }
+        }
+        iter.reviewer = reviewer;
         const v = annotateVerifierConsistency(observeUsage(await runVerifier({
           cwd: iso.dir, bin: verifierBin, model: verifierModel, prompt: DEFAULT_PROMPT,
           superpowersDir: cursorSuperpowersDir,
@@ -952,16 +1042,102 @@ export async function run(opts) {
         iterations.push(iter);
         const circling = detectDebateCircling(debateLedger);
 
-        const reviewOutcome = reviewOutcomeFor(v, intentVerifier);
+        const reviewOutcome = reviewer.timedOut
+          ? 'timed-out'
+          : reviewer.launchFailed
+            ? 'verifier-failed'
+            : reviewOutcomeFor(v, intentVerifier);
         if (reviewOutcome !== 'review-ready') {
           outcome = reviewOutcome;
-          debateStopReason = v.verdict === 'UNVERIFIED' || intentVerifier.verdict === 'UNVERIFIED'
-            ? 'unverified'
-            : reviewOutcome;
+          debateStopReason = reviewer.timedOut
+            ? 'review-timed-out'
+            : reviewer.launchFailed
+              ? 'review-failed'
+              : v.verdict === 'UNVERIFIED' || intentVerifier.verdict === 'UNVERIFIED'
+                ? 'unverified'
+                : reviewOutcome;
           break;
         }
 
         if (blockingFindings.length === 0) {
+          let convergenceGateRetries = 0;
+          if (accumulatedReviewTests.size > 0) {
+            gateResult = await runGate({
+              commands: gateCommands(), cwd: iso.dir, timeoutMs: stageTimeouts.gate,
+              reporter: eventReporter, runId, attempt: 1,
+              captureTestCount,
+            });
+            iter.gate = gateResult;
+            recordGateTimeout(gateResult, n, 1);
+          }
+          while (accumulatedReviewTests.size > 0
+            && decision === null && !executorTimedOut && !conflictingIntent
+            && mergePreparationFailure === null && !gateResult.passed
+            && convergenceGateRetries < gateRetries) {
+            convergenceGateRetries++;
+            gateRetryCount++;
+            const retryPlan = planWithGateFailure(plan, gateResult);
+            const failed = gateResult.results.find((result) => result.code !== 0);
+            reportEvent(eventReporter, runId, 'executor', 'retry', {
+              attempt: executorLaunchCount + 1,
+              source: 'gate',
+              reason: failed ? `gate command exited ${failed.code}` : 'gate did not pass',
+              ...(failed ? { bin: failed.bin, args: failed.args, code: failed.code } : {}),
+            });
+            n++;
+            iterationExecutorUsage = EMPTY_USAGE;
+            exec = await executePlan(retryPlan);
+            executorTimedOut = Boolean(exec.timedOut);
+            await routeChallenges();
+            if (decision === null && !executorTimedOut && !conflictingIntent
+              && mergePreparationFailure === null) {
+              gateResult = await runGate({
+                commands: gateCommands(), cwd: iso.dir, timeoutMs: stageTimeouts.gate,
+                reporter: eventReporter, runId, attempt: convergenceGateRetries + 1,
+                captureTestCount,
+              });
+              recordGateTimeout(gateResult, n, convergenceGateRetries + 1);
+            }
+            iter = makeIteration(n, exec, gateResult, executorTimedOut);
+          }
+          if (executorTimedOut || conflictingIntent || decision !== null
+            || mergePreparationFailure !== null || !gateResult.passed) {
+            if (convergenceGateRetries > 0) iterations.push(iter);
+            if (executorTimedOut) {
+              gateStatus = gateResult ? 'failed' : 'not-run';
+              outcome = 'timed-out';
+              debateStopReason = 'executor-timed-out';
+            } else if (conflictingIntent) {
+              gateStatus = 'not-run';
+              outcome = 'conflicting-intent';
+              debateStopReason = 'conflicting-intent';
+            } else if (decision !== null) {
+              gateStatus = 'not-run';
+              outcome = 'needs-decision';
+              debateStopReason = 'needs-decision';
+            } else {
+              gateStatus = 'failed';
+              const failed = gateResult.results.find((result) => result.code !== 0);
+              outcome = failed?.timedOut ? 'timed-out' : 'gate-failed';
+              debateStopReason = 'gate-failed';
+              if (failed) {
+                gateFailure = {
+                  bin: failed.bin,
+                  args: failed.args,
+                  ...(failed.harness === undefined ? {} : { harness: failed.harness }),
+                  code: failed.code,
+                  ...(failed.timedOut ? { timedOut: true, timeoutMs: failed.timeoutMs } : {}),
+                  outputTail: failed.outputTail,
+                };
+              }
+            }
+            break;
+          }
+          if (convergenceGateRetries > 0) {
+            gateStatus = 'passed';
+            await refreshDiff();
+            continue;
+          }
           outcome = 'review-ready';
           debateStopReason = 'converged';
           reportEvent(eventReporter, runId, 'debate', 'converged', {
@@ -1039,7 +1215,7 @@ export async function run(opts) {
         if (decision === null && !executorTimedOut && !conflictingIntent
           && mergePreparationFailure === null) {
           gateResult = await runGate({
-            commands: mergeGateCommands, cwd: iso.dir, timeoutMs: stageTimeouts.gate,
+            commands: gateCommands(), cwd: iso.dir, timeoutMs: stageTimeouts.gate,
             reporter: eventReporter, runId, attempt: 1,
             captureTestCount,
           });
@@ -1063,7 +1239,7 @@ export async function run(opts) {
           await routeChallenges();
           if (decision === null && !executorTimedOut) {
             gateResult = await runGate({
-              commands: mergeGateCommands, cwd: iso.dir, timeoutMs: stageTimeouts.gate,
+              commands: gateCommands(), cwd: iso.dir, timeoutMs: stageTimeouts.gate,
               reporter: eventReporter, runId, attempt: fixGateRetries + 1,
               captureTestCount,
             });
@@ -1277,6 +1453,11 @@ export async function run(opts) {
     facts.assumedDecision = assumedDecision;
     facts.escalation = 'operator-absent';
   }
+  facts.reviewProtection = {
+    accumulatedTestFiles: [...accumulatedReviewTests].sort(),
+    reviewerRestorations,
+    executorRestorations,
+  };
   writeReport({ dir: iso.dir, facts, reporter: eventReporter, runId });
   const endedAt = new Date();
   try {

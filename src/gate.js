@@ -4,6 +4,83 @@ import { resolveStageTimeouts } from './timeouts.js';
 
 export const GATE_TAIL_LIMIT = 4000;
 
+const JAVASCRIPT_TEST_EXTENSIONS = new Set(['.cjs', '.js', '.jsx', '.mjs', '.ts', '.tsx']);
+
+function executableName(bin) {
+  return String(bin).replaceAll('\\', '/').split('/').at(-1).toLowerCase()
+    .replace(/[.](?:exe|cmd|bat)$/, '');
+}
+
+function testFamily(path) {
+  const match = /([.][^.\\/]+)$/.exec(path.toLowerCase());
+  if (match && JAVASCRIPT_TEST_EXTENSIONS.has(match[1])) return 'javascript';
+  if (match?.[1] === '.py') return 'python';
+  if (match?.[1] === '.rb') return 'ruby';
+  if (match?.[1] === '.php') return 'php';
+  return 'unsupported';
+}
+
+function supportsFamily(command, family) {
+  const bin = executableName(command.bin);
+  const args = Array.isArray(command.args) ? command.args.map(String) : [];
+  if (family === 'javascript') {
+    if (bin === 'node' && args.includes('--test')) return true;
+    if (['npm', 'pnpm', 'yarn', 'bun'].includes(bin)
+      && args.some((arg) => arg === 'test' || arg === 'vitest' || arg === 'jest')) return true;
+    return ['vitest', 'jest', 'mocha', 'ava'].includes(bin);
+  }
+  if (family === 'python') {
+    if (['pytest', 'py.test'].includes(bin)) return true;
+    return ['python', 'python3', 'py'].includes(bin)
+      && args.some((arg, index) => arg === 'pytest' && args[index - 1] === '-m');
+  }
+  if (family === 'ruby') return bin === 'rspec'
+    || (bin === 'bundle' && args.includes('rspec'));
+  if (family === 'php') return ['phpunit'].includes(bin)
+    || (bin === 'php' && args.some((arg) => /phpunit(?:[.]phar)?$/i.test(arg)));
+  return false;
+}
+
+function reviewerArgs(command, files) {
+  const args = [...command.args];
+  const bin = executableName(command.bin);
+  if (['npm', 'pnpm', 'yarn', 'bun'].includes(bin) && !args.includes('--')) args.push('--');
+  return [...args, ...files];
+}
+
+export function buildReviewerTestCommands(commands, testFiles) {
+  const uniqueFiles = [...new Set((testFiles ?? []).map(String))].sort();
+  const groups = new Map();
+  const unsupported = [];
+  for (const testFile of uniqueFiles) {
+    const family = testFamily(testFile);
+    const commandIndex = commands.findIndex((command) => supportsFamily(command, family));
+    if (commandIndex === -1) unsupported.push(testFile);
+    else {
+      const group = groups.get(commandIndex) ?? { files: [], family };
+      group.files.push(testFile);
+      groups.set(commandIndex, group);
+    }
+  }
+
+  const reviewerCommands = [...groups.entries()]
+    .sort(([left], [right]) => left - right)
+    .map(([commandIndex, { files, family }]) => ({
+      bin: commands[commandIndex].bin,
+      args: reviewerArgs(commands[commandIndex], files),
+      harness: 'uro-review-tests',
+    }));
+  if (unsupported.length > 0) {
+    const message = `No operator gate command can run reviewer tests: ${unsupported.join(', ')}`;
+    reviewerCommands.push({
+      bin: process.execPath,
+      args: ['-e', `process.stderr.write(${JSON.stringify(message)});process.exit(1)`],
+      harness: 'uro-review-tests',
+    });
+  }
+  return reviewerCommands;
+}
+
 export function parseTestCount(stdout, stderr = '') {
   const text = `${stdout}\n${stderr}`;
   const patterns = [

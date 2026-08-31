@@ -239,6 +239,14 @@ export function buildReportMarkdown(facts, {
     `- **Iterations:** ${facts.iterations.length}`,
     `- **Debate rounds:** ${facts.debate?.roundsRun ?? 0}`,
     `- **Debate stopped:** ${facts.debate?.stopReason ?? 'not-recorded'}`,
+    ...(facts.reviewProtection?.reviewerRestorations?.length > 0
+      ? [`- **Reviewer scope violations restored:** ${facts.reviewProtection.reviewerRestorations
+          .flatMap((entry) => entry.paths).join(', ')}`]
+      : []),
+    ...(facts.reviewProtection?.executorRestorations?.length > 0
+      ? [`- **Executor changes to review files restored:** ${facts.reviewProtection.executorRestorations
+          .flatMap((entry) => entry.paths).join(', ')}`]
+      : []),
     ...(facts.debate?.circlingDetected ? [`- **Debate circling detected:** yes`] : []),
     ...(facts.debate?.finalPivotDecision
       ? [`- **Final pivot decision:** ${facts.debate.finalPivotDecision}`]

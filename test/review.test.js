@@ -131,7 +131,7 @@ test('detectReview returns reviewed false when REVIEW.md is empty', () => {
   }
 });
 
-test('detectReview lists all test files under __uro_review/tests/', () => {
+test('detectReview lists JavaScript and Python test files under __uro_review/tests/', () => {
   const dir = mkdtempSync(join(tmpdir(), 'review-'));
   try {
     const reviewDir = join(dir, REVIEW_DIR);
@@ -145,15 +145,17 @@ Test: __uro_review/tests/test_a.py
 ## F2
 Severity: blocking
 Description: Bug B.
-Test: __uro_review/tests/test_b.py
+Test: __uro_review/tests/test_b.js
 `);
     writeFileSync(join(reviewDir, 'tests', 'test_a.py'), 'def test_a(): pass\n');
-    writeFileSync(join(reviewDir, 'tests', 'test_b.py'), 'def test_b(): pass\n');
+    writeFileSync(join(reviewDir, 'tests', 'test_b.js'), "import assert from 'node:assert';\n");
+    writeFileSync(join(reviewDir, 'tests', 'notes.txt'), 'not executable proof\n');
 
     const result = detectReview({ dir });
     assert.equal(result.testFiles.length, 2);
     assert.ok(result.testFiles.includes('__uro_review/tests/test_a.py'));
-    assert.ok(result.testFiles.includes('__uro_review/tests/test_b.py'));
+    assert.ok(result.testFiles.includes('__uro_review/tests/test_b.js'));
+    assert.equal(result.testFiles.includes('__uro_review/tests/notes.txt'), false);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

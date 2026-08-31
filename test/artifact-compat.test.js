@@ -44,4 +44,6 @@ test('HARNESS_ARTIFACTS excludes both prefixes from staging and diffs', () => {
   ]) {
     assert.ok(HARNESS_ARTIFACTS.includes(name), `${name} must be excluded`);
   }
+  assert.ok(HARNESS_ARTIFACTS.includes('__uro_review/'),
+    'review findings and tests must never enter CHANGES.diff');
 });

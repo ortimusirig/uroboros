@@ -1,9 +1,14 @@
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
-import { join, relative, sep } from 'node:path';
+import { extname, join, relative, sep } from 'node:path';
 
 const REVIEW_SEVERITIES = new Set(['blocking', 'suggestion']);
 
 export const REVIEW_DIR = '__uro_review';
+
+const TEST_EXTENSIONS = new Set([
+  '.cjs', '.cs', '.go', '.java', '.js', '.jsx', '.kt', '.kts', '.mjs',
+  '.php', '.py', '.rb', '.rs', '.swift', '.ts', '.tsx',
+]);
 
 export function parseReview(content) {
   if (typeof content !== 'string' || content.trim() === '') return null;
@@ -50,7 +55,9 @@ function findTestFiles(dir) {
     for (const entry of readdirSync(current, { withFileTypes: true })) {
       const path = join(current, entry.name);
       if (entry.isDirectory()) visit(path);
-      else if (entry.isFile() && entry.name.endsWith('.py')) files.push(path);
+      else if (entry.isFile() && TEST_EXTENSIONS.has(extname(entry.name).toLowerCase())) {
+        files.push(path);
+      }
     }
   };
   visit(dir);

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 const verifierSkill = readFileSync(fileURLToPath(
@@ -12,6 +12,9 @@ const plannerSkill = readFileSync(fileURLToPath(
 const setupSkill = readFileSync(fileURLToPath(
   new URL('../skills/uroboros-setup/SKILL.md', import.meta.url),
 ), 'utf8');
+const reviewSkillPath = fileURLToPath(
+  new URL('../cursor-plugin/skills/uro-review/SKILL.md', import.meta.url),
+);
 
 function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -33,6 +36,21 @@ test('uro-verify names every reviewer superpowers skill exactly', () => {
     'superpowers:requesting-code-review',
     'superpowers:using-superpowers',
   ]) assertWholeSkillName(verifierSkill, name);
+});
+
+test('uro-review names all six decision-point skills and restricts writes to its artifact directory', () => {
+  assert.equal(existsSync(reviewSkillPath), true, 'uro-review/SKILL.md must be shipped');
+  const reviewSkill = readFileSync(reviewSkillPath, 'utf8');
+  for (const name of [
+    'superpowers:brainstorming',
+    'superpowers:test-driven-development',
+    'superpowers:systematic-debugging',
+    'superpowers:verification-before-completion',
+    'superpowers:requesting-code-review',
+    'superpowers:using-superpowers',
+  ]) assertWholeSkillName(reviewSkill, name);
+  assert.match(reviewSkill,
+    /write nothing outside [`']?__uro_review\/[`']?[\s\S]*reverted[\s\S]*reported/i);
 });
 
 test('uroboros names every Claude debate skill and the spec-coverage self-review rule', () => {

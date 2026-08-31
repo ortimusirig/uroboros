@@ -49,6 +49,7 @@ export const EVENT_TYPES = Object.freeze([
   'gate',
   'unit',
   'survivor',
+  'scope_violation',
 ]);
 
 export const UNIT_KINDS = Object.freeze(['candidate', 'node', 'merge']);
@@ -83,6 +84,7 @@ export const EVENT_PAIRS = Object.freeze([
   'executor/retry',
   'executor/stalled',
   'executor/extended',
+  'executor/scope_violation',
   'gate/start',
   'gate/finish',
   'gate/gate_command',
@@ -100,6 +102,7 @@ export const EVENT_PAIRS = Object.freeze([
   'verify/finish',
   'verify/verdict',
   'verify/stalled',
+  'verify/scope_violation',
   'debate/round',
   'debate/resist',
   'debate/converged',
@@ -410,9 +413,15 @@ export function detailFor(event) {
       + ` survivors=${oneLine(event.survivors)} unexamined=${oneLine(event.unexamined)}`;
   }
   if (event.stage === 'verify') {
+    if (event.type === 'scope_violation') {
+      return `restored out-of-scope writes paths=${oneLine(event.paths?.join(','))}`;
+    }
     const pass = event.pass ? ` pass=${oneLine(event.pass)}` : '';
     const verdict = event.verdict ? ` verdict=${oneLine(event.verdict)}` : '';
     return `${event.type === 'start' ? 'started' : 'finished'}${pass}${verdict}`;
+  }
+  if (event.stage === 'executor' && event.type === 'scope_violation') {
+    return `restored protected review files paths=${oneLine(event.paths?.join(','))}`;
   }
   if (event.stage === 'debate') {
     const round = event.debateRound === undefined ? '' : ` round=${oneLine(event.debateRound)}`;
