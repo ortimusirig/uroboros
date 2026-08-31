@@ -23,7 +23,7 @@ when a run lands.
 | # | Plan | Gate | Status |
 |---|---|---|---|
 | 1 | `plan-a/plan-superpowers-all-seats.md` | `gate-superpowers-all-seats.json` | ✅ shipped `1d6a46e` |
-| 2 | `plan-a/plan-cursor-scoped-write.md` | `gate-cursor-scoped-write.json` | 🔄 running |
+| 2 | `plan-a/plan-cursor-scoped-write.md` | `gate-cursor-scoped-write.json` | ✅ shipped `d9311bb` (unreviewed — Cursor quota) |
 | 3 | `plan-a/plan-claude-seat.md` | `gate-claude-seat.json` | ⏳ queued |
 | 4 | `plan-a/plan-fresh-storm-pivot.md` | `gate-fresh-storm-pivot.json` | ⏳ queued |
 | 5 | `plan-a/plan-board-filters.md` | `gate-board-filters.json` | ⏳ queued |
@@ -74,3 +74,24 @@ Codex used the `DECISION.md` protocol for the first time — it only knew the
 protocol exists because §3 shipped hours earlier — and the
 `decision/challenged` event reached `events.jsonl`, which §4 made possible.
 Before today that event was silently discarded.
+
+## Blocker — Cursor usage exhausted (2026-08-30)
+
+Unit 2 returned `verifier-failed` / `unverified`. Both seats died on:
+
+```
+ActionRequiredError: Increase limits for faster responses
+You're out of usage. Switch to Auto or Composer 2.5
+```
+
+Measured per model:
+
+| model | state |
+|---|---|
+| `cursor-grok-4.5-high` (default) | out of usage |
+| `auto` | out of usage |
+| `composer-2.5` | **works** |
+
+The outage exposed a real defect, fixed in `515d70d`: a seat that emitted
+prose and then died was recorded as `ISSUES` rather than `UNVERIFIED`, making
+a billing outage look like a code problem.
