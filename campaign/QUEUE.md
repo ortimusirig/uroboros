@@ -11,11 +11,29 @@ when a run lands.
 | 4 | `campaign/plan-a/plan-executor-preamble.md` | `gate-executor-preamble.json` | ✅ shipped `3782df5` |
 | 5 | `campaign/plan-a/plan-evidence-based-deadline.md` | `gate-evidence-based-deadline.json` | ✅ shipped `17137d1` |
 | 6 |  `campaign/debate/plan-debate.md` | `gate-debate.json` | ✅ shipped (see below for the first attempt) |
-| 7 | `campaign/debate/plan-review.md` | `gate-review.json` | ⏳ queued |
-| 8 | `campaign/debate/plan-fix-plan.md` | `gate-fix-plan.json` | ⏳ queued |
-| 9 | arbitration + `run.js` debate integration (§8) | tbd | ⏳ not yet written |
-| 10 | durable artifacts (§2) | tbd | ⏳ not yet written |
-| 11 | doctor verdict-first (§6) | tbd | ⏳ not yet written |
+| 7 | `campaign/debate/plan-review.md` | `gate-review.json` | ✅ shipped |
+| 8 | `campaign/debate/plan-fix-plan.md` | `gate-fix-plan.json` | ✅ shipped |
+| 9 | arbitration + `run.js` debate integration (§8) | `gate-arbitration.json` | ✅ shipped |
+| 10 | durable artifacts (§2) | `gate-durable-artifacts.json` | ✅ shipped |
+| 11 | liveness as conversation + 2 repair rounds | `gate-liveness-*.json` | ✅ shipped |
+| 12 | `loop mutate` + 2 repair rounds | `gate-mutation-gate.json` | ✅ shipped `13f5ebb` |
+
+### Current queue — `campaign/queue-from-unit2.json`
+
+| # | Plan | Gate | Status |
+|---|---|---|---|
+| 1 | `plan-a/plan-superpowers-all-seats.md` | `gate-superpowers-all-seats.json` | 🔄 running |
+| 2 | `plan-a/plan-cursor-scoped-write.md` | `gate-cursor-scoped-write.json` | ⏳ queued |
+| 3 | `plan-a/plan-claude-seat.md` | `gate-claude-seat.json` | ⏳ queued |
+| 4 | `plan-a/plan-fresh-storm-pivot.md` | `gate-fresh-storm-pivot.json` | ⏳ queued |
+| 5 | `plan-a/plan-board-filters.md` | `gate-board-filters.json` | ⏳ queued |
+
+**Install-time work already done for unit 1** (a run never installs):
+`codex plugin add superpowers@openai-curated` → installed, enabled.
+`agent plugin marketplace add https://github.com/obra/superpowers-marketplace.git`
+→ added, but Cursor has no non-interactive install, so its route is
+`--plugin-dir` at a directory carrying `.cursor-plugin`. See the measured
+section at the end of `plan-superpowers-all-seats.md`.
 
 ## Loop the planner runs
 
