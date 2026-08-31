@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import { basename, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import vm from 'node:vm';
 import { HARNESS_ARTIFACTS } from '../src/run.js';
@@ -16,6 +17,47 @@ const dashboardLauncherPath = fileURLToPath(new URL('../src/dashboard-launcher.j
 const logdyConfigPath = fileURLToPath(new URL('../docs/optional-tools/logdy-run-events.json', import.meta.url));
 const verifierPluginManifestPath = fileURLToPath(new URL('../cursor-plugin/.cursor-plugin/plugin.json', import.meta.url));
 const verifierSkillPath = fileURLToPath(new URL('../cursor-plugin/skills/uro-verify/SKILL.md', import.meta.url));
+// Literal prefixes passed to mkdtempSync(join(tmpdir(), ...)) across test/. Node
+// appends six alphanumerics, so only these concurrent fixtures are exempt when a
+// constrained runner redirects os.tmpdir() into this checkout.
+const temporaryFixturePrefixes = new Set([
+  'campaign-target-', 'candidate-mode-target-', 'ccc dashboard diff #-',
+  'ccc-dashboard-correctness-facts-', 'ccc-dashboard-diff-cap-',
+  'ccc-dashboard-empty-root-', 'ccc-dashboard-execution-record-',
+  'ccc-dashboard-missing-', 'ccc-dashboard-partial-', 'ccc-dashboard-port-',
+  'ccc-dashboard-readonly-', 'ccc-dashboard-snapshot-shape-', 'ccc-dashboard-sse-',
+  'ccc-dashboard-task-body-', 'ccc-dashboard-task-layouts-', 'ccc-dashboard-verdict-',
+  'ccc-dashboard-verifier-plans-', 'ccc-doctor-empty-blocklist-',
+  'ccc-doctor-missing-blocklist-', 'ccc-doctor-valid-blocklist-',
+  'ccc-executor-incremental-', 'ccc-first-run-', 'ccc-github-test-',
+  'ccc-init-fallback-',
+  'ccc-init-package-', 'ccc-installer-duplicate-', 'ccc-installer-home-',
+  'ccc-installer-legacy-', 'ccc-launcher-reuse-', 'ccc-managed-state-',
+  'ccc-publish-guard-test-', 'ccc-publish-guard-write-test-',
+  'ccc-setup-containment-', 'ccc-setup-demo-failure-', 'ccc-status-',
+  'ccc-status-campaign-', 'ccc-status-mixed-', 'ccc-verdict-evidence-',
+  'clean-fanin-target-', 'cli-events-', 'cli-task-', 'conflict-fanin-target-', 'cwd-',
+  'debate-events-', 'decision-', 'deterministic-one-target-',
+  'deterministic-seed-', 'deterministic-two-target-', 'events-target-',
+  'facts-base-target-', 'floor-fanin-target-', 'g-', 'gate-count-', 'ht-',
+  'intent-fanin-target-', 'isolate-failure-target-', 'isolation-repo-',
+  'iterative-base-target-', 'nogit-', 'p-', 'p-corrects-', 'p-probe-', 'rep-',
+  'rep2-', 'rep-debate-', 'rep-diag-', 'rep-min-', 'repo-', 'rep-timeout-',
+  'rep-unverified-', 'rep-verifier-silence-', 'review-', 'run-journal-',
+  'run-journal-campaign-', 'run-journal-campaign-target-',
+  'run-journal-standalone-target-', 'run-task-', 'shared-base-target-',
+  'spawn-tree-', 'src-', 'stall-target-', 'task-', 'tgt-',
+  'tree-inheritance-target-', 'uro-artifact-', 'uro-codex-superpowers-',
+  'uro-cursor-superpowers-', 'uro-dashboard-board-facts-',
+  'uro-dashboard-board-sse-', 'uro-dashboard-transcript-decision-',
+  'uro-dashboard-transcript-escape-', 'uro-dashboard-transcript-gate-',
+  'uro-dashboard-transcript-lifecycle-', 'uro-dashboard-transcript-picker-',
+  'uro-dashboard-transcript-route-', 'uro-dashboard-transcript-shell-',
+  'uro-dashboard-transcript-steps-', 'uro-dashboard-transcript-verifiers-',
+  'uro-headless-cli-', 'uro-headless-doctor-', 'uro-journal-both-',
+  'uro-journal-legacy-', 'uro-skills-run-', 'uro-superpowers-doctor-',
+  'uro-superpowers-home-',
+]);
 
 test('the repository ships a substantive MIT license', () => {
   assert.ok(existsSync(licensePath), 'LICENSE must exist at the repository root');
@@ -30,7 +72,7 @@ test('the repository ships a substantive MIT license', () => {
   assert.equal(fileURLToPath(new URL(`../${link[1]}`, import.meta.url)), licensePath);
 });
 
-test('the plugin verifier payload includes every shippable top-level entry', () => {
+function assertPayloadIncludesEveryShippableTopLevelEntry() {
   assert.ok(existsSync(installerPath), 'the repository checkout must contain install.mjs');
   const installer = readFileSync(installerPath, 'utf8');
   const declaration = installer.match(/const PAYLOAD\s*=\s*(\[[\s\S]*?\]);/);
@@ -55,10 +97,11 @@ test('the plugin verifier payload includes every shippable top-level entry', () 
   const workingDocument = (name) => /^FINDINGS-\d{4}-\d{2}-\d{2}-[\w-]+\.md$/.test(name);
   // Other test files create short-lived mkdtemp fixtures under os.tmpdir(). Constrained
   // runners can redirect that location into the checkout, and node --test runs those files
-  // concurrently with this assertion. Node appends six random alphanumerics to each such
-  // directory; these untracked fixtures are not repository payload.
+  // concurrently with this assertion. Do not treat arbitrary six-character suffixes as
+  // temporary: only the known fixture prefixes above are exempt.
   const temporaryTestDirectory = (entry) => entry.isDirectory()
-    && /-[A-Za-z0-9]{6}$/.test(entry.name);
+    && [...temporaryFixturePrefixes].some((prefix) => entry.name.startsWith(prefix)
+      && /^[A-Za-z0-9]{6}$/.test(entry.name.slice(prefix.length)));
   const shippable = readdirSync(root, { withFileTypes: true })
     .filter((entry) => !temporaryTestDirectory(entry))
     .map((entry) => entry.name)
@@ -67,6 +110,29 @@ test('the plugin verifier payload includes every shippable top-level entry', () 
       && !workingDocument(name));
   const omitted = shippable.filter((name) => !payload.includes(name));
   assert.deepEqual(omitted, [], `PAYLOAD omits shippable root entries: ${omitted.join(', ')}`);
+}
+
+test('the payload guard rejects a non-fixture six-character directory suffix', () => {
+  const control = mkdtempSync(join(root, 'payload-control-'));
+  try {
+    assert.throws(() => assertPayloadIncludesEveryShippableTopLevelEntry(),
+      new RegExp(`PAYLOAD omits shippable root entries: ${basename(control)}`));
+  } finally {
+    rmSync(control, { recursive: true, force: true });
+  }
+});
+
+test('the payload guard tolerates a recognized concurrent mkdtemp fixture', () => {
+  const fixture = mkdtempSync(join(root, 'uro-artifact-'));
+  try {
+    assert.doesNotThrow(() => assertPayloadIncludesEveryShippableTopLevelEntry());
+  } finally {
+    rmSync(fixture, { recursive: true, force: true });
+  }
+});
+
+test('the plugin verifier payload includes every shippable top-level entry', () => {
+  assertPayloadIncludesEveryShippableTopLevelEntry();
 });
 
 test('GitHub publishing is lazy and absent from the run implementation', () => {

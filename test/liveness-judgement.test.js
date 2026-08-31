@@ -397,6 +397,42 @@ test('the production fresh judge preserves a working verdict with a malformed ca
   });
 });
 
+test('mutation control: post-parse else-if invalidNextIntervalMs branch records the deadline decision', async () => {
+  const judge = createLivenessJudge({
+    cwd: tmpdir(),
+    superpowersDir: null,
+    runSeat: async () => ({
+      code: 0,
+      timedOut: false,
+      stdout: `${JSON.stringify({
+        type: 'item.completed',
+        item: {
+          type: 'agent_message',
+          text: JSON.stringify({
+            status: 'working', reasoning: 'The worker child is live.', nextIntervalMs: 0,
+          }),
+        },
+      })}\n`,
+    }),
+  });
+  const harness = deadlineHarness({ judge });
+
+  harness.clock.advance(50);
+  await flush();
+  await flush();
+
+  assert.deepEqual(harness.killed, [], 'a malformed advisory cadence must not kill a working seat');
+  assert.equal(harness.decisions.length, 1);
+  assert.equal(harness.decisions[0].status, 'working');
+  assert.equal(harness.decisions[0].nextIntervalMs, 50);
+  assert.equal(harness.decisions[0].intervalReused, true);
+  assert.equal(harness.decisions[0].invalidNextIntervalMs, 0,
+    'the post-parse malformed cadence must be recorded by createLivenessDeadline');
+  assert.equal(harness.decisions[0].nextIntervalError,
+    'nextIntervalMs must be a positive safe timer integer');
+  harness.deadline.dispose();
+});
+
 test('run facts mutation control records createLivenessDeadline via decide(decision)', async () => {
   const root = mkdtempSync(join(process.cwd(), '.liveness-run-'));
   const scratchRoot = join(root, 'scratch');

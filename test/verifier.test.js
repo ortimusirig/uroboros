@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { EventEmitter } from 'node:events';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -29,6 +30,42 @@ const realSamplePath = fileURLToPath(new URL('../fixtures/cursor-stream-schema-s
 const planSamplePath = fileURLToPath(new URL('../fixtures/cursor-plan-mode-sample.ndjson', import.meta.url));
 const fixturesDir = fileURLToPath(new URL('../fixtures/', import.meta.url));
 const expectedPluginDir = fileURLToPath(new URL('../cursor-plugin', import.meta.url));
+
+function controlledClock() {
+  let time = 0;
+  let nextTimerId = 0;
+  const timers = new Map();
+  return {
+    now: () => time,
+    setTimer(fn, delayMs) {
+      const id = ++nextTimerId;
+      timers.set(id, { dueAt: time + delayMs, fn });
+      return id;
+    },
+    clearTimer(id) { timers.delete(id); },
+    advance(ms) { time += ms; },
+    fireDueTimers() {
+      while (true) {
+        const due = [...timers.entries()]
+          .filter(([, timer]) => timer.dueAt <= time)
+          .sort((left, right) => left[1].dueAt - right[1].dueAt || left[0] - right[0])[0];
+        if (!due) return;
+        timers.delete(due[0]);
+        due[1].fn();
+      }
+    },
+  };
+}
+
+function fakeChild() {
+  const child = new EventEmitter();
+  child.pid = 12345;
+  child.stdout = new EventEmitter();
+  child.stderr = new EventEmitter();
+  child.stdin = { end() {} };
+  child.kill = () => {};
+  return child;
+}
 
 function rewriteEvents(streamText, rewrite) {
   return streamText.trim().split(/\r?\n/)
@@ -233,6 +270,47 @@ test('runVerifier identifies a non-zero empty stream as a launch failure', async
   assert.equal(r.launchFailed, true);
   assert.notEqual(r.exitCode, 0);
   assert.match(r.stderr, /fake agent failed/);
+});
+
+test('raw stdout resets the verifier liveness gap through the runVerifier observer', async () => {
+  const clock = controlledClock();
+  const child = fakeChild();
+  const livenessChecks = [];
+  let kills = 0;
+  const pending = runVerifier({
+    cwd: tmpdir(), bin: process.execPath, extraArgv: ['unused'], env: {},
+    runId: 'chatty-verifier', pass: 'correctness',
+    livenessThresholdMs: 50, progressThresholdMs: 100,
+    now: clock.now, setTimer: clock.setTimer, clearTimer: clock.clearTimer,
+    spawnProcess: () => child,
+    killProcessTree: () => { kills++; },
+    judgeLiveness: async (evidence) => {
+      livenessChecks.push(evidence);
+      return { status: 'working', reasoning: 'Raw stdout proves the verifier is live.' };
+    },
+    getProcessTree: () => ({ available: true, descendants: [] }),
+    getWorktreeActivity: (sinceMs) => ({
+      available: true, changed: false, changedFiles: [], sinceMs,
+    }),
+  });
+  await Promise.resolve();
+
+  clock.advance(40);
+  child.stdout.emit('data', Buffer.from('thinking'));
+  clock.advance(50);
+  clock.fireDueTimers();
+  await new Promise((resolve) => setImmediate(resolve));
+
+  // Removing verifier.js's onStdout lastByteAt reset makes this 90, measured from start.
+  assert.equal(livenessChecks.length, 1, 'the controlled liveness deadline must consult its judge');
+  assert.equal(livenessChecks[0].gapMs, 50,
+    'the judge must measure from stdout observed by runVerifier, not process start');
+  assert.equal(kills, 0, 'the fresh stdout gap must not terminate the verifier');
+
+  child.emit('close', 0, null);
+  const result = await pending;
+  assert.equal(result.timedOut, false);
+  assert.equal(kills, 0);
 });
 
 test('buildCursorArgs carries both plugin directories and remains guarded', () => {

@@ -158,6 +158,47 @@ test('raw bytes keep the real executor coordinator alive while progress silence 
     assert.equal(kills, 0);
   });
 
+test('raw stdout resets the executor liveness gap through the runExecutor observer', async () => {
+  const clock = controlledClock();
+  const child = fakeChild();
+  const livenessChecks = [];
+  let kills = 0;
+  const pending = runExecutor({
+    plan: 'measure the raw stream', cwd: tmpdir(),
+    bin: process.execPath, extraArgv: ['unused'], env: {}, runId: 'executor-observer', attempt: 1,
+    livenessThresholdMs: 50,
+    now: clock.now, setTimer: clock.setTimer, clearTimer: clock.clearTimer,
+    spawnProcess: () => child,
+    killProcessTree: () => { kills++; },
+    judgeLiveness: async (evidence) => {
+      livenessChecks.push(evidence);
+      return { status: 'working', reasoning: 'Raw stdout proves the executor is live.' };
+    },
+    getProcessTree: () => ({ available: true, descendants: [] }),
+    getWorktreeActivity: (sinceMs) => ({
+      available: true, changed: false, changedFiles: [], sinceMs,
+    }),
+  });
+  await Promise.resolve();
+
+  clock.advance(40);
+  child.stdout.emit('data', Buffer.from('thinking'));
+  clock.advance(50);
+  clock.fireDueTimers();
+  await new Promise((resolve) => setImmediate(resolve));
+
+  // Removing executor.js's onStdout lastByteAt reset makes this 90, measured from start.
+  assert.equal(livenessChecks.length, 1, 'the controlled liveness deadline must consult its judge');
+  assert.equal(livenessChecks[0].gapMs, 50,
+    'the judge must measure from stdout observed by runExecutor, not process start');
+  assert.equal(kills, 0, 'the fresh stdout gap must not terminate the executor');
+
+  child.emit('close', 0, null);
+  const result = await pending;
+  assert.equal(result.timedOut, false);
+  assert.equal(kills, 0);
+});
+
 test('a genuinely silent executor still emits one stall event', async () => {
   const { delivered, watchdog, pending } = executorWithWatchdog({
     source: 'setTimeout(() => {}, 350)', thresholdMs: 100, runId: 'silent-executor',
