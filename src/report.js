@@ -303,19 +303,19 @@ export function buildReportMarkdown(facts, {
     ``,
     `## Why / reasoning`,
     last.lastMessage ?? '(no executor message)',
+    ...(facts.verifierPlan !== null
+      ? [``, `## Verifier plan artifact`, facts.verifierPlan || '(empty plan artifact)']
+      : []),
     ``,
     `## Verifier findings`,
     facts.verifierFindings || '(none recorded)',
+    ...(facts.intentVerifierPlan !== null
+      ? [``, `## Intent verifier plan artifact`, facts.intentVerifierPlan || '(empty plan artifact)']
+      : []),
     ``,
     `## Intent verifier findings`,
     facts.intentVerifierFindings || '(none recorded)',
   ];
-  if (facts.verifierPlan !== null) {
-    md.push(``, `## Verifier plan artifact`, facts.verifierPlan || '(empty plan artifact)');
-  }
-  if (facts.intentVerifierPlan !== null) {
-    md.push(``, `## Intent verifier plan artifact`, facts.intentVerifierPlan || '(empty plan artifact)');
-  }
   if (facts.gateFailure !== null) {
     const command = [facts.gateFailure.bin, ...(facts.gateFailure.args ?? [])].join(' ');
     md.push(

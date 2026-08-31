@@ -53,7 +53,14 @@ test('the plugin verifier payload includes every shippable top-level entry', () 
   // they are named here rather than added to PAYLOAD.
   const repositoryOnly = new Set(['install.mjs', 'campaign', ...HARNESS_ARTIFACTS]);
   const workingDocument = (name) => /^FINDINGS-\d{4}-\d{2}-\d{2}-[\w-]+\.md$/.test(name);
+  // Other test files create short-lived mkdtemp fixtures under os.tmpdir(). Constrained
+  // runners can redirect that location into the checkout, and node --test runs those files
+  // concurrently with this assertion. Node appends six random alphanumerics to each such
+  // directory; these untracked fixtures are not repository payload.
+  const temporaryTestDirectory = (entry) => entry.isDirectory()
+    && /-[A-Za-z0-9]{6}$/.test(entry.name);
   const shippable = readdirSync(root, { withFileTypes: true })
+    .filter((entry) => !temporaryTestDirectory(entry))
     .map((entry) => entry.name)
     .filter((name) => !name.startsWith('.')
       && !repositoryOnly.has(name)

@@ -367,19 +367,32 @@ export function createLivenessDeadline({
     const reasoning = judgement.reasoning.trim();
     if (judgement.status === 'working') {
       const previousIntervalMs = intervalMs;
+      let invalidNextInterval;
       if (judgement.nextIntervalMs !== undefined) {
-        try { timerInteger(judgement.nextIntervalMs, 'nextIntervalMs'); }
-        catch (error) {
-          unavailable(observed, error.message, { processTree, worktreeActivity });
-          return;
+        try {
+          timerInteger(judgement.nextIntervalMs, 'nextIntervalMs');
+          intervalMs = judgement.nextIntervalMs;
         }
-        intervalMs = judgement.nextIntervalMs;
+        catch (error) {
+          invalidNextInterval = {
+            invalidNextIntervalMs: judgement.nextIntervalMs,
+            nextIntervalError: error.message,
+          };
+        }
+      } else if (Object.hasOwn(judgement, 'invalidNextIntervalMs')) {
+        invalidNextInterval = {
+          invalidNextIntervalMs: judgement.invalidNextIntervalMs,
+          nextIntervalError: typeof judgement.nextIntervalError === 'string'
+            ? judgement.nextIntervalError
+            : 'nextIntervalMs was unusable',
+        };
       }
       const decision = {
         status: 'working', judged: true, reasoning,
         gapMs: observed.gapMs, intervalMs, previousIntervalMs,
         nextIntervalMs: intervalMs,
-        intervalReused: judgement.nextIntervalMs === undefined,
+        intervalReused: judgement.nextIntervalMs === undefined || invalidNextInterval !== undefined,
+        ...(invalidNextInterval ?? {}),
         checkCount, seat: observed.seat,
         lastEvent: observed.lastEvent, processTree, worktreeActivity,
       };

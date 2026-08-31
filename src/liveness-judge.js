@@ -55,9 +55,15 @@ export function parseLivenessJudgement(text) {
       reasoning: parsed.reasoning.trim(),
     };
     if (Object.hasOwn(parsed, 'nextIntervalMs')) {
-      try { timerInteger(parsed.nextIntervalMs, 'nextIntervalMs'); }
-      catch { continue; }
-      judgement.nextIntervalMs = parsed.nextIntervalMs;
+      try {
+        timerInteger(parsed.nextIntervalMs, 'nextIntervalMs');
+        judgement.nextIntervalMs = parsed.nextIntervalMs;
+      } catch (error) {
+        // Cadence is advisory. Preserve a readable verdict and carry the malformed
+        // suggestion forward so supervision can reuse its current interval and report it.
+        judgement.invalidNextIntervalMs = parsed.nextIntervalMs;
+        judgement.nextIntervalError = error.message;
+      }
     }
     return judgement;
   }

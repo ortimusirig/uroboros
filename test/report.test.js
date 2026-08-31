@@ -202,10 +202,15 @@ test('writeReport emits retained diagnostics, verdict provenance, fail-safe word
   assert.match(md, /Intent verifier: no verdict marker was found/i);
   assert.match(md, /## Verifier plan artifact/);
   assert.match(md, /The assertion misses the defect/);
+  assert.ok(md.indexOf('## Verifier plan artifact') < md.indexOf('## Verifier findings'),
+    'the correctness verdict artifact must lead its reasoning stream');
   assert.match(md, /## Intent verifier findings/);
   assert.match(md, /Intent verifier preamble only/);
   assert.match(md, /## Intent verifier plan artifact/);
   assert.match(md, /Shared scope was omitted/);
+  assert.ok(md.indexOf('## Intent verifier plan artifact')
+    < md.indexOf('## Intent verifier findings'),
+  'the intent verdict artifact must lead its reasoning stream');
   assert.match(md, /## Gate failure/);
   assert.match(md, /node --test/);
   assert.match(md, /exit code:.*1/i);

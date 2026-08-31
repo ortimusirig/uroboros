@@ -60,9 +60,11 @@ function deadlineHarness({
   judgeTimeoutMs = 20,
   processTree = { available: true, rootPid: 7, liveDescendantCount: 0, descendants: [] },
   worktreeActivity = { available: true, changed: false, changedFiles: [] },
+  onDecision,
 } = {}) {
   const clock = controlledClock();
   const events = [];
+  const decisions = [];
   const killed = [];
   let lastByteAt = 0;
   let lastEvent = { stage: 'executor', type: 'item_completed', itemType: 'agent_message' };
@@ -81,13 +83,18 @@ function deadlineHarness({
       lastAgentMessage,
     }),
     onEvent: (type, fields) => events.push({ type, ...fields }),
+    onDecision: (decision) => {
+      decisions.push(decision);
+      onDecision?.(decision);
+    },
     onKill: (reason) => killed.push(reason),
     now: clock.now,
     setTimer: clock.setTimer,
     clearTimer: clock.clearTimer,
   });
   return {
-    clock, deadline, events, killed,
+    clock, deadline, events, decisions, killed,
+    get lastByteAt() { return lastByteAt; },
     byte(event = lastEvent, message = lastAgentMessage) {
       lastByteAt = clock.now();
       lastEvent = event;
@@ -131,6 +138,7 @@ test('silence asks a judge; working leaves the executor alive and emits its reas
     killProcessTree: () => { kills.push('kill'); },
   });
   await flush();
+  clock.advance(30);
   child.stdout.emit('data', Buffer.from(`${JSON.stringify({
     type: 'item.completed', item: { type: 'agent_message', text: message },
   })}\n`));
@@ -139,6 +147,8 @@ test('silence asks a judge; working leaves the executor alive and emits its reas
 
   assert.equal(inputs.length, 1, 'silence must invoke the separate judge');
   assert.deepEqual(kills, [], 'a working judgement must not kill the seat');
+  assert.equal(inputs[0].gapMs, 50,
+    'the first stdout byte must reset lastByteAt rather than measuring from process start');
   assert.equal(inputs[0].lastAgentMessage, message, 'the last message must remain verbatim');
   assert.deepEqual(inputs[0].processTree, processTree);
   assert.deepEqual(inputs[0].worktreeActivity, worktreeActivity);
@@ -211,6 +221,65 @@ test('two successive working judgements do not kill and each judged interval is 
   harness.deadline.dispose();
 });
 
+test('a working verdict with an invalid interval stays alive and reuses the previous interval', async () => {
+  let calls = 0;
+  const harness = deadlineHarness({
+    judge: () => {
+      calls++;
+      return {
+        status: 'working',
+        reasoning: 'The worker is alive even though this cadence is malformed.',
+        nextIntervalMs: 0,
+      };
+    },
+  });
+
+  harness.clock.advance(50);
+  await flush();
+
+  assert.equal(calls, 1);
+  assert.deepEqual(harness.killed, [], 'an invalid advisory cadence must never kill a working seat');
+  assert.equal(harness.decisions[0].status, 'working');
+  assert.equal(harness.decisions[0].judged, true);
+  assert.equal(harness.decisions[0].nextIntervalMs, 50);
+  assert.equal(harness.decisions[0].intervalReused, true);
+  assert.equal(harness.decisions[0].invalidNextIntervalMs, 0);
+  assert.match(harness.decisions[0].nextIntervalError, /positive safe timer integer/);
+
+  harness.clock.advance(49);
+  await flush();
+  assert.equal(calls, 1, 'the invalid cadence must not silently shorten the previous interval');
+  harness.clock.advance(1);
+  await flush();
+  assert.equal(calls, 2, 'the previous interval must be reused for the next check');
+  assert.deepEqual(harness.killed, []);
+  harness.deadline.dispose();
+});
+
+test('a working verdict with a valid interval still honors the new cadence', async () => {
+  let calls = 0;
+  const harness = deadlineHarness({
+    judge: () => {
+      calls++;
+      return { status: 'working', reasoning: 'The worker is alive.', nextIntervalMs: 75 };
+    },
+  });
+
+  harness.clock.advance(50);
+  await flush();
+  harness.clock.advance(74);
+  await flush();
+  assert.equal(calls, 1);
+  harness.clock.advance(1);
+  await flush();
+
+  assert.equal(calls, 2);
+  assert.equal(harness.decisions[0].nextIntervalMs, 75);
+  assert.equal(harness.decisions[0].intervalReused, false);
+  assert.deepEqual(harness.killed, []);
+  harness.deadline.dispose();
+});
+
 test('no judge falls back to an explicitly unjudged kill', () => {
   const harness = deadlineHarness();
   harness.clock.advance(50);
@@ -249,6 +318,8 @@ test('normal output indefinitely postpones both asking and killing, with silence
   for (let index = 0; index < 10; index++) {
     harness.clock.advance(40);
     harness.byte({ stage: 'executor', type: 'item_completed', itemType: 'command_execution' });
+    assert.equal(harness.lastByteAt, harness.clock.now(),
+      'each observed byte must reset lastByteAt directly');
     await flush();
   }
   assert.ok(harness.clock.now() > 50);
@@ -299,7 +370,34 @@ test('the production fresh judge is read-only, bounded, and receives verbatim ev
   });
 });
 
-test('run integration records the judged cadence and reasoning in durable facts', async () => {
+test('the production fresh judge preserves a working verdict with a malformed cadence', async () => {
+  const judge = createLivenessJudge({
+    cwd: tmpdir(),
+    superpowersDir: null,
+    runSeat: async () => ({
+      code: 0,
+      timedOut: false,
+      stdout: `${JSON.stringify({
+        type: 'item.completed',
+        item: {
+          type: 'agent_message',
+          text: JSON.stringify({
+            status: 'working', reasoning: 'The worker child is live.', nextIntervalMs: 0,
+          }),
+        },
+      })}\n`,
+    }),
+  });
+
+  assert.deepEqual(await judge({}), {
+    status: 'working',
+    reasoning: 'The worker child is live.',
+    invalidNextIntervalMs: 0,
+    nextIntervalError: 'nextIntervalMs must be a positive safe timer integer',
+  });
+});
+
+test('run facts mutation control records createLivenessDeadline via decide(decision)', async () => {
   const root = mkdtempSync(join(process.cwd(), '.liveness-run-'));
   const scratchRoot = join(root, 'scratch');
   const worktree = join(root, 'worktree');
@@ -309,12 +407,13 @@ test('run integration records the judged cadence and reasoning in durable facts'
   mkdirSync(worktree, { recursive: true });
   mkdirSync(target, { recursive: true });
   const judgeLiveness = async () => ({
-    status: 'working', reasoning: 'Injected integration judge.', nextIntervalMs: 321,
+    status: 'working', reasoning: 'Injected integration judge.', nextIntervalMs: 0,
   });
   try {
     const facts = await run({
       task: 'Observe a liveness decision.', target, gate: [], gateRetries: 0,
       scratchRoot, artifactRoot, runId: 'liveness-facts', reporter: () => {},
+      stallThresholdMs: 50,
       adapters: {
         judgeLiveness,
         isolate: async () => ({
@@ -323,11 +422,15 @@ test('run integration records the judged cadence and reasoning in durable facts'
         }),
         runExecutor: async (options) => {
           assert.equal(options.judgeLiveness, judgeLiveness);
-          options.onLivenessDecision({
-            seat: 'executor', status: 'working', judged: true,
-            nextIntervalMs: 321, intervalMs: 321,
-            reasoning: 'A delegated test worker is still live.',
+          const harness = deadlineHarness({
+            thresholdMs: options.livenessThresholdMs,
+            judge: options.judgeLiveness,
+            onDecision: options.onLivenessDecision,
           });
+          harness.clock.advance(options.livenessThresholdMs);
+          await flush();
+          assert.deepEqual(harness.killed, []);
+          harness.deadline.dispose();
           return { changedFiles: [], lastMessage: 'No source change.', exitCode: 0 };
         },
         diffText: async () => '',
@@ -336,9 +439,48 @@ test('run integration records the judged cadence and reasoning in durable facts'
       },
     });
     assert.equal(facts.outcome, 'no-op');
-    assert.equal(facts.livenessChecks[0].nextIntervalMs, 321);
+    assert.equal(facts.livenessChecks.length, 1,
+      'removing decide(decision) from createLivenessDeadline must make this mutation control fail');
+    assert.equal(facts.livenessChecks[0].nextIntervalMs, 50);
+    assert.equal(facts.livenessChecks[0].intervalReused, true);
+    assert.equal(facts.livenessChecks[0].invalidNextIntervalMs, 0);
+    assert.match(facts.livenessChecks[0].nextIntervalError, /positive safe timer integer/);
     assert.equal(facts.livenessChecks[0].reasoning,
-      'A delegated test worker is still live.');
+      'Injected integration judge.');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('a normal run without a liveness check leaves facts and behavior unchanged', async () => {
+  const root = mkdtempSync(join(process.cwd(), '.liveness-control-run-'));
+  const scratchRoot = join(root, 'scratch');
+  const worktree = join(root, 'worktree');
+  const target = join(root, 'target');
+  const artifactRoot = join(root, 'artifacts');
+  mkdirSync(scratchRoot, { recursive: true });
+  mkdirSync(worktree, { recursive: true });
+  mkdirSync(target, { recursive: true });
+  try {
+    const facts = await run({
+      task: 'Complete without a liveness check.', target, gate: [], gateRetries: 0,
+      scratchRoot, artifactRoot, runId: 'liveness-control', reporter: () => {},
+      adapters: {
+        isolate: async () => ({
+          dir: worktree, isRepo: false, baseRef: 'HEAD', baseCommit: null,
+          branch: 'uro/liveness-control',
+        }),
+        runExecutor: async () => ({
+          changedFiles: [], lastMessage: 'No source change.', exitCode: 0,
+        }),
+        diffText: async () => '',
+        runGate: async () => ({ passed: true, results: [] }),
+        runVerifier: async () => { throw new Error('a no-op must not verify'); },
+      },
+    });
+
+    assert.equal(facts.outcome, 'no-op');
+    assert.deepEqual(facts.livenessChecks, []);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
