@@ -362,3 +362,21 @@ test('parseCodexStream retains real usage and ignores command_execution items', 
     cacheWriteTokens: 0,
   });
 });
+
+test('a failed executor keeps its stderr, the only account of why it died', async () => {
+  const r = await runExecutor({ plan: 'x', cwd: process.cwd(),
+    bin: process.execPath, extraArgv: [fakeCodex, 'die-quietly'] });
+
+  // Observed in production: exit 1, no diff, no usage, and nothing anywhere in
+  // the run facts saying what happened. stdout carried no explanation because
+  // the stream simply stopped.
+  assert.equal(r.exitCode, 1);
+  assert.match(r.stderr, /upstream connection reset/);
+});
+
+test('a successful executor carries no stderr noise', async () => {
+  const r = await runExecutor({ plan: 'x', cwd: process.cwd(),
+    bin: process.execPath, extraArgv: [fakeCodex] });
+  assert.equal(r.exitCode, 0);
+  assert.equal(r.stderr, undefined);
+});

@@ -825,6 +825,7 @@ export async function run(opts) {
       timeoutMs: executorResult.timeoutReason?.timeoutMs
         ?? executorResult.timeoutMs ?? stageTimeouts.executor,
       ...(executorResult.timeoutReason ? { timeoutReason: executorResult.timeoutReason } : {}),
+      ...(executorResult.stderr ? { stderr: executorResult.stderr } : {}),
       ...(executorResult.usageConsistency
         ? { usageConsistency: executorResult.usageConsistency } : {}),
     },

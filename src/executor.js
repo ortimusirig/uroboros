@@ -12,7 +12,12 @@ import {
 } from './stall-watchdog.js';
 
 export const DEFAULT_EXECUTOR_MODEL = 'gpt-5.6-sol';
+
 export const DEFAULT_EXECUTOR_EFFORT = 'xhigh';
+// Enough to carry a stack trace or an API error body; the failing path has no
+// other record of the cause, so this is deliberately generous rather than a
+// token-saving trim.
+const EXECUTOR_STDERR_LIMIT = 4000;
 export const EXECUTOR_PREAMBLE = `# Harness execution instructions
 
 The plan below is approved. Implement it. Do not stop to request design approval, and do not wait for confirmation.
@@ -322,6 +327,11 @@ export async function runExecutor({
     ...parsed,
     exitCode: r.code,
     timedOut: r.timedOut,
+    // When the executor dies, its stderr is usually the only account of why.
+    // Dropping it cost a queue unit a diagnosis: exit 1, no diff, no usage, and
+    // nothing anywhere in the run facts saying what happened. Kept only on the
+    // failing path, where stdout carries no explanation of its own.
+    ...(r.code !== 0 && r.stderr?.trim() ? { stderr: r.stderr.slice(0, EXECUTOR_STDERR_LIMIT) } : {}),
     ...(r.aborted ? { aborted: true } : {}),
     timeoutMs: r.timeoutMs,
     ...(r.timeoutReason ? { timeoutReason: r.timeoutReason } : {}),
