@@ -25,6 +25,7 @@ const setupSkill = fileURLToPath(new URL('../skills/uroboros-setup/SKILL.md', im
 const fakeGit = fileURLToPath(new URL('../fixtures/fake-doctor-git.mjs', import.meta.url));
 const fakeCodex = fileURLToPath(new URL('../fixtures/fake-doctor-codex.mjs', import.meta.url));
 const fakeAgent = fileURLToPath(new URL('../fixtures/fake-doctor-agent.mjs', import.meta.url));
+const fakeClaude = fileURLToPath(new URL('../fixtures/fake-doctor-claude.mjs', import.meta.url));
 const fakeGh = fileURLToPath(new URL('../fixtures/fake-doctor-gh.mjs', import.meta.url));
 const fakeCodexNoWrite = fileURLToPath(new URL('../fixtures/fake-codex.mjs', import.meta.url));
 const fakeAgentBlocked = fileURLToPath(new URL('../fixtures/fake-agent-broken.mjs', import.meta.url));
@@ -84,6 +85,7 @@ function doctorFixture({
   writeFakeBin(bins, 'git', fakeGit);
   if (codex) writeFakeBin(bins, 'codex', codexScript);
   if (agent) writeFakeBin(bins, 'agent', agentScript);
+  writeFakeBin(bins, 'claude', fakeClaude);
   if (gh) writeFakeBin(bins, 'gh', fakeGh);
   const pathKey = Object.keys(process.env).find((key) => key.toLowerCase() === 'path') ?? 'PATH';
   return {
@@ -190,13 +192,14 @@ test('doctor gives the official platform-specific Cursor install command and ski
   }
 });
 
-test('doctor requires both free local sign-in checks, with passing positive controls', async () => {
+test('doctor requires all three free local sign-in checks, with passing positive controls', async () => {
   const fixture = doctorFixture();
   try {
     const signedIn = await invokeDoctor(fixture);
     assert.equal(signedIn.code, 0, `${signedIn.stderr}\n${signedIn.stdout}`);
     assert.match(signedIn.stdout, /PASS \[required\] Codex signed in: `codex login status` exited 0/);
     assert.match(signedIn.stdout, /PASS \[required\] Cursor signed in: `agent status` exited 0/);
+    assert.match(signedIn.stdout, /PASS \[required\] Claude signed in: `claude auth status` exited 0/);
 
     fixture.env.URO_FAKE_CODEX_SIGNED_IN = 'no';
     const codexSignedOut = await invokeDoctor(fixture);
@@ -206,6 +209,8 @@ test('doctor requires both free local sign-in checks, with passing positive cont
     assert.match(codexSignedOut.stdout, /update or reinstall the Codex CLI/);
     assert.match(codexSignedOut.stdout, /PASS \[required\] Cursor signed in/,
       'positive control: Cursor can still pass while Codex is signed out');
+    assert.match(codexSignedOut.stdout, /PASS \[required\] Claude signed in/,
+      'positive control: Claude can still pass while Codex is signed out');
 
     delete fixture.env.URO_FAKE_CODEX_SIGNED_IN;
     fixture.env.URO_FAKE_AGENT_SIGNED_IN = 'no';
@@ -216,6 +221,16 @@ test('doctor requires both free local sign-in checks, with passing positive cont
     assert.match(cursorSignedOut.stdout, /FAIL \[required\] Cursor signed in: `agent status` exited 1/);
     assert.match(cursorSignedOut.stdout, /run `agent login`/);
     assert.match(cursorSignedOut.stdout, /run `agent update` or reinstall the Cursor Agent CLI/);
+
+    delete fixture.env.URO_FAKE_AGENT_SIGNED_IN;
+    fixture.env.URO_FAKE_CLAUDE_SIGNED_IN = 'no';
+    const claudeSignedOut = await invokeDoctor(fixture);
+    assert.notEqual(claudeSignedOut.code, 0);
+    assert.match(claudeSignedOut.stdout, /PASS \[required\] Codex signed in/);
+    assert.match(claudeSignedOut.stdout, /PASS \[required\] Cursor signed in/);
+    assert.match(claudeSignedOut.stdout,
+      /FAIL \[required\] Claude signed in: `claude auth status` exited 1/);
+    assert.match(claudeSignedOut.stdout, /run `claude auth login`/);
   } finally {
     rmSync(fixture.root, { recursive: true, force: true });
   }
@@ -232,8 +247,9 @@ test('plain doctor invokes only local status commands and never model probes', a
     assert.deepEqual(invocations, [
       { cli: 'codex', args: ['login', 'status'] },
       { cli: 'agent', args: ['status'] },
+      { cli: 'claude', args: ['auth', 'status'] },
       { cli: 'codex', args: ['plugin', 'list'] },
-    ], 'default doctor must never invoke Codex exec or Cursor -p model forms');
+    ], 'default doctor must never invoke Codex exec, Cursor -p, or Claude -p model forms');
   } finally {
     rmSync(fixture.root, { recursive: true, force: true });
   }

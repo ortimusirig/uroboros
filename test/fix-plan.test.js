@@ -46,6 +46,33 @@ test('validateFindings returns empty accepted for empty array', () => {
   assert.deepEqual(result.rejected, []);
 });
 
+test('arbiter-invalid findings enter rejected and render as overruled', async () => {
+  const findings = [
+    { id: 'F1', severity: 'blocking', description: 'Real bug.', test: 't.py' },
+    { id: 'F2', severity: 'blocking', description: 'False positive.', test: 'f.py' },
+  ];
+  const result = await validateFindings(findings, {
+    arbiter: async ({ finding }) => finding.id === 'F2'
+      ? { verdict: 'invalid', reason: 'The diff already guards this path.' }
+      : { verdict: 'valid' },
+    diff: 'diff',
+    plan: 'plan',
+  });
+  assert.deepEqual(result.accepted, ['F1']);
+  assert.deepEqual(result.rejected, ['F2']);
+  assert.match(buildFixPlan({ findings, ...result, originalTask: 'Task.' }),
+    /F2 rejected \(overruled\)/);
+});
+
+test('an unavailable arbiter accepts the reviewer objection', async () => {
+  const findings = [{ id: 'F1', severity: 'blocking', description: 'Keep me.', test: 't.py' }];
+  const result = await validateFindings(findings, {
+    arbiter: async () => ({ verdict: 'UNVERIFIED' }),
+  });
+  assert.deepEqual(result.accepted, ['F1']);
+  assert.deepEqual(result.rejected, []);
+});
+
 // --- buildFixPlan ---
 
 test('buildFixPlan produces markdown with validated findings section', () => {

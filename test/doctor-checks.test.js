@@ -18,6 +18,7 @@ import { runDoctor } from '../src/doctor.js';
 const fakeGit = fileURLToPath(new URL('../fixtures/fake-doctor-git.mjs', import.meta.url));
 const fakeCodex = fileURLToPath(new URL('../fixtures/fake-doctor-codex.mjs', import.meta.url));
 const fakeAgent = fileURLToPath(new URL('../fixtures/fake-doctor-agent.mjs', import.meta.url));
+const fakeClaude = fileURLToPath(new URL('../fixtures/fake-doctor-claude.mjs', import.meta.url));
 const fakeGh = fileURLToPath(new URL('../fixtures/fake-doctor-gh.mjs', import.meta.url));
 const SAFE_TEST_BASE = process.env.URO_TEST_SCRATCH_ROOT ?? (process.platform === 'win32'
   ? 'C:/tmp'
@@ -66,6 +67,7 @@ function createPassingFixture() {
       git: writeFakeBin(binRoot, 'golden-git', fakeGit),
       codex: writeFakeBin(binRoot, 'golden-codex', fakeCodex),
       agent: writeFakeBin(binRoot, 'golden-agent', fakeAgent),
+      claude: writeFakeBin(binRoot, 'golden-claude', fakeClaude),
       gh: writeFakeBin(binRoot, 'golden-gh', fakeGh),
       gitleaks: writeFakeBin(binRoot, 'golden-gitleaks', fakeGh),
       trufflehog: writeFakeBin(binRoot, 'golden-trufflehog', fakeGh),
@@ -91,6 +93,7 @@ function createFailingFixture() {
       git: 'ccc-doctor-golden-missing-git-7e57',
       codex: 'ccc-doctor-golden-missing-codex-7e57',
       agent: 'ccc-doctor-golden-missing-agent-7e57',
+      claude: 'ccc-doctor-golden-missing-claude-7e57',
       gh: 'ccc-doctor-golden-missing-gh-7e57',
       gitleaks: 'ccc-doctor-golden-missing-gitleaks-7e57',
       trufflehog: 'ccc-doctor-golden-missing-trufflehog-7e57',
@@ -145,6 +148,8 @@ test('doctor registry has every prerequisite id and exactly four auto-fixable ch
     'codex-signed-in',
     'cursor-agent-installed',
     'cursor-signed-in',
+    'claude-cli-installed',
+    'claude-signed-in',
     'scratch-root-location',
     'scratch-root-writable',
     'superpowers-codex',
@@ -561,7 +566,7 @@ test('optional publish guard failures do not affect core health, while required 
     assert.match(healthy.output, /FAIL \[optional\] Publish guard trufflehog/);
     assertMatchingLeadingAndTrailingVerdicts(
       healthy.output,
-      'Loop core health: HEALTHY (all performed required checks passed; Codex and Cursor sign-ins were verified).',
+      'Loop core health: HEALTHY (all performed required checks passed; Codex, Cursor, and Claude sign-ins were verified).',
     );
 
     const unhealthy = await runDoctor({
@@ -602,6 +607,7 @@ test('doctor all-pass output is byte-identical to its committed golden', async (
       SUPERPOWERS_DIR: resolve(fixture.superpowers),
       CODEX_BIN: fixture.bins.codex,
       AGENT_BIN: fixture.bins.agent,
+      CLAUDE_BIN: fixture.bins.claude,
       GH_BIN: fixture.bins.gh,
       GITLEAKS_BIN: fixture.bins.gitleaks,
       TRUFFLEHOG_BIN: fixture.bins.trufflehog,

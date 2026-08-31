@@ -75,6 +75,8 @@ test('setup prerequisite probes receive the installation home and environment', 
     assert.deepEqual(observed.env, { CODEX_HOME: join(root, 'codex-home') });
     assert.equal(observed.home, join(root, 'user-home'));
     assert.equal(observed.bins.codex, 'seat-codex');
+    assert.equal(observed.bins.claude, 'claude',
+      'partial injected bin maps must retain the default Claude prerequisite binary');
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

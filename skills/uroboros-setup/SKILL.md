@@ -38,6 +38,7 @@ install and rerun its direct probe.
 | git | `winget install --id Git.Git -e --source winget` | `brew install git` | Debian/Ubuntu: `sudo apt-get install git`; Fedora: `sudo dnf install git` |
 | Codex CLI | `npm.cmd install -g @openai/codex` | `npm install -g @openai/codex` | `npm install -g @openai/codex` |
 | Cursor CLI | `irm 'https://cursor.com/install?win32=true' \| iex` | `curl https://cursor.com/install -fsS \| bash` | `curl https://cursor.com/install -fsS \| bash` |
+| Claude CLI | `npm.cmd install -g @anthropic-ai/claude-code` | `npm install -g @anthropic-ai/claude-code` | `npm install -g @anthropic-ai/claude-code` |
 
 The Cursor binary required by uroboros is `agent`, not `cursor-agent`. On Windows it may be a
 PowerShell shim that Git Bash or another POSIX shell cannot resolve. If a POSIX-shell probe says it
@@ -60,7 +61,12 @@ is missing, repeat the probe in PowerShell before concluding that the CLI is not
 6. Run `agent status`. Require exit 0. If it fails, stop and tell the operator to run `agent login`
    in a real terminal and complete its browser flow. This sign-in belongs to the operator and
    Claude cannot perform it. Wait for the operator, then rerun `agent status`; never assume success.
-7. Choose a short, writable, local scratch root outside AppData and OneDrive: `C:\uro\w` on Windows
+7. Run `claude --version`. Require exit 0. If absent, request consent for the platform's Claude CLI
+   command, reopen the terminal, then re-check.
+8. Run `claude auth status`. Require exit 0. If it fails, stop and tell the operator to run
+   `claude auth login` in a real terminal. This sign-in belongs to the operator; wait for them,
+   rerun `claude auth status`, and never assume success.
+9. Choose a short, writable, local scratch root outside AppData and OneDrive: `C:\uro\w` on Windows
    or `$HOME/uro-w` on macOS/Linux. Ask before creating or configuring it. Run the matching check as
    one unpiped command; each rejects an unsafe path, proves writability, removes its probe, and
    returns a real exit code:
@@ -76,19 +82,19 @@ is missing, repeat the probe in PowerShell before concluding that the CLI is not
 
 A directory existing is never proof that an actor can load it. Verify each mechanism separately:
 
-8. **Codex:** Run `codex plugin list` under the same `CODEX_HOME` used for `codex exec`. Require
+10. **Codex:** Run `codex plugin list` under the same `CODEX_HOME` used for `codex exec`. Require
    the `superpowers@openai-curated` row to say `installed, enabled`, and record the row's version.
    If it says `not installed`, ask consent to run
    `codex plugin add superpowers@openai-curated`, then rerun the direct list probe. Never pass
    `--plugin-dir` to Codex; that flag does not exist for `codex exec`.
-9. **Cursor:** Resolve only a superpowers directory carrying a valid
+11. **Cursor:** Resolve only a superpowers directory carrying a valid
    `.cursor-plugin/plugin.json`; require its version and every `skills/*/SKILL.md` to be readable.
    A higher-version `.codex-plugin`-only directory is ineligible and must not be used as fallback.
    Point Cursor at the eligible directory for doctor and later runs with
    `$env:URO_SUPERPOWERS_DIR='<directory-with-.cursor-plugin>'` in PowerShell or
    `export URO_SUPERPOWERS_DIR='<directory-with-.cursor-plugin>'` on macOS/Linux, then rerun
    `/uroboros:doctor`.
-10. **Claude:** Require a valid `.claude-plugin/plugin.json`, its version, and readable
+12. **Claude:** Require a valid `.claude-plugin/plugin.json`, its version, and readable
     `skills/*/SKILL.md` files. If absent, tell the operator to run
     `/plugin install superpowers@superpowers-marketplace` inside Claude Code, restart the session,
     and rerun doctor.
@@ -99,6 +105,6 @@ the failed evidence and bypass are retained in run facts and stated in the repor
 
 ## Hand off
 
-When all ten prerequisites are green, restart the Claude Code session. Slash commands do not
+When all twelve prerequisites are green, restart the Claude Code session. Slash commands do not
 appear in a session that began before the plugin was installed. In the fresh session, run
 `/uroboros:setup` for the demo pass.

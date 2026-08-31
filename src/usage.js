@@ -45,6 +45,21 @@ export function normalizeCursorUsage(raw) {
   };
 }
 
+// Claude reports cache reads and cache creation separately from uncached input.
+// Canonical input is inclusive, matching the Codex/Cursor accounting contract.
+export function normalizeClaudeUsage(raw) {
+  if (!isUsageObject(raw)) return EMPTY_USAGE;
+  const cachedInputTokens = valueOrZero(raw.cache_read_input_tokens);
+  const cacheWriteTokens = valueOrZero(raw.cache_creation_input_tokens);
+  return {
+    inputTokens: valueOrZero(raw.input_tokens) + cachedInputTokens + cacheWriteTokens,
+    cachedInputTokens,
+    outputTokens: valueOrZero(raw.output_tokens),
+    reasoningOutputTokens: 0,
+    cacheWriteTokens,
+  };
+}
+
 export function addUsage(a, b) {
   return {
     inputTokens: valueOrZero(a?.inputTokens) + valueOrZero(b?.inputTokens),

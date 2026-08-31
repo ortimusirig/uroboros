@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { buildReportMarkdown, buildRunFacts, writeReport } from '../src/report.js';
 import { DEFAULT_EXECUTOR_EFFORT, DEFAULT_EXECUTOR_MODEL } from '../src/executor.js';
 import { DEFAULT_VERIFIER_MODEL } from '../src/verifier.js';
+import { DEFAULT_ARBITER_MODEL } from '../src/arbiter.js';
 import { EMPTY_USAGE } from '../src/usage.js';
 
 const facts = buildRunFacts({
@@ -20,11 +21,13 @@ test('buildRunFacts records pins and outcome', () => {
   assert.equal(facts.model.executor, DEFAULT_EXECUTOR_MODEL);
   assert.equal(facts.model.executorEffort, DEFAULT_EXECUTOR_EFFORT);
   assert.equal(facts.model.verifier, DEFAULT_VERIFIER_MODEL);
+  assert.equal(facts.model.arbiter, DEFAULT_ARBITER_MODEL);
   assert.equal(facts.outcome, 'review-ready');
   assert.equal(facts.iterations[0].changedFiles[0], 'a.py');
   assert.equal(Object.hasOwn(facts.limits, 'maxIterations'), false);
   assert.equal(facts.limits.gateRetries, 2);
-  assert.deepEqual(facts.limits.timeoutsMs, { executor: null, verifier: null, gate: null });
+  assert.deepEqual(facts.limits.timeoutsMs,
+    { executor: null, verifier: null, arbiter: null, gate: null });
   assert.deepEqual(facts.timeoutEvents, []);
   assert.equal(facts.skills, null);
   assert.equal(facts.superpowers, null);
@@ -137,12 +140,16 @@ test('buildRunFacts records model overrides actually used for a run', () => {
     runId: 'models', target: 'C:/proj', dir: 'C:/ccc/w', isRepo: false, branch: 'ccc/models',
     iterations: [], gateStatus: 'passed', verdict: null, outcome: 'no-op',
     gateRetries: 0,
-    models: { executor: 'executor-override', executorEffort: 'medium', verifier: 'verifier-override' },
+    models: {
+      executor: 'executor-override', executorEffort: 'medium',
+      verifier: 'verifier-override', arbiter: 'arbiter-override',
+    },
   });
   assert.deepEqual(overridden.model, {
     executor: 'executor-override',
     executorEffort: 'medium',
     verifier: 'verifier-override',
+    arbiter: 'arbiter-override',
   });
 });
 
@@ -232,6 +239,7 @@ test('facts carry an explicit null when no findings were recorded', () => {
   assert.deepEqual(facts.tokens, {
     executor: EMPTY_USAGE,
     verifier: EMPTY_USAGE,
+    arbiter: EMPTY_USAGE,
     total: EMPTY_USAGE,
   });
 });
@@ -327,7 +335,7 @@ test('configured timeouts and timeout events reach facts and markdown', () => {
     runId: 'timeout', target: 'C:/proj', dir: 'C:/ccc/w', isRepo: false,
     branch: 'ccc/timeout', iterations: [], gateStatus: 'not-run', verdict: null,
     outcome: 'timed-out', gateRetries: 0,
-    timeouts: { executor: 100, verifier: 200, gate: 300 },
+    timeouts: { executor: 100, verifier: 200, arbiter: 250, gate: 300 },
     timeoutEvents: [{
       stage: 'executor', iteration: 1, attempt: 1, timeoutMs: 100,
       reason: 'deadline', gapMs: 75,
@@ -335,12 +343,13 @@ test('configured timeouts and timeout events reach facts and markdown', () => {
       setting: 'URO_STALL_THRESHOLD_MS',
     }],
   });
-  assert.deepEqual(timedOut.limits.timeoutsMs, { executor: 100, verifier: 200, gate: 300 });
+  assert.deepEqual(timedOut.limits.timeoutsMs,
+    { executor: 100, verifier: 200, arbiter: 250, gate: 300 });
   assert.equal(timedOut.timeoutEvents[0].stage, 'executor');
   const d = mkdtempSync(join(tmpdir(), 'rep-timeout-'));
   const { mdPath } = writeReport({ dir: d, facts: timedOut });
   const md = readFileSync(mdPath, 'utf8');
-  assert.match(md, /Timeouts \(ms\).*executor 100.*verifier 200.*gate 300/i);
+  assert.match(md, /Timeouts \(ms\).*executor 100.*verifier 200.*arbiter 250.*gate 300/i);
   assert.match(md, /executor: timed out after 100 ms/i);
   assert.match(md, /75 ms silence after executor\/item_completed/i);
   assert.match(md, /URO_STALL_THRESHOLD_MS/);

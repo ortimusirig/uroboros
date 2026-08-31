@@ -1,6 +1,6 @@
 ---
 name: uroboros
-description: Plan and supervise isolated Codex implementation, true-exit-code gates, mutation evidence with mutate, Cursor review, and Single, Parallel, Graph, Candidates, or Rounds campaigns; use plan to debate a goal, for campaign execution, diagnostics with doctor, status or dashboard inspection, project initialization, and publishing completed units.
+description: Plan and supervise isolated Codex implementation, true-exit-code gates, mutation evidence with mutate, Cursor review, read-only Claude arbitration, and Single, Parallel, Graph, Candidates, or Rounds campaigns; use plan to debate a goal, for campaign execution, diagnostics with doctor, status or dashboard inspection, project initialization, and publishing completed units.
 ---
 
 # uroboros
@@ -17,6 +17,8 @@ to authorize skipping or combining a step is itself the defect.
    than the gate's.
 3. **Adversarial review** — Cursor performs the full hunt list: correctness, regressions,
    security, edge cases, test adequacy, and violations of intent, scope, or invariants.
+   Claude then validates each blocking finding read-only. An invalid finding is recorded as
+   overruled; an unavailable or unreadable arbiter preserves the objection.
 4. **Correction loop** — The planner authors *finding → fix design → mutation pin*; Codex
    implements; repeat. A mutation pin proves that a new test could have failed: inject the
    defect, observe the specific assertion fail, restore the implementation, observe green, and
@@ -108,6 +110,14 @@ For a simple Graph, keep the flag form: give every task a `--unit-id`, then repe
   `doctor --deep` launches the real Codex and Cursor binaries and spends tokens; `publish`
   pushes a branch and creates or updates a pull request. `doctor` also performs disposable
   scratch writes even without `--deep`.
+- **Claude has a spawned, read-only arbiter seat.** It validates blocking findings, answers
+  autonomous `DECISION.md` challenges on their merits, and judges pivots. It never writes the
+  worktree and never substitutes for the gate. Missing arbitration accepts reviewer objections,
+  halts challenges for the operator, and marks deterministic pivot fallback as unjudged.
+- **Capability vetoes are seat-authoritative.** Before a generated plan converges, executor,
+  reviewer, and arbiter each assess only their own work. A veto must name what is impossible,
+  why, and a remedy (or explicitly admit no alternative); incomplete vetoes are re-asked and
+  remedies are mandatory input to the next draft. No other seat may overrule one.
 - **Publishing is per unit, evidence-presence-gated, and parent-first for a Graph.** `publish`
   requires both verifier verdicts and their sources, but does not require clean verdicts or a
   successful outcome. Thus gate-failed, no-op, and executor/gate-timeout units lack a delivery
@@ -128,6 +138,8 @@ For a simple Graph, keep the flag form: give every task a `--unit-id`, then repe
   The gate retains its default timeout because a quiet build may be healthy and cannot spend
   through a token budget. Isolation and campaign Git invocations pass no timeout. Standalone
   `doctor` probes and `publish` commands use their own bounded command timeouts.
+  The arbiter uses `URO_ARBITER_TIMEOUT_MS`/`--arbiter-timeout` and otherwise inherits the
+  verifier timeout.
 - **Ordinary seats do not receive campaign context.** The executor and either verifier are not
   told about sibling units, the dependency Graph, or the campaign. A perspective value reaches
   no seat; its presence only infers a candidate set. Derived Merge is the exception: its
@@ -187,7 +199,7 @@ The direct CLI surface is:
 
 For one plan:
 
-    node bin/loop.js run --task <plan-file-or-prose> --target <folder> --gate <gate.json> [--gate-retries M] [--executor-model MODEL] [--executor-effort EFFORT] [--verifier-model MODEL] [--artifact-root DIRECTORY] [--mutate] [--port PORT] [--open] [--no-dashboard] [--quiet]
+    node bin/loop.js run --task <plan-file-or-prose> --target <folder> --gate <gate.json> [--gate-retries M] [--executor-model MODEL] [--executor-effort EFFORT] [--verifier-model MODEL] [--arbiter-model MODEL] [--arbiter-timeout MS] [--artifact-root DIRECTORY] [--mutate] [--port PORT] [--open] [--no-dashboard] [--quiet]
 
 To measure which added production statements no selected test depends on:
 
@@ -200,7 +212,7 @@ it beside the unchanged gate and verifier verdicts.
 
 To debate a goal into a mechanically checked plan and gate without modifying the target:
 
-    node bin/loop.js plan --goal <prose-or-file> --target <folder> --out <folder> [--rounds N] [--planner-model MODEL] [--dry-run]
+    node bin/loop.js plan --goal <prose-or-file> --target <folder> --out <folder> [--rounds N] [--planner-model MODEL] [--verifier-model MODEL] [--arbiter-model MODEL] [--dry-run]
 
 For an ordered queue whose approved units should land in the current clean Git worktree:
 
@@ -212,7 +224,7 @@ locally and never pushes.
 
 For flag-declared Parallel, Candidates, Rounds, or a simple Graph:
 
-    node bin/loop.js batch --task <plan-1> --task <plan-2> --target <folder> --gate <gate.json> [--concurrency N] [--token-budget TOKENS] [--rounds 1|2|3] [--round N ...] [--unit-kind candidate|node|merge] [--unit-id ID ...] [--perspective NAME ...] [--depends-on CHILD=PARENT ...] [--port PORT] [--open] [--no-dashboard] [--quiet]
+    node bin/loop.js batch --task <plan-1> --task <plan-2> --target <folder> --gate <gate.json> [--arbiter-model MODEL] [--arbiter-timeout MS] [--concurrency N] [--token-budget TOKENS] [--rounds 1|2|3] [--round N ...] [--unit-kind candidate|node|merge] [--unit-id ID ...] [--perspective NAME ...] [--depends-on CHILD=PARENT ...] [--port PORT] [--open] [--no-dashboard] [--quiet]
 
 Candidates share one base, reject dependencies, and retain each attributed result without
 choosing a winner. Rounds use two or three caller-authored candidate sets, the same campaign
@@ -229,6 +241,8 @@ Use `status` or the read-only `dashboard` to observe a run, `publish` only after
   `queue` is the explicit exception that applies and commits fully approved diffs.
 - Cursor performs correctness and intent/assertion verification in read-only plan mode, only
   when the gate passed and the diff is non-empty.
+- Claude arbitrates findings, challenges, and pivots in read-only plan permission mode. Its
+  usage is recorded separately in run facts and included in total usage.
 - Output is `uro-runfacts.json`, `uro-report.md`, `events.jsonl`, and, for changed work,
   `CHANGES.diff` in the isolated directory and the per-run durable artifact directory.
 - Outcomes include `review-ready`, `no-op`, `gate-failed`, `verifier-failed`, `timed-out`, and

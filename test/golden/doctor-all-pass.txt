@@ -8,6 +8,8 @@ PASS [required] Codex CLI installed: {{CODEX_BIN}} was found; write ability is r
 PASS [required] Codex signed in: `codex login status` exited 0
 PASS [required] Cursor agent installed: {{AGENT_BIN}} was found; read ability is reported separately
 PASS [required] Cursor signed in: `agent status` exited 0
+PASS [required] Claude CLI installed: {{CLAUDE_BIN}} was found; arbitration is read-only
+PASS [required] Claude signed in: `claude auth status` exited 0
 PASS [required] Scratch root location: {{SCRATCH_ROOT}} is outside AppData and OneDrive
 PASS [required] Scratch root writable: {{SCRATCH_ROOT}} accepted a disposable write
 PASS [required] Codex superpowers: Codex: `codex plugin list` reports superpowers@openai-curated  installed, enabled  6.3.0  C:/fake/superpowers; version 6.3.0

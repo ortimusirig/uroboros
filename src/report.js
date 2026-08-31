@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { reportEvent } from './events.js';
 import { DEFAULT_EXECUTOR_EFFORT, DEFAULT_EXECUTOR_MODEL } from './executor.js';
 import { DEFAULT_VERIFIER_MODEL } from './verifier.js';
+import { DEFAULT_ARBITER_MODEL } from './arbiter.js';
 import { addUsage, EMPTY_USAGE } from './usage.js';
 
 export function buildRunFacts({
@@ -63,6 +64,7 @@ export function buildRunFacts({
       executor: models?.executor ?? DEFAULT_EXECUTOR_MODEL,
       executorEffort: models?.executorEffort ?? DEFAULT_EXECUTOR_EFFORT,
       verifier: models?.verifier ?? DEFAULT_VERIFIER_MODEL,
+      arbiter: models?.arbiter ?? DEFAULT_ARBITER_MODEL,
     },
     skills: skills ?? null,
     superpowers: superpowers ?? null,
@@ -71,6 +73,7 @@ export function buildRunFacts({
       timeoutsMs: {
         executor: timeouts.executor ?? null,
         verifier: timeouts.verifier ?? null,
+        arbiter: timeouts.arbiter ?? timeouts.verifier ?? null,
         gate: timeouts.gate ?? null,
       },
     },
@@ -93,6 +96,7 @@ export function buildRunFacts({
     tokens: {
       executor: addUsage(EMPTY_USAGE, tokens?.executor),
       verifier: addUsage(EMPTY_USAGE, tokens?.verifier),
+      arbiter: addUsage(EMPTY_USAGE, tokens?.arbiter),
       total: addUsage(EMPTY_USAGE, tokens?.total),
     },
     usageConsistency: usageConsistency ?? null,
@@ -167,12 +171,14 @@ function tokenLines(facts, style) {
       '| --- | ---: | ---: | ---: | ---: | ---: |',
       tokenTableRow('Executor', facts.tokens?.executor),
       tokenTableRow('Verifier', facts.tokens?.verifier),
+      tokenTableRow('Arbiter', facts.tokens?.arbiter),
       tokenTableRow('Total', facts.tokens?.total),
     ];
   }
   return [
     `- **Executor:** ${formatUsage(facts.tokens?.executor)}`,
     `- **Verifier:** ${formatUsage(facts.tokens?.verifier)}`,
+    `- **Arbiter:** ${formatUsage(facts.tokens?.arbiter)}`,
     `- **Total:** ${formatUsage(facts.tokens?.total)}`,
   ];
 }
@@ -266,7 +272,7 @@ export function buildReportMarkdown(facts, {
         ]
       : []),
     ...(configuredTimeouts && Object.values(configuredTimeouts).some((value) => value !== null)
-      ? [`- **Timeouts (ms):** executor ${configuredTimeouts.executor}; verifier ${configuredTimeouts.verifier}; gate ${configuredTimeouts.gate}`]
+      ? [`- **Timeouts (ms):** executor ${configuredTimeouts.executor}; verifier ${configuredTimeouts.verifier}; arbiter ${configuredTimeouts.arbiter}; gate ${configuredTimeouts.gate}`]
       : []),
     ...(facts.limits?.stall
       ? [

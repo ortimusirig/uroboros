@@ -17,7 +17,7 @@ const EXECUTOR_EFFORTS = new Set([
 const RUN_MODES = new Set(['manual', 'autonomous']);
 const UNIT_KIND_SET = new Set(UNIT_KINDS);
 const STAGE_TIMEOUT_FLAGS = new Set([
-  '--executor-timeout', '--verifier-timeout', '--gate-timeout',
+  '--executor-timeout', '--verifier-timeout', '--arbiter-timeout', '--gate-timeout',
 ]);
 
 // This is the single source of truth for the batch flag surface and its precedence class.
@@ -32,8 +32,10 @@ export const BATCH_FLAG_DEFINITIONS = Object.freeze({
   'executor-model': Object.freeze({ type: 'string', scope: 'campaign' }),
   'executor-effort': Object.freeze({ type: 'string', scope: 'campaign' }),
   'verifier-model': Object.freeze({ type: 'string', scope: 'campaign' }),
+  'arbiter-model': Object.freeze({ type: 'string', scope: 'campaign' }),
   'executor-timeout': Object.freeze({ type: 'string', scope: 'invocation' }),
   'verifier-timeout': Object.freeze({ type: 'string', scope: 'invocation' }),
+  'arbiter-timeout': Object.freeze({ type: 'string', scope: 'invocation' }),
   'gate-timeout': Object.freeze({ type: 'string', scope: 'invocation' }),
   'artifact-root': Object.freeze({ type: 'string', scope: 'invocation' }),
   concurrency: Object.freeze({ type: 'string', scope: 'campaign' }),
@@ -97,6 +99,7 @@ function assignStageTimeouts(parsed, values) {
   for (const [flag, property] of [
     ['executor-timeout', 'executorTimeout'],
     ['verifier-timeout', 'verifierTimeout'],
+    ['arbiter-timeout', 'arbiterTimeout'],
     ['gate-timeout', 'gateTimeout'],
   ]) {
     if (values[flag] !== undefined) {
@@ -252,6 +255,8 @@ export function parseArgs(argv) {
         out: { type: 'string' },
         rounds: { type: 'string' },
         'planner-model': { type: 'string' },
+        'verifier-model': { type: 'string' },
+        'arbiter-model': { type: 'string' },
         'dry-run': { type: 'boolean' },
       },
       allowPositionals: false,
@@ -269,6 +274,8 @@ export function parseArgs(argv) {
         rounds: strictInt(values.rounds, undefined, 1, Number.MAX_SAFE_INTEGER),
       }),
       ...(values['planner-model'] === undefined ? {} : { plannerModel: values['planner-model'] }),
+      ...(values['verifier-model'] === undefined ? {} : { verifierModel: values['verifier-model'] }),
+      ...(values['arbiter-model'] === undefined ? {} : { arbiterModel: values['arbiter-model'] }),
       dryRun: values['dry-run'] === true,
     };
   }
@@ -352,8 +359,10 @@ export function parseArgs(argv) {
       'executor-model': { type: 'string' },
       'executor-effort': { type: 'string' },
       'verifier-model': { type: 'string' },
+      'arbiter-model': { type: 'string' },
       'executor-timeout': { type: 'string' },
       'verifier-timeout': { type: 'string' },
+      'arbiter-timeout': { type: 'string' },
       'gate-timeout': { type: 'string' },
       'artifact-root': { type: 'string' },
       mode: { type: 'string' },
@@ -399,6 +408,7 @@ export function parseArgs(argv) {
       executorModel: values['executor-model'],
       executorEffort,
       verifierModel: values['verifier-model'],
+      arbiterModel: values['arbiter-model'],
       ...(values['artifact-root'] === undefined ? {} : { artifactRoot: values['artifact-root'] }),
     };
     if (values.mode !== undefined) parsed.mode = values.mode;
@@ -526,6 +536,7 @@ export function parseArgs(argv) {
     executorModel: values['executor-model'],
     executorEffort,
     verifierModel: values['verifier-model'],
+    arbiterModel: values['arbiter-model'],
     ...(values['artifact-root'] === undefined ? {} : { artifactRoot: values['artifact-root'] }),
     concurrency: strictInt(values.concurrency, DEFAULT_CONCURRENCY, 1, MAX_CONCURRENCY),
     tokenBudget: strictInt(

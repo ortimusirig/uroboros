@@ -15,6 +15,7 @@ import { UNIT_KINDS } from './events.js';
 
 const TOP_LEVEL_KEYS = new Set([
   'target', 'gate', 'gateRetries', 'concurrency', 'tokenBudget', 'rounds',
+  'arbiterModel',
   'executorModel', 'executorEffort', 'verifierModel', 'units',
 ]);
 const UNIT_KEYS = new Set([
@@ -228,7 +229,7 @@ export function loadCampaignFile(file) {
   positiveInteger(tokenBudget, 'tokenBudget');
   const gateRetries = document.gateRetries ?? 2;
   boundedInteger(gateRetries, 'gateRetries', 0, 3);
-  for (const field of ['executorModel', 'verifierModel']) {
+  for (const field of ['executorModel', 'verifierModel', 'arbiterModel']) {
     if (document[field] !== undefined && typeof document[field] !== 'string') {
       throw new TypeError(`${field} must be a string`);
     }
@@ -250,6 +251,7 @@ export function loadCampaignFile(file) {
     executorModel: document.executorModel,
     executorEffort: document.executorEffort,
     verifierModel: document.verifierModel,
+    arbiterModel: document.arbiterModel,
     concurrency,
     tokenBudget,
   };

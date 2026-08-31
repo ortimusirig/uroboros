@@ -20,6 +20,7 @@ import {
 import { VERIFIED_SUPERPOWERS, withVerifiedSuperpowers } from '../fixtures/verified-superpowers.mjs';
 import { PIVOT_CONCLUDE, PIVOT_FRESH } from '../src/debate.js';
 import { EMPTY_USAGE } from '../src/usage.js';
+import { DEFAULT_ARBITER_MODEL } from '../src/arbiter.js';
 import {
   DEFAULT_PROMPT,
   DEFAULT_VERIFIER_MODEL,
@@ -158,6 +159,7 @@ test('executor retries accumulate usage and model overrides reach both agents an
   assert.deepEqual(verifierCalls.map((call) => call.prompt), [DEFAULT_PROMPT, INTENT_PROMPT]);
   assert.deepEqual(facts.model, {
     executor: 'executor-override', executorEffort: 'medium', verifier: 'verifier-override',
+    arbiter: DEFAULT_ARBITER_MODEL,
   });
   assert.deepEqual(facts.iterations[0].executorUsage, {
     inputTokens: 30, cachedInputTokens: 15, outputTokens: 5,
@@ -168,6 +170,7 @@ test('executor retries accumulate usage and model overrides reach both agents an
       reasoningOutputTokens: 3, cacheWriteTokens: 1 },
     verifier: { inputTokens: 18, cachedInputTokens: 9, outputTokens: 14,
       reasoningOutputTokens: 0, cacheWriteTokens: 5 },
+    arbiter: EMPTY_USAGE,
     total: { inputTokens: 48, cachedInputTokens: 24, outputTokens: 19,
       reasoningOutputTokens: 3, cacheWriteTokens: 6 },
   });
@@ -317,6 +320,7 @@ test('omitted model flags travel through the CLI path to both agents and run-fac
     executor: DEFAULT_EXECUTOR_MODEL,
     executorEffort: DEFAULT_EXECUTOR_EFFORT,
     verifier: DEFAULT_VERIFIER_MODEL,
+    arbiter: DEFAULT_ARBITER_MODEL,
   });
   assert.equal(facts.skills, VERIFIED_SUPERPOWERS.seats.cursor.path);
   assert.deepEqual(facts.superpowers, VERIFIED_SUPERPOWERS);

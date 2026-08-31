@@ -20,6 +20,14 @@ import {
   shouldPivot,
 } from './debate.js';
 import { buildFixPlan, validateFindings } from './fix-plan.js';
+import {
+  ARBITER_UNVERIFIED,
+  buildArbiterPrompt,
+  DEFAULT_ARBITER_MODEL,
+  parseCapabilityJudgement,
+  parsePivotJudgement,
+  runArbiter,
+} from './arbiter.js';
 import { reportEvent } from './events.js';
 import { runExecutor } from './executor.js';
 import { runPlanGate } from './plan-gate.js';
@@ -182,6 +190,148 @@ async function productionReview({
   return { content: result.findings ?? '', verdict: result.verdict, usage: result.usage };
 }
 
+function capabilityPrompt({ seat, plan, remedyOnly = false, previousAnswer }) {
+  return buildArbiterPrompt({
+    type: 'capability', seat, plan, remedyOnly, previousAnswer,
+  }).replace('# Claude arbiter seat', `# ${seat} capability seat`);
+}
+
+async function productionCapability({
+  seat,
+  prompt,
+  target,
+  plannerModel,
+  verifierModel,
+  arbiterModel,
+  executorTimeout,
+  verifierTimeout,
+  arbiterTimeout,
+  runId,
+  env,
+  home,
+  superpowersDir,
+}) {
+  if (seat === 'executor') {
+    const result = await runExecutor({
+      plan: prompt, cwd: target, model: plannerModel, sandbox: 'read-only',
+      timeoutMs: executorTimeout, runId, env,
+    });
+    return result.exitCode === 0 && !result.timedOut
+      ? result.lastMessage
+      : { verdict: ARBITER_UNVERIFIED };
+  }
+  if (seat === 'reviewer') {
+    const verifierPrompt = prompt
+      .replace(
+        'Return exactly one JSON object and no prose.',
+        'Return one JSON object followed only by the required final verdict marker.',
+      )
+      .replaceAll('"', "'")
+      .replace(/[\r\n]+/g, ' ');
+    const result = await runVerifier({
+      cwd: target,
+      prompt: `${verifierPrompt} End with exactly NO_BLOCKERS.`,
+      model: verifierModel,
+      timeoutMs: verifierTimeout,
+      pass: 'capability',
+      env,
+      home,
+      superpowersDir,
+    });
+    return result.launchFailed || result.timedOut
+      ? { verdict: ARBITER_UNVERIFIED }
+      : result.findings;
+  }
+  return runArbiter({
+    cwd: target,
+    request: { type: 'capability', seat, plan: prompt },
+    prompt,
+    model: arbiterModel,
+    timeoutMs: arbiterTimeout,
+    runId,
+    env,
+  });
+}
+
+async function capabilityVetoes({
+  plan,
+  checkCapability,
+  context,
+  reporter,
+  runId,
+  planRound,
+}) {
+  if (typeof checkCapability !== 'function') return [];
+  const vetoes = [];
+  for (const seat of ['executor', 'reviewer', 'arbiter']) {
+    const firstPrompt = capabilityPrompt({ seat, plan });
+    const first = await checkCapability({ ...context, seat, plan, prompt: firstPrompt });
+    let judgement = parseCapabilityJudgement(first);
+    if (judgement.verdict !== 'answered' || judgement.capable !== false) continue;
+    const answers = [first];
+    if (!judgement.complete) {
+      const prompt = capabilityPrompt({
+        seat, plan, remedyOnly: true, previousAnswer: first,
+      });
+      const second = await checkCapability({
+        ...context,
+        seat,
+        plan,
+        prompt,
+        remedyOnly: true,
+        previousAnswer: first,
+      });
+      answers.push(second);
+      const supplement = parseCapabilityJudgement(second);
+      if (supplement.verdict === 'answered' && supplement.capable === false) {
+        judgement = {
+          ...judgement,
+          what: supplement.what || judgement.what,
+          why: supplement.why || judgement.why,
+          alternative: supplement.alternative || judgement.alternative,
+        };
+        judgement.complete = Boolean(judgement.what && judgement.why && judgement.alternative);
+      } else {
+        const alternative = typeof second === 'string'
+          ? second.trim()
+          : typeof second?.alternative === 'string' ? second.alternative.trim()
+            : typeof second?.answer === 'string' ? second.answer.trim() : '';
+        if (alternative) {
+          judgement = { ...judgement, alternative, complete: Boolean(judgement.what && judgement.why) };
+        }
+      }
+    }
+    const veto = { seat, ...judgement, answers };
+    vetoes.push(veto);
+    reportEvent(reporter, runId, 'capability', 'vetoed', {
+      planRound,
+      seat,
+      what: veto.what,
+      why: veto.why,
+      alternative: veto.alternative,
+      complete: veto.complete,
+      answers,
+    });
+  }
+  return vetoes;
+}
+
+function vetoFeedback(vetoes) {
+  return [
+    '# Capability veto remedies',
+    '',
+    'The previous draft cannot proceed. Redraft it around each seat-authoritative remedy.',
+    '',
+    ...vetoes.flatMap((veto) => [
+      `## ${veto.seat}`,
+      `Cannot do: ${veto.what}`,
+      `Limitation: ${veto.why}`,
+      `Use instead: ${veto.alternative || 'No complete alternative was supplied; find a compatible mechanism.'}`,
+      '',
+    ]),
+  ].join('\n');
+}
+
 function normalizeDraft(value) {
   if (value && typeof value === 'object' && typeof value.plan === 'string') {
     let gate = value.gate;
@@ -253,9 +403,11 @@ export async function runPlan({
   rounds,
   plannerModel,
   verifierModel,
+  arbiterModel = DEFAULT_ARBITER_MODEL,
   gateTimeout = resolveStageTimeouts().gate,
   executorTimeout = resolveStageTimeouts().executor,
   verifierTimeout = resolveStageTimeouts().verifier,
+  arbiterTimeout = resolveStageTimeouts().arbiter,
   dryRun = false,
   runId = `plan-${randomUUID()}`,
   reporter,
@@ -290,13 +442,52 @@ export async function runPlan({
 
   const draft = adapters.draft ?? productionDraft;
   const reviewPlan = adapters.review ?? productionReview;
+  const runArbiterSeat = adapters.runArbiter
+    ?? (adapters.draft === undefined ? runArbiter : null);
+  const checkCapability = adapters.checkCapability
+    ?? adapters.capabilityCheck
+    ?? (adapters.draft === undefined && adapters.review === undefined
+      ? productionCapability
+      : null);
   const checkGate = adapters.runPlanGate ?? runPlanGate;
   const ledger = new DebateLedger();
   let previousPlan = '';
   let feedback = '';
   let pivotInstruction = '';
   let pivotCount = 0;
+  const pivotHistory = [];
+  const capabilityHistory = [];
   let lastGate = null;
+
+  const arbitrate = async (arbiterRequest) => {
+    if (typeof runArbiterSeat !== 'function') {
+      return { verdict: ARBITER_UNVERIFIED, unavailable: true };
+    }
+    const injected = adapters.runArbiter !== undefined;
+    if (injected) reportEvent(reporter, runId, 'arbiter', 'start', {
+      model: arbiterModel, judgement: arbiterRequest.type,
+    });
+    let result;
+    try {
+      result = await runArbiterSeat({
+        cwd: request.target,
+        request: arbiterRequest,
+        prompt: buildArbiterPrompt(arbiterRequest),
+        model: arbiterModel,
+        timeoutMs: arbiterTimeout,
+        runId,
+        env,
+        reporter: injected ? undefined : reporter,
+      });
+    } catch {
+      result = { verdict: ARBITER_UNVERIFIED };
+    }
+    if (injected) reportEvent(reporter, runId, 'arbiter', 'finish', {
+      verdict: result?.verdict ?? (result ? 'ANSWERED' : ARBITER_UNVERIFIED),
+      judgement: arbiterRequest.type,
+    });
+    return result;
+  };
 
   for (let round = 1; rounds === undefined || round <= rounds; round++) {
     const input = draftingPrompt({
@@ -376,16 +567,57 @@ export async function runPlan({
       findings = gateFindings(gateResult.failures ?? []);
     }
     const blocking = findings.filter((finding) => finding.severity === 'blocking');
-    ledger.record(round, findings.map((finding) => finding.id));
+    const validation = blocking.length === 0
+      ? { accepted: [], rejected: [], judgements: [] }
+      : await validateFindings(blocking, {
+          arbiter: arbitrate,
+          diff: `PLAN\n${artifact.plan}\nGATE\n${JSON.stringify(artifact.gate)}`,
+          plan: request.goal,
+          reporter,
+          runId,
+          debateRound: round,
+        });
+    const survivingIds = new Set(validation.accepted);
+    const surviving = blocking.filter((finding) => survivingIds.has(finding.id));
+    ledger.record(round, surviving.map((finding) => finding.id));
     reportEvent(reporter, runId, 'plan', 'round', {
       planRound: round,
       gatePassed: gateResult.passed === true,
       reviewed,
       findingIds: findings.map((finding) => finding.id),
       blockingFindingIds: blocking.map((finding) => finding.id),
+      acceptedFindingIds: validation.accepted,
+      rejectedFindingIds: validation.rejected,
     });
 
-    if (gateResult.passed === true && blocking.length === 0) {
+    if (gateResult.passed === true && surviving.length === 0) {
+      const vetoes = await capabilityVetoes({
+        plan: artifact.plan,
+        checkCapability,
+        context: {
+          target: request.target,
+          plannerModel,
+          verifierModel,
+          arbiterModel,
+          executorTimeout,
+          verifierTimeout,
+          arbiterTimeout,
+          runId,
+          env,
+          home,
+          superpowersDir: cursorSuperpowersDir,
+        },
+        reporter,
+        runId,
+        planRound: round,
+      });
+      if (vetoes.length > 0) {
+        capabilityHistory.push({ round, vetoes });
+        previousPlan = artifact.plan;
+        feedback = vetoFeedback(vetoes);
+        pivotInstruction = '';
+        continue;
+      }
       const paths = writeArtifacts(request.out, artifact.plan, artifact.gate);
       reportEvent(reporter, runId, 'plan', 'converged', {
         planRound: round, suggestions: findings.length,
@@ -398,6 +630,8 @@ export async function runPlan({
         rounds: round,
         target: request.target,
         out: request.out,
+        capabilityVetoes: capabilityHistory,
+        pivotHistory,
         ...paths,
       };
       reportEvent(reporter, runId, 'plan', 'finish', {
@@ -406,7 +640,6 @@ export async function runPlan({
       return result;
     }
 
-    const validation = validateFindings(blocking);
     feedback = buildFixPlan({
       findings: blocking,
       accepted: validation.accepted,
@@ -416,11 +649,29 @@ export async function runPlan({
     previousPlan = artifact.plan;
     pivotInstruction = '';
     if (detectCircling(ledger)) {
-      const decision = shouldPivot(pivotCount++);
+      const pivotJudgement = parsePivotJudgement(await arbitrate({
+        type: 'pivot',
+        ledger: Array.from({ length: ledger.currentRound }, (_, index) => ({
+          round: index + 1, findingIds: ledger.round(index + 1),
+        })),
+        recurringFindings: surviving.filter((finding) => ledger.stuckFindings().has(finding.id)),
+        attempted: pivotHistory,
+        plan: artifact.plan,
+      }));
+      const unjudged = pivotJudgement.verdict !== 'answered';
+      const decision = unjudged ? shouldPivot(pivotCount) : pivotJudgement.decision;
+      pivotCount++;
+      pivotHistory.push({
+        decision,
+        unjudged,
+        ...(pivotJudgement.reason ? { reason: pivotJudgement.reason } : {}),
+      });
       if (decision === PIVOT_CONCLUDE) {
         const result = {
           runId, dryRun: false, converged: false, reason: 'pivot-conclude', rounds: round,
           target: request.target, out: request.out, gate: lastGate,
+          capabilityVetoes: capabilityHistory,
+          pivotHistory,
         };
         reportEvent(reporter, runId, 'plan', 'finish', {
           converged: false, reason: result.reason, rounds: round, pivot: decision,
@@ -443,6 +694,8 @@ export async function runPlan({
     target: request.target,
     out: request.out,
     gate: lastGate,
+    capabilityVetoes: capabilityHistory,
+    pivotHistory,
   };
   reportEvent(reporter, runId, 'plan', 'finish', {
     converged: false, reason: result.reason, rounds,

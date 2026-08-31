@@ -59,6 +59,14 @@ import {
 import { detectReview, parseReview, REVIEW_DIR } from './review.js';
 import { buildFixPlan, validateFindings } from './fix-plan.js';
 import {
+  ARBITER_UNVERIFIED,
+  buildArbiterPrompt,
+  DEFAULT_ARBITER_MODEL,
+  parsePivotJudgement,
+  runArbiter as realArbiter,
+} from './arbiter.js';
+import { createAutonomousDecisionResolver } from './decision-resolver.js';
+import {
   captureReviewSnapshot,
   restoreReviewSnapshot,
   runProtectedOperation,
@@ -284,8 +292,10 @@ export async function run(opts) {
     executorEffort = DEFAULT_EXECUTOR_EFFORT,
     verifierModel = DEFAULT_VERIFIER_MODEL,
     verifierBin = 'agent', verifierProbeCompleted = false,
+    arbiterModel = DEFAULT_ARBITER_MODEL,
+    arbiterBin = 'claude',
     mode = 'manual', decisionResolver, challengeRounds = 2,
-    debateRounds,
+    debateRounds, tokenBudget,
     adapters = {}, reporter,
   } = opts;
   const physicalRunId = physicalRunIdFor(runId);
@@ -294,6 +304,10 @@ export async function run(opts) {
   }
   if (!Number.isInteger(challengeRounds) || challengeRounds < 1) {
     throw new Error(`invalid challengeRounds: ${challengeRounds}; expected a positive integer`);
+  }
+  if (tokenBudget !== undefined
+    && (!Number.isSafeInteger(tokenBudget) || tokenBudget < 1)) {
+    throw new Error('tokenBudget must be a positive safe integer');
   }
   const maxChallengeRounds = Math.min(challengeRounds, 2);
   const runExecutor = adapters.runExecutor ?? realExecutor;
@@ -306,6 +320,10 @@ export async function run(opts) {
   const createDiff = adapters.diffText ?? diffText;
   const detectDebateCircling = adapters.detectCircling ?? detectCircling;
   const selectPivot = adapters.shouldPivot ?? shouldPivot;
+  // Injected executor runs are test/embedding seams. They must opt into an arbiter
+  // explicitly, so an otherwise hermetic test can never launch the real Claude CLI.
+  const runArbiterSeat = adapters.runArbiter
+    ?? (adapters.runExecutor === undefined ? realArbiter : null);
   const runEnvironment = opts.env ?? process.env;
   const verifySuperpowers = adapters.verifySuperpowers ?? verifySuperpowersSeats;
   const verification = opts.superpowers?.seats
@@ -482,6 +500,7 @@ export async function run(opts) {
   let outcome = 'gate-failed';
   let executorUsage = EMPTY_USAGE;
   let verifierUsage = EMPTY_USAGE;
+  let arbiterUsage = EMPTY_USAGE;
   const usageChecks = [];
   let gateFailure = null;
   const timeoutEvents = [];
@@ -493,6 +512,7 @@ export async function run(opts) {
   let debateCirclingDetected = false;
   let debatePivotCount = 0;
   let finalPivotDecision = null;
+  const pivotHistory = [];
   let debateStopReason = 'not-started';
   const accumulatedReviewTests = new Set();
   const reviewerRestorations = [];
@@ -534,6 +554,58 @@ export async function run(opts) {
     const consistency = annotated?.usageConsistency ?? checkUsageConsistency(result?.usage);
     usageChecks.push({ ...context, ...consistency });
     return annotated;
+  };
+  const arbitrate = async (request) => {
+    if (typeof runArbiterSeat !== 'function') {
+      return { verdict: ARBITER_UNVERIFIED, answer: '', unavailable: true };
+    }
+    const injected = adapters.runArbiter !== undefined;
+    if (injected) {
+      reportEvent(eventReporter, runId, 'arbiter', 'start', {
+        bin: arbiterBin, model: arbiterModel, judgement: request.type,
+      });
+    }
+    let result;
+    try {
+      result = await runArbiterSeat({
+        cwd: iso.dir,
+        request,
+        prompt: buildArbiterPrompt(request),
+        bin: arbiterBin,
+        model: arbiterModel,
+        timeoutMs: stageTimeouts.arbiter,
+        env: runEnvironment,
+        reporter: injected ? undefined : eventReporter,
+        runId,
+      });
+    } catch (error) {
+      result = {
+        verdict: ARBITER_UNVERIFIED,
+        answer: '',
+        launchFailed: true,
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
+    if (result?.usage !== undefined) {
+      result = observeUsage(result, { seat: 'arbiter', judgement: request.type, iteration: n });
+      arbiterUsage = addUsage(arbiterUsage, result.usage);
+    }
+    if (result?.timedOut) {
+      timeoutEvents.push({
+        stage: 'arbiter', judgement: request.type, iteration: n,
+        timeoutMs: result.timeoutMs ?? stageTimeouts.arbiter,
+      });
+    }
+    if (injected) {
+      reportEvent(eventReporter, runId, 'arbiter', 'finish', {
+        code: result?.exitCode ?? null,
+        verdict: result?.verdict ?? (result ? 'ANSWERED' : ARBITER_UNVERIFIED),
+        timedOut: result?.timedOut === true,
+        judgement: request.type,
+        ...(result?.usage === undefined ? {} : { tokens: result.usage }),
+      });
+    }
+    return result ?? { verdict: ARBITER_UNVERIFIED, answer: '' };
   };
   let iterationExecutorUsage = EMPTY_USAGE;
   const executePlan = async (basePlan) => {
@@ -698,6 +770,10 @@ export async function run(opts) {
   let decision = null;
   let resolvedDecision = null;
   let assumedDecision = null;
+  const effectiveDecisionResolver = decisionResolver
+    ?? (mode === 'autonomous'
+      ? createAutonomousDecisionResolver({ arbiter: arbitrate })
+      : null);
   const routeChallenges = async () => {
     while (!executorTimedOut && !conflictingIntent && mergePreparationFailure === null) {
       const challenge = detectChallenge({ dir: iso.dir });
@@ -714,13 +790,13 @@ export async function run(opts) {
         questions: challenge.questions,
       });
       if (mode !== 'autonomous'
-        || typeof decisionResolver !== 'function'
+        || typeof effectiveDecisionResolver !== 'function'
         || challengeRound >= maxChallengeRounds) {
         decision = { questions: challenge.questions, mode, challengeRound };
         break;
       }
 
-      const resolution = await decisionResolver({
+      const resolution = await effectiveDecisionResolver({
         questions: challenge.questions,
         plan,
         task: originalPlan,
@@ -901,6 +977,13 @@ export async function run(opts) {
     } else {
       let debateRound = 0;
       while (true) {
+        const consumedBeforeRound = addUsage(addUsage(executorUsage, verifierUsage), arbiterUsage);
+        if (tokenBudget !== undefined
+          && consumedBeforeRound.inputTokens + consumedBeforeRound.outputTokens >= tokenBudget) {
+          outcome = 'needs-pivot';
+          debateStopReason = 'token-budget';
+          break;
+        }
         debateRound++;
         let reviewer = { launchFailed: false, timedOut: false, skipped: true };
         if (runReview !== null) {
@@ -1024,15 +1107,15 @@ export async function run(opts) {
         const suggestionFindings = findings.filter((finding) => finding.severity === 'suggestion');
         const findingIds = findings.map((finding) => finding.id);
         const blockingFindingIds = blockingFindings.map((finding) => finding.id);
-        debateLedger.record(debateRound, blockingFindingIds);
-        debateRoundHistory.push({
+        const roundRecord = {
           round: debateRound,
           findingIds,
           blockingFindingIds,
           suggestionFindingIds: suggestionFindings.map((finding) => finding.id),
           findings: findings.map((finding) => ({ ...finding })),
           verdict,
-        });
+        };
+        debateRoundHistory.push(roundRecord);
         reportEvent(eventReporter, runId, 'debate', 'round', {
           debateRound,
           findingIds,
@@ -1041,7 +1124,6 @@ export async function run(opts) {
           verdict,
         });
         iterations.push(iter);
-        const circling = detectDebateCircling(debateLedger);
 
         const reviewOutcome = reviewer.timedOut
           ? 'timed-out'
@@ -1060,9 +1142,29 @@ export async function run(opts) {
           break;
         }
 
-        if (blockingFindings.length === 0) {
+        const validation = blockingFindings.length === 0
+          ? { accepted: [], rejected: [], judgements: [] }
+          : await validateFindings(blockingFindings, {
+              arbiter: arbitrate,
+              diff,
+              plan,
+              reporter: eventReporter,
+              runId,
+              debateRound,
+            });
+        const acceptedFindingIds = validation.accepted;
+        const acceptedIdSet = new Set(acceptedFindingIds);
+        const acceptedFindings = blockingFindings.filter((finding) => acceptedIdSet.has(finding.id));
+        roundRecord.acceptedFindingIds = [...acceptedFindingIds];
+        roundRecord.rejectedFindingIds = [...validation.rejected];
+        roundRecord.arbiterJudgements = (validation.judgements ?? []).map((item) => ({ ...item }));
+        debateLedger.record(debateRound, acceptedFindingIds);
+        const circling = detectDebateCircling(debateLedger);
+
+        if (acceptedFindings.length === 0) {
+          const allBlockingOverruled = blockingFindings.length > 0;
           let convergenceGateRetries = 0;
-          if (accumulatedReviewTests.size > 0) {
+          if (!allBlockingOverruled && accumulatedReviewTests.size > 0) {
             gateResult = await runGate({
               commands: gateCommands(), cwd: iso.dir, timeoutMs: stageTimeouts.gate,
               reporter: eventReporter, runId, attempt: 1,
@@ -1071,7 +1173,7 @@ export async function run(opts) {
             iter.gate = gateResult;
             recordGateTimeout(gateResult, n, 1);
           }
-          while (accumulatedReviewTests.size > 0
+          while (!allBlockingOverruled && accumulatedReviewTests.size > 0
             && decision === null && !executorTimedOut && !conflictingIntent
             && mergePreparationFailure === null && !gateResult.passed
             && convergenceGateRetries < gateRetries) {
@@ -1144,6 +1246,7 @@ export async function run(opts) {
           reportEvent(eventReporter, runId, 'debate', 'converged', {
             debateRound,
             resolvedFindingIds: [...debateLedger.resolvedFindings()],
+            overruledFindingIds: [...validation.rejected],
             suggestionFindingIds: suggestionFindings.map((finding) => finding.id),
           });
           break;
@@ -1151,7 +1254,7 @@ export async function run(opts) {
 
         reportEvent(eventReporter, runId, 'debate', 'resist', {
           debateRound,
-          findingIds: blockingFindingIds,
+          findingIds: acceptedFindingIds,
         });
 
         let amendPlan = false;
@@ -1162,7 +1265,22 @@ export async function run(opts) {
             debateRound,
             stuckFindingIds,
           });
-          const pivotDecision = selectPivot(debatePivotCount);
+          const pivotJudgement = parsePivotJudgement(await arbitrate({
+            type: 'pivot',
+            ledger: Array.from({ length: debateLedger.currentRound }, (_, index) => ({
+              round: index + 1,
+              findingIds: debateLedger.round(index + 1),
+            })),
+            recurringFindings: acceptedFindings.filter(
+              (finding) => stuckFindingIds.includes(finding.id),
+            ),
+            attempted: pivotHistory,
+            plan,
+          }));
+          const unjudged = pivotJudgement.verdict !== 'answered';
+          const pivotDecision = unjudged
+            ? selectPivot(debatePivotCount)
+            : pivotJudgement.decision;
           if (![PIVOT_AMEND, PIVOT_FRESH, PIVOT_CONCLUDE].includes(pivotDecision)) {
             throw new Error(`invalid debate pivot decision: ${pivotDecision}`);
           }
@@ -1176,11 +1294,17 @@ export async function run(opts) {
           }
           finalPivotDecision = pivotDecision;
           debatePivotCount++;
+          pivotHistory.push({
+            decision: pivotDecision,
+            unjudged,
+            ...(pivotJudgement.reason ? { reason: pivotJudgement.reason } : {}),
+          });
           reportEvent(eventReporter, runId, 'debate', 'pivot', {
             debateRound,
             decision: pivotDecision,
             pivotCount: debatePivotCount,
             stuckFindingIds,
+            ...(unjudged ? { unjudged: true } : { judged: true, reason: pivotJudgement.reason }),
           });
           if (pivotDecision === PIVOT_FRESH || pivotDecision === PIVOT_CONCLUDE) {
             outcome = 'needs-pivot';
@@ -1196,7 +1320,6 @@ export async function run(opts) {
           break;
         }
 
-        const validation = validateFindings(blockingFindings);
         let fixPlan = buildFixPlan({
           findings: blockingFindings,
           accepted: validation.accepted,
@@ -1324,7 +1447,8 @@ export async function run(opts) {
   const tokens = {
     executor: executorUsage,
     verifier: verifierUsage,
-    total: addUsage(executorUsage, verifierUsage),
+    arbiter: arbiterUsage,
+    total: addUsage(addUsage(executorUsage, verifierUsage), arbiterUsage),
   };
   const usageConsistency = summarizeUsageConsistency(usageChecks);
   const blockingOccurrences = new Map();
@@ -1361,6 +1485,7 @@ export async function run(opts) {
     circlingDetected: debateCirclingDetected,
     pivotCount: debatePivotCount,
     finalPivotDecision,
+    pivotHistory: pivotHistory.map((item) => ({ ...item })),
     stopReason: debateStopReason,
     ledger: {
       rounds: ledgerHistory,
@@ -1444,6 +1569,7 @@ export async function run(opts) {
       executor: executorModel,
       executorEffort,
       verifier: verifierModel,
+      arbiter: arbiterModel,
     },
     skills: cursorSuperpowersDir,
     superpowers,

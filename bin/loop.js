@@ -21,7 +21,6 @@ import {
   launchDashboard,
 } from '../src/dashboard-launcher.js';
 import { readEnv } from '../src/env-compat.js';
-import { createAutonomousDecisionResolver } from '../src/decision-resolver.js';
 import { pruneScratch } from '../src/prune.js';
 import { physicalRunIdFor } from '../src/run-id.js';
 import { executeQueueCommand } from '../src/queue-cli.js';
@@ -102,6 +101,8 @@ async function main() {
         out: opts.out,
         rounds: opts.rounds,
         plannerModel: opts.plannerModel,
+        verifierModel: opts.verifierModel,
+        arbiterModel: opts.arbiterModel,
         dryRun: opts.dryRun,
         runId,
         reporter,
@@ -374,9 +375,11 @@ async function main() {
         executorModel: opts.executorModel,
         executorEffort: opts.executorEffort,
         verifierModel: opts.verifierModel,
+        arbiterModel: opts.arbiterModel,
         artifactRoot: opts.artifactRoot,
         executorTimeout: opts.executorTimeout,
         verifierTimeout: opts.verifierTimeout,
+        arbiterTimeout: opts.arbiterTimeout,
         gateTimeout: opts.gateTimeout,
         verifierProbeCompleted: true,
       },
@@ -396,15 +399,14 @@ async function main() {
     executorModel: opts.executorModel,
     executorEffort: opts.executorEffort,
     verifierModel: opts.verifierModel,
+    arbiterModel: opts.arbiterModel,
     artifactRoot: opts.artifactRoot,
     executorTimeout: opts.executorTimeout,
     verifierTimeout: opts.verifierTimeout,
+    arbiterTimeout: opts.arbiterTimeout,
     gateTimeout: opts.gateTimeout,
     verifierProbeCompleted: true,
     mode: opts.mode,
-    ...(opts.mode === 'autonomous'
-      ? { decisionResolver: createAutonomousDecisionResolver() }
-      : {}),
     correctsRunId: opts.correctsRunId,
     ...(opts.mutate ? { mutation: true } : {}),
     scratchRoot: SCRATCH_ROOT,

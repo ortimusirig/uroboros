@@ -138,6 +138,69 @@ test('suggestions alone converge without driving another round', async () => {
   } finally { item.cleanup(); }
 });
 
+test('a capability veto is unoverrulable and its remedy drives the next draft', async () => {
+  const item = fixture();
+  const inputs = [];
+  const capabilityCalls = [];
+  try {
+    const result = await runPlan({
+      goal: 'Use a supported launch mechanism', target: item.target, out: item.out, rounds: 2,
+      adapters: {
+        draft: async (request) => { inputs.push(request.input); return draft(); },
+        runPlanGate: passingGate,
+        review: async () => 'NO_BLOCKERS',
+        runArbiter: async () => ({ verdict: 'valid' }),
+        checkCapability: async ({ seat, remedyOnly }) => {
+          capabilityCalls.push({ seat, remedyOnly: remedyOnly === true });
+          if (seat !== 'executor' || inputs.length > 1) return { capable: true };
+          if (!remedyOnly) {
+            return 'I cannot use --plugin-dir.';
+          }
+          return {
+            capable: false,
+            what: '--plugin-dir',
+            why: 'the flag does not exist',
+            alternative: 'register the plugin marketplace and reuse CODEX_HOME',
+          };
+        },
+      },
+    });
+    assert.equal(result.converged, true);
+    assert.equal(result.rounds, 2);
+    assert.match(inputs[1], /register the plugin marketplace and reuse CODEX_HOME/);
+    assert.ok(capabilityCalls.some((call) => call.seat === 'executor' && call.remedyOnly));
+    assert.equal(result.capabilityVetoes[0].vetoes[0].answers.length, 2);
+  } finally { item.cleanup(); }
+});
+
+test('an arbiter cannot overrule a seat capability veto', async () => {
+  const item = fixture();
+  let arbiterCalls = 0;
+  try {
+    const result = await runPlan({
+      goal: 'Respect seat limits', target: item.target, out: item.out, rounds: 1,
+      adapters: {
+        draft,
+        runPlanGate: passingGate,
+        review: async () => 'NO_BLOCKERS',
+        runArbiter: async () => { arbiterCalls++; return { verdict: 'valid' }; },
+        checkCapability: async ({ seat }) => seat === 'reviewer'
+          ? {
+              capable: false,
+              what: 'write outside the review directory',
+              why: 'the reviewer is scoped read-only',
+              alternative: 'have the executor perform implementation writes',
+            }
+          : { capable: true },
+      },
+    });
+    assert.equal(result.converged, false);
+    assert.equal(result.reason, 'rounds-exhausted');
+    assert.equal(result.capabilityVetoes[0].vetoes[0].seat, 'reviewer');
+    assert.equal(arbiterCalls, 0, 'clean reviews need no arbiter and vetoes are never arbitrated');
+  } finally { item.cleanup(); }
+});
+
 test('without --rounds recurring findings run until the pivot ladder concludes', async () => {
   const item = fixture();
   const inputs = [];

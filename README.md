@@ -6,7 +6,7 @@
 
 [![tests](https://github.com/ortimusirig/uroboros/actions/workflows/tests.yml/badge.svg)](https://github.com/ortimusirig/uroboros/actions/workflows/tests.yml) [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) ![node](https://img.shields.io/badge/node-%3E%3D24-brightgreen) ![runtime dependencies](https://img.shields.io/badge/runtime%20dependencies-0-brightgreen)
 
-Codex writes in a git-isolated copy, command exit codes gate the change, and Cursor reviews it read-only.
+Codex writes in a git-isolated copy, command exit codes gate the change, Cursor reviews it read-only, and a spawned read-only Claude seat arbitrates findings and challenges.
 
 ### If you are an AI agent setting this up for someone
 
@@ -16,9 +16,9 @@ truth for the bootstrap procedure. If this README is all you have, fetch the ski
 
 Expected order:
 
-1. Verify Node 24 or newer, git, the Codex CLI, the Cursor CLI, and superpowers in all three seats.
+1. Verify Node 24 or newer, git, the Codex CLI, the Cursor CLI, the Claude CLI, and superpowers in all three seats.
 2. With the operator's consent, install anything missing.
-3. Have the operator complete the two browser sign-ins.
+3. Have the operator complete the three browser sign-ins.
 4. Install the plugin.
 5. Restart the Claude Code session so its slash commands register.
 6. Run the demo pass.
@@ -51,7 +51,7 @@ project of yours.
 
 Re-running `setup` is safe: it re-checks and skips whatever is already green.
 
-**Two things nothing can do for you: signing in to Codex, and signing in to Cursor.** Both are
+**Three things nothing can do for you: signing in to Codex, Cursor, and Claude.** These are
 interactive browser flows owned by those CLIs. In a terminal with a TTY, `setup` waits while the
 operator completes them and then re-checks. Inside Claude Code there is no TTY, so `setup`
 reports its `NEEDS:` summary and exits non-zero; complete the sign-ins in a terminal, then run
@@ -64,7 +64,7 @@ can actually write and the signed-in Cursor CLI can actually read.
 
 ## What you need
 
-**Node 24+, git, the Codex CLI, and the Cursor Agent CLI, with Codex and Cursor each signed
+**Node 24+, git, the Codex CLI, Cursor Agent CLI, and Claude CLI, with every seat signed
 in under its own account, plus superpowers verified separately for Codex, Cursor, and Claude.**
 `setup` and `doctor` check all of these and name what is missing,
 so you should not need this section — it is here for doing it yourself, or for when something

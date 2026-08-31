@@ -7,6 +7,10 @@ import {
 } from './doctor-checks.js';
 import { fixFailedCheck, selectedRemediation } from './remediation.js';
 
+const DEFAULT_BINS = Object.freeze({
+  git: 'git', codex: 'codex', agent: 'agent', claude: 'claude', gh: 'gh', logdy: 'logdy',
+});
+
 export {
   CURSOR_AGENT_INSTALL_COMMANDS,
   cursorAgentInstallCommand,
@@ -25,7 +29,7 @@ export async function runDoctor({
   scratchRoot,
   repository = process.cwd(),
   nodeVersion = process.versions.node,
-  bins = { git: 'git', codex: 'codex', agent: 'agent', gh: 'gh', logdy: 'logdy' },
+  bins = DEFAULT_BINS,
   consent,
   remediationExecutor,
   write = () => {},
@@ -45,12 +49,13 @@ export async function runDoctor({
   const resolvedScratchRoot = resolve(scratchRoot);
   const remediationEnvironment = { ...process.env, ...(env ?? {}) };
   const state = createDoctorProbeState(resolvedScratchRoot);
+  const resolvedBins = { ...DEFAULT_BINS, ...(bins ?? {}) };
   const context = {
     deep,
     scratchRoot: resolvedScratchRoot,
     repository: resolve(repository),
     nodeVersion,
-    bins,
+    bins: resolvedBins,
     state,
     home,
     ...(env === undefined ? {} : { env }),
@@ -96,7 +101,7 @@ export async function runDoctor({
   } else if (deep) {
     healthVerdict = 'Loop health: HEALTHY (all required checks, including the write/read probes, passed).';
   } else {
-    healthVerdict = 'Loop core health: HEALTHY (all performed required checks passed; Codex and Cursor sign-ins were verified).';
+    healthVerdict = 'Loop core health: HEALTHY (all performed required checks passed; Codex, Cursor, and Claude sign-ins were verified).';
   }
   detailLines.push('', healthVerdict);
   if (!requiredFailed && !deep) {

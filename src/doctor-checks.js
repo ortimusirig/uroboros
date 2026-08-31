@@ -348,6 +348,56 @@ export const DOCTOR_CHECKS = Object.freeze([
     },
   }),
   Object.freeze({
+    id: 'claude-cli-installed',
+    phase: 'prerequisite',
+    kind: 'required',
+    name: 'Claude CLI installed',
+    remediation: remediation(
+      'run `npm install -g @anthropic-ai/claude-code`, then run `claude auth login`.',
+      spawnCommand('npm', ['install', '-g', '@anthropic-ai/claude-code']),
+      false,
+    ),
+    probe: async ({ bins, state }) => {
+      const present = await commandExists(bins.claude);
+      state.claudePresent = present;
+      return present
+        ? { status: 'PASS', detail: `${bins.claude} was found; arbitration is read-only` }
+        : {
+            status: 'FAIL',
+            detail: `${bins.claude} was not found on PATH`,
+            reason: 'not-on-path',
+            remediationKey: 'default',
+          };
+    },
+  }),
+  Object.freeze({
+    id: 'claude-signed-in',
+    phase: 'prerequisite',
+    kind: 'required',
+    name: 'Claude signed in',
+    remediation: remediation(
+      'run `claude auth login`; if that does not help, update or reinstall Claude Code, then rerun doctor.',
+      spawnCommand('claude', ['auth', 'login']),
+      false,
+    ),
+    probe: async ({ bins, state }) => {
+      if (!state.claudePresent) {
+        return {
+          status: 'SKIP',
+          detail: 'not checked because the Claude CLI is not installed yet',
+        };
+      }
+      const status = await signInStatus(bins.claude, ['auth', 'status']);
+      return status.signedIn
+        ? { status: 'PASS', detail: '`claude auth status` exited 0' }
+        : {
+            status: 'FAIL',
+            detail: signInFailureDetail('claude auth status', status),
+            remediationKey: 'default',
+          };
+    },
+  }),
+  Object.freeze({
     id: 'scratch-root-location',
     phase: 'prerequisite',
     kind: 'required',

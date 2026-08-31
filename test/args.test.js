@@ -25,7 +25,8 @@ import { resolveStageTimeouts } from '../src/timeouts.js';
 test('parses a full run invocation', () => {
   const r = parseArgs(['run', '--task', 'plan.md', '--target', 'C:/proj',
     '--gate', 'gate.json', '--gate-retries', '1', '--executor-model', 'executor-X',
-    '--executor-effort', 'medium', '--verifier-model', 'verifier-Y']);
+    '--executor-effort', 'medium', '--verifier-model', 'verifier-Y',
+    '--arbiter-model', 'claude-Z']);
   assert.equal(r.command, 'run');
   assert.equal(r.task, 'plan.md');
   assert.equal(r.target, 'C:/proj');
@@ -34,6 +35,7 @@ test('parses a full run invocation', () => {
   assert.equal(r.executorModel, 'executor-X');
   assert.equal(r.executorEffort, 'medium');
   assert.equal(r.verifierModel, 'verifier-Y');
+  assert.equal(r.arbiterModel, 'claude-Z');
   assert.equal(Object.hasOwn(r, 'quiet'), false,
     'the default parse result keeps its existing shape for callers');
 });
@@ -67,16 +69,18 @@ test('applies the retry default and leaves model defaults to run()', () => {
 test('run parses each stage timeout flag and the values reach timeout resolution', () => {
   const parsed = parseArgs([
     'run', '--task', 'p', '--target', 't', '--gate', 'g',
-    '--executor-timeout', '101', '--verifier-timeout', '202', '--gate-timeout', '303',
+    '--executor-timeout', '101', '--verifier-timeout', '202', '--arbiter-timeout', '212',
+    '--gate-timeout', '303',
   ]);
   assert.equal(parsed.executorTimeout, 101);
   assert.equal(parsed.verifierTimeout, 202);
+  assert.equal(parsed.arbiterTimeout, 212);
   assert.equal(parsed.gateTimeout, 303);
   assert.deepEqual(resolveStageTimeouts({
     URO_EXECUTOR_TIMEOUT_MS: '1',
     URO_VERIFIER_TIMEOUT_MS: '2',
     URO_GATE_TIMEOUT_MS: '3',
-  }, parsed), { executor: 101, verifier: 202, gate: 303 });
+  }, parsed), { executor: 101, verifier: 202, arbiter: 212, gate: 303 });
 });
 
 test('batch parses each stage timeout flag', () => {

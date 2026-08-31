@@ -617,6 +617,9 @@ async function runCampaignRound(options) {
           }
           return runUnit({
             ...runOptions,
+            // The scheduler remains authoritative for cross-unit dispatch, while the
+            // unit uses the currently remaining campaign budget as its per-round backstop.
+            tokenBudget: Math.max(1, tokenBudget - consumedTokens),
             task: unit.task,
             target,
             gate,

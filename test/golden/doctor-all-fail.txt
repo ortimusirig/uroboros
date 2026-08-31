@@ -12,6 +12,9 @@ SKIP [required] Codex signed in: not checked because the Codex CLI is not instal
 FAIL [required] Cursor agent installed: ccc-doctor-golden-missing-agent-7e57 was not found on PATH
   Next: {{CURSOR_INSTALL_PROSE}}
 SKIP [required] Cursor signed in: not checked because the Cursor Agent CLI is not installed yet
+FAIL [required] Claude CLI installed: ccc-doctor-golden-missing-claude-7e57 was not found on PATH
+  Next: run `npm install -g @anthropic-ai/claude-code`, then run `claude auth login`.
+SKIP [required] Claude signed in: not checked because the Claude CLI is not installed yet
 FAIL [required] Scratch root location: scratch root under AppData is forbidden: {{SCRATCH_ROOT}}
   Next: set `URO_SCRATCH_ROOT` to a short local path outside AppData and OneDrive (for example `C:\uro\w`) and rerun doctor.
 FAIL [required] Scratch root writable: not tested because the configured path is unsafe

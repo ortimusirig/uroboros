@@ -71,6 +71,8 @@ test('uroboros names every Claude debate skill and the spec-coverage self-review
 });
 
 test('setup treats superpowers loading as three required seat-specific prerequisites', () => {
+  assert.match(setupSkill, /Claude CLI[\s\S]*@anthropic-ai\/claude-code/i);
+  assert.match(setupSkill, /claude auth status[\s\S]*claude auth login/i);
   assert.match(setupSkill, /Codex[\s\S]*codex plugin list[\s\S]*installed, enabled/i);
   assert.match(setupSkill, /codex plugin add superpowers@openai-curated/);
   assert.match(setupSkill, /Cursor[\s\S]*[.]cursor-plugin[\s\S]*URO_SUPERPOWERS_DIR/i);

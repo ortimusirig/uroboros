@@ -264,6 +264,16 @@ test('every plan event pair round-trips through the declared vocabulary', () => 
   }
 });
 
+test('every arbiter and capability event pair round-trips through the vocabulary', () => {
+  for (const pair of [
+    'arbiter/start', 'arbiter/finish', 'arbiter/overruled', 'capability/vetoed',
+  ]) {
+    const [stage, type] = pair.split('/');
+    assert.ok(EVENT_PAIRS.includes(pair));
+    assert.doesNotThrow(() => createEvent({ runId: pair, stage, type }));
+  }
+});
+
 test('every liveness event pair round-trips through the declared vocabulary', () => {
   assert.ok(EVENT_STAGES.includes('liveness'));
   for (const type of ['asked', 'working', 'stuck']) {
@@ -693,6 +703,15 @@ test('fully exercised runs have exact pair equality with both event vocabularies
       type,
       fields: { name: 'conformance unit', status: 'finished' },
     }));
+    const arbiterEvents = [
+      ['arbiter', 'start'],
+      ['arbiter', 'finish'],
+      ['arbiter', 'overruled'],
+      ['capability', 'vetoed'],
+    ].map(([stage, type]) => createEvent({
+      runId: `conformance-${stage}-${type}`, stage, type,
+      fields: { judgement: 'finding', findingId: 'F1', seat: 'executor' },
+    }));
     const allEvents = [
       ...campaignEvents,
       ...unitEvents,
@@ -701,6 +720,7 @@ test('fully exercised runs have exact pair equality with both event vocabularies
       ...planEvents,
       ...livenessEvents,
       ...mutationEvents,
+      ...arbiterEvents,
     ];
     assert.doesNotThrow(() => assertEventConformance(allEvents, {
       allowUnemitted: Object.keys(deliberatelyUncovered),

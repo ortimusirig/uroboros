@@ -30,12 +30,12 @@ check so a later unit or invocation does not self-block; tracked changes to that
 still treated as dirty. Keep the queue definition tracked or outside the target worktree.
 
 ```
-node bin/loop.js run --task <plan-file-or-prose> --target <folder> --gate <gate.json> [--gate-retries M] [--executor-model MODEL] [--executor-effort EFFORT] [--verifier-model MODEL] [--artifact-root DIRECTORY] [--mutate] [--port PORT] [--open] [--no-dashboard] [--quiet]
+node bin/loop.js run --task <plan-file-or-prose> --target <folder> --gate <gate.json> [--gate-retries M] [--executor-model MODEL] [--executor-effort EFFORT] [--verifier-model MODEL] [--arbiter-model MODEL] [--arbiter-timeout MS] [--artifact-root DIRECTORY] [--mutate] [--port PORT] [--open] [--no-dashboard] [--quiet]
 node bin/loop.js mutate --target <folder> [--base REF] [--tests COMMAND] [--dry-run]
-node bin/loop.js plan --goal <prose-or-file> --target <folder> --out <folder> [--rounds N] [--planner-model MODEL] [--dry-run]
+node bin/loop.js plan --goal <prose-or-file> --target <folder> --out <folder> [--rounds N] [--planner-model MODEL] [--verifier-model MODEL] [--arbiter-model MODEL] [--dry-run]
 node bin/loop.js queue --file <queue.json> [--mode <manual|autonomous>] [--max-runs N] [--token-budget TOKENS] [--dry-run]
-node bin/loop.js batch --task <plan-1> --task <plan-2> --target <folder> --gate <gate.json> [--gate-retries M] [--executor-model MODEL] [--executor-effort EFFORT] [--verifier-model MODEL] [--artifact-root DIRECTORY] [--concurrency N] [--token-budget TOKENS] [--rounds N] [--round N ...] [--unit-kind KIND] [--unit-id ID ...] [--perspective NAME ...] [--depends-on CHILD=PARENT ...] [--port PORT] [--open] [--no-dashboard] [--quiet]
-node bin/loop.js batch --campaign <campaign.json> [--artifact-root DIRECTORY] [--port PORT] [--open] [--no-dashboard] [--quiet]
+node bin/loop.js batch --task <plan-1> --task <plan-2> --target <folder> --gate <gate.json> [--gate-retries M] [--executor-model MODEL] [--executor-effort EFFORT] [--verifier-model MODEL] [--arbiter-model MODEL] [--arbiter-timeout MS] [--artifact-root DIRECTORY] [--concurrency N] [--token-budget TOKENS] [--rounds N] [--round N ...] [--unit-kind KIND] [--unit-id ID ...] [--perspective NAME ...] [--depends-on CHILD=PARENT ...] [--port PORT] [--open] [--no-dashboard] [--quiet]
+node bin/loop.js batch --campaign <campaign.json> [--arbiter-timeout MS] [--artifact-root DIRECTORY] [--port PORT] [--open] [--no-dashboard] [--quiet]
 node bin/loop.js status <run-or-campaign-directory>
 node bin/loop.js dashboard [<run-directory>] [--scratch-root <directory>] [--port <port>]
 node bin/loop.js publish <completed-run-directory>
@@ -73,7 +73,7 @@ the already-observed gate status or run outcome.
 
 `init` never overwrites `plan.md` or `gate.json`. It detects a `package.json` test script;
 otherwise it emits a valid, runnable placeholder gate with an explicit comment telling you to
-replace it. `doctor` runs Node, Git, PATH, local Codex/Cursor sign-in, scratch-safety,
+replace it. `doctor` runs Node, Git, PATH, local Codex/Cursor/Claude sign-in, scratch-safety,
 scratch-writability, Codex registry, Cursor `.cursor-plugin`, and Claude `.claude-plugin` checks
 by default without spending agent tokens. All three superpowers checks are required. The Codex
 write and Cursor read probes spend real agent tokens, so they are marked `SKIP` until `--deep` is supplied.
@@ -90,6 +90,8 @@ directory is modified.
 | `--executor-model` | no | launch-module default | Codex model ID |
 | `--executor-effort` | no | launch-module default | `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, or `ultra` |
 | `--verifier-model` | no | launch-module default | Cursor model ID |
+| `--arbiter-model` | no | `sonnet` | read-only Claude arbiter model ID |
+| `--arbiter-timeout` | no | verifier timeout | per-judgement Claude elapsed timeout in milliseconds |
 | `--artifact-root` | no | `<scratchRoot>/artifacts` | durable per-run records and `index.jsonl` |
 | `--quiet` | no | false | suppress stderr event summaries; `events.jsonl` is still written |
 
@@ -213,6 +215,11 @@ Structured blocking review findings are converted into executor work, followed b
 and both verifier seats. `URO_DEBATE_ROUNDS` is an optional operator cap; the tool supplies no
 round limit of its own. A `needs-pivot` result returns control to the campaign or operator.
 
+Claude is spawned read-only to validate each blocking finding, answer autonomous challenges,
+and judge pivots from the ledger and attempted remedies. Invalid findings are retained as
+overruled evidence. If Claude is unavailable, findings remain blocking, challenges stop with
+`needs-decision`, and the deterministic pivot ladder is explicitly recorded as unjudged.
+
 ## Optional flat event view with Logdy
 
 [Logdy](https://logdy.dev/) is an optional, local operator tool: a single Apache-2.0 Go
@@ -279,6 +286,8 @@ embedded Obsidian Bases campaign table.
   `--executor-timeout` to impose an operator-owned millisecond limit.
 - **Verifier elapsed timeout:** none by default. Set `URO_VERIFIER_TIMEOUT_MS` or pass
   `--verifier-timeout` to impose an operator-owned millisecond limit on each Cursor pass.
+- **Arbiter elapsed timeout:** inherits the verifier timeout by default. Set
+  `URO_ARBITER_TIMEOUT_MS` or pass `--arbiter-timeout` to bound each read-only Claude judgement.
 - **Gate timeout:** 60 minutes per command by default (chosen to accommodate slow test
   suites); override with `URO_GATE_TIMEOUT_MS`.
   All timeout overrides are positive integer millisecond values.

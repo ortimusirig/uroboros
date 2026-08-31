@@ -3,12 +3,12 @@ export const CLI_COMMANDS = Object.freeze([
 ]);
 
 export const CLI_USAGE = `Usage:
-  node bin/loop.js run --task <plan-file-or-prose> --target <directory> --gate <gate.json> [--gate-retries <0-3>] [--executor-model <model>] [--executor-effort <effort>] [--verifier-model <model>] [--executor-timeout <ms>] [--verifier-timeout <ms>] [--gate-timeout <ms>] [--artifact-root <directory>] [--mutate] [--port <0-65535>] [--open] [--no-dashboard] [--quiet]
+  node bin/loop.js run --task <plan-file-or-prose> --target <directory> --gate <gate.json> [--gate-retries <0-3>] [--executor-model <model>] [--executor-effort <effort>] [--verifier-model <model>] [--arbiter-model <model>] [--executor-timeout <ms>] [--verifier-timeout <ms>] [--arbiter-timeout <ms>] [--gate-timeout <ms>] [--artifact-root <directory>] [--mutate] [--port <0-65535>] [--open] [--no-dashboard] [--quiet]
   node bin/loop.js mutate --target <directory> [--base <ref>] [--tests <command>] [--dry-run]
-  node bin/loop.js plan --goal <prose-or-file> --target <directory> --out <directory> [--rounds <n>] [--planner-model <model>] [--dry-run]
+  node bin/loop.js plan --goal <prose-or-file> --target <directory> --out <directory> [--rounds <n>] [--planner-model <model>] [--verifier-model <model>] [--arbiter-model <model>] [--dry-run]
   node bin/loop.js queue --file <queue.json> [--mode <manual|autonomous>] [--max-runs <n>] [--token-budget <tokens>] [--dry-run]
-  node bin/loop.js batch --task <plan> [--task <plan> ...] --target <directory> --gate <gate.json> [--gate-retries <0-3>] [--executor-model <model>] [--executor-effort <effort>] [--verifier-model <model>] [--executor-timeout <ms>] [--verifier-timeout <ms>] [--gate-timeout <ms>] [--artifact-root <directory>] [--concurrency <1-16>] [--token-budget <tokens>] [--rounds <1-3>] [--round <number> ...] [--unit-kind <candidate|node|merge> ...] [--unit-id <id> ...] [--perspective <name> ...] [--depends-on <child=parent> ...] [--port <0-65535>] [--open] [--no-dashboard] [--quiet]
-  node bin/loop.js batch --campaign <file> [--executor-timeout <ms>] [--verifier-timeout <ms>] [--gate-timeout <ms>] [--artifact-root <directory>] [--port <0-65535>] [--open] [--no-dashboard] [--quiet]
+  node bin/loop.js batch --task <plan> [--task <plan> ...] --target <directory> --gate <gate.json> [--gate-retries <0-3>] [--executor-model <model>] [--executor-effort <effort>] [--verifier-model <model>] [--arbiter-model <model>] [--executor-timeout <ms>] [--verifier-timeout <ms>] [--arbiter-timeout <ms>] [--gate-timeout <ms>] [--artifact-root <directory>] [--concurrency <1-16>] [--token-budget <tokens>] [--rounds <1-3>] [--round <number> ...] [--unit-kind <candidate|node|merge> ...] [--unit-id <id> ...] [--perspective <name> ...] [--depends-on <child=parent> ...] [--port <0-65535>] [--open] [--no-dashboard] [--quiet]
+  node bin/loop.js batch --campaign <file> [--executor-timeout <ms>] [--verifier-timeout <ms>] [--arbiter-timeout <ms>] [--gate-timeout <ms>] [--artifact-root <directory>] [--port <0-65535>] [--open] [--no-dashboard] [--quiet]
   node bin/loop.js status <run-or-campaign-directory>
   node bin/loop.js dashboard [<run-directory> | --run <run-directory> | --scratch-root <directory>] [--port <0-65535>]
   node bin/loop.js publish <completed-run-directory>
@@ -27,7 +27,7 @@ Shapes (choose by how the plans relate):
   Rounds      candidates refined over 2-3 rounds: add --rounds (iterative-candidate-set)
 
 Commands:
-  run        Execute one isolated Codex/gate/Cursor pass with a live read-only dashboard.
+  run        Execute one isolated Codex/gate/Cursor debate with Claude arbitrating read-only.
   mutate     Delete changed statements temporarily and report which selected tests do not notice.
   plan       Debate a goal into a mechanically checked plan and gate without changing the target.
   queue      Run and safely land queue units in order; never retry, skip, or push.

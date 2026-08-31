@@ -13,17 +13,23 @@ const question = (kind = 'technical', recommendation = 'use the existing convent
   recommendation,
 });
 
-test('the autonomous resolver adopts only stated recommendations without a model call', async () => {
+test('the autonomous resolver uses the arbiter and may reject the executor recommendation', async () => {
+  const requests = [];
   const resolver = createAutonomousDecisionResolver({
     ttyAttached: true,
     invocation: 'interactive',
+    arbiter: async (request) => {
+      requests.push(request);
+      return { answer: 'invent a new approach', reason: 'it fits the stated constraint' };
+    },
   });
   assert.deepEqual(await resolver({
     questions: [question()], plan: 'approved plan', task: 'task text',
-  }), { answers: [{ id: 'Q1', answer: 'use the existing convention' }] });
-  assert.deepEqual(await resolver({
-    questions: [question('technical', null)], plan: 'approved plan', task: 'task text',
-  }), { answers: [] });
+  }), { answers: [{ id: 'Q1', answer: 'invent a new approach' }] });
+  assert.equal(requests[0].question.recommendation, 'use the existing convention');
+
+  const unavailable = createAutonomousDecisionResolver({ ttyAttached: false });
+  assert.deepEqual(await unavailable({ questions: [question()] }), { answers: [] });
 });
 
 test('authority resolution requires no-TTY evidence and records its reasoning', async () => {
@@ -36,6 +42,7 @@ test('authority resolution requires no-TTY evidence and records its reasoning', 
   const absent = createAutonomousDecisionResolver({
     ttyAttached: false,
     invocation: 'non-interactive',
+    arbiter: async () => ({ answer: 'use the existing convention' }),
   });
   const resolution = await absent({ questions: [question('authority')] });
   assert.deepEqual(resolution.answers, [{ id: 'Q1', answer: 'use the existing convention' }]);

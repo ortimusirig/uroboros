@@ -1,0 +1,110 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
+import {
+  buildClaudeArgs,
+  parseArbiterStream,
+  parseCapabilityJudgement,
+  parseDecisionJudgement,
+  parseFindingJudgement,
+  parsePivotJudgement,
+  runArbiter,
+} from '../src/arbiter.js';
+
+function fakeChild() {
+  const child = new EventEmitter();
+  child.pid = 12345;
+  child.stdout = new EventEmitter();
+  child.stderr = new EventEmitter();
+  child.stdin = { end() {} };
+  child.kill = () => {};
+  return child;
+}
+
+test('Claude arbiter arguments are headless and read-only', () => {
+  const args = buildClaudeArgs({ prompt: 'judge this', model: 'claude-test' });
+  assert.deepEqual(args.slice(0, 4), ['-p', 'judge this', '--output-format', 'stream-json']);
+  assert.deepEqual(args.slice(args.indexOf('--permission-mode'), args.indexOf('--permission-mode') + 2),
+    ['--permission-mode', 'plan']);
+  assert.deepEqual(args.slice(args.indexOf('--model')), ['--model', 'claude-test']);
+});
+
+test('arbiter stream parsing distinguishes a readable result from no answer', () => {
+  const readable = parseArbiterStream(`${JSON.stringify({
+    type: 'result',
+    result: '{"verdict":"valid"}',
+    usage: { input_tokens: 3, cache_read_input_tokens: 2, output_tokens: 1 },
+  })}\n`);
+  assert.equal(readable.verdict, 'ANSWERED');
+  assert.equal(readable.answer, '{"verdict":"valid"}');
+  assert.equal(readable.usage.inputTokens, 5);
+  assert.equal(parseArbiterStream('{not-json}\n').verdict, 'UNVERIFIED');
+  assert.equal(parseArbiterStream(`${JSON.stringify({ type: 'result', is_error: true })}\n`).verdict,
+    'UNVERIFIED');
+  assert.equal(parseArbiterStream([
+    JSON.stringify({
+      type: 'assistant', message: { content: [{ type: 'text', text: '{"verdict":"valid"}' }] },
+    }),
+    JSON.stringify({ type: 'result', is_error: false, result: '' }),
+  ].join('\n')).verdict, 'UNVERIFIED', 'an empty final result must beat stale assistant prose');
+});
+
+test('typed arbiter judgements reject unreadable or incomplete answers', () => {
+  assert.deepEqual(parseFindingJudgement({ answer: '{"verdict":"valid"}' }),
+    { verdict: 'valid' });
+  assert.deepEqual(parseFindingJudgement({ answer: '{"verdict":"invalid"}' }),
+    { verdict: 'UNVERIFIED' });
+  assert.equal(parseDecisionJudgement({ answer: '{"answer":"choose B"}' }).answer, 'choose B');
+  assert.equal(parsePivotJudgement({ answer: '{"decision":"fresh"}' }).decision, 'fresh');
+  assert.deepEqual(parseCapabilityJudgement({
+    capable: false, what: 'flag', why: 'unsupported', alternative: '',
+  }).complete, false);
+});
+
+test('an incomplete structured capability refusal remains a veto for constructive retry', () => {
+  assert.deepEqual(parseCapabilityJudgement({
+    capable: false,
+    what: 'unsupported flag',
+  }), {
+    verdict: 'answered',
+    capable: false,
+    what: 'unsupported flag',
+    why: '',
+    alternative: '',
+    complete: false,
+  });
+});
+
+test('runArbiter is injectable and records a readable judgement without launching Claude', async () => {
+  const child = fakeChild();
+  const events = [];
+  let launch;
+  const pending = runArbiter({
+    cwd: process.cwd(),
+    bin: process.execPath,
+    request: { type: 'finding', finding: { id: 'F1' }, plan: 'plan', diff: 'diff' },
+    timeoutMs: 1000,
+    reporter: (event) => events.push(event),
+    runId: 'arbiter-injected',
+    spawnProcess: (bin, args, options) => {
+      launch = { bin, args, options };
+      return child;
+    },
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  child.stdout.emit('data', Buffer.from(`${JSON.stringify({
+    type: 'result',
+    result: '{"verdict":"valid"}',
+    usage: { input_tokens: 2, output_tokens: 1 },
+  })}\n`));
+  child.emit('close', 0, null);
+
+  const result = await pending;
+  assert.equal(launch.bin, process.execPath);
+  assert.ok(launch.args.includes('--permission-mode'));
+  assert.equal(result.verdict, 'ANSWERED');
+  assert.equal(parseFindingJudgement(result).verdict, 'valid');
+  assert.deepEqual(events.map((event) => `${event.stage}/${event.type}`), [
+    'arbiter/start', 'arbiter/finish',
+  ]);
+});

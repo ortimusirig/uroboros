@@ -188,7 +188,7 @@ test('a real CLI run announces a read-only dashboard before executor events and 
       'stdout must contain exactly the one formatted run-facts document');
     assert.equal(facts.outcome, 'no-op');
     assert.deepEqual(facts.limits.timeoutsMs,
-      { executor: 60001, verifier: 60002, gate: 60003 });
+      { executor: 60001, verifier: 60002, arbiter: 60002, gate: 60003 });
     assert.match(r.stderr, /^\[uroboros\].*isolate\/start/m,
       'positive control: the heartbeat must actually be emitted');
     assert.match(r.stderr, /^\[uroboros\].*executor\/file_change/m);
@@ -334,7 +334,7 @@ test('batch stdout is one aggregate JSON document while heartbeats remain on std
     assert.equal(aggregate.rollup.counts.completed, 2);
     for (const unit of aggregate.units) {
       assert.deepEqual(unit.facts.limits.timeoutsMs,
-        { executor: 61001, verifier: 61002, gate: 61003 });
+        { executor: 61001, verifier: 61002, arbiter: 61002, gate: 61003 });
     }
     assert.match(r.stderr, /^\[uroboros\].*campaign\/start/m,
       'positive control: campaign heartbeat must actually be emitted');
@@ -407,7 +407,7 @@ test('batch --campaign executes the declared units with invocation-only flags', 
     assert.equal(aggregate.rollup.counts.completed, 2);
     for (const unit of aggregate.units) {
       assert.deepEqual(unit.facts.limits.timeoutsMs,
-        { executor: 62001, verifier: 62002, gate: 62003 });
+        { executor: 62001, verifier: 62002, arbiter: 62002, gate: 62003 });
     }
   } finally {
     rmSync(fixture.root, { recursive: true, force: true });

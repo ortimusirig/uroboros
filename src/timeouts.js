@@ -30,12 +30,16 @@ function resolveStageTimeout(env, overrides, stage, suffix, fallback) {
 }
 
 export function resolveStageTimeouts(env = process.env, overrides = {}) {
+  const verifier = resolveStageTimeout(
+    env, overrides, 'verifier', 'VERIFIER_TIMEOUT_MS', undefined,
+  );
   return {
     executor: resolveStageTimeout(
       env, overrides, 'executor', 'EXECUTOR_TIMEOUT_MS', undefined,
     ),
-    verifier: resolveStageTimeout(
-      env, overrides, 'verifier', 'VERIFIER_TIMEOUT_MS', undefined,
+    verifier,
+    arbiter: resolveStageTimeout(
+      env, overrides, 'arbiter', 'ARBITER_TIMEOUT_MS', verifier,
     ),
     gate: resolveStageTimeout(env, overrides, 'gate', 'GATE_TIMEOUT_MS', DEFAULT_GATE_TIMEOUT_MS),
   };

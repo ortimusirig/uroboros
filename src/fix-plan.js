@@ -1,4 +1,14 @@
-export function validateFindings(findings) {
+import { parseFindingJudgement } from './arbiter.js';
+import { reportEvent } from './events.js';
+
+export function validateFindings(findings, {
+  arbiter,
+  diff = '',
+  plan = '',
+  reporter,
+  runId,
+  debateRound,
+} = {}) {
   if (!Array.isArray(findings) || findings.length === 0) {
     return { accepted: [], rejected: [] };
   }
@@ -6,15 +16,39 @@ export function validateFindings(findings) {
   const accepted = [];
   const rejected = [];
 
+  const structurallyValid = findings.filter((finding) => (
+    typeof finding?.description === 'string' && finding.description.trim() !== ''
+  ));
   for (const finding of findings) {
-    const destination = typeof finding?.description === 'string'
-      && finding.description.trim() !== ''
-      ? accepted
-      : rejected;
-    destination.push(finding?.id);
+    if (!structurallyValid.includes(finding)) rejected.push(finding?.id);
   }
-
-  return { accepted, rejected };
+  if (typeof arbiter !== 'function') {
+    accepted.push(...structurallyValid.map((finding) => finding.id));
+    return { accepted, rejected };
+  }
+  return (async () => {
+    const judgements = [];
+    for (const finding of structurallyValid) {
+      let response;
+      try {
+        response = await arbiter({ type: 'finding', finding, diff, plan });
+      } catch {
+        response = null;
+      }
+      const judgement = parseFindingJudgement(response);
+      judgements.push({ findingId: finding.id, ...judgement });
+      if (judgement.verdict === 'invalid') {
+        rejected.push(finding.id);
+        reportEvent(reporter, runId, 'arbiter', 'overruled', {
+          debateRound, findingId: finding.id, reason: judgement.reason,
+        });
+      } else {
+        // Fail safe: an unavailable or unreadable arbiter preserves the objection.
+        accepted.push(finding.id);
+      }
+    }
+    return { accepted, rejected, judgements };
+  })();
 }
 
 export function buildFixPlan({

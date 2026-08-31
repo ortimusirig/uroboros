@@ -68,6 +68,7 @@ test('agent seats have no invented elapsed timeout while the gate keeps its defa
   assert.deepEqual(resolveStageTimeouts({}), {
     executor: undefined,
     verifier: undefined,
+    arbiter: undefined,
     gate: DEFAULT_GATE_TIMEOUT_MS,
   });
   assert.equal(DEFAULT_GATE_TIMEOUT_MS, 60 * 60 * 1000);
@@ -83,6 +84,7 @@ test('operator executor and verifier timeout overrides remain honored', () => {
   }), {
     executor: 303,
     verifier: 404,
+    arbiter: 404,
     gate: DEFAULT_GATE_TIMEOUT_MS,
   });
 });

@@ -21,7 +21,7 @@ was made by the CCC setup demo. Do not modify plan.md or gate.json.
 `;
 
 const DEFAULT_BINS = Object.freeze({
-  git: 'git', codex: 'codex', agent: 'agent', gh: 'gh', logdy: 'logdy',
+  git: 'git', codex: 'codex', agent: 'agent', claude: 'claude', gh: 'gh', logdy: 'logdy',
 });
 
 function isPathInside(parent, candidate) {
@@ -43,12 +43,13 @@ export async function probeSetupPrerequisites({
 }) {
   const resolvedScratchRoot = resolve(scratchRoot);
   const state = createDoctorProbeState(resolvedScratchRoot);
+  const resolvedBins = { ...DEFAULT_BINS, ...(bins ?? {}) };
   const context = {
     deep: false,
     scratchRoot: resolvedScratchRoot,
     repository: resolvedScratchRoot,
     nodeVersion,
-    bins,
+    bins: resolvedBins,
     state,
     home,
     ...(env === undefined ? {} : { env }),
