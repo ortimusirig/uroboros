@@ -272,6 +272,27 @@ export function parseArgs(argv) {
       dryRun: values['dry-run'] === true,
     };
   }
+  if (command === 'mutate') {
+    const { values } = nodeParseArgs({
+      args: argv.slice(1),
+      options: {
+        target: { type: 'string' },
+        base: { type: 'string' },
+        tests: { type: 'string' },
+        'dry-run': { type: 'boolean' },
+      },
+      allowPositionals: false,
+      strict: true,
+    });
+    if (!values.target) throw new Error('missing required option: --target');
+    return {
+      command,
+      target: values.target,
+      base: values.base ?? 'HEAD',
+      ...(values.tests === undefined ? {} : { tests: values.tests }),
+      dryRun: values['dry-run'] === true,
+    };
+  }
   if (command === 'init') {
     if (argv.length !== 2 || !argv[1]) {
       throw new Error('usage: init <directory>');
@@ -336,6 +357,7 @@ export function parseArgs(argv) {
       'gate-timeout': { type: 'string' },
       'artifact-root': { type: 'string' },
       mode: { type: 'string' },
+      mutate: { type: 'boolean' },
       quiet: { type: 'boolean' },
       'no-dashboard': { type: 'boolean' },
       open: { type: 'boolean' },
@@ -380,6 +402,7 @@ export function parseArgs(argv) {
       ...(values['artifact-root'] === undefined ? {} : { artifactRoot: values['artifact-root'] }),
     };
     if (values.mode !== undefined) parsed.mode = values.mode;
+    if (values.mutate) parsed.mutate = true;
     if (values.quiet) parsed.quiet = true;
     if (values['no-dashboard']) parsed.noDashboard = true;
     if (values.open) parsed.open = true;

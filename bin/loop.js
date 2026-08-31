@@ -114,6 +114,48 @@ async function main() {
     }
     return;
   }
+  if (opts.command === 'mutate') {
+    const {
+      createMutationArbiter,
+      createMutationJudge,
+      runMutate,
+    } = await import('../src/mutate.js');
+    const runId = `mutate-${new Date().toISOString().replace(/[:.]/g, '-')}-${randomUUID().slice(0, 8)}`;
+    const reporter = (event) => {
+      try { process.stderr.write(`${formatEventSummary(event)}\n`); } catch { /* drop sink */ }
+    };
+    const controller = new AbortController();
+    const abort = (signal) => controller.abort(new Error(`mutation interrupted by ${signal}`));
+    const onSigint = () => abort('SIGINT');
+    const onSigterm = () => abort('SIGTERM');
+    process.on('SIGINT', onSigint);
+    process.on('SIGTERM', onSigterm);
+    try {
+      const seatOptions = { cwd: opts.target };
+      const result = await runMutate({
+        target: opts.target,
+        base: opts.base,
+        tests: opts.tests,
+        dryRun: opts.dryRun,
+        runId,
+        reporter,
+        signal: controller.signal,
+        ...(opts.dryRun ? {} : {
+          judge: createMutationJudge(seatOptions),
+          arbiter: createMutationArbiter(seatOptions),
+        }),
+      });
+      process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+      if (result.status === 'baseline-failed') process.exitCode = 1;
+    } catch (error) {
+      process.stderr.write(`mutate failed: ${error.message}\n`);
+      process.exitCode = controller.signal.aborted ? 130 : 2;
+    } finally {
+      process.removeListener('SIGINT', onSigint);
+      process.removeListener('SIGTERM', onSigterm);
+    }
+    return;
+  }
   if (opts.command === 'doctor') {
     const { runDoctor } = await import('../src/doctor.js');
     const headless = !process.stdin.isTTY;
@@ -359,6 +401,7 @@ async function main() {
       ? { decisionResolver: createAutonomousDecisionResolver() }
       : {}),
     correctsRunId: opts.correctsRunId,
+    ...(opts.mutate ? { mutation: true } : {}),
     scratchRoot: SCRATCH_ROOT,
     runId,
     reporter,

@@ -38,6 +38,33 @@ test('buildRunFacts records the resolved skills path', () => {
   assert.equal(withSkills.skills, 'C:/plugins/superpowers/6.3.0');
 });
 
+test('run facts and markdown retain mutation measurement and arbiter judgement without changing the gate', () => {
+  const mutation = {
+    status: 'finished',
+    grouping: { method: 'semantic-judge', judged: true },
+    summary: { unitsExamined: 1, survivors: 1, kills: 0, unexamined: 0 },
+    survivors: [{
+      name: 'recordLivenessDecision()',
+      lines: [{ path: 'src/run.js', line: 269 }],
+      tests: ['test/liveness.test.js'],
+      judgement: { verdict: 'gap', reasoning: 'The facts write has no observing assertion.' },
+    }],
+    unexamined: [],
+  };
+  const withMutation = buildRunFacts({
+    runId: 'mutation-report', target: 'C:/proj', dir: 'C:/uro/w', isRepo: true,
+    branch: 'uro/mutation-report', iterations: [], gateStatus: 'passed', verdict: 'NO_BLOCKERS',
+    outcome: 'review-ready', gateRetries: 0, mutation,
+  });
+  assert.equal(withMutation.gateStatus, 'passed');
+  assert.equal(withMutation.outcome, 'review-ready');
+  assert.equal(withMutation.mutation, mutation);
+  const markdown = buildReportMarkdown(withMutation);
+  assert.match(markdown, /Mutation survivors:\*\* 1/);
+  assert.match(markdown, /recordLivenessDecision\(\).*src\/run[.]js:269/);
+  assert.match(markdown, /arbiter: gap.*facts write has no observing assertion/i);
+});
+
 test('buildRunFacts retains the judged interval and its reasoning', () => {
   const judged = buildRunFacts({
     runId: 'judged-liveness', target: 'C:/proj', dir: 'C:/uro/w', isRepo: true,

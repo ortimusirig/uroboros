@@ -672,6 +672,12 @@ test('fully exercised runs have exact pair equality with both event vocabularies
         reasoning: 'Vocabulary conformance fixture.',
       },
     }));
+    const mutationEvents = ['start', 'unit', 'survivor', 'finish'].map((type) => createEvent({
+      runId: `conformance-mutate-${type}`,
+      stage: 'mutate',
+      type,
+      fields: { name: 'conformance unit', status: 'finished' },
+    }));
     const allEvents = [
       ...campaignEvents,
       ...unitEvents,
@@ -679,6 +685,7 @@ test('fully exercised runs have exact pair equality with both event vocabularies
       ...journalEvents,
       ...planEvents,
       ...livenessEvents,
+      ...mutationEvents,
     ];
     assert.doesNotThrow(() => assertEventConformance(allEvents, {
       allowUnemitted: Object.keys(deliberatelyUncovered),

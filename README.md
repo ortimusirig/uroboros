@@ -137,10 +137,11 @@ billed through this skill.
 Windows is the primary, fully-exercised target. macOS and Linux should work — pure Node,
 POSIX `which`, plain `spawn` — but treat the first Unix run as verification.
 
-After plugin installation, these are the twelve namespaced slash commands:
+After plugin installation, these are the thirteen namespaced slash commands:
 
 ```text
 /uroboros:run
+/uroboros:mutate
 /uroboros:plan
 /uroboros:queue
 /uroboros:batch
@@ -164,6 +165,7 @@ usable plan before spending tokens.
 
 ```sh
 node bin/loop.js run --task plan.md --target . --gate gate.json
+node bin/loop.js mutate --target . --base HEAD
 node bin/loop.js plan --goal "Add the requested behavior" --target . --out campaign/generated/example
 ```
 

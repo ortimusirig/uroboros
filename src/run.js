@@ -60,6 +60,11 @@ import { buildFixPlan, validateFindings } from './fix-plan.js';
 import { resolveSuperpowersDir } from './superpowers.js';
 import { readEnv } from './env-compat.js';
 import { createLivenessJudge } from './liveness-judge.js';
+import {
+  createMutationArbiter,
+  createMutationJudge,
+  runMutate as realMutation,
+} from './mutate.js';
 
 export { HARNESS_ARTIFACTS } from './artifacts.js';
 
@@ -284,6 +289,7 @@ export async function run(opts) {
   const runExecutor = adapters.runExecutor ?? realExecutor;
   const runGate = adapters.runGate ?? realGate;
   const runVerifier = adapters.runVerifier ?? realVerifier;
+  const runMutation = adapters.runMutation ?? realMutation;
   const isolateRun = adapters.isolate ?? isolate;
   const createDiff = adapters.diffText ?? diffText;
   const detectDebateCircling = adapters.detectCircling ?? detectCircling;
@@ -1185,6 +1191,27 @@ export async function run(opts) {
         : merge.testCounts.source === 'gate-output' ? null : countTestFiles(iso.dir),
     },
   };
+  let mutation = null;
+  if (gateStatus === 'passed' && opts.mutation !== undefined) {
+    const mutationOptions = opts.mutation === true ? {} : opts.mutation;
+    try {
+      mutation = await runMutation({
+        target: iso.dir,
+        base: merge === undefined ? iso.baseCommit : merge.mergeBase,
+        runId,
+        reporter: eventReporter,
+        ...(adapters.runMutation === undefined ? {
+          judge: createMutationJudge({ cwd: iso.dir }),
+          arbiter: createMutationArbiter({ cwd: iso.dir }),
+        } : {}),
+        ...mutationOptions,
+      });
+    } catch (error) {
+      // Mutation evidence is advisory. An unavailable measurement must not rewrite the
+      // already-observed gate result or the run outcome.
+      mutation = { status: 'error', reason: error instanceof Error ? error.message : String(error) };
+    }
+  }
   const facts = buildRunFacts({ runId,
     ...(physicalRunId === runId ? {} : { physicalRunId }),
     target, targetPath: resolve(target),
@@ -1213,6 +1240,7 @@ export async function run(opts) {
     } : null,
     ...(unitKind === undefined ? {} : { unitKind }),
     ...(mergeFacts === null ? {} : { merge: mergeFacts }),
+    ...(mutation === null ? {} : { mutation }),
     models: {
       executor: executorModel,
       executorEffort,

@@ -48,6 +48,7 @@ export function buildRunFacts({
   perspective,
   unitKind,
   merge,
+  mutation,
   debate = null,
   skills = null,
 }) {
@@ -122,6 +123,7 @@ export function buildRunFacts({
   }
   if (unitKind !== undefined) facts.unitKind = unitKind;
   if (merge !== undefined) facts.merge = merge;
+  if (mutation !== undefined) facts.mutation = mutation;
   if (noOpReason !== undefined) facts.noOpReason = noOpReason;
   if (supervision !== null) {
     facts.limits.stall = {
@@ -230,6 +232,13 @@ export function buildReportMarkdown(facts, {
           `- **Unit kind:** merge`,
           `- **Parent order:** ${(facts.merge?.parentOrder ?? []).join(' -> ')}`,
           `- **Merge base:** ${facts.merge?.mergeBase ?? 'n/a'}`,
+        ]
+      : []),
+    ...(facts.mutation
+      ? [
+          `- **Mutation units examined:** ${facts.mutation.summary?.unitsExamined ?? 0}`,
+          `- **Mutation survivors:** ${facts.mutation.summary?.survivors ?? 0}`,
+          `- **Mutation unexamined:** ${facts.mutation.summary?.unexamined ?? 0}`,
         ]
       : []),
     ...(configuredTimeouts && Object.values(configuredTimeouts).some((value) => value !== null)
@@ -398,6 +407,28 @@ export function buildReportMarkdown(facts, {
         md.push(`- **${resolution.path}** (${resolution.parentUnitId}): `
           + `${resolution.chosen} — ${resolution.reason}`);
       }
+    }
+  }
+  if (facts.mutation) {
+    md.push(
+      ``,
+      `## Mutation evidence`,
+      `- **Status:** ${facts.mutation.status ?? 'unknown'}`,
+      `- **Grouping:** ${facts.mutation.grouping?.method ?? 'not-run'} `
+        + `(${facts.mutation.grouping?.judged ? 'judged' : 'unjudged'})`,
+    );
+    for (const survivor of facts.mutation.survivors ?? []) {
+      const locations = (survivor.lines ?? [])
+        .map((line) => `${line.path}:${line.line}`).join(', ') || '(unknown lines)';
+      const tests = (survivor.tests ?? []).join(', ') || '(none selected)';
+      md.push(
+        `- **Survivor — ${survivor.name}:** ${locations}; tests: ${tests}; `
+          + `arbiter: ${survivor.judgement?.verdict ?? 'unjudged'} — `
+          + `${survivor.judgement?.reasoning ?? 'no reasoning recorded'}`,
+      );
+    }
+    for (const unit of facts.mutation.unexamined ?? []) {
+      md.push(`- **Unexamined — ${unit.name}:** ${unit.reason ?? 'no reason recorded'}`);
     }
   }
   md.push(

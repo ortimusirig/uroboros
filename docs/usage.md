@@ -30,7 +30,8 @@ check so a later unit or invocation does not self-block; tracked changes to that
 still treated as dirty. Keep the queue definition tracked or outside the target worktree.
 
 ```
-node bin/loop.js run --task <plan-file-or-prose> --target <folder> --gate <gate.json> [--gate-retries M] [--executor-model MODEL] [--executor-effort EFFORT] [--verifier-model MODEL] [--artifact-root DIRECTORY] [--port PORT] [--open] [--no-dashboard] [--quiet]
+node bin/loop.js run --task <plan-file-or-prose> --target <folder> --gate <gate.json> [--gate-retries M] [--executor-model MODEL] [--executor-effort EFFORT] [--verifier-model MODEL] [--artifact-root DIRECTORY] [--mutate] [--port PORT] [--open] [--no-dashboard] [--quiet]
+node bin/loop.js mutate --target <folder> [--base REF] [--tests COMMAND] [--dry-run]
 node bin/loop.js plan --goal <prose-or-file> --target <folder> --out <folder> [--rounds N] [--planner-model MODEL] [--dry-run]
 node bin/loop.js queue --file <queue.json> [--mode <manual|autonomous>] [--max-runs N] [--token-budget TOKENS] [--dry-run]
 node bin/loop.js batch --task <plan-1> --task <plan-2> --target <folder> --gate <gate.json> [--gate-retries M] [--executor-model MODEL] [--executor-effort EFFORT] [--verifier-model MODEL] [--artifact-root DIRECTORY] [--concurrency N] [--token-budget TOKENS] [--rounds N] [--round N ...] [--unit-kind KIND] [--unit-id ID ...] [--perspective NAME ...] [--depends-on CHILD=PARENT ...] [--port PORT] [--open] [--no-dashboard] [--quiet]
@@ -46,7 +47,7 @@ node bin/loop.js init <directory>
 node bin/loop.js help
 ```
 
-The corresponding plugin commands are `/uroboros:run`, `/uroboros:plan`,
+The corresponding plugin commands are `/uroboros:run`, `/uroboros:mutate`, `/uroboros:plan`,
 `/uroboros:queue`, `/uroboros:batch`, `/uroboros:status`, `/uroboros:dashboard`,
 `/uroboros:publish`, `/uroboros:prune`, `/uroboros:doctor`, `/uroboros:setup`,
 `/uroboros:init`, and `/uroboros:help`. Install them with
@@ -58,6 +59,17 @@ controls, then asks a read-only verifier for structured findings. It writes `pla
 `gate.json` under `--out` only after convergence; exhaustion and pivot conclusion write neither.
 
 `--help` and `-h` remain aliases for `help`.
+
+`loop mutate` first runs the tests that statically touch changed production modules. It then
+deletes added statements in semantic units inside temporary worktrees, subdivides every killed
+multi-statement unit, and reports survivors for arbiter judgement. `--tests` replaces the test
+launcher; use `{tests}` when that launcher should receive the statically selected paths.
+`--dry-run` executes neither tests nor judging seats. Mutation survivors are evidence and do not
+change a gate command's exit-code meaning.
+Add `--mutate` to `loop run` to perform the same advisory measurement after a passing gate and
+retain the evidence beside the gate and verifier verdicts in `uro-runfacts.json` and
+`uro-report.md`. A survivor, red mutation baseline, or unavailable mutation seat does not alter
+the already-observed gate status or run outcome.
 
 `init` never overwrites `plan.md` or `gate.json`. It detects a `package.json` test script;
 otherwise it emits a valid, runnable placeholder gate with an explicit comment telling you to

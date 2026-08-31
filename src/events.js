@@ -15,6 +15,7 @@ export const EVENT_STAGES = Object.freeze([
   'report',
   'journal',
   'plan',
+  'mutate',
 ]);
 
 export const EVENT_TYPES = Object.freeze([
@@ -46,6 +47,8 @@ export const EVENT_TYPES = Object.freeze([
   'circling',
   'pivot',
   'gate',
+  'unit',
+  'survivor',
 ]);
 
 export const UNIT_KINDS = Object.freeze(['candidate', 'node', 'merge']);
@@ -112,6 +115,10 @@ export const EVENT_PAIRS = Object.freeze([
   'plan/gate',
   'plan/converged',
   'plan/finish',
+  'mutate/start',
+  'mutate/unit',
+  'mutate/survivor',
+  'mutate/finish',
 ]);
 
 // The aggregate stream is intentionally smaller than a unit stream: the orchestrator is
@@ -388,6 +395,19 @@ export function detailFor(event) {
       : ` next-check=${oneLine(event.nextIntervalMs)}ms`;
     return `${event.type} seat=${oneLine(event.seat)} gap=${oneLine(event.gapMs)}ms${interval}`
       + (event.reasoning ? ` reasoning=${oneLine(event.reasoning)}` : '');
+  }
+  if (event.stage === 'mutate') {
+    if (event.type === 'start') {
+      return `started base=${oneLine(event.base)} target=${oneLine(event.target)}`;
+    }
+    if (event.type === 'unit') {
+      return `unit=${oneLine(event.name)} tests=${oneLine(event.tests?.length ?? 0)}`;
+    }
+    if (event.type === 'survivor') {
+      return `survivor=${oneLine(event.name)} judgement=${oneLine(event.judgement?.verdict)}`;
+    }
+    return `finished status=${oneLine(event.status)} examined=${oneLine(event.unitsExamined)}`
+      + ` survivors=${oneLine(event.survivors)} unexamined=${oneLine(event.unexamined)}`;
   }
   if (event.stage === 'verify') {
     const pass = event.pass ? ` pass=${oneLine(event.pass)}` : '';

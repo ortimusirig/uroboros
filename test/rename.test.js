@@ -270,6 +270,7 @@ test('commands documented in docs/usage.md are accepted by the real parser', () 
     .map((match) => match[1]);
   const requiredArgv = new Map([
     ['run', ['run', '--task', 'write docs', '--target', '.', '--gate', 'gate.json']],
+    ['mutate', ['mutate', '--target', '.']],
     ['plan', ['plan', '--goal', 'write docs', '--target', '.', '--out', 'generated']],
     ['queue', ['queue', '--file', 'queue.json']],
     ['batch', ['batch', '--task', 'write docs', '--target', '.', '--gate', 'gate.json']],

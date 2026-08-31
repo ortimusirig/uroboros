@@ -1,6 +1,6 @@
 ---
 name: uroboros
-description: Plan and supervise isolated Codex implementation, true-exit-code gates, Cursor review, and Single, Parallel, Graph, Candidates, or Rounds campaigns; use plan to debate a goal, for campaign execution, diagnostics with doctor, status or dashboard inspection, project initialization, and publishing completed units.
+description: Plan and supervise isolated Codex implementation, true-exit-code gates, mutation evidence with mutate, Cursor review, and Single, Parallel, Graph, Candidates, or Rounds campaigns; use plan to debate a goal, for campaign execution, diagnostics with doctor, status or dashboard inspection, project initialization, and publishing completed units.
 ---
 
 # uroboros
@@ -147,10 +147,11 @@ hazard is reuse of a unit id in the flat scratch root.
 
 Install the plugin from a clone by running `node install.mjs`, then paste the two exact Claude
 Code commands it prints: `/plugin marketplace add <absolute-clone-path>` followed by
-`/plugin install uroboros@uroboros`. The plugin registers these twelve namespaced slash
+`/plugin install uroboros@uroboros`. The plugin registers these thirteen namespaced slash
 commands while the direct Node CLI remains available:
 
 - `/uroboros:run`
+- `/uroboros:mutate`
 - `/uroboros:plan`
 - `/uroboros:queue`
 - `/uroboros:batch`
@@ -171,6 +172,7 @@ load this skill so invoking them cannot bypass the governing law.
 The direct CLI surface is:
 
     node bin/loop.js run ...
+    node bin/loop.js mutate ...
     node bin/loop.js plan ...
     node bin/loop.js queue ...
     node bin/loop.js batch ...
@@ -185,7 +187,16 @@ The direct CLI surface is:
 
 For one plan:
 
-    node bin/loop.js run --task <plan-file-or-prose> --target <folder> --gate <gate.json> [--gate-retries M] [--executor-model MODEL] [--executor-effort EFFORT] [--verifier-model MODEL] [--artifact-root DIRECTORY] [--port PORT] [--open] [--no-dashboard] [--quiet]
+    node bin/loop.js run --task <plan-file-or-prose> --target <folder> --gate <gate.json> [--gate-retries M] [--executor-model MODEL] [--executor-effort EFFORT] [--verifier-model MODEL] [--artifact-root DIRECTORY] [--mutate] [--port PORT] [--open] [--no-dashboard] [--quiet]
+
+To measure which added production statements no selected test depends on:
+
+    node bin/loop.js mutate --target <folder> [--base REF] [--tests COMMAND] [--dry-run]
+
+Mutation survivors are measurements for arbiter judgement, not a widened gate verdict. A dry
+run lists semantic units and their selected tests without executing tests or agent seats.
+On a normal run, `--mutate` performs this advisory measurement after a passing gate and records
+it beside the unchanged gate and verifier verdicts.
 
 To debate a goal into a mechanically checked plan and gate without modifying the target:
 

@@ -1,6 +1,25 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { parseArgs } from '../src/args.js';
+
+test('parses mutate options and requires a target', () => {
+  assert.deepEqual(parseArgs([
+    'mutate', '--target', 'repo', '--base', 'main', '--tests', 'node --test {tests}', '--dry-run',
+  ]), {
+    command: 'mutate', target: 'repo', base: 'main', tests: 'node --test {tests}', dryRun: true,
+  });
+  assert.deepEqual(parseArgs(['mutate', '--target', 'repo']), {
+    command: 'mutate', target: 'repo', base: 'HEAD', dryRun: false,
+  });
+  assert.throws(() => parseArgs(['mutate']), /missing required option: --target/);
+});
+
+test('run accepts opt-in advisory mutation evidence', () => {
+  const parsed = parseArgs([
+    'run', '--task', 'plan', '--target', 'repo', '--gate', 'gate.json', '--mutate',
+  ]);
+  assert.equal(parsed.mutate, true);
+});
 import { resolveStageTimeouts } from '../src/timeouts.js';
 
 test('parses a full run invocation', () => {
