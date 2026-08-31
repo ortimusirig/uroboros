@@ -331,7 +331,11 @@ export async function runExecutor({
     // Dropping it cost a queue unit a diagnosis: exit 1, no diff, no usage, and
     // nothing anywhere in the run facts saying what happened. Kept only on the
     // failing path, where stdout carries no explanation of its own.
-    ...(r.code !== 0 && r.stderr?.trim() ? { stderr: r.stderr.slice(0, EXECUTOR_STDERR_LIMIT) } : {}),
+    // Keep the TAIL, not the head. Codex logs every failing tool command to
+    // stderr, so the head is exploratory noise — the first capture filled all
+    // 4000 characters with a directory listing and truncated away the actual
+    // cause. Whatever was written last is what the process died of.
+    ...(r.code !== 0 && r.stderr?.trim() ? { stderr: r.stderr.slice(-EXECUTOR_STDERR_LIMIT) } : {}),
     ...(r.aborted ? { aborted: true } : {}),
     timeoutMs: r.timeoutMs,
     ...(r.timeoutReason ? { timeoutReason: r.timeoutReason } : {}),

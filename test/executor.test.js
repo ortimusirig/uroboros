@@ -371,7 +371,11 @@ test('a failed executor keeps its stderr, the only account of why it died', asyn
   // the run facts saying what happened. stdout carried no explanation because
   // the stream simply stopped.
   assert.equal(r.exitCode, 1);
+  // The cause is the LAST thing written, behind 400 lines of tool-router noise.
+  // Keeping the head of stderr fills the whole limit with that noise and
+  // truncates the cause away, which is exactly what the first fix did.
   assert.match(r.stderr, /upstream connection reset/);
+  assert.doesNotMatch(r.stderr, /noisy tool listing line 0/);
 });
 
 test('a successful executor carries no stderr noise', async () => {
