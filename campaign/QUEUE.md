@@ -108,3 +108,50 @@ suite. Seat findings that proved real: unit 4 (three ungated requirements,
 both seats, contradicting each other on one) and unit 5 (transcript default
 disagreeing with the board). `loop mutate` exists to catch this class
 mechanically and should be run against these diffs next.
+
+## Retrospective review of the three units that landed unreviewed
+
+Units 2, 3 and 4 shipped without a completed independent review — unit 2 because
+Cursor's quota died mid-run, unit 3 because the run was killed during
+verification. Both seats were re-run against the landed diffs on
+`composer-2.5`. Six passes, every one a real verdict (no `UNVERIFIED`, no
+launch failures):
+
+| unit | correctness | intent |
+|---|---|---|
+| 2 cursor scoped write | ISSUES | NO_BLOCKERS |
+| 3 claude seat | ISSUES | NO_BLOCKERS |
+| 4 FRESH + STORM | NO_BLOCKERS | NO_BLOCKERS |
+
+**Both blocking findings were verified false.** Recorded here so they are not
+re-litigated:
+
+**Unit 2 — "reviewer snapshot adapters missing production fallback."** The seat
+argued that `captureSnapshot: adapters.captureWorktreeSnapshot` passes an
+explicit `undefined`, and that "explicit `undefined` does not trigger the
+default parameter". That is not how JavaScript behaves: a destructuring default
+applies precisely when the property is `undefined`. Confirmed by running it, and
+confirmed in production — unit 4's real run, with empty adapters, logged
+`verify/scope_violation restored out-of-scope writes paths=events.jsonl`, which
+only happens if those defaults resolved.
+
+The two call sites deliberately differ: the executor protects `__uro_review`
+with `scope: 'inside'` and the light `captureReviewSnapshot`; the reviewer
+reverts everything outside it with `scope: 'outside'` and the git-based
+`captureWorktreeSnapshot`. Different jobs, different mechanisms.
+
+**Unit 3 — "`--arbiter-timeout` is parsed but never applied in `run()`."** The
+seat looked for `arbiterTimeout` in `run()`'s destructuring and did not find it.
+`run()` forwards the whole options object instead:
+`resolveStageTimeouts(opts.env ?? process.env, opts)`. Measured:
+
+    resolveStageTimeouts({}, { verifierTimeout: 11111 })                        -> arbiter 11111
+    resolveStageTimeouts({}, { verifierTimeout: 11111, arbiterTimeout: 77777 }) -> arbiter 77777
+
+The flag takes effect end-to-end.
+
+Both false positives share a shape: confident, specific, internally coherent
+reasoning resting on one wrong premise. Neither would have been caught by
+reading the review alone, and both took a few minutes to falsify. That is the
+argument for the standing rule that every seat finding is reproduced before it
+is acted on.
