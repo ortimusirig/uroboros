@@ -118,6 +118,8 @@ async function main() {
     const {
       createMutationArbiter,
       createMutationJudge,
+      formatMutationSummary,
+      mutationExitCode,
       runMutate,
     } = await import('../src/mutate.js');
     const runId = `mutate-${new Date().toISOString().replace(/[:.]/g, '-')}-${randomUUID().slice(0, 8)}`;
@@ -146,7 +148,9 @@ async function main() {
         }),
       });
       process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
-      if (result.status === 'baseline-failed') process.exitCode = 1;
+      process.stderr.write(formatMutationSummary(result));
+      const exitCode = mutationExitCode(result);
+      if (exitCode !== 0) process.exitCode = exitCode;
     } catch (error) {
       process.stderr.write(`mutate failed: ${error.message}\n`);
       process.exitCode = controller.signal.aborted ? 130 : 2;

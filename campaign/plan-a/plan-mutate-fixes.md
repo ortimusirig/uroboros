@@ -84,8 +84,14 @@ This is precisely the defect class `loop mutate` exists to catch, present in
   documented marker.
 - Assert it **discriminates**: a different statement in the same file is left
   intact.
-- Assert the **round trip** — the deletion is applied, then restored, and the
-  source is byte-identical to the original.
+- ~~Assert the round trip — applied, then restored, byte-identical.~~
+  **This requirement was wrong and is withdrawn.** `applyStatementDeletion`
+  edits a disposable workspace copy; there is no in-place restore to round-trip.
+  The real invariant — the original tree is never touched — is asserted through
+  `executeMutationTrial` in Defect 3, with a `sawDeletion` positive control.
+  Demanding a round-trip that does not exist produced a tautological
+  `writeFileSync(original)` / `assert.deepEqual(original)` pair, which both
+  seats then correctly rejected.
 - **Acceptance criterion:** replacing `applyStatementDeletion` with a no-op must
   make a test fail. That is checkable by running the mutation, and it is the
   definition of done.

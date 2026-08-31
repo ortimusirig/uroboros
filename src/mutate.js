@@ -545,8 +545,27 @@ function testsByChangedFile(root, changedFiles) {
   return result;
 }
 
+function interruptedCommandError(operation, result) {
+  const error = new Error(`${operation} interrupted`);
+  error.aborted = true;
+  error.commandResult = result;
+  return error;
+}
+
+function interruptedTestResult(error) {
+  const result = error.commandResult ?? {};
+  return {
+    aborted: true,
+    code: Number.isInteger(result.code) ? result.code : -1,
+    stdout: result.stdout ?? '',
+    stderr: result.stderr ?? '',
+    ...(result.signal ? { signal: result.signal } : {}),
+  };
+}
+
 async function git(root, args, { signal, runCommand = spawnCapture } = {}) {
   const result = await runCommand('git', ['-C', root, ...args], { signal });
+  if (result.aborted) throw interruptedCommandError(`git ${args[0]}`, result);
   if (result.code !== 0) throw new Error(`git ${args[0]} failed: ${result.stderr?.trim() || result.code}`);
   return result.stdout;
 }
@@ -674,7 +693,7 @@ export async function runSelectedTests({
   }
   const result = await runCommand(invocation.bin, invocation.args, { cwd, signal, timeoutMs });
   return {
-    passed: result.code === 0,
+    ...(result.aborted ? { aborted: true } : { passed: result.code === 0 }),
     code: result.code,
     tests: selected,
     command: invocation,
@@ -787,6 +806,7 @@ export async function createMutationWorkspace({ root, signal, runCommand = spawn
   let registered = false;
   try {
     const add = await runCommand('git', ['-C', root, 'worktree', 'add', '--detach', workspace, 'HEAD'], { signal });
+    if (add.aborted) throw interruptedCommandError('git worktree add', add);
     if (add.code !== 0) throw new Error(`git worktree add failed: ${add.stderr?.trim() || add.code}`);
     registered = true;
     overlayChanges(root, workspace, await workingTreeChanges(root, { signal, runCommand }));
@@ -868,7 +888,12 @@ export async function executeMutationTrial({
   createWorkspace = createMutationWorkspace,
   runCommand = spawnCapture,
 }) {
-  const workspace = await createWorkspace({ root: plan.root, signal, runCommand });
+  let workspace;
+  try { workspace = await createWorkspace({ root: plan.root, signal, runCommand }); }
+  catch (error) {
+    if (error?.aborted !== true) throw error;
+    return interruptedTestResult(error);
+  }
   let primaryError;
   try {
     applyStatementDeletion(workspace.directory, unit);
@@ -877,6 +902,9 @@ export async function executeMutationTrial({
     });
   } catch (error) {
     primaryError = error;
+    if (error?.aborted === true) {
+      return interruptedTestResult(error);
+    }
     throw error;
   } finally {
     try { await workspace.cleanup(); }
@@ -917,6 +945,10 @@ function splitUnit(unit) {
 function normalizeTestResult(result) {
   if (typeof result === 'boolean') return { passed: result, code: result ? 0 : 1 };
   if (!result || typeof result !== 'object') throw new Error('test runner returned no result');
+  if (result.aborted === true) {
+    const { passed: ignoredPassed, ...abortedResult } = result;
+    return { ...abortedResult, aborted: true };
+  }
   if (typeof result.passed === 'boolean') return result;
   if (Number.isInteger(result.code)) return { ...result, passed: result.code === 0 };
   throw new Error('test runner result must contain passed or code');
@@ -1033,6 +1065,24 @@ async function runMutateCore({
     runCommand: adapters.runCommand,
     phase: 'baseline',
   }));
+  if (baseline.aborted) {
+    const result = {
+      runId,
+      status: 'interrupted',
+      dryRun: false,
+      target: plan.target,
+      base: plan.base,
+      baseline,
+      grouping: null,
+      examined: [], survivors: [], kills: [], unexamined: [],
+      summary: { unitsExamined: 0, survivors: 0, kills: 0, unexamined: 0 },
+      reason: 'Mutation interrupted during baseline tests; no mutation result was recorded.',
+    };
+    reportEvent(reporter, runId, 'mutate', 'finish', {
+      status: result.status, baselineCode: baseline.code,
+    });
+    return result;
+  }
   if (!baseline.passed) {
     const result = {
       runId,
@@ -1050,7 +1100,22 @@ async function runMutateCore({
     return result;
   }
 
-  if (signal?.aborted) throw signal.reason ?? new Error('mutation run aborted');
+  if (signal?.aborted) {
+    const result = {
+      runId,
+      status: 'interrupted',
+      dryRun: false,
+      target: plan.target,
+      base: plan.base,
+      baseline,
+      grouping: null,
+      examined: [], survivors: [], kills: [], unexamined: [],
+      summary: { unitsExamined: 0, survivors: 0, kills: 0, unexamined: 0 },
+      reason: 'Mutation interrupted before grouping; no mutation result was recorded.',
+    };
+    reportEvent(reporter, runId, 'mutate', 'finish', { status: result.status });
+    return result;
+  }
   const grouping = await groupMutationStatements(plan.statements, { judge, diff: plan.diff });
   const queue = [...grouping.units];
   const examined = [];
@@ -1058,9 +1123,16 @@ async function runMutateCore({
   const kills = [];
   const unexamined = [];
   let trials = 0;
+  let interrupted = signal?.aborted === true;
 
   while (queue.length > 0) {
-    if (signal?.aborted) throw signal.reason ?? new Error('mutation run aborted');
+    if (signal?.aborted) {
+      unexamined.push(...queue.splice(0).map((unit) => ({
+        ...serializeUnit(unit, plan), reason: 'mutation interrupted before examination',
+      })));
+      interrupted = true;
+      break;
+    }
     const remaining = budget - trials;
     if (remaining <= 0) {
       unexamined.push(...queue.splice(0).map((unit) => ({
@@ -1091,13 +1163,29 @@ async function runMutateCore({
     if (failedTrial) throw failedTrial.reason;
     const results = settled.map((entry) => entry.value);
     trials += batch.length;
+    const batchInterrupted = results.some(({ testResult }) => testResult.aborted);
 
     for (const { unit, testResult } of results) {
       const evidence = serializeUnit(unit, plan);
+      if (testResult.aborted) {
+        unexamined.push({
+          ...evidence,
+          reason: 'mutation interrupted before the trial produced a result',
+          testResult,
+        });
+        continue;
+      }
       const record = { ...evidence, testResult };
       examined.push(record);
       if (testResult.passed) {
-        const judged = await judgeSurvivor(unit, plan, arbiter);
+        const judged = batchInterrupted || signal?.aborted
+          ? {
+            judgement: {
+              verdict: 'unjudged',
+              reasoning: 'mutation interrupted before arbiter judgement',
+            },
+          }
+          : await judgeSurvivor(unit, plan, arbiter);
         const survivor = { ...record, measurement: 'survived', judgement: judged.judgement };
         survivors.push(survivor);
         reportEvent(reporter, runId, 'mutate', 'survivor', {
@@ -1111,11 +1199,18 @@ async function runMutateCore({
       const children = splitUnit(unit);
       if (children.length > 0) queue.push(...children);
     }
+    if (batchInterrupted || signal?.aborted) {
+      unexamined.push(...queue.splice(0).map((unit) => ({
+        ...serializeUnit(unit, plan), reason: 'mutation interrupted before examination',
+      })));
+      interrupted = true;
+      break;
+    }
   }
 
   const result = {
     runId,
-    status: 'finished',
+    status: interrupted ? 'interrupted' : 'finished',
     dryRun: false,
     target: plan.target,
     base: plan.base,
@@ -1131,6 +1226,7 @@ async function runMutateCore({
       kills: kills.length,
       unexamined: unexamined.length,
     },
+    ...(interrupted ? { reason: 'Mutation interrupted; unexamined units have no result.' } : {}),
   };
   reportEvent(reporter, runId, 'mutate', 'finish', { ...result.summary, status: result.status });
   return result;
@@ -1148,6 +1244,12 @@ export async function runMutate(options = {}) {
 }
 
 export const runMutation = runMutate;
+
+export function mutationExitCode(result) {
+  if (result?.status === 'interrupted') return 130;
+  if (result?.status === 'baseline-failed') return 1;
+  return 0;
+}
 
 export async function runMutationAfterGate({ gateResult, runMutation: execute = runMutate, ...options }) {
   if (!gateResult?.passed) return { gateResult, mutation: null, passed: false };
@@ -1234,6 +1336,12 @@ export function formatMutationSummary(result) {
       lines.push(`- ${unit.name}: ${unit.lines.map((line) => `${line.path}:${line.line}`).join(', ')}; tests: ${unit.tests.join(', ') || '(none)'}`);
     }
     return `${lines.join('\n')}\n`;
+  }
+  if (result.status === 'interrupted') {
+    return `Mutation interrupted: ${result.summary.unitsExamined} examined, `
+      + `${result.summary.survivors} survivors, ${result.summary.kills} kills, `
+      + `${result.summary.unexamined} unexamined — the run did not complete, `
+      + 'so these counts are partial and nothing here means "tested".\n';
   }
   return `Mutation finished: ${result.summary.unitsExamined} examined, `
     + `${result.summary.survivors} survivors, ${result.summary.kills} kills, `

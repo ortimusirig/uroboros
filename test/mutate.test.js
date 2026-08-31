@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { execFileSync, spawnSync } from 'node:child_process';
 import {
   cpSync,
   existsSync,
@@ -11,13 +12,18 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { test } from 'node:test';
+import { fileURLToPath } from 'node:url';
 import {
+  applyStatementDeletion,
   filterMutableAddedLines,
+  formatMutationSummary,
   groupMutationStatements,
   isTestFile,
+  mutationExitCode,
   parseUnifiedDiff,
   runMutate,
   runMutationAfterGate,
+  runSelectedTests,
   selectTouchingTests,
 } from '../src/mutate.js';
 import { createEvent, EVENT_PAIRS, EVENT_STAGES, EVENT_TYPES } from '../src/events.js';
@@ -179,6 +185,283 @@ test('a red baseline stops before grouping or mutation and explains why', async 
   });
 });
 
+test('an aborted baseline reports interrupted rather than baseline-failed', async () => {
+  await withPlan([statement('one', 1)], async (plan) => {
+    let trialCalls = 0;
+    const result = await runMutate({
+      target: plan.root,
+      plan,
+      adapters: {
+        runTests: async () => ({ aborted: true, code: 1 }),
+        runTrial: async () => { trialCalls++; return { passed: true, code: 0 }; },
+      },
+    });
+
+    assert.equal(result.status, 'interrupted');
+    assert.notEqual(result.status, 'baseline-failed');
+    assert.equal(result.baseline.aborted, true);
+    assert.equal(trialCalls, 0);
+  });
+});
+
+test('an aborted trial is unexamined and is neither a kill nor a survivor', async () => {
+  await withPlan([
+    statement('one', 1, { functionName: 'one' }),
+    statement('pending', 2, { functionName: 'pending' }),
+  ], async (plan) => {
+    let trialCalls = 0;
+    const result = await runMutate({
+      target: plan.root,
+      plan,
+      concurrency: 1,
+      adapters: {
+        runTests: greenBaseline,
+        runTrial: async () => { trialCalls++; return { aborted: true, code: 1 }; },
+      },
+    });
+
+    assert.equal(result.status, 'interrupted');
+    assert.equal(trialCalls, 1);
+    assert.equal(result.examined.length, 0);
+    assert.equal(result.kills.length, 0);
+    assert.equal(result.survivors.length, 0);
+    assert.equal(result.unexamined.length, 2);
+    assert.ok(result.unexamined.every((unit) => /interrupted/i.test(unit.reason)));
+  });
+});
+
+test('an interrupted concurrent batch keeps a completed peer result', async () => {
+  await withPlan([
+    statement('aborted', 1, { functionName: 'aborted' }),
+    statement('completed', 2, { functionName: 'completed' }),
+    statement('survived', 3, { functionName: 'survived' }),
+  ], async (plan) => {
+    let arbiterCalls = 0;
+    const result = await runMutate({
+      target: plan.root,
+      plan,
+      concurrency: 3,
+      arbiter: async () => {
+        arbiterCalls++;
+        return { verdict: 'gap', reasoning: 'should not run after interruption' };
+      },
+      adapters: {
+        runTests: greenBaseline,
+        runTrial: async ({ unit }) => {
+          const id = unit.statements[0].id;
+          if (id === 'aborted') return { aborted: true, code: 1 };
+          return { passed: id === 'survived', code: id === 'survived' ? 0 : 1 };
+        },
+      },
+    });
+
+    assert.equal(result.status, 'interrupted');
+    assert.deepEqual(result.unexamined.map((unit) => unit.statements[0].id), ['aborted']);
+    assert.deepEqual(result.kills.map((unit) => unit.statements[0].id), ['completed']);
+    assert.deepEqual(result.survivors.map((unit) => unit.statements[0].id), ['survived']);
+    assert.equal(result.examined.length, 2);
+    assert.equal(arbiterCalls, 0);
+    assert.deepEqual(result.survivors[0].judgement, {
+      verdict: 'unjudged',
+      reasoning: 'mutation interrupted before arbiter judgement',
+    });
+  });
+});
+
+test('an abort during trial workspace setup is unexamined and restores the working tree', async () => {
+  await withPlan([statement('one', 1)], async (plan) => {
+    const before = readFileSync(join(plan.root, 'src', 'work.js'));
+    const commands = [];
+    let workspace;
+    const result = await runMutate({
+      target: plan.root,
+      plan,
+      adapters: {
+        runTests: greenBaseline,
+        runCommand: async (bin, args) => {
+          commands.push([bin, ...args]);
+          if (args.includes('add')) {
+            workspace = args.at(-2);
+            return { aborted: true, code: 1, stdout: '', stderr: '' };
+          }
+          return { code: 0, stdout: '', stderr: '' };
+        },
+      },
+    });
+
+    assert.equal(result.status, 'interrupted');
+    assert.equal(result.unexamined.length, 1);
+    assert.equal(result.kills.length, 0);
+    assert.equal(result.survivors.length, 0);
+    assert.ok(commands.some((args) => args.includes('remove')));
+    assert.ok(commands.some((args) => args.includes('prune')));
+    assert.equal(existsSync(dirname(workspace)), false);
+    assert.deepEqual(readFileSync(join(plan.root, 'src', 'work.js')), before);
+  });
+});
+
+test('an abort while overlaying trial changes is unexamined and removes the workspace', async () => {
+  await withPlan([statement('one', 1)], async (plan) => {
+    const before = readFileSync(join(plan.root, 'src', 'work.js'));
+    let workspace;
+    const result = await runMutate({
+      target: plan.root,
+      plan,
+      adapters: {
+        runTests: greenBaseline,
+        runCommand: async (bin, args) => {
+          if (args.includes('add')) {
+            workspace = args.at(-2);
+            cpSync(plan.root, workspace, { recursive: true });
+            return { code: 0, stdout: '', stderr: '' };
+          }
+          if (args.includes('diff')) {
+            return { aborted: true, code: 1, stdout: '', stderr: '' };
+          }
+          return { code: 0, stdout: '', stderr: '' };
+        },
+      },
+    });
+
+    assert.equal(result.status, 'interrupted');
+    assert.equal(result.unexamined.length, 1);
+    assert.equal(result.kills.length, 0);
+    assert.equal(result.survivors.length, 0);
+    assert.equal(existsSync(dirname(workspace)), false);
+    assert.deepEqual(readFileSync(join(plan.root, 'src', 'work.js')), before);
+  });
+});
+
+test('an abort during semantic grouping reports interrupted without starting a trial', async () => {
+  await withPlan([statement('one', 1)], async (plan) => {
+    const controller = new AbortController();
+    let trialCalls = 0;
+    const result = await runMutate({
+      target: plan.root,
+      plan,
+      signal: controller.signal,
+      judge: async () => {
+        controller.abort(new Error('operator interrupted grouping'));
+        return { units: [{ name: 'work()', statementIds: ['one'] }] };
+      },
+      adapters: {
+        runTests: greenBaseline,
+        runTrial: async () => { trialCalls++; return { passed: true, code: 0 }; },
+      },
+    });
+
+    assert.equal(result.status, 'interrupted');
+    assert.equal(mutationExitCode(result), 130);
+    assert.equal(trialCalls, 0);
+    assert.equal(result.unexamined.length, 1);
+    assert.equal(result.kills.length, 0);
+    assert.equal(result.survivors.length, 0);
+  });
+});
+
+test('an abort during empty semantic grouping cannot finish successfully', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'uro-mutate-empty-grouping-'));
+  try {
+    const controller = new AbortController();
+    const result = await runMutate({
+      target: root,
+      signal: controller.signal,
+      plan: {
+        root,
+        target: root,
+        base: 'HEAD',
+        diff: '',
+        statements: [],
+        changedFiles: [],
+        tests: [],
+        testsByFile: {},
+      },
+      judge: async () => {
+        controller.abort(new Error('operator interrupted empty grouping'));
+        return { units: [] };
+      },
+      adapters: { runTests: greenBaseline },
+    });
+
+    assert.equal(result.status, 'interrupted');
+    assert.equal(mutationExitCode(result), 130);
+    assert.equal(result.examined.length, 0);
+    assert.equal(result.unexamined.length, 0);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('an abort during survivor judgement cannot finish successfully', async () => {
+  await withPlan([
+    statement('one', 1, { functionName: 'one' }),
+    statement('two', 2, { functionName: 'two' }),
+  ], async (plan) => {
+    const controller = new AbortController();
+    let arbiterCalls = 0;
+    const result = await runMutate({
+      target: plan.root,
+      plan,
+      concurrency: 2,
+      signal: controller.signal,
+      arbiter: async () => {
+        arbiterCalls++;
+        controller.abort(new Error('operator interrupted arbiter'));
+        return { verdict: 'acceptable', reasoning: 'measurement completed before interruption' };
+      },
+      adapters: {
+        runTests: greenBaseline,
+        runTrial: async () => ({ passed: true, code: 0 }),
+      },
+    });
+
+    assert.equal(result.status, 'interrupted');
+    assert.equal(mutationExitCode(result), 130);
+    assert.equal(result.examined.length, 2);
+    assert.equal(result.survivors.length, 2);
+    assert.equal(result.kills.length, 0);
+    assert.equal(arbiterCalls, 1);
+    assert.deepEqual(result.survivors[1].judgement, {
+      verdict: 'unjudged',
+      reasoning: 'mutation interrupted before arbiter judgement',
+    });
+  });
+});
+
+test('an interrupted mutation run maps to the conventional non-zero interrupt exit', () => {
+  assert.equal(mutationExitCode({ status: 'interrupted' }), 130);
+  assert.notEqual(mutationExitCode({ status: 'interrupted' }), 0);
+});
+
+test('runSelectedTests preserves an aborted spawn as neither a pass nor a fail', async () => {
+  const result = await runSelectedTests({
+    cwd: process.cwd(),
+    tests: ['test/work.test.js'],
+    runCommand: async () => ({
+      aborted: true,
+      code: 1,
+      signal: 'SIGTERM',
+      stdout: '',
+      stderr: '',
+    }),
+  });
+
+  assert.equal(result.aborted, true);
+  assert.equal(result.code, 1);
+  assert.equal(Object.hasOwn(result, 'passed'), false);
+});
+
+test('runSelectedTests keeps a non-aborted non-zero spawn as a real failure', async () => {
+  const result = await runSelectedTests({
+    cwd: process.cwd(),
+    tests: ['test/work.test.js'],
+    runCommand: async () => ({ code: 1, stdout: '', stderr: 'assertion failed' }),
+  });
+
+  assert.equal(result.passed, false);
+  assert.equal(Object.hasOwn(result, 'aborted'), false);
+});
+
 test('only added executable production statements are mutable', () => {
   const sourceByFile = {
     'src/change.js': [
@@ -214,6 +497,36 @@ test('only added executable production statements are mutable', () => {
     '+recordFact();',
   ].join('\n'));
   assert.deepEqual(parsed, [{ path: 'src/change.js', line: 5, content: 'recordFact();' }]);
+});
+
+test('mutation control: statement deletion cannot be a no-op and discriminates between statements', () => {
+  const root = mkdtempSync(join(tmpdir(), 'uro-mutate-deletion-control-'));
+  const file = join(root, 'src', 'work.js');
+  const original = Buffer.from(
+    'export function work() {\r\n  recordFact();\r\n  preserveFact();\r\n}\r\n',
+  );
+  try {
+    mkdirSync(dirname(file), { recursive: true });
+    writeFileSync(file, original);
+
+    applyStatementDeletion(root, {
+      statements: [statement('record', 2, {
+        path: 'src/work.js', content: '  recordFact();', name: 'recordFact()',
+      })],
+    });
+
+    const mutated = readFileSync(file, 'utf8');
+    assert.match(mutated, /\/\* uro mutation deleted record \*\//);
+    assert.doesNotMatch(mutated, /\brecordFact\(\);/);
+    assert.match(mutated, /\bpreserveFact\(\);/);
+
+    // Byte-identity is NOT asserted here. applyStatementDeletion edits a
+    // disposable workspace copy, so there is no in-place restore to round-trip;
+    // the real invariant is "the original tree is never touched", and it is
+    // asserted through executeMutationTrial with a sawDeletion positive control.
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test('dry-run executes no tests, trials, judge, or arbiter and lists units with tests', async () => {
@@ -423,6 +736,7 @@ test('the source working tree is byte-identical after a thrown trial error', asy
       testsByFile: { 'src/value.js': ['test/value.test.js'] },
     };
     const events = [];
+    let sawDeletion = false;
 
     await assert.rejects(runMutate({
       target: root,
@@ -431,6 +745,10 @@ test('the source working tree is byte-identical after a thrown trial error', asy
       adapters: {
         runTests: async ({ cwd }) => {
           if (cwd === root) return { passed: true, code: 0 };
+          const mutated = readFileSync(join(cwd, 'src', 'value.js'), 'utf8');
+          assert.match(mutated, /\/\* uro mutation deleted record \*\//);
+          assert.doesNotMatch(mutated, /\brecordFact\(\);/);
+          sawDeletion = true;
           throw new Error('injected mid-run failure');
         },
         createWorkspace: async () => {
@@ -445,11 +763,70 @@ test('the source working tree is byte-identical after a thrown trial error', asy
       },
     }), /injected mid-run failure/);
 
+    assert.equal(sawDeletion, true, 'positive control: the trial must delete before restoration');
     assert.deepEqual(readFileSync(join(root, 'src', 'value.js')), before);
     assert.deepEqual(events.map((event) => `${event.stage}/${event.type}`), [
       'mutate/start', 'mutate/unit', 'mutate/finish',
     ]);
     assert.equal(events.at(-1).status, 'error');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('an aborted trial restores the source byte-identically after observing the deletion', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'uro-mutate-abort-restore-'));
+  try {
+    mkdirSync(join(root, 'src'), { recursive: true });
+    writeFileSync(
+      join(root, 'src', 'value.js'),
+      'export function value() {\n  recordFact();\n  return 1;\n}\n',
+    );
+    const before = readFileSync(join(root, 'src', 'value.js'));
+    const plan = {
+      root,
+      target: root,
+      base: 'HEAD',
+      diff: '',
+      statements: [statement('record', 2, {
+        path: 'src/value.js', name: 'recordFact()', content: '  recordFact();', functionName: 'value',
+      })],
+      changedFiles: ['src/value.js'],
+      tests: ['test/value.test.js'],
+      testsByFile: { 'src/value.js': ['test/value.test.js'] },
+    };
+    let sawDeletion = false;
+    let workspaceParent;
+
+    const result = await runMutate({
+      target: root,
+      plan,
+      adapters: {
+        runTests: async ({ cwd }) => {
+          if (cwd === root) return { passed: true, code: 0 };
+          const mutated = readFileSync(join(cwd, 'src', 'value.js'), 'utf8');
+          assert.match(mutated, /\/\* uro mutation deleted record \*\//);
+          assert.doesNotMatch(mutated, /\brecordFact\(\);/);
+          sawDeletion = true;
+          return { aborted: true, code: 1 };
+        },
+        createWorkspace: async () => {
+          workspaceParent = mkdtempSync(join(tmpdir(), 'uro-mutate-abort-workspace-'));
+          const directory = join(workspaceParent, 'w');
+          cpSync(root, directory, { recursive: true });
+          return {
+            directory,
+            cleanup: async () => rmSync(workspaceParent, { recursive: true, force: true }),
+          };
+        },
+      },
+    });
+
+    assert.equal(sawDeletion, true, 'positive control: the aborted trial must delete first');
+    assert.equal(result.status, 'interrupted');
+    assert.equal(result.unexamined.length, 1);
+    assert.equal(existsSync(workspaceParent), false);
+    assert.deepEqual(readFileSync(join(root, 'src', 'value.js')), before);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -512,4 +889,46 @@ test('mutate is documented as a command, skill token, and CLI usage command', ()
   assert.equal(existsSync(new URL('commands/mutate.md', root)), true);
   assert.match(readFileSync(new URL('skills/uroboros/SKILL.md', root), 'utf8'), /\bmutate\b/);
   assert.match(readFileSync(new URL('src/cli-help.js', root), 'utf8'), /loop[.]js mutate\b/);
+});
+
+test('an interrupted run is never summarised as finished', () => {
+  const summary = { unitsExamined: 3, survivors: 1, kills: 1, unexamined: 4 };
+
+  const interrupted = formatMutationSummary({ status: 'interrupted', summary });
+  assert.match(interrupted, /^Mutation interrupted:/);
+  assert.doesNotMatch(interrupted, /finished/i);
+  assert.match(interrupted, /did not complete/);
+  assert.match(interrupted, /partial/);
+
+  // Narrowness control: a run that really completed must still read as finished.
+  const finished = formatMutationSummary({ status: 'finished', summary });
+  assert.match(finished, /^Mutation finished:/);
+  assert.doesNotMatch(finished, /interrupted/i);
+});
+
+test('loop mutate prints the human summary, not only the JSON result', () => {
+  const cli = fileURLToPath(new URL('../bin/loop.js', import.meta.url));
+  const root = mkdtempSync(join(tmpdir(), 'uro-mutate-cli-'));
+  const git = (...args) => execFileSync('git', ['-C', root, ...args], { stdio: 'pipe' });
+  try {
+    git('init', '-q');
+    git('config', 'user.email', 'test@example.com');
+    git('config', 'user.name', 'uro test');
+    mkdirSync(join(root, 'src'), { recursive: true });
+    writeFileSync(join(root, 'src', 'work.js'), 'export function work() {\n  return 1;\n}\n');
+    git('add', '-A');
+    git('commit', '-qm', 'base');
+    writeFileSync(join(root, 'src', 'work.js'),
+      'export function work() {\n  recordFact();\n  return 1;\n}\n');
+
+    const result = spawnSync(process.execPath, [cli, 'mutate', '--target', root, '--dry-run'],
+      { encoding: 'utf8' });
+
+    // formatMutationSummary was unreachable dead code until it was wired here;
+    // asserting through the CLI is what keeps it reachable.
+    assert.match(result.stderr, /Mutation dry run: \d+ unit\(s\); no commands executed\./);
+    assert.match(result.stdout, /"status": "dry-run"/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
