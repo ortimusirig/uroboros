@@ -91,7 +91,9 @@ gate with the real task and project checks before relying on the result.
 One `loop run` is one pass:
 
 ```
-plan.md ──► Codex writes (isolated copy) ──► gate (exit codes) ──► bounded review/fix loop ──► report
+plan.md ──► Codex writes (isolated copy) ──► gate (exit codes) ──► debate ──► report
+                                                              │
+                          Cursor ×2 review ──► findings ──► arbiter judges ──► fix / pivot
 ```
 
 Run approved plans sequentially with `loop queue`. Relative task, gate, goal-file, and output
@@ -111,6 +113,10 @@ loop queue --file queue.json --mode autonomous --max-runs 3 --token-budget 50000
 
 For a goal unit, `loop plan` first debates a draft with a read-only drafting seat, a mechanical
 plan gate, and a read-only reviewer. Implementation never starts unless that plan converges.
+Wherever an approach is being chosen — the initial plan, and again when the arbiter decides an
+approach is dead rather than merely wrong — several candidates are drafted from deliberately
+distinct declared perspectives and one is selected, so the loop compares approaches instead of
+polishing the first one it thought of. A dead plan is replaced, not abandoned.
 The queue stops on the first non-approved result. A change lands only when the code gate
 passed and both verifier seats reported `NO_BLOCKERS`; `ISSUES` and `UNVERIFIED` always
 stop the queue. Each landed unit is committed locally, nothing is pushed, and
@@ -130,8 +136,16 @@ Three separate failure modes get three separate seats:
 - **Codex writes but cannot mark its own homework.** It never decides whether it succeeded.
 - **The gate is the only thing that can pass a change.** It runs your commands and reads
   exit codes. An agent cannot argue with a non-zero exit.
-- **Cursor reviews read-only** (`--mode plan`), and only when there is a non-empty diff.
-  Write flags are asserted absent, not merely omitted.
+- **Cursor reviews and writes only its own tests.** Two seats run with different prompts:
+  one judges correctness, one judges whether the diff implements the task. They may write
+  into `__uro_review/` and nowhere else — the worktree is snapshotted around the review and
+  everything outside that directory is restored, so the boundary is enforced rather than
+  trusted. A blocking finding without a test is demoted to a suggestion.
+- **Claude arbitrates.** The seats disagree, and something has to decide. The arbiter judges
+  each finding (a reviewer objection can be overruled, but an unavailable arbiter preserves
+  the objection), answers the executor's own questions instead of letting it answer them,
+  and decides when to amend, replan, or conclude. The debate is not round-capped; it ends
+  when the arbiter says so or the findings stop recurring.
 
 The loop refuses to report success over a red gate. If the verifier fails to launch, that is
 reported as `verifier-failed` — never silently downgraded to a review verdict.
@@ -142,6 +156,12 @@ billed through this skill.
 
 Windows is the primary, fully-exercised target. macOS and Linux should work — pure Node,
 POSIX `which`, plain `spawn` — but treat the first Unix run as verification.
+
+`loop dashboard` serves a read-only live view: one tab is the transcript — what each seat is
+thinking, the files it touched, and the diff beside it — and one is a board of every run. The
+board opens on runs that need attention (still running, stopped somewhere a person must
+decide, or finished with the two verifier seats disagreeing) rather than on everything, with
+Active, Today and All beside it.
 
 After plugin installation, these are the thirteen namespaced slash commands:
 
@@ -171,7 +191,7 @@ usable plan before spending tokens.
 
 ```sh
 node bin/loop.js run --task plan.md --target . --gate gate.json
-node bin/loop.js mutate --target . --base HEAD
+node bin/loop.js mutate --target . --base HEAD   # which added lines does no test depend on?
 node bin/loop.js plan --goal "Add the requested behavior" --target . --out campaign/generated/example
 ```
 
@@ -197,6 +217,10 @@ and a verdict.
   empty output and every review silently falls back to `ISSUES`. Already on the launch line.
 - **Never pass `--ignore-user-config` to Codex.** It discards the project trust registry and
   Codex silently goes read-only — it appears to work and writes nothing.
+- **Do not check this repository out under `AppData`.** The scratch-root guard refuses paths
+  there, and several tests build fixtures inside the repository directory, so the suite fails
+  with `scratch root under AppData is forbidden` — pointing at the fixture rather than at
+  where you cloned it. Any other location is fine.
 - **`where codex` may list an extensionless npm shim first.** Handled: the resolver prefers a
   PATHEXT-executable variant.
 
