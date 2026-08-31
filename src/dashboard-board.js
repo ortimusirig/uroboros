@@ -1,4 +1,11 @@
 import { escapeHtml, oneLine } from './dashboard-transcript.js';
+import {
+  DASHBOARD_FILTERS,
+  DEFAULT_DASHBOARD_FILTER,
+  dashboardFilterCounts,
+  filterDashboardRuns,
+  verifierSeatsDisagree,
+} from './dashboard-filters.js';
 
 const COLUMNS = [
   {
@@ -88,7 +95,7 @@ function verifierConsensus(verifiers = {}) {
   if (correctnessUnavailable && intentUnavailable) {
     return { kind: 'pending', label: 'Seats unavailable' };
   }
-  if (correctnessUnavailable !== intentUnavailable || correctness.verdict !== intent.verdict) {
+  if (verifierSeatsDisagree(verifiers)) {
     return { kind: 'disagreement', label: 'Seats disagree' };
   }
   return { kind: 'agreement', label: 'Seats agree' };
@@ -153,11 +160,21 @@ function renderCard(run) {
     + '</span></button></article>';
 }
 
-export function renderDashboardBoard(snapshot) {
+export function renderDashboardBoard(snapshot, selectedFilter = DEFAULT_DASHBOARD_FILTER) {
   const grouped = new Map(COLUMNS.map((column) => [column.key, []]));
-  for (const run of Array.isArray(snapshot?.runs) ? snapshot.runs : []) {
+  const visibleRuns = filterDashboardRuns(snapshot, selectedFilter);
+  for (const run of visibleRuns) {
     grouped.get(columnFor(run.outcome)).push(run);
   }
+  const filterCounts = dashboardFilterCounts(snapshot);
+  const filters = DASHBOARD_FILTERS.map(({ key, label }) => (
+    `<button type="button" data-board-filter="${key}" data-filter-count="${filterCounts[key]}"`
+    + ` aria-pressed="${selectedFilter === key}">${label} <span>${filterCounts[key]}</span></button>`
+  )).join('');
+  const total = filterCounts.all;
+  const summary = visibleRuns.length < total
+    ? `<p class="board-filter-summary" data-board-summary>showing ${visibleRuns.length} of ${total}</p>`
+    : '';
   const columns = COLUMNS.map((definition) => {
     const runs = grouped.get(definition.key).toSorted(newestFirst);
     const body = runs.length === 0
@@ -168,7 +185,16 @@ export function renderDashboardBoard(snapshot) {
       + `${body}</section>`;
   }).join('\n');
   return '<section class="board" data-dashboard-view="board">\n'
+    + `<nav class="board-filters" aria-label="Filter runs">${filters}</nav>\n`
+    + `${summary}`
     + '<div class="board-grid">\n'
     + `${columns}\n`
     + '</div>\n</section>\n';
+}
+
+export function renderDashboardBoards(snapshot) {
+  return Object.fromEntries(DASHBOARD_FILTERS.map(({ key }) => [
+    key,
+    renderDashboardBoard(snapshot, key),
+  ]));
 }

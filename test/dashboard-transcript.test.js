@@ -60,18 +60,26 @@ test('run picker lists run states and defaults to the most recent running run', 
   const active = '2026-08-28T11-00-00-000Z-active';
   const mostRecentActive = '2026-08-28T09-00-00-000Z-most-recent-active';
   const newerFinished = '2026-08-28T12-00-00-000Z-finished';
-  makeRun(root, olderFinished, [
+  const older = makeRun(root, olderFinished, [
     event(olderFinished, 'executor', 'start'),
     event(olderFinished, 'report', 'finish', {}, 1),
   ]);
+  writeFileSync(join(older.worktreeDirectory, 'uro-runfacts.json'), JSON.stringify({
+    runId: olderFinished,
+    outcome: 'needs-decision',
+  }));
   makeRun(root, active, [event(active, 'executor', 'start')]);
   makeRun(root, mostRecentActive, [event(mostRecentActive, 'executor', 'start', {
     ts: '2026-08-28T13:00:00.000Z',
   })]);
-  makeRun(root, newerFinished, [
+  const newer = makeRun(root, newerFinished, [
     event(newerFinished, 'executor', 'start'),
     event(newerFinished, 'report', 'finish', {}, 1),
   ]);
+  writeFileSync(join(newer.worktreeDirectory, 'uro-runfacts.json'), JSON.stringify({
+    runId: newerFinished,
+    outcome: 'needs-decision',
+  }));
   try {
     const html = renderDashboardPage(buildDashboardSnapshot({ scratchRoot: root }));
     assert.match(html, /<select id="run-picker"[^>]*>/);
@@ -247,7 +255,7 @@ test('zero-event, running, and finished runs all render deterministically', () =
     const second = renderDashboardContent(snapshot);
     assert.equal(first, second, 'an identical snapshot must produce byte-identical HTML');
     const withoutState = structuredClone(snapshot);
-    delete withoutState.runs[0].state;
+    delete withoutState.runs.find((run) => run.runId === running).state;
     assert.notEqual(renderDashboardContent(withoutState), first,
       'positive control: removing a required snapshot field must change the output');
   } finally {
@@ -268,7 +276,7 @@ test('served run swaps return the transcript layout through read-only requests',
     const pageHtml = await pageResponse.text();
     assert.match(pageHtml, /new EventSource\('\/events'\)/);
     assert.doesNotMatch(pageHtml, /method\s*:\s*['"](?:POST|PUT|PATCH|DELETE)/i);
-    assert.match(pageHtml, /picker[.]disabled=state[.]snapshot[.]runs[.]length===0/,
+    assert.match(pageHtml, /picker[.]disabled=pickerRuns[.]length===0/,
       'an SSE-discovered first run must enable the initially empty picker');
 
     const listeners = {};
@@ -283,7 +291,10 @@ test('served run swaps return the transcript layout through read-only requests',
     const initialData = pageHtml.match(
       /<script id="initial-dashboard-data" type="application\/json">([\s\S]*?)<\/script>/,
     )?.[1];
-    assert.ok(initialData, 'the client test needs the page snapshot');
+    const initialBoardsData = pageHtml.match(
+      /<script id="initial-dashboard-boards" type="application\/json">([\s\S]*?)<\/script>/,
+    )?.[1];
+    assert.ok(initialData && initialBoardsData, 'the client test needs the page snapshot');
     const rootElement = {
       addEventListener(type, listener) { listeners[type] = listener; },
     };
@@ -311,6 +322,7 @@ test('served run swaps return the transcript layout through read-only requests',
           'run-picker': picker,
           'transcript-body': transcriptBody,
           'initial-dashboard-data': { textContent: initialData },
+          'initial-dashboard-boards': { textContent: initialBoardsData },
         }[id] ?? null;
       },
       querySelectorAll(selector) {

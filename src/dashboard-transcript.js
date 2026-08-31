@@ -1,4 +1,5 @@
 import { decodeRecordedText } from './execution-record.js';
+import { DEFAULT_DASHBOARD_FILTER, filterDashboardRuns } from './dashboard-filters.js';
 
 export function escapeHtml(value) {
   return String(value ?? '')
@@ -352,14 +353,33 @@ export function renderRunTranscript(run, renderDiff) {
     + renderInspector(run, renderDiff) + '</div>';
 }
 
-export function renderTranscriptDashboard(snapshot, renderDiff) {
-  const selected = selectDefaultRun(snapshot.runs);
+export function renderTranscriptDashboard(
+  snapshot,
+  renderDiff,
+  selectedFilter = DEFAULT_DASHBOARD_FILTER,
+) {
+  const allRuns = Array.isArray(snapshot?.runs) ? snapshot.runs : [];
+  const filteredRuns = filterDashboardRuns(snapshot, selectedFilter);
+  // Prefer the FILTERED runs, exactly as the client's defaultRunId does.
+  // Selecting from allRuns first picked the newest run overall, which under the
+  // default attention filter is often a clean review-ready the board omits — so
+  // first paint showed a transcript for a run absent from the board beside it.
+  // The client never corrects this: syncPicker keeps the server's value once
+  // state.runId is set.
+  //
+  // The fallback to allRuns is deliberate and must stay: when nothing matches
+  // the filter the board is empty by design, and a blank transcript beside it
+  // is worse than showing the newest run.
+  const selected = selectDefaultRun(filteredRuns) ?? selectDefaultRun(allRuns);
+  const runs = selected && !filteredRuns.some((run) => run.runId === selected.runId)
+    ? [...filteredRuns, selected]
+    : filteredRuns;
   const message = snapshot.message
     ? `<p class="empty source-message">${escapeHtml(snapshot.message)}</p>`
     : '';
   return '<section data-dashboard-view="transcript">'
     + '<header class="transcript-header">'
-    + renderRunPicker(snapshot.runs, selected?.runId ?? null)
+    + renderRunPicker(runs, selected?.runId ?? null)
     + '<small>Read-only · updates live</small></header>'
     + message
     + `<div id="transcript-body">${renderRunTranscript(selected, renderDiff)}</div>`

@@ -60,6 +60,16 @@ function column(html, key) {
   ))?.[1] ?? '';
 }
 
+function cardRunIds(html) {
+  return [...html.matchAll(/<article class="board-card [^"]+" data-run-id="([^"]+)"/g)]
+    .map((match) => match[1]);
+}
+
+function pickerRunIds(html) {
+  const options = html.match(/<select id="run-picker"[^>]*>([\s\S]*?)<\/select>/)?.[1] ?? '';
+  return [...options.matchAll(/<option value="([^"]+)"/g)].map((match) => match[1]);
+}
+
 function writeRun(root, runId, events, facts = null) {
   const work = join(root, runId, 'w');
   mkdirSync(work, { recursive: true });
@@ -78,6 +88,183 @@ test('dashboard has exactly Transcript and Board tabs with Transcript selected b
   assert.match(html, /data-dashboard-panel="board"[^>]* hidden/);
 });
 
+test('the default board shows only active, human-stopped, and verifier-disagreement runs', () => {
+  const runs = [
+    run('running'),
+    run('decision', { state: 'finished', outcome: 'needs-decision' }),
+    run('disagreement', {
+      state: 'finished',
+      outcome: 'review-ready',
+      verifiers: {
+        correctness: { verdict: 'NO_BLOCKERS' },
+        intent: { verdict: 'ISSUES' },
+      },
+    }),
+    run('clean-review', {
+      state: 'finished',
+      outcome: 'review-ready',
+      verifiers: {
+        correctness: { verdict: 'NO_BLOCKERS' },
+        intent: { verdict: 'NO_BLOCKERS' },
+      },
+    }),
+    run('no-change', { state: 'finished', outcome: 'no-op' }),
+  ];
+
+  assert.deepEqual(cardRunIds(renderDashboardBoard(snapshot(...runs))), [
+    'running', 'decision', 'disagreement',
+  ]);
+});
+
+test('two unavailable verifier seats remain pending rather than becoming a disagreement', () => {
+  const item = run('both-unavailable', {
+    state: 'finished',
+    outcome: 'review-ready',
+    verifiers: {
+      correctness: { verdict: 'UNVERIFIED', verdictSource: 'none' },
+      intent: { verdict: 'NO_RESULT', verdictSource: 'none' },
+    },
+  });
+
+  assert.deepEqual(cardRunIds(renderDashboardBoard(snapshot(item))), []);
+  assert.match(
+    renderDashboardBoard(snapshot(item), 'all'),
+    /data-run-id="both-unavailable" data-verifier-consensus="pending"/,
+  );
+});
+
+test('every human-stop outcome enters the attention filter', () => {
+  const outcomes = [
+    'needs-decision', 'needs-pivot', 'gate-failed',
+    'executor-failed', 'timed-out', 'conflicting-intent',
+  ];
+  const runs = outcomes.map((outcome) => run(outcome, { state: 'finished', outcome }));
+
+  assert.deepEqual(
+    cardRunIds(renderDashboardBoard(snapshot(...runs))).toSorted(),
+    outcomes.toSorted(),
+  );
+});
+
+test('the Active filter shows running and waiting runs only', () => {
+  const runs = [
+    run('running'),
+    run('waiting', { state: 'waiting' }),
+    run('decision', { state: 'finished', outcome: 'needs-decision' }),
+    run('clean-review', { state: 'finished', outcome: 'review-ready' }),
+  ];
+
+  assert.deepEqual(
+    cardRunIds(renderDashboardBoard(snapshot(...runs), 'active')).toSorted(),
+    ['running', 'waiting'],
+  );
+});
+
+test('the Today filter uses each run first event date', () => {
+  const today = run('today', {
+    state: 'finished', outcome: 'no-op', startTs: '2026-08-28T00:00:01.000Z',
+  });
+  const earlier = run('earlier', {
+    state: 'finished', outcome: 'no-op', startTs: '2026-08-27T23:59:59.000Z',
+  });
+
+  assert.deepEqual(
+    cardRunIds(renderDashboardBoard(snapshot(today, earlier), 'today')),
+    ['today'],
+  );
+});
+
+test('every filter reports its match count and renders exactly that many cards', () => {
+  const fixture = snapshot(
+    run('running'),
+    run('waiting', { state: 'waiting', startTs: '2026-08-27T12:00:00.000Z' }),
+    run('decision', {
+      state: 'finished', outcome: 'needs-decision', startTs: '2026-08-27T12:00:00.000Z',
+    }),
+    run('clean-review', {
+      state: 'finished',
+      outcome: 'review-ready',
+      verifiers: {
+        correctness: { verdict: 'NO_BLOCKERS' },
+        intent: { verdict: 'NO_BLOCKERS' },
+      },
+    }),
+    run('no-change', {
+      state: 'finished', outcome: 'no-op', startTs: '2026-08-27T12:00:00.000Z',
+    }),
+  );
+  const expected = { 'needs-attention': 3, active: 2, today: 2, all: 5 };
+
+  for (const [filter, count] of Object.entries(expected)) {
+    const html = renderDashboardBoard(fixture, filter);
+    const reported = Object.fromEntries([...html.matchAll(
+      /data-board-filter="([^"]+)"[^>]*data-filter-count="(\d+)"/g,
+    )].map((match) => [match[1], Number(match[2])]));
+    assert.deepEqual(reported, expected);
+    assert.equal(cardRunIds(html).length, count, `${filter} card count`);
+    if (filter === 'all') {
+      assert.deepEqual(cardRunIds(html).toSorted(), [
+        'clean-review', 'decision', 'no-change', 'running', 'waiting',
+      ]);
+    }
+  }
+});
+
+test('the board states how many runs are shown only when a filter narrows the snapshot', () => {
+  const fixture = snapshot(
+    run('running'),
+    run('clean-review', { state: 'finished', outcome: 'review-ready' }),
+  );
+
+  assert.match(
+    renderDashboardBoard(fixture),
+    /<p class="board-filter-summary" data-board-summary>showing 1 of 2<\/p>/,
+  );
+  assert.doesNotMatch(renderDashboardBoard(fixture, 'all'), /data-board-summary|showing \d+ of \d+/);
+  assert.doesNotMatch(
+    renderDashboardBoard(snapshot(run('only-running'))),
+    /data-board-summary|showing \d+ of \d+/,
+  );
+});
+
+test('the initial run picker lists the same attention-filtered set as the board', () => {
+  const fixture = snapshot(
+    run('running'),
+    run('decision', { state: 'finished', outcome: 'needs-decision' }),
+    run('disagreement', {
+      state: 'finished',
+      outcome: 'review-ready',
+      verifiers: {
+        correctness: { verdict: 'NO_BLOCKERS' },
+        intent: { verdict: 'ISSUES' },
+      },
+    }),
+    run('clean-review', { state: 'finished', outcome: 'review-ready' }),
+    run('no-change', { state: 'finished', outcome: 'no-op' }),
+  );
+
+  assert.deepEqual(
+    pickerRunIds(renderDashboardPage(fixture)).toSorted(),
+    ['decision', 'disagreement', 'running'],
+  );
+});
+
+test('an initially selected run remains in the picker when the filter would exclude it', () => {
+  const fixture = snapshot(run('selected-clean-run', {
+    state: 'finished',
+    outcome: 'review-ready',
+    verifiers: {
+      correctness: { verdict: 'NO_BLOCKERS' },
+      intent: { verdict: 'NO_BLOCKERS' },
+    },
+  }));
+  const html = renderDashboardPage(fixture);
+
+  assert.deepEqual(pickerRunIds(html), ['selected-clean-run']);
+  assert.match(html, /class="state finished">Finished/);
+  assert.deepEqual(cardRunIds(html), []);
+});
+
 test('tab and card clicks preserve one SSE connection and the latest transcript selection', async () => {
   const firstId = 'run-first';
   const secondId = 'run-second';
@@ -87,8 +274,12 @@ test('tab and card clicks preserve one SSE connection and the latest transcript 
   const initialData = html.match(
     /<script id="initial-dashboard-data" type="application\/json">([\s\S]*?)<\/script>/,
   )?.[1];
+  const initialBoardsData = html.match(
+    /<script id="initial-dashboard-boards" type="application\/json">([\s\S]*?)<\/script>/,
+  )?.[1];
   const source = html.match(/<script>([\s\S]*?)<\/script>\s*<\/body>/)?.[1];
-  assert.ok(initialData && source);
+  assert.ok(initialData && initialBoardsData && source);
+  const initialBoards = JSON.parse(initialBoardsData);
 
   const listeners = {};
   const streamListeners = {};
@@ -120,6 +311,7 @@ test('tab and card clicks preserve one SSE connection and the latest transcript 
         'transcript-body': transcriptBody,
         'board-body': boardBody,
         'initial-dashboard-data': { textContent: initialData },
+        'initial-dashboard-boards': { textContent: initialBoardsData },
       }[id] ?? null;
     },
     querySelectorAll(selector) {
@@ -146,6 +338,13 @@ test('tab and card clicks preserve one SSE connection and the latest transcript 
   runInNewContext(source, { document, EventSource: FakeEventSource, fetch });
   assert.equal(eventSourceCount, 1);
 
+  const allFilter = { dataset: { boardFilter: 'all' } };
+  listeners.click({
+    target: { closest(selector) { return selector === '[data-board-filter]' ? allFilter : null; } },
+  });
+  assert.equal(boardBody.innerHTML, initialBoards.all);
+  assert.match(picker.innerHTML, new RegExp(`<option value="${secondId}">`));
+
   const boardTab = dashboardTabs[1];
   listeners.click({
     target: { closest(selector) { return selector === '[data-dashboard-tab]' ? boardTab : null; } },
@@ -161,15 +360,23 @@ test('tab and card clicks preserve one SSE connection and the latest transcript 
         ...emptySnapshot(),
         message: null,
         runs: [
-          { runId: firstId, title: null, state: 'running', startTs: null, lastEventTs: null },
-          { runId: secondId, title: null, state: 'finished', startTs: null, lastEventTs: null },
+          { runId: firstId, title: null, state: 'running', startTs: null, lastEventTs: null,
+            filters: ['needs-attention', 'active', 'all'] },
+          { runId: secondId, title: null, state: 'finished', startTs: null, lastEventTs: null,
+            filters: ['all'] },
         ],
       },
       boardHtml: '<p>live board</p>',
+      boardHtmlByFilter: {
+        'needs-attention': '<p>live attention</p>',
+        active: '<p>live active</p>',
+        today: '<p>live today</p>',
+        all: '<p>live all</p>',
+      },
     }),
   });
   assert.ok(fetchCalls.some(({ url }) => url === `/detail?runId=${firstId}`));
-  assert.equal(boardBody.innerHTML, '<p>live board</p>');
+  assert.equal(boardBody.innerHTML, '<p>live all</p>', 'SSE must retain the All filter');
 
   const card = { dataset: { boardRun: secondId } };
   listeners.click({
@@ -179,6 +386,17 @@ test('tab and card clicks preserve one SSE connection and the latest transcript 
   assert.equal(dashboardPanels[1].hidden, true);
   assert.equal(picker.value, secondId, 'the live snapshot must retain the selected run');
   assert.ok(fetchCalls.some(({ url }) => url === `/detail?runId=${secondId}`));
+
+  const fetchCountBeforeFilter = fetchCalls.length;
+  const activeFilter = { dataset: { boardFilter: 'active' } };
+  listeners.click({
+    target: { closest(selector) { return selector === '[data-board-filter]' ? activeFilter : null; } },
+  });
+  assert.equal(boardBody.innerHTML, '<p>live active</p>');
+  assert.equal(picker.value, secondId, 'a selected run outside Active must remain selectable');
+  assert.match(picker.innerHTML, new RegExp(`<option value="${firstId}">`));
+  assert.match(picker.innerHTML, new RegExp(`<option value="${secondId}">`));
+  assert.equal(fetchCalls.length, fetchCountBeforeFilter, 'filtering must not issue a request');
 
   resolveFetch(`/detail?runId=${secondId}`, '<p>run B transcript</p>');
   await new Promise((resolve) => setImmediate(resolve));
@@ -195,15 +413,30 @@ test('tab and card clicks preserve one SSE connection and the latest transcript 
     data: JSON.stringify({
       snapshot: {
         ...emptySnapshot(), message: null,
-        runs: [{ runId: secondId, title: null, state: 'running', startTs: null, lastEventTs: null }],
+        runs: [{ runId: secondId, title: null, state: 'running', startTs: null, lastEventTs: null,
+          filters: ['needs-attention', 'active', 'all'] }],
       },
       boardHtml: '<p>one live run</p>',
+      boardHtmlByFilter: {
+        'needs-attention': '<p>one attention run</p>', active: '<p>one active run</p>',
+        today: '<p>no today runs</p>', all: '<p>one all run</p>',
+      },
     }),
   });
+  assert.equal(boardBody.innerHTML, '<p>one active run</p>',
+    'the selected filter must survive later snapshot updates');
   assert.equal(transcriptBody.busy, true);
   streamListeners.snapshot({
-    data: JSON.stringify({ snapshot: emptySnapshot(), boardHtml: '<p>empty board</p>' }),
+    data: JSON.stringify({
+      snapshot: emptySnapshot(),
+      boardHtml: '<p>empty board</p>',
+      boardHtmlByFilter: {
+        'needs-attention': '<p>empty attention</p>', active: '<p>empty active</p>',
+        today: '<p>empty today</p>', all: '<p>empty all</p>',
+      },
+    }),
   });
+  assert.equal(boardBody.innerHTML, '<p>empty active</p>');
   assert.equal(transcriptBody.busy, false,
     'an empty snapshot must clear busy state from the request it superseded');
   assert.match(transcriptBody.innerHTML, /No run is available yet/);
@@ -235,8 +468,13 @@ test('the existing SSE payload carries pure board HTML without a second route', 
     assert.match(payload.boardHtml, /^<section class="board" data-dashboard-view="board">/);
     assert.match(payload.boardHtml, /data-run-id="sse-board-run"/);
     assert.doesNotMatch(payload.boardHtml, /<form|method=|data-action=/i);
-    assert.deepEqual(Object.keys(payload).sort(), ['boardHtml', 'snapshot']);
+    assert.deepEqual(Object.keys(payload.boardHtmlByFilter), [
+      'needs-attention', 'active', 'today', 'all',
+    ]);
+    assert.equal(payload.boardHtmlByFilter['needs-attention'], payload.boardHtml);
+    assert.deepEqual(Object.keys(payload).sort(), ['boardHtml', 'boardHtmlByFilter', 'snapshot']);
     assert.equal(payload.snapshot.runs[0].runId, runId);
+    assert.deepEqual(payload.snapshot.runs[0].filters, ['needs-attention', 'active', 'all']);
   } finally {
     observer.dispose();
     rmSync(root, { recursive: true, force: true });
@@ -413,6 +651,15 @@ test('changing a run outcome moves its card to a different column', () => {
   assert.match(column(after, 'review-ready'), /data-run-id="moving-run"/);
 });
 
+test('changing a stopped run outcome moves it into the attention filter', () => {
+  const item = run('classification-control', { state: 'finished', outcome: 'no-op' });
+  const before = renderDashboardBoard(snapshot(item));
+  const after = renderDashboardBoard(snapshot({ ...item, outcome: 'gate-failed' }));
+
+  assert.deepEqual(cardRunIds(before), []);
+  assert.deepEqual(cardRunIds(after), ['classification-control']);
+});
+
 test('board rendering matches its golden file and is byte-identical for an identical snapshot', () => {
   const fixture = snapshot(run('run-golden', {
     title: 'Golden board',
@@ -421,7 +668,7 @@ test('board rendering matches its golden file and is byte-identical for an ident
     gateResult: 'passed',
     verifiers: {
       correctness: { verdict: 'NO_BLOCKERS' },
-      intent: { verdict: 'NO_BLOCKERS' },
+      intent: { verdict: 'ISSUES' },
     },
     debateRoundCount: 2,
     startTs: '2026-08-28T12:00:00.000Z',
@@ -434,4 +681,30 @@ test('board rendering matches its golden file and is byte-identical for an ident
   const golden = readFileSync(new URL('./golden/dashboard-board.html', import.meta.url), 'utf8');
   assert.equal(first, golden);
   assert.equal(second, first);
+});
+
+test('the transcript default comes from the filtered runs, not the newest overall', () => {
+  // Reproduces the correctness seat's finding on the board-filters change.
+  // Nothing is running, the newest run is clean and excluded by the default
+  // attention filter, and an older run needs attention. Selecting the default
+  // from all runs put the transcript on a run the board does not list.
+  const fixture = snapshot(
+    run('newest-clean', {
+      state: 'finished', outcome: 'review-ready',
+      startTs: '2026-08-28T15:00:00.000Z',
+      verifiers: { correctness: { verdict: 'NO_BLOCKERS' }, intent: { verdict: 'NO_BLOCKERS' } },
+    }),
+    run('older-gate-failed', {
+      state: 'finished', outcome: 'gate-failed',
+      startTs: '2026-08-28T09:00:00.000Z',
+      verifiers: { correctness: { verdict: 'ISSUES' }, intent: { verdict: 'ISSUES' } },
+    }),
+  );
+  const html = renderDashboardPage(fixture);
+
+  assert.deepEqual(cardRunIds(html), ['older-gate-failed']);
+  assert.deepEqual(pickerRunIds(html), ['older-gate-failed'],
+    'the picker must not offer a run the board omits as the default');
+  assert.match(html, /<h2>older-gate-failed<\/h2>/);
+  assert.doesNotMatch(html, /<h2>newest-clean<\/h2>/);
 });

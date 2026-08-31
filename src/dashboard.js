@@ -5,7 +5,7 @@ import {
 } from './dashboard-config.js';
 import {
   buildDashboardSnapshot,
-  renderBoardDetail,
+  renderBoardDetails,
   renderDashboardPage,
   renderTranscriptDetail,
   snapshotForClient,
@@ -28,9 +28,11 @@ export function createDashboardObserver(options, pollIntervalMs = 250) {
   let disposed = false;
 
   const send = (response) => {
+    const boardHtmlByFilter = renderBoardDetails(snapshot);
     const payload = JSON.stringify({
       snapshot: snapshotForClient(snapshot),
-      boardHtml: renderBoardDetail(snapshot),
+      boardHtml: boardHtmlByFilter['needs-attention'],
+      boardHtmlByFilter,
     });
     try {
       response.write(`event: snapshot\ndata: ${payload}\n\n`);

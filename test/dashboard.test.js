@@ -347,7 +347,7 @@ test('the SSE client snapshot retains its exact on-demand-view-independent field
       'message', 'mode', 'observedAt', 'runs', 'sourcePath',
     ]);
     assert.deepEqual(Object.keys(client.runs[0]).sort(), [
-      'lastEventTs', 'runId', 'startTs', 'state', 'title',
+      'filters', 'lastEventTs', 'runId', 'startTs', 'state', 'title',
     ]);
     assert.equal(Object.hasOwn(client, 'logs'), false);
     assert.equal(Object.hasOwn(client, 'graph'), false);

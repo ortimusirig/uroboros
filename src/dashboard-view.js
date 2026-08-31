@@ -12,7 +12,8 @@ import { pathToFileURL } from 'node:url';
 import { URO_DASHBOARD_MARKER } from './dashboard-config.js';
 import { CAMPAIGN_EVENTS_FILENAME, readEventStream } from './event-stream.js';
 import { resolveArtifact } from './artifacts.js';
-import { renderDashboardBoard } from './dashboard-board.js';
+import { renderDashboardBoard, renderDashboardBoards } from './dashboard-board.js';
+import { DEFAULT_DASHBOARD_FILTER, dashboardFiltersForRun } from './dashboard-filters.js';
 import { addUsage, EMPTY_USAGE } from './usage.js';
 import {
   escapeHtml,
@@ -543,6 +544,10 @@ export function renderBoardDetail(snapshot) {
   return renderDashboardBoard(snapshot);
 }
 
+export function renderBoardDetails(snapshot) {
+  return renderDashboardBoards(snapshot);
+}
+
 export function snapshotForClient(snapshot) {
   return {
     mode: snapshot.mode,
@@ -555,6 +560,7 @@ export function snapshotForClient(snapshot) {
       state: run.state,
       startTs: run.startTs,
       lastEventTs: run.lastEventTs,
+      filters: dashboardFiltersForRun(run, snapshot.observedAt),
     })),
   };
 }
@@ -567,28 +573,32 @@ function clientScript() {
   return String.raw`
 const connection=document.getElementById('connection');
 const root=document.getElementById('runs');
-const state={snapshot:JSON.parse(document.getElementById('initial-dashboard-data').textContent),runId:null,view:'transcript'};
+const defaultFilter=${JSON.stringify(DEFAULT_DASHBOARD_FILTER)};
+const state={snapshot:JSON.parse(document.getElementById('initial-dashboard-data').textContent),boards:JSON.parse(document.getElementById('initial-dashboard-boards').textContent),filter:defaultFilter,runId:null,view:'transcript'};
 function esc(value){return String(value==null?'':value).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;').replaceAll("'",'&#39;')}
 function label(stateValue){if(stateValue==='running')return'Live';if(stateValue==='finished')return'Finished';if(stateValue==='error')return'Read error';return'Waiting'}
 function mostRecent(runs){return runs.reduce(function(latest,run){if(latest===null)return run;const runTime=Date.parse(run.lastEventTs||run.startTs||'');const latestTime=Date.parse(latest.lastEventTs||latest.startTs||'');if(!Number.isFinite(runTime))return latest;return!Number.isFinite(latestTime)||runTime>latestTime?run:latest},null)}
-function defaultRunId(){const runs=state.snapshot.runs;const run=mostRecent(runs.filter(function(item){return item.state==='running'}))||mostRecent(runs.filter(function(item){return item.state==='waiting'}))||runs[0];return run?run.runId:null}
-function syncPicker(){const picker=document.getElementById('run-picker');if(!picker)return;const wanted=state.runId&&state.snapshot.runs.some(function(run){return run.runId===state.runId})?state.runId:defaultRunId();picker.innerHTML=state.snapshot.runs.map(function(run){return'<option value="'+esc(run.runId)+'">'+esc(run.runId)+' — '+esc(label(run.state))+'</option>'}).join('');picker.disabled=state.snapshot.runs.length===0;if(wanted!==null)picker.value=wanted;state.runId=wanted}
+function defaultRunId(runs){const run=mostRecent(runs.filter(function(item){return item.state==='running'}))||mostRecent(runs.filter(function(item){return item.state==='waiting'}))||runs[0];return run?run.runId:null}
+function filteredRuns(){return state.snapshot.runs.filter(function(run){return Array.isArray(run.filters)&&run.filters.includes(state.filter)})}
+function syncPicker(){const picker=document.getElementById('run-picker');if(!picker)return;const filtered=filteredRuns();const selected=state.runId?state.snapshot.runs.find(function(run){return run.runId===state.runId}):null;const wanted=selected?selected.runId:defaultRunId(filtered);const pickerRuns=selected&&!filtered.some(function(run){return run.runId===selected.runId})?filtered.concat([selected]):filtered;picker.innerHTML=pickerRuns.map(function(run){return'<option value="'+esc(run.runId)+'">'+esc(run.runId)+' — '+esc(label(run.state))+'</option>'}).join('');picker.disabled=pickerRuns.length===0;if(wanted!==null)picker.value=wanted;state.runId=wanted}
+function renderBoard(){const board=document.getElementById('board-body');const html=state.boards&&state.boards[state.filter];if(board&&typeof html==='string')board.innerHTML=html}
 let transcriptRequest=0;
 async function refreshTranscript(){const request=++transcriptRequest;const target=document.getElementById('transcript-body');if(!target)return;const requestedRunId=state.runId;if(requestedRunId===null){target.removeAttribute('aria-busy');target.innerHTML='<div class="transcript-layout"><section class="transcript-pane"><p class="empty">No run is available yet.</p></section><aside class="inspector-pane"><p class="muted">Nothing to inspect.</p></aside></div>';return}target.setAttribute('aria-busy','true');try{const response=await fetch('/detail?runId='+encodeURIComponent(requestedRunId),{cache:'no-store'});const html=response.ok?await response.text():'<p class="empty">That run is no longer available.</p>';if(request===transcriptRequest)target.innerHTML=html}catch(error){if(request===transcriptRequest)target.innerHTML='<p class="empty">Could not load run: '+esc(error.message)+'</p>'}finally{if(request===transcriptRequest)target.removeAttribute('aria-busy')}}
 function showDashboardTab(name){state.view=name;document.querySelectorAll('[data-dashboard-tab]').forEach(function(button){button.setAttribute('aria-selected',String(button.dataset.dashboardTab===name))});document.querySelectorAll('[data-dashboard-panel]').forEach(function(panel){panel.hidden=panel.dataset.dashboardPanel!==name})}
 function showInspectorTab(name){document.querySelectorAll('[data-inspector-tab]').forEach(function(button){button.setAttribute('aria-pressed',String(button.dataset.inspectorTab===name))});document.querySelectorAll('[data-inspector-panel]').forEach(function(panel){panel.hidden=panel.dataset.inspectorPanel!==name})}
 function diffKey(value){return String(value||'').replace(/\\/g,'/').replace(/^(?:[.][/]|[ab][/])/,'')}
 root.addEventListener('change',function(event){if(event.target.id==='run-picker'){state.runId=event.target.value;refreshTranscript()}});
-root.addEventListener('click',function(event){const dashboardTab=event.target.closest('[data-dashboard-tab]');if(dashboardTab){showDashboardTab(dashboardTab.dataset.dashboardTab);return}const boardRun=event.target.closest('[data-board-run]');if(boardRun){state.runId=boardRun.dataset.boardRun;syncPicker();showDashboardTab('transcript');refreshTranscript();return}const tab=event.target.closest('[data-inspector-tab]');if(tab){showInspectorTab(tab.dataset.inspectorTab);return}const file=event.target.closest('[data-file-diff]');if(!file)return;showInspectorTab('diff');const wanted=diffKey(file.dataset.fileDiff);document.querySelectorAll('[data-diff-path]').forEach(function(section){const match=diffKey(section.dataset.diffPath)===wanted;section.hidden=!match;if(match){section.open=true;section.scrollIntoView({behavior:'smooth',block:'start'})}})});
+root.addEventListener('click',function(event){const dashboardTab=event.target.closest('[data-dashboard-tab]');if(dashboardTab){showDashboardTab(dashboardTab.dataset.dashboardTab);return}const boardFilter=event.target.closest('[data-board-filter]');if(boardFilter){state.filter=boardFilter.dataset.boardFilter;renderBoard();syncPicker();return}const boardRun=event.target.closest('[data-board-run]');if(boardRun){state.runId=boardRun.dataset.boardRun;syncPicker();showDashboardTab('transcript');refreshTranscript();return}const tab=event.target.closest('[data-inspector-tab]');if(tab){showInspectorTab(tab.dataset.inspectorTab);return}const file=event.target.closest('[data-file-diff]');if(!file)return;showInspectorTab('diff');const wanted=diffKey(file.dataset.fileDiff);document.querySelectorAll('[data-diff-path]').forEach(function(section){const match=diffKey(section.dataset.diffPath)===wanted;section.hidden=!match;if(match){section.open=true;section.scrollIntoView({behavior:'smooth',block:'start'})}})});
 const picker=document.getElementById('run-picker');state.runId=picker&&!picker.disabled?picker.value:null;
 const stream=new EventSource('/events');
-stream.addEventListener('snapshot',function(event){const payload=JSON.parse(event.data);state.snapshot=payload.snapshot;const board=document.getElementById('board-body');if(board&&typeof payload.boardHtml==='string')board.innerHTML=payload.boardHtml;syncPicker();refreshTranscript();connection.textContent='Live'});
+stream.addEventListener('snapshot',function(event){const payload=JSON.parse(event.data);state.snapshot=payload.snapshot;if(payload.boardHtmlByFilter&&typeof payload.boardHtmlByFilter==='object')state.boards=payload.boardHtmlByFilter;else if(typeof payload.boardHtml==='string')state.boards[defaultFilter]=payload.boardHtml;renderBoard();syncPicker();refreshTranscript();connection.textContent='Live'});
 stream.onopen=function(){connection.textContent='Live'};
 stream.onerror=function(){connection.textContent='Reconnecting…'};
 `;
 }
 
 export function renderDashboardPage(snapshot) {
+  const boards = renderDashboardBoards(snapshot);
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -610,6 +620,12 @@ button{color:inherit}
 .dashboard-tabs{display:flex;gap:.25rem;margin-bottom:1rem;border-bottom:1px solid var(--line)}
 .dashboard-tabs button{border:0;border-bottom:3px solid transparent;background:transparent;padding:.6rem .85rem;cursor:pointer;color:var(--muted)}
 .dashboard-tabs button[aria-selected="true"]{border-color:var(--ink);color:var(--ink);font-weight:700}
+.board-filters{display:flex;flex-wrap:wrap;gap:.4rem;margin-bottom:.5rem}
+.board-filters button{display:flex;align-items:center;gap:.4rem;border:1px solid var(--line);border-radius:999px;background:var(--card);padding:.35rem .65rem;cursor:pointer}
+.board-filters button:hover{background:var(--soft)}
+.board-filters button[aria-pressed="true"]{border-color:var(--ink);font-weight:700}
+.board-filters span{min-width:1.35rem;border-radius:999px;background:var(--soft);padding:0 .35rem;text-align:center;font-size:.75rem;font-variant-numeric:tabular-nums}
+.board-filter-summary{margin:.35rem 0 .75rem;color:var(--muted)}
 .board-grid{display:grid;grid-template-columns:repeat(5,minmax(220px,1fr));gap:.8rem;align-items:start;overflow-x:auto;padding-bottom:.5rem}
 .board-column{min-height:14rem;background:var(--soft);border:1px solid var(--line);border-radius:7px;padding:.65rem}
 .board-column>header{display:flex;align-items:center;justify-content:space-between;gap:.5rem;margin-bottom:.65rem}
@@ -716,8 +732,9 @@ button{color:inherit}
 <button type="button" role="tab" data-dashboard-tab="board" aria-selected="false">Board</button>
 </nav>
 <section role="tabpanel" data-dashboard-panel="transcript">${renderDashboardContent(snapshot)}</section>
-<section role="tabpanel" data-dashboard-panel="board" hidden><div id="board-body">${renderDashboardBoard(snapshot)}</div></section></main>
+<section role="tabpanel" data-dashboard-panel="board" hidden><div id="board-body">${boards[DEFAULT_DASHBOARD_FILTER]}</div></section></main>
 <script id="initial-dashboard-data" type="application/json">${jsonForInlineScript(snapshotForClient(snapshot))}</script>
+<script id="initial-dashboard-boards" type="application/json">${jsonForInlineScript(boards)}</script>
 <script>${clientScript()}</script>
 </body>
 </html>`;
