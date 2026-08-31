@@ -958,3 +958,33 @@ test('loop mutate prints the human summary, not only the JSON result', () => {
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('a golden fixture under test/ is not selected as a runnable test', () => {
+  // `loop mutate` selected test/golden/dashboard-board.html because the path
+  // has a "test" segment and its stem matched the changed src/dashboard-board.js.
+  // node --test then tried to execute the HTML, the baseline went red, and the
+  // whole mutation run refused to start.
+  assert.equal(isTestFile('test/golden/dashboard-board.html'), false);
+  assert.equal(isTestFile('test/golden/doctor-all-pass.txt'), false);
+  assert.equal(isTestFile('test/fixtures/sample.json'), false);
+
+  // Narrowness control: real tests must still be found, by segment and by name.
+  assert.equal(isTestFile('test/dashboard-board.test.js'), true);
+  assert.equal(isTestFile('test/plan.test.js'), true);
+  assert.equal(isTestFile('src/thing.spec.ts'), true);
+  assert.equal(isTestFile('__tests__/helper.mjs'), true);
+});
+
+test('selectTouchingTests never hands a non-runnable fixture to the test command', () => {
+  const files = [
+    'src/dashboard-board.js',
+    'test/dashboard-board.test.js',
+    'test/golden/dashboard-board.html',
+  ];
+  const selected = selectTouchingTests({
+    root: process.cwd(), changedFiles: ['src/dashboard-board.js'], files,
+  });
+  assert.ok(selected.includes('test/dashboard-board.test.js'));
+  assert.equal(selected.includes('test/golden/dashboard-board.html'), false,
+    'a golden fixture must never reach `node --test`');
+});

@@ -58,6 +58,11 @@ function sourceExtension(path) {
 
 export function isTestFile(path) {
   const normalized = posixPath(path);
+  // A test file must be runnable. Living under test/ is not enough: golden
+  // fixtures sit there too, and selecting test/golden/dashboard-board.html
+  // handed it to `node --test`, which tried to execute it and turned the whole
+  // baseline red — mutation then refused to run at all.
+  if (!sourceExtension(normalized)) return false;
   const segments = normalized.toLowerCase().split('/');
   const name = segments.at(-1) ?? '';
   return segments.some((segment) => TEST_SEGMENTS.has(segment))
