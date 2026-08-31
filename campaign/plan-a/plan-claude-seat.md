@@ -230,3 +230,59 @@ Do not delete, skip, or weaken any existing test.
 - Cursor's scoped write and the `uro-review` skill.
 - The FRESH pivot re-branching from a pre-debate snapshot.
 - Any change to how the gate or the verifier verdicts work.
+
+---
+
+## Measured 2026-08-30 — corrections to this plan's premise
+
+Checked against the code before the plan was run.
+
+### Still true
+
+- `claude` is never spawned as a seat. `codex` and `agent` are child processes;
+  the only occurrence of `'claude'` in `src/` is the doctor's superpowers check.
+- `validateFindings` in `fix-plan.js` is still
+  `description non-empty ? accept : reject` — every reviewer complaint carrying
+  any text is obeyed, and `buildFixPlan`'s "rejected (overruled)" rendering is
+  still unreachable.
+- `decision-resolver.js` still adopts `question.recommendation` verbatim, so the
+  executor still answers its own questions.
+
+### Stale — do not implement
+
+**`DEFAULT_DEBATE_ROUNDS` no longer exists.** It was removed by the earlier
+uncapping work; there are no occurrences anywhere in `src/`. The `maxRounds` in
+`args.js` belongs to `batch --rounds` candidate refinement and is unrelated to
+the debate loop. Nothing in this plan should try to remove a cap that is
+already gone.
+
+### The real remaining cap
+
+Termination is now governed by two functions in `src/debate.js`, and the split
+between them is wrong in exactly one place:
+
+```js
+export function detectCircling(ledger) { ... }   // evidence — keep as is
+export function shouldPivot(pivotCount) {        // a decision, hard-coded
+  if (pivotCount === 0) return PIVOT_AMEND;
+  if (pivotCount === 1) return PIVOT_FRESH;
+  return PIVOT_CONCLUDE;
+}
+```
+
+`detectCircling` **measures** whether findings are actually decreasing across
+the last three rounds. That is evidence, it is deterministic, and it stays.
+
+`shouldPivot` **decides** what to do about it, by counting pivots and nothing
+else. It cannot see whether the findings are converging, whether the remedy
+proposed by the reviewer was tried, or whether a FRESH plan would help. It is
+the arbitrary deterministic ladder this plan should replace.
+
+**Required, superseding any instruction above about the round cap:** the
+arbiter judges the pivot, given the ledger, the recurring findings, and what
+has already been attempted. `shouldPivot`'s ladder becomes the fallback used
+only when no arbiter is available, and when it is used the run records that the
+pivot was unjudged — the same pattern `groupMutationStatements` already uses for
+unjudged grouping.
+
+Evidence stays deterministic; the decision gets judged.
