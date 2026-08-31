@@ -372,16 +372,6 @@ export function parseVerdict(streamText) {
   return parseVerdictDetail(streamText).verdict;
 }
 
-export function hasVerdictEvidence(streamText) {
-  for (const line of streamText.split('\n')) {
-    const s = line.trim();
-    if (!s) continue;
-    let item;
-    try { item = JSON.parse(s); } catch { continue; }
-    if (item.type === 'result' || item.type === 'assistant') return true;
-  }
-  return false;
-}
 
 function extractResultUsage(streamText) {
   let rawUsage;
@@ -627,8 +617,17 @@ export async function runVerifier({
   }
   observer.finish();
   const detail = parseVerdictDetail(r.stdout);
-  const evidenceWithTermination = r.timedOut
-    ? { ...detail.evidence, termination: r.timeoutReason ?? { kind: 'deadline' } }
+  // A non-zero exit is a termination just as a deadline is. Without this, a seat
+  // that emitted some prose and then died — Cursor exiting 1 on usage
+  // exhaustion, observed in production — reached the `hasSubstantiveEvidence`
+  // fallback and was recorded as ISSUES, a review conclusion nobody reached.
+  // Every marker check runs before `termination` is consulted, so a seat that
+  // did render a verdict and then exited non-zero still keeps that verdict.
+  const terminationReason = r.timedOut
+    ? (r.timeoutReason ?? { kind: 'deadline' })
+    : (r.code !== 0 ? { kind: 'exit', code: r.code } : null);
+  const evidenceWithTermination = terminationReason
+    ? { ...detail.evidence, termination: terminationReason }
     : detail.evidence;
   const derived = deriveVerdictFromEvidence(evidenceWithTermination);
   const evidence = {
@@ -640,7 +639,12 @@ export async function runVerifier({
   const { text, planText } = detail;
   const { verdict, source } = derived;
   const exitCode = r.code;
-  const launchFailed = r.timedOut || (exitCode !== 0 && !hasVerdictEvidence(r.stdout));
+  // A seat that started talking and then died is not a seat that reviewed. This
+  // once tested only for stream activity, so a single assistant chunk emitted
+  // before the CLI aborted (quota exhaustion, killed process) made it false and
+  // the stderr carrying the actual cause was discarded as though the review had
+  // run. Key it on whether a verdict was derivable — `source === 'none'`.
+  const launchFailed = r.timedOut || (exitCode !== 0 && source === 'none');
   const usage = extractResultUsage(r.stdout);
   // A verdict without its reasoning is not actionable: report the findings on the
   // path where the verifier actually ran, mirroring how stderr is kept when it did not.

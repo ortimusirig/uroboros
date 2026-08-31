@@ -20,7 +20,6 @@ import {
   DEFAULT_PROMPT,
   DEFAULT_VERIFIER_MODEL,
   extractPlanArtifact,
-  hasVerdictEvidence,
   parseVerdict,
   parseVerdictDetail,
   runVerifier,
@@ -765,7 +764,31 @@ test('a conclusive result ISSUES is not overridden by a NO_BLOCKERS plan artifac
   assert.match(detail.planText, /NO_BLOCKERS$/);
 });
 
-test('hasVerdictEvidence detects result or assistant stream events', () => {
-  assert.equal(hasVerdictEvidence(''), false);
-  assert.equal(hasVerdictEvidence('{"type":"result","result":"x"}'), true);
+
+test('a seat that dies mid-stream is UNVERIFIED, never ISSUES', async () => {
+  const r = await runVerifier({ cwd: process.cwd(), bin: process.execPath,
+    extraArgv: [fakeAgent, 'quota-death'] });
+
+  // Observed in production: Cursor emitted one assistant chunk, then exited 1
+  // on usage exhaustion. That prose satisfied hasSubstantiveEvidence, so the
+  // run recorded ISSUES — a review conclusion no reviewer reached — and a
+  // billing outage was indistinguishable from a code problem.
+  assert.equal(r.verdict, 'UNVERIFIED');
+  assert.notEqual(r.verdict, 'ISSUES');
+  assert.equal(r.verdictSource, 'none');
+  assert.equal(r.launchFailed, true);
+  assert.equal(r.verdictEvidence.termination.kind, 'exit');
+  // The cause must survive: stderr is the only place the outage is legible.
+  assert.match(r.stderr, /out of usage/);
+});
+
+test('narrowness control: a rendered verdict survives a non-zero exit', async () => {
+  const r = await runVerifier({ cwd: process.cwd(), bin: process.execPath,
+    extraArgv: [fakeAgent, 'verdict-then-fail'] });
+
+  // Termination must not swallow a verdict the seat actually reached, or the
+  // fix above would turn every review into UNVERIFIED.
+  assert.equal(r.verdict, 'ISSUES');
+  assert.equal(r.verdictSource, 'result');
+  assert.equal(r.launchFailed, false);
 });
