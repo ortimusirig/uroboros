@@ -1148,6 +1148,12 @@ async function runMutateCore({
     const batch = queue.splice(0, Math.min(concurrency, remaining));
     const settled = await Promise.allSettled(batch.map(async (unit) => {
       const selectedTests = unitTests(unit, plan);
+      // A trial with no tests cannot fail, so it would "survive" unconditionally
+      // and be reported as "every line here is untested" — a claim the run has
+      // no evidence for. That is the same false confidence this tool exists to
+      // detect. Fixtures hit this: they are spawned by path, so the import graph
+      // never links them to the tests that use them.
+      if (selectedTests.length === 0) return { unit, noTests: true };
       reportEvent(reporter, runId, 'mutate', 'unit', {
         unitId: unit.id, name: unit.name, lines: unit.lines, tests: selectedTests,
       });
@@ -1168,10 +1174,17 @@ async function runMutateCore({
     if (failedTrial) throw failedTrial.reason;
     const results = settled.map((entry) => entry.value);
     trials += batch.length;
-    const batchInterrupted = results.some(({ testResult }) => testResult.aborted);
+    const batchInterrupted = results.some(({ testResult }) => testResult?.aborted);
 
-    for (const { unit, testResult } of results) {
+    for (const { unit, testResult, noTests } of results) {
       const evidence = serializeUnit(unit, plan);
+      if (noTests) {
+        unexamined.push({
+          ...evidence,
+          reason: 'no selected test touches this unit, so a trial could not have failed',
+        });
+        continue;
+      }
       if (testResult.aborted) {
         unexamined.push({
           ...evidence,

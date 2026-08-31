@@ -401,8 +401,8 @@ test('doctor deep seat probes keep registry overrides and the inherited launch e
   writeFileSync(join(plugin, 'skills', 'using-superpowers', 'SKILL.md'), '# skill\n');
   const env = { CODEX_HOME: join(root, 'codex-home'), URO_SUPERPOWERS_DIR: plugin };
   const calls = [];
-  const spawn = async (bin, _args, options) => {
-    calls.push({ bin, options });
+  const spawn = async (bin, args, options) => {
+    calls.push({ bin, args, options });
     if (bin === 'codex') {
       writeFileSync(join(options.cwd, 'ccc-doctor-write.txt'), 'URO_DOCTOR_WRITE_OK\n');
     }
@@ -430,6 +430,21 @@ test('doctor deep seat probes keep registry overrides and the inherited launch e
 
     assert.equal(codex.status, 'PASS');
     assert.equal(cursor.status, 'PASS');
+
+    // loop mutate found this: deleting initializeProbeRepository from
+    // probeCodex left the whole suite green. The write probe runs Codex inside
+    // a throwaway repository, and without git init it is not a repository at
+    // all, so the probe would no longer be probing what it claims to.
+    // Assert on the argv arrays: the commit is invoked as
+    // `git -c user.email=... -c user.name=... commit -m ...`, so a prefix match
+    // on the joined string would look for "commit" and find "-c".
+    const gitCalls = calls.filter(({ bin }) => bin === 'git').map(({ args }) => args ?? []);
+    assert.ok(gitCalls.some((args) => args[0] === 'init'),
+      'the probe repository must be initialised before Codex writes into it');
+    assert.ok(gitCalls.some((args) => args[0] === 'add'),
+      'the probe repository must stage its seed file');
+    assert.ok(gitCalls.some((args) => args.includes('commit')),
+      'the probe repository must have a commit, not an unborn branch');
     for (const call of calls.filter(({ bin }) => bin === 'codex' || bin === 'agent')) {
       assert.equal(call.options.env.CODEX_HOME, env.CODEX_HOME);
       assert.equal(call.options.env.PATH, process.env.PATH);

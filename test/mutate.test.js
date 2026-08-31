@@ -988,3 +988,26 @@ test('selectTouchingTests never hands a non-runnable fixture to the test command
   assert.equal(selected.includes('test/golden/dashboard-board.html'), false,
     'a golden fixture must never reach `node --test`');
 });
+
+test('a unit with no selected tests is unexamined, never a survivor', async () => {
+  // Measured: `loop mutate` reported four fixtures/*.mjs units as survivors
+  // after running ZERO tests for each. A trial with no tests cannot fail, so
+  // "survived" asserted every line was untested on no evidence — and the
+  // arbiter then judged all four a gap.
+  await withPlan([statement('untouched', 2, { path: 'src/work.js' })], async (plan) => {
+    let trials = 0;
+    const result = await runMutate({
+      target: plan.root,
+      plan: { ...plan, tests: [], testsByFile: { 'src/work.js': [] } },
+      adapters: {
+        runTests: greenBaseline,
+        runTrial: async () => { trials++; return { passed: true, code: 0 }; },
+      },
+    });
+
+    assert.equal(result.survivors.length, 0, 'a zero-test unit must not be a survivor');
+    assert.equal(result.unexamined.length, 1);
+    assert.match(result.unexamined[0].reason, /no selected test/i);
+    assert.equal(trials, 0, 'a trial with no tests must not be run at all');
+  });
+});
