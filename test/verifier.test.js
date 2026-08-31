@@ -1,7 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { EventEmitter } from 'node:events';
 import { join } from 'node:path';
@@ -30,6 +36,15 @@ const realSamplePath = fileURLToPath(new URL('../fixtures/cursor-stream-schema-s
 const planSamplePath = fileURLToPath(new URL('../fixtures/cursor-plan-mode-sample.ndjson', import.meta.url));
 const fixturesDir = fileURLToPath(new URL('../fixtures/', import.meta.url));
 const expectedPluginDir = fileURLToPath(new URL('../cursor-plugin', import.meta.url));
+
+function writeSuperpowersPlugin(directory, manifest = '.cursor-plugin') {
+  mkdirSync(join(directory, manifest), { recursive: true });
+  mkdirSync(join(directory, 'skills', 'using-superpowers'), { recursive: true });
+  writeFileSync(join(directory, manifest, 'plugin.json'), JSON.stringify({
+    name: 'superpowers', version: '6.0.2',
+  }));
+  writeFileSync(join(directory, 'skills', 'using-superpowers', 'SKILL.md'), '# skill\n');
+}
 
 function controlledClock() {
   let time = 0;
@@ -313,8 +328,29 @@ test('raw stdout resets the verifier liveness gap through the runVerifier observ
   assert.equal(kills, 0);
 });
 
+test('runVerifier launches Cursor under the environment used for verification', async () => {
+  const env = { URO_SUPERPOWERS_DIR: 'C:/verified-by-preflight' };
+  const child = fakeChild();
+  let spawnOptions;
+  const pending = runVerifier({
+    cwd: process.cwd(),
+    bin: process.execPath,
+    env,
+    superpowersDir: null,
+    spawnProcess: (_bin, _args, options) => { spawnOptions = options; return child; },
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  child.emit('close', 0, null);
+  await pending;
+
+  assert.equal(spawnOptions.env.URO_SUPERPOWERS_DIR, env.URO_SUPERPOWERS_DIR);
+  assert.equal(spawnOptions.env.PATH, process.env.PATH,
+    'a Superpowers override must not remove the PATH needed to launch Cursor');
+});
+
 test('buildCursorArgs carries both plugin directories and remains guarded', () => {
   const superpowersDir = mkdtempSync(join(tmpdir(), 'uro-cursor-superpowers-'));
+  writeSuperpowersPlugin(superpowersDir);
   try {
     const args = buildCursorArgs({
       env: { URO_SUPERPOWERS_DIR: superpowersDir }, home: tmpdir(),
@@ -326,6 +362,19 @@ test('buildCursorArgs carries both plugin directories and remains guarded', () =
     assert.equal(args[args.indexOf('--mode') + 1], 'plan');
     assert.ok(args.includes('--trust'));
     assert.doesNotThrow(() => assertNoForbiddenFlags(args));
+  } finally {
+    rmSync(superpowersDir, { recursive: true, force: true });
+  }
+});
+
+test('buildCursorArgs rejects a Codex-only superpowers directory before launching Cursor', () => {
+  const superpowersDir = mkdtempSync(join(tmpdir(), 'uro-codex-only-superpowers-'));
+  writeSuperpowersPlugin(superpowersDir, '.codex-plugin');
+  try {
+    assert.throws(
+      () => buildCursorArgs({ superpowersDir }),
+      /Cursor.*[.]cursor-plugin/i,
+    );
   } finally {
     rmSync(superpowersDir, { recursive: true, force: true });
   }

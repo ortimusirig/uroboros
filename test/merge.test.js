@@ -11,11 +11,17 @@ import {
 } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { runCampaign } from '../src/campaign.js';
+import { runCampaign as executeCampaign } from '../src/campaign.js';
 import { exitCodeFor } from '../src/exit.js';
 import { runGate } from '../src/gate.js';
 import { MERGE_LEDGER_FILENAME, TEST_COUNT_FLOOR_BIN } from '../src/merge.js';
 import { spawnCapture } from '../src/spawn.js';
+import { VERIFIED_SUPERPOWERS } from '../fixtures/verified-superpowers.mjs';
+
+const runCampaign = (options) => executeCampaign({
+  superpowers: VERIFIED_SUPERPOWERS,
+  ...options,
+});
 
 const SAFE_SCRATCH_BASE = process.env.URO_TEST_SCRATCH_ROOT ?? (process.platform === 'win32'
   ? 'C:/ccc-test'

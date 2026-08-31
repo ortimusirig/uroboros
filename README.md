@@ -16,7 +16,7 @@ truth for the bootstrap procedure. If this README is all you have, fetch the ski
 
 Expected order:
 
-1. Verify Node 24 or newer, git, the Codex CLI, and the Cursor CLI.
+1. Verify Node 24 or newer, git, the Codex CLI, the Cursor CLI, and superpowers in all three seats.
 2. With the operator's consent, install anything missing.
 3. Have the operator complete the two browser sign-ins.
 4. Install the plugin.
@@ -65,12 +65,18 @@ can actually write and the signed-in Cursor CLI can actually read.
 ## What you need
 
 **Node 24+, git, the Codex CLI, and the Cursor Agent CLI, with Codex and Cursor each signed
-in under its own account.** `setup` and `doctor` check all of these and name what is missing,
+in under its own account, plus superpowers verified separately for Codex, Cursor, and Claude.**
+`setup` and `doctor` check all of these and name what is missing,
 so you should not need this section — it is here for doing it yourself, or for when something
 went wrong.
 
 One detail that catches people out: the Cursor binary is `agent`, not `cursor-agent`. Follow the
 [bootstrap skill](skills/uroboros-setup/SKILL.md) for installation and remediation details.
+
+Codex loads superpowers from its registry; Cursor receives only a directory carrying a valid
+`.cursor-plugin` manifest; Claude requires `.claude-plugin` plus readable skills. A run does not
+install any of them. `URO_REQUIRE_SUPERPOWERS=0` is an explicit bypass for deliberate degraded
+runs, and the bypass is recorded in run facts and the report.
 
 **Everything else is optional.** GitHub publishing, Logdy, and the offline Obsidian journal
 are separate add-ons. A machine with none of them has a fully working loop.

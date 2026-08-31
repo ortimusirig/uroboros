@@ -1,4 +1,5 @@
 import { existsSync, readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { exitCodeFor } from './exit.js';
 import { identifyEvent, reportEvent, UNIT_KINDS } from './events.js';
@@ -23,6 +24,10 @@ import {
 } from './isolation.js';
 import { deriveMergeContext, withObservedTestCounts } from './merge.js';
 import { countTestFiles } from './merge-test-count.js';
+import {
+  applySuperpowersRequirement,
+  verifySuperpowersSeats,
+} from './superpowers.js';
 import { run as realRun } from './run.js';
 import { resolveStageTimeouts } from './timeouts.js';
 import {
@@ -1064,6 +1069,27 @@ function iterativeRollup(rounds, tokenBudget, stopReason) {
 
 export async function runCampaign(options) {
   if (!isRecord(options)) throw new TypeError('campaign options must be an object');
+  const environment = options.env ?? options.runOptions?.env ?? process.env;
+  const suppliedSuperpowers = options.superpowers ?? options.runOptions?.superpowers;
+  const verifySuperpowers = options.verifySuperpowers ?? verifySuperpowersSeats;
+  const verification = suppliedSuperpowers?.seats
+    ? {
+        ok: Object.values(suppliedSuperpowers.seats).every((seat) => seat.verified === true),
+        seats: suppliedSuperpowers.seats,
+      }
+    : await verifySuperpowers({ env: environment, home: options.home ?? homedir() });
+  const requirement = applySuperpowersRequirement(verification, environment);
+  if (!requirement.ok) throw new Error(`superpowers preflight failed: ${requirement.reason}`);
+  const superpowers = {
+    required: true,
+    bypassed: requirement.bypassed,
+    seats: requirement.verification.seats,
+  };
+  options = {
+    ...options,
+    superpowers,
+    runOptions: { ...options.runOptions, superpowers, env: environment },
+  };
   const configuration = iterativeConfiguration(options);
   const firstDeclaration = configuration.declarations?.[0];
 

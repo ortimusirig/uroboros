@@ -54,12 +54,22 @@ function cliFixture() {
   mkdirSync(shims);
   writeFakeBin(shims, 'codex', fakeCodex);
   writeFakeBin(shims, 'agent', fakeAgent, ['clean']);
+  const superpowers = join(root, 'superpowers');
+  for (const manifest of ['.cursor-plugin', '.claude-plugin']) {
+    mkdirSync(join(superpowers, manifest), { recursive: true });
+    writeFileSync(join(superpowers, manifest, 'plugin.json'), JSON.stringify({
+      name: 'superpowers', version: '6.0.2',
+    }));
+  }
+  mkdirSync(join(superpowers, 'skills', 'using-superpowers'), { recursive: true });
+  writeFileSync(join(superpowers, 'skills', 'using-superpowers', 'SKILL.md'), '# test skill\n');
   const pathKey = Object.keys(process.env).find((key) => key.toLowerCase() === 'path') ?? 'PATH';
   const env = {
     ...process.env,
     [pathKey]: `${shims}${delimiter}${process.env[pathKey] ?? ''}`,
     URO_SCRATCH_ROOT: scratchRoot,
     URO_NO_DASHBOARD: '1',
+    URO_SUPERPOWERS_DIR: superpowers,
   };
   const args = [cli, 'run', '--task', 'Make no real change.', '--target', target,
     '--gate', gate, '--gate-retries', '0'];

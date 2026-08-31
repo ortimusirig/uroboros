@@ -15,7 +15,11 @@ import { assertSafeScratchRoot } from './isolation.js';
 import { commandExists, spawnCapture } from './spawn.js';
 import { buildCursorArgs } from './verifier.js';
 import { readEnv } from './env-compat.js';
-import { resolveSuperpowersDir } from './superpowers.js';
+import {
+  SUPERPOWERS_REMEDIATION,
+  verifyCodexSuperpowers,
+  verifyDirectorySuperpowers,
+} from './superpowers.js';
 
 const MINIMUM_NODE_MAJOR = 24;
 const CHEAP_PROBE_TIMEOUT_MS = 30_000;
@@ -108,8 +112,8 @@ function usableBlocklistTermCount(raw) {
     .length;
 }
 
-async function initializeProbeRepository(gitBin, directory) {
-  const init = await spawnCapture(gitBin, ['init', '-b', 'ccc-doctor'], {
+async function initializeProbeRepository(gitBin, directory, spawn = spawnCapture) {
+  const init = await spawn(gitBin, ['init', '-b', 'ccc-doctor'], {
     cwd: directory,
     timeoutMs: 30_000,
   });
@@ -117,9 +121,9 @@ async function initializeProbeRepository(gitBin, directory) {
     throw new Error(init.stderr.trim() || `git init exited ${init.code}`);
   }
   writeFileSync(join(directory, 'README.md'), 'Disposable ccc doctor repository.\n');
-  const add = await spawnCapture(gitBin, ['add', '-A'], { cwd: directory, timeoutMs: 30_000 });
+  const add = await spawn(gitBin, ['add', '-A'], { cwd: directory, timeoutMs: 30_000 });
   if (add.code !== 0 || add.timedOut) throw new Error(add.stderr.trim() || `git add exited ${add.code}`);
-  const commit = await spawnCapture(gitBin, [
+  const commit = await spawn(gitBin, [
     '-c', 'user.email=ccc@local', '-c', 'user.name=ccc doctor',
     'commit', '-m', 'doctor baseline',
   ], { cwd: directory, timeoutMs: 30_000 });
@@ -128,14 +132,15 @@ async function initializeProbeRepository(gitBin, directory) {
   }
 }
 
-async function probeCodex(bin, gitBin, workspace) {
+async function probeCodex(bin, gitBin, workspace, { env, spawn = spawnCapture } = {}) {
   const directory = join(workspace, 'codex-write');
   mkdirSync(directory);
-  await initializeProbeRepository(gitBin, directory);
+  await initializeProbeRepository(gitBin, directory, spawn);
   const outputPath = join(directory, WRITE_FILENAME);
   const prompt = `Create ${WRITE_FILENAME} in the current repository with exactly ${WRITE_CONTENT.trim()} followed by a newline. You must write the file; do not merely describe it.`;
-  const result = await spawnCapture(bin, buildCodexArgs({ cwd: directory }), {
+  const result = await spawn(bin, buildCodexArgs({ cwd: directory }), {
     cwd: directory,
+    env: { ...process.env, ...(env ?? {}) },
     input: prompt,
     timeoutMs: PROBE_TIMEOUT_MS,
   });
@@ -144,7 +149,7 @@ async function probeCodex(bin, gitBin, workspace) {
   return { passed: result.code === 0 && !result.timedOut && wroteExpectedFile, result };
 }
 
-async function probeAgent(bin, workspace) {
+async function probeAgent(bin, workspace, { env, home, spawn = spawnCapture } = {}) {
   const directory = join(workspace, 'cursor-read');
   mkdirSync(directory);
   const token = `URO_DOCTOR_READ_${randomUUID()}`;
@@ -152,8 +157,9 @@ async function probeAgent(bin, workspace) {
   writeFileSync(inputPath, `${token}\n`);
   const prompt = 'Read ccc-doctor-read.txt and return its exact contents. This is a read-only diagnostic; do not create, edit, or delete any file.';
   const before = readdirSync(directory).sort();
-  const result = await spawnCapture(bin, buildCursorArgs({ prompt }), {
+  const result = await spawn(bin, buildCursorArgs({ prompt, env, home }), {
     cwd: directory,
+    env: { ...process.env, ...(env ?? {}) },
     timeoutMs: PROBE_TIMEOUT_MS,
   });
   const after = readdirSync(directory).sort();
@@ -430,7 +436,8 @@ export const DOCTOR_CHECKS = Object.freeze([
         }),
       },
     ),
-    probe: async ({ bins, deep, state }) => {
+    probe: async (context) => {
+      const { bins, deep, state } = context;
       if (!deep) {
         return {
           status: 'SKIP',
@@ -446,7 +453,10 @@ export const DOCTOR_CHECKS = Object.freeze([
         };
       }
       try {
-        const probe = await probeCodex(bins.codex, bins.git, state.workspace);
+        const probe = await probeCodex(bins.codex, bins.git, state.workspace, {
+          env: doctorEnvironment(context),
+          ...(context.spawn === undefined ? {} : { spawn: context.spawn }),
+        });
         return probe.passed
           ? {
               status: 'PASS',
@@ -484,7 +494,8 @@ export const DOCTOR_CHECKS = Object.freeze([
         }),
       },
     ),
-    probe: async ({ bins, deep, state }) => {
+    probe: async (context) => {
+      const { bins, deep, state } = context;
       if (!deep) {
         return {
           status: 'SKIP',
@@ -500,7 +511,11 @@ export const DOCTOR_CHECKS = Object.freeze([
         };
       }
       try {
-        const probe = await probeAgent(bins.agent, state.workspace);
+        const probe = await probeAgent(bins.agent, state.workspace, {
+          env: doctorEnvironment(context),
+          home: context.home,
+          ...(context.spawn === undefined ? {} : { spawn: context.spawn }),
+        });
         return probe.passed
           ? {
               status: 'PASS',
@@ -517,38 +532,53 @@ export const DOCTOR_CHECKS = Object.freeze([
     },
   }),
   Object.freeze({
-    id: 'superpowers-plugin',
-    phase: 'optional',
-    kind: 'optional',
-    name: 'Superpowers plugin',
+    id: 'superpowers-codex',
+    phase: 'prerequisite',
+    kind: 'required',
+    name: 'Codex superpowers',
     remediation: remediation(
-      'install superpowers in a Claude or Codex plugin cache, or set `URO_SUPERPOWERS_DIR` to its installed plugin directory.',
-      null,
-      false,
+      SUPERPOWERS_REMEDIATION.codex,
+      spawnCommand('codex', ['plugin', 'add', 'superpowers@openai-curated']),
+      true,
     ),
     probe: async (context) => {
-      let path;
-      try {
-        path = resolveSuperpowersDir({
-          env: doctorEnvironment(context),
-          home: context.home,
-        });
-      } catch (error) {
+      if (context.state?.codexPresent === false) {
         return {
           status: 'FAIL',
-          detail: error instanceof Error ? error.message : String(error),
+          detail: 'Codex: cannot verify superpowers because the Codex CLI is not installed',
           remediationKey: 'default',
         };
       }
-      return path === null
-        ? {
-            status: 'FAIL',
-            detail: 'not found in the Claude or Codex plugin caches; the loop remains usable without it',
-            remediationKey: 'default',
-          }
-        : { status: 'PASS', detail: `resolved from ${path}` };
+      const verification = await verifyCodexSuperpowers({
+        bin: context.bins.codex,
+        env: doctorEnvironment(context),
+        ...(context.spawn === undefined ? {} : { spawn: context.spawn }),
+      });
+      return verification.verified
+        ? { status: 'PASS', detail: `${verification.evidence}; version ${verification.version}` }
+        : { status: 'FAIL', detail: verification.evidence, remediationKey: 'default' };
     },
   }),
+  ...['cursor', 'claude'].map((seat) => Object.freeze({
+    id: `superpowers-${seat}`,
+    phase: 'prerequisite',
+    kind: 'required',
+    name: `${seat === 'cursor' ? 'Cursor' : 'Claude'} superpowers`,
+    remediation: remediation(SUPERPOWERS_REMEDIATION[seat], null, false),
+    probe: async (context) => {
+      const verification = verifyDirectorySuperpowers({
+        seat,
+        env: doctorEnvironment(context),
+        home: context.home,
+      });
+      return verification.verified
+        ? {
+            status: 'PASS',
+            detail: `${verification.evidence}; version ${verification.version}`,
+          }
+        : { status: 'FAIL', detail: verification.evidence, remediationKey: 'default' };
+    },
+  })),
   Object.freeze({
     id: 'github-cli-installed',
     phase: 'optional',

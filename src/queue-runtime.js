@@ -11,6 +11,10 @@ import { spawnCapture } from './spawn.js';
 const GIT_TIMEOUT_MS = 30_000;
 const DEFAULT_LOOP_PATH = fileURLToPath(new URL('../bin/loop.js', import.meta.url));
 
+function launchEnvironment(env) {
+  return { ...process.env, ...(env ?? {}) };
+}
+
 function messageFrom(result, fallback) {
   return (result?.stderr || result?.stdout || '').trim() || fallback;
 }
@@ -23,6 +27,7 @@ export async function launchLoopRun({ unit, target, mode }, {
   runCommand = spawnCapture,
   loopPath = DEFAULT_LOOP_PATH,
   nodePath = process.execPath,
+  env,
 } = {}) {
   const resolvedTarget = resolve(target);
   const result = await runCommand(nodePath, [
@@ -34,7 +39,7 @@ export async function launchLoopRun({ unit, target, mode }, {
     '--mode', mode,
     '--quiet',
     '--no-dashboard',
-  ], { cwd: resolvedTarget });
+  ], { cwd: resolvedTarget, env: launchEnvironment(env) });
 
   let facts;
   try {
@@ -59,6 +64,7 @@ export async function launchLoopPlan({ unit, target }, {
   runCommand = spawnCapture,
   loopPath = DEFAULT_LOOP_PATH,
   nodePath = process.execPath,
+  env,
 } = {}) {
   const resolvedTarget = resolve(target);
   const result = await runCommand(nodePath, [
@@ -67,7 +73,7 @@ export async function launchLoopPlan({ unit, target }, {
     '--goal', unit.goal,
     '--target', resolvedTarget,
     '--out', unit.out,
-  ], { cwd: resolvedTarget });
+  ], { cwd: resolvedTarget, env: launchEnvironment(env) });
 
   let planResult;
   try {

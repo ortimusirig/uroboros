@@ -241,12 +241,18 @@ Every actor uses superpowers skills at its decision points. Full mapping:
 
 ### Skill installation per actor
 
-- **Codex**: Superpowers installed via `--plugin-dir` or environment config.
-  The executor invocation adds the superpowers plugin path.
-- **Cursor**: Superpowers added to the existing `cursor-plugin/` directory.
-  The `uro-review` skill file references superpowers skills by name.
-- **Claude**: Already has superpowers installed as a plugin. The `uroboros`
-  skill file (SKILL.md) is extended with the debate protocol section.
+- **Codex**: Superpowers is registered through Codex's plugin registry and verified by an
+  `installed, enabled` row from `codex plugin list`. `codex exec` receives no plugin-directory
+  flag and uses the same `CODEX_HOME` as that registry.
+- **Cursor**: The verifier receives a resolved superpowers directory only when it carries a valid
+  `.cursor-plugin` manifest and readable skills. Resolution is highest-version within compatible
+  candidates; it never falls back to a higher `.codex-plugin`-only directory.
+- **Claude**: The orchestrator's plugin directory is verified independently through its valid
+  `.claude-plugin` manifest and readable skills.
+
+All three checks are required for `run`, `batch`, `plan`, and `queue`. The explicit
+`URO_REQUIRE_SUPERPOWERS=0` bypass is recorded in run facts and called out in the report. Facts
+retain each seat's evidence and version because registry and directory versions can differ.
 
 ## CLI Surface
 

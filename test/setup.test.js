@@ -13,7 +13,7 @@ import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import { DOCTOR_CHECKS } from '../src/doctor-checks.js';
 import { scaffold } from '../src/init.js';
-import { runSetup } from '../src/setup.js';
+import { probeSetupPrerequisites, runSetup } from '../src/setup.js';
 
 function fakeCheck({ id = 'fake-check', autoFixable = true, probe }) {
   return {
@@ -53,6 +53,67 @@ function successfulFacts(scratchRoot) {
     iterations: [{ changedFiles: ['hello-from-ccc.txt'] }],
   };
 }
+
+test('setup prerequisite probes receive the installation home and environment', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'ccc-setup-superpowers-context-'));
+  let observed;
+  const check = fakeCheck({
+    autoFixable: false,
+    probe: async (context) => {
+      observed = context;
+      return { status: 'PASS', detail: 'ready' };
+    },
+  });
+  try {
+    await probeSetupPrerequisites({
+      checks: [check],
+      scratchRoot: join(root, 'scratch'),
+      bins: { codex: 'seat-codex' },
+      env: { CODEX_HOME: join(root, 'codex-home') },
+      home: join(root, 'user-home'),
+    });
+    assert.deepEqual(observed.env, { CODEX_HOME: join(root, 'codex-home') });
+    assert.equal(observed.home, join(root, 'user-home'));
+    assert.equal(observed.bins.codex, 'seat-codex');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('setup remediation installs into the same Codex registry environment it probed', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'ccc-setup-remediation-env-'));
+  const env = { CODEX_HOME: join(root, 'codex-home') };
+  let probes = 0;
+  let remediationOptions;
+  const check = fakeCheck({
+    probe: async () => (++probes === 1
+      ? { status: 'FAIL', detail: 'not installed', remediationKey: 'default' }
+      : { status: 'PASS', detail: 'installed and enabled' }),
+  });
+  try {
+    const result = await runSetup({
+      scratchRoot: join(root, 'scratch'),
+      checks: [check],
+      consent: async () => true,
+      wait: async () => '',
+      env,
+      remediationExecutor: async (_command, _inputs, options) => {
+        remediationOptions = options;
+        return { code: 0 };
+      },
+      repositoryInitializer: async () => {},
+      demoRunner: async () => successfulFacts(join(root, 'scratch')),
+      id: () => 'remediation-env',
+    });
+
+    assert.equal(result.ok, true);
+    assert.equal(remediationOptions.env.CODEX_HOME, env.CODEX_HOME);
+    assert.equal(remediationOptions.env.PATH, process.env.PATH,
+      'the install override must retain the PATH needed to launch Codex');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test('setup terminates when one automatic fix never takes effect', async () => {
   let probes = 0;

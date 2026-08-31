@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { isAbsolute, join, relative, resolve } from 'node:path';
 import { WAIT_NOT_ACKNOWLEDGED } from './interaction-signals.js';
 import {
@@ -37,6 +38,8 @@ export async function probeSetupPrerequisites({
   scratchRoot,
   nodeVersion = process.versions.node,
   bins = DEFAULT_BINS,
+  env,
+  home = homedir(),
 }) {
   const resolvedScratchRoot = resolve(scratchRoot);
   const state = createDoctorProbeState(resolvedScratchRoot);
@@ -47,6 +50,8 @@ export async function probeSetupPrerequisites({
     nodeVersion,
     bins,
     state,
+    home,
+    ...(env === undefined ? {} : { env }),
   };
   const outcomes = [];
   try {
@@ -98,6 +103,8 @@ export async function runSetup({
   repositoryInitializer = initializeDemoRepository,
   demoRunner = run,
   id = randomUUID,
+  env = process.env,
+  home = homedir(),
 } = {}) {
   if (typeof scratchRoot !== 'string' || scratchRoot === '') {
     throw new TypeError('setup scratchRoot must be a non-empty string');
@@ -106,6 +113,7 @@ export async function runSetup({
   if (typeof wait !== 'function') throw new TypeError('setup requires a wait function');
 
   const resolvedScratchRoot = resolve(scratchRoot);
+  const remediationEnvironment = { ...process.env, ...env };
   if (operatorDirectory && isPathInside(operatorDirectory, resolvedScratchRoot)) {
     write('Setup paused: the scratch root must not be the current working directory or inside it.\n');
     return stoppedResult('unsafe-destination', []);
@@ -119,7 +127,14 @@ export async function runSetup({
   // Every check can consume at most one automatic attempt and one instruction wait.
   // The cap is defense in depth: even adversarial injected prompts cannot make this loop unbounded.
   for (let pass = 0; pass <= (checkCount * 2); pass++) {
-    outcomes = await probe({ checks, scratchRoot: resolvedScratchRoot, nodeVersion, bins });
+    outcomes = await probe({
+      checks,
+      scratchRoot: resolvedScratchRoot,
+      nodeVersion,
+      bins,
+      env,
+      home,
+    });
     const incomplete = outcomes.filter(({ outcome }) => outcome.status !== 'PASS');
     if (incomplete.length === 0) {
       for (const { check, outcome } of outcomes) {
@@ -158,6 +173,7 @@ export async function runSetup({
           inputs: { scratchRoot: resolvedScratchRoot },
           consent,
           ...(remediationExecutor === undefined ? {} : { executor: remediationExecutor }),
+          executorOptions: { env: remediationEnvironment },
           write,
         });
         if (fixed.attempted) {
@@ -235,6 +251,8 @@ export async function runSetup({
       gate: scaffolded.gatePath,
       gateRetries: 0,
       scratchRoot: resolvedScratchRoot,
+      env,
+      home,
       runId: `setup-run-${invocationId}`,
       reporter: (event) => write(`${formatEventSummary(event)}\n`),
     });

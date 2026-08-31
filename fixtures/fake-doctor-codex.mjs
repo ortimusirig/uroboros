@@ -5,7 +5,9 @@ if (process.env.URO_FAKE_DOCTOR_INVOCATIONS) {
   appendFileSync(process.env.URO_FAKE_DOCTOR_INVOCATIONS, `${JSON.stringify({ cli: 'codex', args })}\n`);
 }
 
-if (args[0] === 'login' && args[1] === 'status') {
+if (args[0] === 'plugin' && args[1] === 'list') {
+  process.stdout.write('superpowers@openai-curated  installed, enabled  6.3.0  C:/fake/superpowers\n');
+} else if (args[0] === 'login' && args[1] === 'status') {
   if (process.env.URO_FAKE_CODEX_SIGNED_IN === 'no') {
     process.stderr.write('Not logged in\n');
     process.exitCode = 1;

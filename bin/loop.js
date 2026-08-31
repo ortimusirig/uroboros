@@ -363,6 +363,7 @@ async function main() {
       concurrency: opts.concurrency,
       tokenBudget: opts.tokenBudget,
       scratchRoot: SCRATCH_ROOT,
+      superpowers: pf.superpowers,
       reporter: campaignReporter,
       unitReporterFactory: ({ unitId }) => createCliReporter({
         eventsPath: join(SCRATCH_ROOT, physicalRunIdFor(unitId), 'w', 'events.jsonl'),
@@ -407,6 +408,7 @@ async function main() {
     correctsRunId: opts.correctsRunId,
     ...(opts.mutate ? { mutation: true } : {}),
     scratchRoot: SCRATCH_ROOT,
+    superpowers: pf.superpowers,
     runId,
     reporter,
   });

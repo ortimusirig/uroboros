@@ -24,13 +24,24 @@ import {
   MAX_EVENT_SUMMARY_LENGTH,
   reportEvent,
 } from '../src/events.js';
-import { runCampaign } from '../src/campaign.js';
+import { runCampaign as executeCampaign } from '../src/campaign.js';
 import { runExecutor as realExecutor } from '../src/executor.js';
 import { runGate as realGate } from '../src/gate.js';
-import { run } from '../src/run.js';
-import { runPlan } from '../src/plan.js';
+import { run as executeRun } from '../src/run.js';
+import { runPlan as executePlan } from '../src/plan.js';
 import { generateRunJournal } from '../src/run-journal.js';
 import { runVerifier as realVerifier } from '../src/verifier.js';
+import { VERIFIED_SUPERPOWERS, withVerifiedSuperpowers } from '../fixtures/verified-superpowers.mjs';
+
+const run = (options) => executeRun(withVerifiedSuperpowers(options));
+const runCampaign = (options) => executeCampaign({
+  superpowers: VERIFIED_SUPERPOWERS,
+  ...options,
+});
+const runPlan = (options) => executePlan({
+  superpowers: VERIFIED_SUPERPOWERS,
+  ...options,
+});
 
 const fakeWriter = fileURLToPath(new URL('../fixtures/fake-codex-writer.mjs', import.meta.url));
 const fakeAgent = fileURLToPath(new URL('../fixtures/fake-agent.mjs', import.meta.url));

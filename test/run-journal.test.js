@@ -16,8 +16,14 @@ import {
   generateRunJournalCampaign,
   readRunJournalInput,
 } from '../src/run-journal.js';
-import { runCampaign } from '../src/campaign.js';
-import { run } from '../src/run.js';
+import { runCampaign as executeCampaign } from '../src/campaign.js';
+import { run as executeRun } from '../src/run.js';
+import { VERIFIED_SUPERPOWERS, withVerifiedSuperpowers } from '../fixtures/verified-superpowers.mjs';
+const run = (options) => executeRun(withVerifiedSuperpowers(options));
+const runCampaign = (options) => executeCampaign({
+  superpowers: VERIFIED_SUPERPOWERS,
+  ...options,
+});
 
 const projectRunsDir = fileURLToPath(new URL('../docs/runs/', import.meta.url));
 const SAFE_SCRATCH_BASE = process.env.URO_TEST_SCRATCH_ROOT ?? (process.platform === 'win32'

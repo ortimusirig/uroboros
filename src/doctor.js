@@ -31,6 +31,7 @@ export async function runDoctor({
   write = () => {},
   env,
   home = homedir(),
+  checks = DOCTOR_CHECKS,
 } = {}) {
   if (typeof scratchRoot !== 'string' || scratchRoot === '') {
     throw new TypeError('doctor scratchRoot must be a non-empty string');
@@ -42,6 +43,7 @@ export async function runDoctor({
 
   const detailLines = ['', 'Required checks:'];
   const resolvedScratchRoot = resolve(scratchRoot);
+  const remediationEnvironment = { ...process.env, ...(env ?? {}) };
   const state = createDoctorProbeState(resolvedScratchRoot);
   const context = {
     deep,
@@ -56,7 +58,7 @@ export async function runDoctor({
   let requiredFailed = false;
 
   const runChecks = async (phase) => {
-    for (const check of DOCTOR_CHECKS) {
+    for (const check of checks) {
       if (check.phase !== phase) continue;
       const outcome = await check.probe(context);
       if (check.kind === 'required' && outcome.status === 'FAIL') requiredFailed = true;
@@ -69,6 +71,7 @@ export async function runDoctor({
           inputs: { scratchRoot: resolvedScratchRoot },
           consent,
           ...(remediationExecutor === undefined ? {} : { executor: remediationExecutor }),
+          executorOptions: { env: remediationEnvironment },
           write,
         });
       }

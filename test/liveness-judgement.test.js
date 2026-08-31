@@ -6,11 +6,14 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runExecutor } from '../src/executor.js';
 import { createLivenessDeadline } from '../src/spawn.js';
-import { run } from '../src/run.js';
+import { run as executeRun } from '../src/run.js';
+import { withVerifiedSuperpowers } from '../fixtures/verified-superpowers.mjs';
 import {
   createLivenessJudge,
   DEFAULT_LIVENESS_JUDGE_TIMEOUT_MS,
 } from '../src/liveness-judge.js';
+
+const run = (options) => executeRun(withVerifiedSuperpowers(options));
 
 function controlledClock() {
   let time = 0;
@@ -334,6 +337,7 @@ test('normal output indefinitely postpones both asking and killing, with silence
 
 test('the production fresh judge is read-only, bounded, and receives verbatim evidence', async () => {
   const calls = [];
+  const env = { CODEX_HOME: 'C:/registered-liveness-home' };
   const evidence = {
     lastAgentMessage: 'waiting on child "alpha"',
     processTree: { descendants: [{ pid: 9, name: 'worker' }] },
@@ -341,7 +345,7 @@ test('the production fresh judge is read-only, bounded, and receives verbatim ev
   };
   const judge = createLivenessJudge({
     cwd: tmpdir(),
-    superpowersDir: null,
+    env,
     runSeat: async (bin, args, opts) => {
       calls.push({ bin, args, opts });
       return {
@@ -364,6 +368,8 @@ test('the production fresh judge is read-only, bounded, and receives verbatim ev
   assert.deepEqual(calls[0].args.slice(calls[0].args.indexOf('-s'), calls[0].args.indexOf('-s') + 2),
     ['-s', 'read-only']);
   assert.equal(calls[0].opts.timeoutMs, DEFAULT_LIVENESS_JUDGE_TIMEOUT_MS);
+  assert.equal(calls[0].opts.env.CODEX_HOME, env.CODEX_HOME);
+  assert.equal(calls[0].opts.env.PATH, process.env.PATH);
   assert.match(calls[0].opts.input, /waiting on child \\"alpha\\"/);
   assert.deepEqual(result, {
     status: 'working', reasoning: 'The worker child is live.', nextIntervalMs: 90,

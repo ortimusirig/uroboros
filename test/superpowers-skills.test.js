@@ -9,6 +9,9 @@ const verifierSkill = readFileSync(fileURLToPath(
 const plannerSkill = readFileSync(fileURLToPath(
   new URL('../skills/uroboros/SKILL.md', import.meta.url),
 ), 'utf8');
+const setupSkill = readFileSync(fileURLToPath(
+  new URL('../skills/uroboros-setup/SKILL.md', import.meta.url),
+), 'utf8');
 
 function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -47,4 +50,13 @@ test('uroboros names every Claude debate skill and the spec-coverage self-review
   assert.match(plannerSkill,
     /docs\/superpowers\/specs\/2026-08-25-three-way-debate-loop-design[.]md/);
   assert.match(plannerSkill, /enumerate every[\s\S]*section[\s\S]*does not implement/i);
+});
+
+test('setup treats superpowers loading as three required seat-specific prerequisites', () => {
+  assert.match(setupSkill, /Codex[\s\S]*codex plugin list[\s\S]*installed, enabled/i);
+  assert.match(setupSkill, /codex plugin add superpowers@openai-curated/);
+  assert.match(setupSkill, /Cursor[\s\S]*[.]cursor-plugin[\s\S]*URO_SUPERPOWERS_DIR/i);
+  assert.match(setupSkill, /Claude[\s\S]*[.]claude-plugin[\s\S]*readable/i);
+  assert.match(setupSkill, /all three seats[\s\S]*required/i);
+  assert.match(setupSkill, /URO_REQUIRE_SUPERPOWERS=0[\s\S]*run facts[\s\S]*report/i);
 });

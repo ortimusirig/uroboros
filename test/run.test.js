@@ -11,12 +11,13 @@ import {
 } from '../src/executor.js';
 import {
   HARNESS_ARTIFACTS,
-  run,
+  run as executeRun,
   diffText,
   mergeVerifierVerdicts,
   reviewOutcomeFor,
   resolveDebateRounds,
 } from '../src/run.js';
+import { VERIFIED_SUPERPOWERS, withVerifiedSuperpowers } from '../fixtures/verified-superpowers.mjs';
 import { PIVOT_CONCLUDE, PIVOT_FRESH } from '../src/debate.js';
 import { EMPTY_USAGE } from '../src/usage.js';
 import {
@@ -27,6 +28,8 @@ import {
 } from '../src/verifier.js';
 import { spawnCapture } from '../src/spawn.js';
 import { exitCodeFor } from '../src/exit.js';
+
+const run = (options) => executeRun(withVerifiedSuperpowers(options));
 
 function makeTarget(withFile = true) {
   const d = mkdtempSync(join(tmpdir(), 'tgt-'));
@@ -288,10 +291,8 @@ test('omitted model flags travel through the CLI path to both agents and run-fac
   const verifierCalls = [];
   const cliOpts = parseArgs(['run', '--task', 'do the task', '--target', makeTarget(),
     '--gate', 'unused-gate.json']);
-  const superpowersDir = 'C:/plugins/superpowers/6.3.0';
   const facts = await run({
     ...cliOpts, gate: [], scratchRoot: scr, runId: 'default-models',
-    superpowersDir,
     adapters: {
       runExecutor: async (opts) => {
         executorCalls.push(opts);
@@ -307,17 +308,18 @@ test('omitted model flags travel through the CLI path to both agents and run-fac
 
   assert.equal(executorCalls[0].model, DEFAULT_EXECUTOR_MODEL);
   assert.equal(executorCalls[0].effort, DEFAULT_EXECUTOR_EFFORT);
-  assert.equal(executorCalls[0].superpowersDir, superpowersDir);
+  assert.equal(Object.hasOwn(executorCalls[0], 'superpowersDir'), false);
   assert.deepEqual(verifierCalls.map((call) => call.model),
     [DEFAULT_VERIFIER_MODEL, DEFAULT_VERIFIER_MODEL]);
   assert.deepEqual(verifierCalls.map((call) => call.superpowersDir),
-    [superpowersDir, superpowersDir]);
+    [VERIFIED_SUPERPOWERS.seats.cursor.path, VERIFIED_SUPERPOWERS.seats.cursor.path]);
   assert.deepEqual(facts.model, {
     executor: DEFAULT_EXECUTOR_MODEL,
     executorEffort: DEFAULT_EXECUTOR_EFFORT,
     verifier: DEFAULT_VERIFIER_MODEL,
   });
-  assert.equal(facts.skills, superpowersDir);
+  assert.equal(facts.skills, VERIFIED_SUPERPOWERS.seats.cursor.path);
+  assert.deepEqual(facts.superpowers, VERIFIED_SUPERPOWERS);
   rmSync(scr, { recursive: true, force: true });
 });
 

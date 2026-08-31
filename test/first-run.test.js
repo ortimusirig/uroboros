@@ -70,8 +70,17 @@ function doctorFixture({
   const root = mkdtempSync(join(SAFE_TEST_ROOT, 'ccc-first-run-'));
   const bins = join(root, 'bin');
   const repository = join(root, 'repository');
+  const superpowers = join(root, 'superpowers');
   mkdirSync(bins);
   mkdirSync(repository);
+  for (const manifest of ['.cursor-plugin', '.claude-plugin']) {
+    mkdirSync(join(superpowers, manifest), { recursive: true });
+    writeFileSync(join(superpowers, manifest, 'plugin.json'), JSON.stringify({
+      name: 'superpowers', version: '6.0.2',
+    }));
+  }
+  mkdirSync(join(superpowers, 'skills', 'using-superpowers'), { recursive: true });
+  writeFileSync(join(superpowers, 'skills', 'using-superpowers', 'SKILL.md'), '# test skill\n');
   writeFakeBin(bins, 'git', fakeGit);
   if (codex) writeFakeBin(bins, 'codex', codexScript);
   if (agent) writeFakeBin(bins, 'agent', agentScript);
@@ -81,7 +90,11 @@ function doctorFixture({
     root,
     scratchRoot: join(root, 'scratch'),
     repository,
-    env: { ...process.env, [pathKey]: isolatedPath(bins) },
+    env: {
+      ...process.env,
+      [pathKey]: isolatedPath(bins),
+      URO_SUPERPOWERS_DIR: superpowers,
+    },
   };
 }
 
@@ -219,6 +232,7 @@ test('plain doctor invokes only local status commands and never model probes', a
     assert.deepEqual(invocations, [
       { cli: 'codex', args: ['login', 'status'] },
       { cli: 'agent', args: ['status'] },
+      { cli: 'codex', args: ['plugin', 'list'] },
     ], 'default doctor must never invoke Codex exec or Cursor -p model forms');
   } finally {
     rmSync(fixture.root, { recursive: true, force: true });

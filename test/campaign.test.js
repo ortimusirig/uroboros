@@ -12,7 +12,7 @@ import {
 import { homedir, tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { countUsageTokens, runCampaign } from '../src/campaign.js';
+import { countUsageTokens, runCampaign as executeCampaign } from '../src/campaign.js';
 import { parsePartialEventStream } from '../src/event-stream.js';
 import { formatEventSummary, reportEvent } from '../src/events.js';
 import { exitCodeFor } from '../src/exit.js';
@@ -26,6 +26,19 @@ import {
 const SAFE_SCRATCH_BASE = process.env.URO_TEST_SCRATCH_ROOT ?? (process.platform === 'win32'
   ? 'C:/ccc-test'
   : join(homedir(), '.ccc-test'));
+
+const VERIFIED_SUPERPOWERS = {
+  ok: true,
+  seats: {
+    codex: { seat: 'codex', verified: true, evidence: 'registry', version: '6.3.0' },
+    cursor: { seat: 'cursor', verified: true, evidence: 'manifest', version: '6.0.2' },
+    claude: { seat: 'claude', verified: true, evidence: 'manifest', version: '6.0.2' },
+  },
+};
+const runCampaign = (options) => executeCampaign({
+  verifySuperpowers: async () => VERIFIED_SUPERPOWERS,
+  ...options,
+});
 
 const codexUsageSamplePath = fileURLToPath(
   new URL('../fixtures/codex-exec-usage-sample.ndjson', import.meta.url),
@@ -72,6 +85,56 @@ async function gitOk(cwd, ...args) {
   assert.equal(result.code, 0, result.stderr);
   return result.stdout.trim();
 }
+
+test('batch refuses an unverified seat before dispatching any unit', async () => {
+  let runCalls = 0;
+  await assert.rejects(runCampaign({
+    campaignId: 'superpowers-preflight-failure',
+    tasks: ['one', 'two'],
+    target: 'unused-by-adapter',
+    gate: [],
+    concurrency: 2,
+    tokenBudget: 1000,
+    verifySuperpowers: async () => ({
+      ok: false,
+      seats: {
+        ...VERIFIED_SUPERPOWERS.seats,
+        claude: {
+          seat: 'claude', verified: false, evidence: 'Claude plugin missing', version: null,
+          remediation: 'Claude: /plugin install superpowers@superpowers-marketplace',
+        },
+      },
+    }),
+    runUnit: async ({ runId }) => { runCalls++; return successFacts(runId); },
+  }), /Claude.*plugin install superpowers@superpowers-marketplace/i);
+  assert.equal(runCalls, 0);
+});
+
+test('batch verifies and launches with the CODEX_HOME supplied in run options', async () => {
+  const env = { CODEX_HOME: 'C:/registered-codex-home' };
+  let verificationEnv;
+  let unitEnv;
+  await runCampaign({
+    campaignId: 'superpowers-run-environment',
+    tasks: ['one'],
+    target: 'unused-by-adapter',
+    gate: [],
+    concurrency: 1,
+    tokenBudget: 1000,
+    runOptions: { env },
+    verifySuperpowers: async (options) => {
+      verificationEnv = options.env;
+      return VERIFIED_SUPERPOWERS;
+    },
+    runUnit: async (options) => {
+      unitEnv = options.env;
+      return successFacts(options.runId);
+    },
+  });
+
+  assert.equal(verificationEnv, env);
+  assert.equal(unitEnv, env);
+});
 
 test('several independent units all conclude and retain one aggregate entry each', async () => {
   const result = await runCampaign({

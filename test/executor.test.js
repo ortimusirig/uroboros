@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -25,6 +26,16 @@ const fakeCodex = fileURLToPath(new URL('../fixtures/fake-codex.mjs', import.met
 const schemaSamplePath = fileURLToPath(new URL('../fixtures/codex-stream-schema-sample.ndjson', import.meta.url));
 const usageSamplePath = fileURLToPath(new URL('../fixtures/codex-exec-usage-sample.ndjson', import.meta.url));
 const cursorPlanSamplePath = fileURLToPath(new URL('../fixtures/cursor-plan-mode-sample.ndjson', import.meta.url));
+
+function fakeChild() {
+  const child = new EventEmitter();
+  child.pid = 12345;
+  child.stdout = new EventEmitter();
+  child.stderr = new EventEmitter();
+  child.stdin = { end() {} };
+  child.kill = () => {};
+  return child;
+}
 
 async function runFakeExecutorStream(lines) {
   const events = [];
@@ -120,6 +131,26 @@ test('executor preamble names the approved-work and decision protocol', () => {
   assert.match(EXECUTOR_PREAMBLE, /Question:/);
   assert.match(EXECUTOR_PREAMBLE, /Options:/);
   assert.match(EXECUTOR_PREAMBLE, /Recommendation:/);
+});
+
+test('runExecutor launches Codex under the environment whose registry was verified', async () => {
+  const env = { CODEX_HOME: 'C:/registered-codex-home' };
+  const child = fakeChild();
+  let spawnOptions;
+  const pending = runExecutor({
+    plan: 'observe the launch environment',
+    cwd: process.cwd(),
+    bin: process.execPath,
+    env,
+    spawnProcess: (_bin, _args, options) => { spawnOptions = options; return child; },
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  child.emit('close', 0, null);
+  await pending;
+
+  assert.equal(spawnOptions.env.CODEX_HOME, env.CODEX_HOME);
+  assert.equal(spawnOptions.env.PATH, process.env.PATH,
+    'a registry override must not remove the PATH needed to launch Codex');
 });
 
 test('runExecutor parses file_change and agent_message from the stream', async () => {

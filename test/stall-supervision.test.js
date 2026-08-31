@@ -5,8 +5,11 @@ import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { reportEvent } from '../src/events.js';
 import { exitCodeFor } from '../src/exit.js';
-import { run } from '../src/run.js';
+import { run as executeRun } from '../src/run.js';
+import { withVerifiedSuperpowers } from '../fixtures/verified-superpowers.mjs';
 import { EXECUTOR_PREAMBLE } from '../src/executor.js';
+
+const run = (options) => executeRun(withVerifiedSuperpowers(options));
 
 const SAFE_SCRATCH_BASE = process.env.URO_TEST_SCRATCH_ROOT ?? (process.platform === 'win32'
   ? 'C:/ccc-test'

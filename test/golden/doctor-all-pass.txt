@@ -10,13 +10,14 @@ PASS [required] Cursor agent installed: {{AGENT_BIN}} was found; read ability is
 PASS [required] Cursor signed in: `agent status` exited 0
 PASS [required] Scratch root location: {{SCRATCH_ROOT}} is outside AppData and OneDrive
 PASS [required] Scratch root writable: {{SCRATCH_ROOT}} accepted a disposable write
+PASS [required] Codex superpowers: Codex: `codex plugin list` reports superpowers@openai-curated  installed, enabled  6.3.0  C:/fake/superpowers; version 6.3.0
+PASS [required] Cursor superpowers: Cursor: .cursor-plugin/plugin.json verified 1 readable skill files at {{SUPERPOWERS_DIR}}; version 6.0.2
+PASS [required] Claude superpowers: Claude: .claude-plugin/plugin.json verified 1 readable skill files at {{SUPERPOWERS_DIR}}; version 6.0.2
 PASS [required] Codex write probe: created ccc-doctor-write.txt with the requested content in a disposable Git repository
 PASS [required] Cursor read probe: returned the unpredictable contents of a scratch file and left the directory unchanged
 
 Optional features (these do not affect loop health):
 INFO [optional] GitHub publishing: optional; the loop is fully usable without it.
-FAIL [optional] Superpowers plugin: not found in the Claude or Codex plugin caches; the loop remains usable without it
-  Next: install superpowers in a Claude or Codex plugin cache, or set `URO_SUPERPOWERS_DIR` to its installed plugin directory.
 PASS [optional] GitHub CLI installed: {{GH_BIN}} was found
 PASS [optional] GitHub authentication: `gh auth status` exited 0
 PASS [optional] GitHub remote: {{REPOSITORY}} has a github.com remote

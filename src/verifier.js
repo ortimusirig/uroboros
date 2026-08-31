@@ -5,7 +5,10 @@ import { spawnCapture } from './spawn.js';
 import { reportEvent } from './events.js';
 import { annotateUsageConsistency, normalizeCursorUsage } from './usage.js';
 import { resolveStageTimeouts } from './timeouts.js';
-import { resolveSuperpowersDir } from './superpowers.js';
+import {
+  inspectSuperpowersDirectory,
+  resolveSuperpowersDir,
+} from './superpowers.js';
 import { inspectWorktreeActivity } from './liveness-evidence.js';
 import {
   createProgressWatchdog,
@@ -47,8 +50,17 @@ export function buildCursorArgs({
 } = {}) {
   assertUsablePrompt(prompt);
   const resolvedSuperpowersDir = superpowersDir === undefined
-    ? resolveSuperpowersDir({ env, home })
+    ? resolveSuperpowersDir({ seat: 'cursor', env, home })
     : superpowersDir;
+  if (resolvedSuperpowersDir !== null) {
+    const inspected = inspectSuperpowersDirectory({
+      path: resolvedSuperpowersDir,
+      seat: 'cursor',
+    });
+    if (!inspected.ok) {
+      throw new Error(`Cursor superpowers plugin directory is unusable: ${inspected.reason}`);
+    }
+  }
   // --trust clears Cursor's "Workspace Trust Required" gate for READING the checkout; without
   // it the agent exits 1 with no output and every review is UNVERIFIED. It is
   // NOT one of the forbidden flags (--force/--yolo/-f/--approve-mcps auto-APPROVE actions);
@@ -405,6 +417,7 @@ export async function runVerifier({
   const args = [...extraArgv, ...buildCursorArgs({
     prompt, model, env, home, superpowersDir,
   })];
+  const launchEnv = { ...process.env, ...env };
   assertNoForbiddenFlags(args);
   const nowMs = () => {
     const value = now();
@@ -452,6 +465,7 @@ export async function runVerifier({
   try {
     r = await spawnCapture(bin, args, {
       cwd,
+      env: launchEnv,
       timeoutMs: resolvedTimeoutMs,
       timeoutSetting: 'URO_VERIFIER_TIMEOUT_MS',
       signal,

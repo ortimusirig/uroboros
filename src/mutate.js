@@ -1306,9 +1306,12 @@ function createReadOnlyMutationSeat({
     sandbox: 'read-only',
     env,
   });
+  const launchEnv = { ...process.env, ...env };
   return async (prompt) => {
     let result;
-    try { result = await runSeat(bin, args, { cwd, env, input: prompt, timeoutMs }); }
+    try {
+      result = await runSeat(bin, args, { cwd, env: launchEnv, input: prompt, timeoutMs });
+    }
     catch (error) { return { available: false, reason: `mutation judge could not start: ${message(error)}` }; }
     if (result.code !== 0) return { available: false, reason: `mutation judge exited ${result.code}` };
     return parseJsonObject(parseCodexStream(result.stdout).lastMessage)

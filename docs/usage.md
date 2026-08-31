@@ -73,9 +73,10 @@ the already-observed gate status or run outcome.
 
 `init` never overwrites `plan.md` or `gate.json`. It detects a `package.json` test script;
 otherwise it emits a valid, runnable placeholder gate with an explicit comment telling you to
-replace it. `doctor` runs Node, Git, PATH, local Codex/Cursor sign-in, scratch-safety, and
-scratch-writability checks by default without spending agent tokens. The Codex write and Cursor
-read probes spend real agent tokens, so they are marked `SKIP` until `--deep` is supplied.
+replace it. `doctor` runs Node, Git, PATH, local Codex/Cursor sign-in, scratch-safety,
+scratch-writability, Codex registry, Cursor `.cursor-plugin`, and Claude `.claude-plugin` checks
+by default without spending agent tokens. All three superpowers checks are required. The Codex
+write and Cursor read probes spend real agent tokens, so they are marked `SKIP` until `--deep` is supplied.
 Every probe uses and cleans its own disposable scratch directory; neither the target nor a run
 directory is modified.
 
@@ -262,6 +263,11 @@ embedded Obsidian Bases campaign table.
 
 ## Configuration
 
+- **Superpowers prerequisite:** Codex must report `superpowers@openai-curated` as
+  `installed, enabled`; Cursor and Claude must resolve compatible manifests with readable skills.
+  Set `URO_SUPERPOWERS_DIR` to the directory-based plugin used by Cursor and Claude when cache
+  discovery is insufficient. Set `URO_REQUIRE_SUPERPOWERS=0` only for a deliberate degraded run;
+  run facts retain per-seat evidence and versions, and the report states the bypass.
 - **Scratch root** defaults to `C:/uro/w` on Windows and `~/.uro/w` elsewhere. Override with
   `URO_SCRATCH_ROOT`.
 - The scratch root must **not** sit under `AppData` or `OneDrive`. This is enforced, not

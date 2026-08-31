@@ -16,6 +16,12 @@ FAIL [required] Scratch root location: scratch root under AppData is forbidden: 
   Next: set `URO_SCRATCH_ROOT` to a short local path outside AppData and OneDrive (for example `C:\uro\w`) and rerun doctor.
 FAIL [required] Scratch root writable: not tested because the configured path is unsafe
   Next: set `URO_SCRATCH_ROOT` to a writable local path outside AppData and OneDrive, then rerun doctor.
+FAIL [required] Codex superpowers: Codex: cannot verify superpowers because the Codex CLI is not installed
+  Next: Codex: run `codex plugin add superpowers@openai-curated`, then rerun `node bin/loop.js doctor`.
+FAIL [required] Cursor superpowers: Cursor: no superpowers directory with a valid .cursor-plugin manifest and readable skills was found
+  Next: Cursor: run `$env:URO_SUPERPOWERS_DIR='<directory-with-.cursor-plugin>'; node bin/loop.js doctor` in PowerShell, or `export URO_SUPERPOWERS_DIR='<directory-with-.cursor-plugin>'; node bin/loop.js doctor` on POSIX.
+FAIL [required] Claude superpowers: Claude: no superpowers directory with a valid .claude-plugin manifest and readable skills was found
+  Next: Claude: run `/plugin install superpowers@superpowers-marketplace` inside Claude Code, restart Claude Code, then rerun `node bin/loop.js doctor`.
 FAIL [required] Codex write probe: could not run because Codex, git, or scratch storage failed a prerequisite
   Next: fix the failed prerequisite above, then rerun `node bin/loop.js doctor --deep`.
 FAIL [required] Cursor read probe: could not run because the agent or scratch storage failed a prerequisite
@@ -23,8 +29,6 @@ FAIL [required] Cursor read probe: could not run because the agent or scratch st
 
 Optional features (these do not affect loop health):
 INFO [optional] GitHub publishing: optional; the loop is fully usable without it.
-FAIL [optional] Superpowers plugin: not found in the Claude or Codex plugin caches; the loop remains usable without it
-  Next: install superpowers in a Claude or Codex plugin cache, or set `URO_SUPERPOWERS_DIR` to its installed plugin directory.
 FAIL [optional] GitHub CLI installed: ccc-doctor-golden-missing-gh-7e57 was not found on PATH
   Next: create an account at https://github.com/signup, install `gh` from https://cli.github.com/, run `gh auth login`, then run `gh repo create OWNER/REPOSITORY --source=. --remote=origin --private --push` from the existing local repository (use `--public` if desired).
 FAIL [optional] GitHub authentication: not checkable until GitHub CLI is installed

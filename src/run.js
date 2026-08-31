@@ -57,7 +57,10 @@ import {
 } from './debate.js';
 import { detectReview, parseReview } from './review.js';
 import { buildFixPlan, validateFindings } from './fix-plan.js';
-import { resolveSuperpowersDir } from './superpowers.js';
+import {
+  applySuperpowersRequirement,
+  verifySuperpowersSeats,
+} from './superpowers.js';
 import { readEnv } from './env-compat.js';
 import { createLivenessJudge } from './liveness-judge.js';
 import {
@@ -294,14 +297,36 @@ export async function run(opts) {
   const createDiff = adapters.diffText ?? diffText;
   const detectDebateCircling = adapters.detectCircling ?? detectCircling;
   const selectPivot = adapters.shouldPivot ?? shouldPivot;
+  const runEnvironment = opts.env ?? process.env;
+  const verifySuperpowers = adapters.verifySuperpowers ?? verifySuperpowersSeats;
+  const verification = opts.superpowers?.seats
+    ? {
+        ok: Object.values(opts.superpowers.seats).every((seat) => seat.verified === true),
+        seats: opts.superpowers.seats,
+      }
+    : await verifySuperpowers({
+        env: runEnvironment,
+        home: opts.home ?? homedir(),
+        codexBin: opts.codexBin ?? 'codex',
+      });
+  const superpowersRequirement = applySuperpowersRequirement(verification, runEnvironment);
+  if (!superpowersRequirement.ok) {
+    throw new Error(`superpowers preflight failed: ${superpowersRequirement.reason}`);
+  }
+  const verifiedSeats = superpowersRequirement.verification.seats;
+  const superpowers = {
+    required: true,
+    bypassed: superpowersRequirement.bypassed,
+    seats: verifiedSeats,
+  };
+  const cursorSuperpowersDir = verifiedSeats.cursor.verified
+    ? verifiedSeats.cursor.path
+    : null;
   const productionLivenessJudge = adapters.runExecutor === undefined;
   const livenessJudgeConfigured = typeof adapters.judgeLiveness === 'function'
     || productionLivenessJudge;
   let judgeLiveness = adapters.judgeLiveness ?? null;
-  const maxDebateRounds = resolveDebateRounds(opts.env ?? process.env, debateRounds);
-  const superpowersDir = opts.superpowersDir === undefined
-    ? resolveSuperpowersDir({ env: opts.env ?? process.env, home: opts.home ?? homedir() })
-    : opts.superpowersDir;
+  const maxDebateRounds = resolveDebateRounds(runEnvironment, debateRounds);
   const originalPlan = resolveTask(task);
   let plan = originalPlan;
   const commands = Array.isArray(gate) ? gate : JSON.parse(readFileSync(gate, 'utf8'));
@@ -393,9 +418,7 @@ export async function run(opts) {
       cwd: iso.dir,
       model: executorModel,
       effort: executorEffort,
-      env: opts.env ?? process.env,
-      home: opts.home ?? homedir(),
-      superpowersDir,
+      env: runEnvironment,
     });
   }
   const mergeConflicts = [];
@@ -525,8 +548,7 @@ export async function run(opts) {
       try {
         result = observeUsage(await runExecutor({
           plan: executorPlan, cwd: iso.dir, model: executorModel, effort: executorEffort,
-          superpowersDir,
-          env: opts.env ?? process.env,
+          env: runEnvironment,
           timeoutMs: stageTimeouts.executor,
           reporter: eventReporter, runId, attempt,
           beforeKill,
@@ -849,8 +871,8 @@ export async function run(opts) {
         debateRound++;
         const v = annotateVerifierConsistency(observeUsage(await runVerifier({
           cwd: iso.dir, bin: verifierBin, model: verifierModel, prompt: DEFAULT_PROMPT,
-          superpowersDir,
-          env: opts.env ?? process.env,
+          superpowersDir: cursorSuperpowersDir,
+          env: runEnvironment,
           timeoutMs: stageTimeouts.verifier,
           reporter: eventReporter, runId, pass: 'correctness',
           onLiveness: () => watchdog?.touch('verify'),
@@ -863,8 +885,8 @@ export async function run(opts) {
         }), { seat: 'verifier', pass: 'correctness', iteration: n }));
         const intentVerifier = annotateVerifierConsistency(observeUsage(await runVerifier({
           cwd: iso.dir, bin: verifierBin, model: verifierModel, prompt: INTENT_PROMPT,
-          superpowersDir,
-          env: opts.env ?? process.env,
+          superpowersDir: cursorSuperpowersDir,
+          env: runEnvironment,
           timeoutMs: stageTimeouts.verifier,
           reporter: eventReporter, runId, pass: 'intent',
           onLiveness: () => watchdog?.touch('verify'),
@@ -1246,7 +1268,8 @@ export async function run(opts) {
       executorEffort,
       verifier: verifierModel,
     },
-    skills: superpowersDir,
+    skills: cursorSuperpowersDir,
+    superpowers,
   });
   if (outcome === 'needs-decision') facts.decision = decision;
   else if (resolvedDecision !== null) facts.decision = resolvedDecision;

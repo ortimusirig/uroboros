@@ -51,6 +51,7 @@ export function buildRunFacts({
   mutation,
   debate = null,
   skills = null,
+  superpowers = null,
 }) {
   const facts = {
     runId,
@@ -64,6 +65,7 @@ export function buildRunFacts({
       verifier: models?.verifier ?? DEFAULT_VERIFIER_MODEL,
     },
     skills: skills ?? null,
+    superpowers: superpowers ?? null,
     limits: {
       gateRetries,
       timeoutsMs: {
@@ -190,9 +192,23 @@ export function buildReportMarkdown(facts, {
   const assumedDecision = facts.assumedDecision
     ?? (facts.decision?.escalation === 'operator-absent' ? facts.decision : null);
   const presence = assumedDecision?.presenceEvidence ?? {};
+  const unverifiedSuperpowersSeats = Object.entries(facts.superpowers?.seats ?? {})
+    .filter(([, seat]) => seat?.verified !== true);
   const md = [
     `# CCC run ${facts.runId}`,
     ``,
+    ...(facts.superpowers?.bypassed
+      ? [
+          `## Superpowers prerequisite bypassed`,
+          ``,
+          ...(unverifiedSuperpowersSeats.length > 0
+            ? [`This run started with \`URO_REQUIRE_SUPERPOWERS=0\`; results were produced without all required seat skills being verified.`]
+            : [`This run started with \`URO_REQUIRE_SUPERPOWERS=0\`; the bypass was requested even though all required seat skills were verified.`]),
+          ...unverifiedSuperpowersSeats
+            .map(([name, seat]) => `- **${name[0].toUpperCase()}${name.slice(1)}:** not verified — ${seat?.evidence ?? 'no evidence recorded'}`),
+          ``,
+        ]
+      : []),
     ...(assumedDecision
       ? [
           `## Decision made while the operator was absent`,

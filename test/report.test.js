@@ -27,6 +27,7 @@ test('buildRunFacts records pins and outcome', () => {
   assert.deepEqual(facts.limits.timeoutsMs, { executor: null, verifier: null, gate: null });
   assert.deepEqual(facts.timeoutEvents, []);
   assert.equal(facts.skills, null);
+  assert.equal(facts.superpowers, null);
 });
 
 test('buildRunFacts records the resolved skills path', () => {
@@ -36,6 +37,47 @@ test('buildRunFacts records the resolved skills path', () => {
     outcome: 'no-op', gateRetries: 0, skills: 'C:/plugins/superpowers/6.3.0',
   });
   assert.equal(withSkills.skills, 'C:/plugins/superpowers/6.3.0');
+});
+
+test('buildRunFacts records independent superpowers evidence and versions for every seat', () => {
+  const superpowers = {
+    required: true,
+    bypassed: false,
+    seats: {
+      codex: { verified: true, evidence: 'registry enabled', version: '3fdeeb49', path: null },
+      cursor: { verified: true, evidence: '.cursor-plugin readable', version: '6.0.2', path: 'C:/cursor' },
+      claude: { verified: true, evidence: '.claude-plugin readable', version: '6.0.1', path: 'C:/claude' },
+    },
+  };
+  const withSuperpowers = buildRunFacts({
+    runId: 'seat-skills', target: 'C:/proj', dir: 'C:/uro/w', isRepo: true,
+    branch: 'uro/seat-skills', iterations: [], gateStatus: 'passed', verdict: null,
+    outcome: 'no-op', gateRetries: 0, superpowers,
+  });
+  assert.deepEqual(withSuperpowers.superpowers, superpowers);
+  assert.deepEqual(
+    Object.values(withSuperpowers.superpowers.seats).map((seat) => seat.version),
+    ['3fdeeb49', '6.0.2', '6.0.1'],
+  );
+});
+
+test('a requested bypass does not claim verified seats were missing', () => {
+  const markdown = buildReportMarkdown({
+    ...facts,
+    superpowers: {
+      required: true,
+      bypassed: true,
+      seats: {
+        codex: { verified: true, evidence: 'registry enabled', version: '3fdeeb49' },
+        cursor: { verified: true, evidence: 'manifest readable', version: '6.0.2' },
+        claude: { verified: true, evidence: 'manifest readable', version: '6.0.2' },
+      },
+    },
+  });
+
+  assert.match(markdown, /URO_REQUIRE_SUPERPOWERS=0/);
+  assert.match(markdown, /all required seat skills were verified/i);
+  assert.doesNotMatch(markdown, /without all required seat skills being verified/i);
 });
 
 test('run facts and markdown retain mutation measurement and arbiter judgement without changing the gate', () => {

@@ -1,8 +1,13 @@
 import { existsSync, readFileSync, statSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { commandExists, spawnCapture } from './spawn.js';
 import { assertSafeScratchRoot } from './isolation.js';
 import { resolveTask } from './task.js';
+import {
+  applySuperpowersRequirement,
+  verifySuperpowersSeats,
+} from './superpowers.js';
 
 function isDirectory(path) {
   try {
@@ -60,6 +65,9 @@ export async function preflight({
   probeVerifier = probeVerifierLiveness,
   skipVerifierProbe = false,
   checkCommand = commandExists,
+  verifySuperpowers = verifySuperpowersSeats,
+  env = process.env,
+  home = homedir(),
 }) {
   const fail = (reason) => ({ ok: false, reason });
   if (!existsSync(target)) return fail(`target does not exist: ${target}`);
@@ -97,5 +105,21 @@ export async function preflight({
         + `"${bins.agent} ${VERIFIER_PROBE_ARGS.join(' ')}"`);
     }
   }
-  return { ok: true, reason: null };
+  let verification;
+  try {
+    verification = await verifySuperpowers({ env, home, codexBin: bins.codex });
+  } catch (error) {
+    return fail(`superpowers preflight failed: ${error?.message ?? String(error)}`);
+  }
+  const requirement = applySuperpowersRequirement(verification, env);
+  if (!requirement.ok) return fail(`superpowers preflight failed: ${requirement.reason}`);
+  return {
+    ok: true,
+    reason: null,
+    superpowers: {
+      required: true,
+      bypassed: requirement.bypassed,
+      seats: requirement.verification.seats,
+    },
+  };
 }

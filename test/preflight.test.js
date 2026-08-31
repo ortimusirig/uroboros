@@ -3,7 +3,23 @@ import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { preflight, probeVerifierLiveness } from '../src/preflight.js';
+import { preflight as runPreflight, probeVerifierLiveness } from '../src/preflight.js';
+
+const VERIFIED_SUPERPOWERS = Object.freeze({
+  ok: true,
+  seats: Object.freeze({
+    codex: Object.freeze({ seat: 'codex', verified: true, evidence: 'registry', version: '6.3.0', path: null, remediation: 'Codex fix' }),
+    cursor: Object.freeze({ seat: 'cursor', verified: true, evidence: 'manifest', version: '6.0.2', path: 'C:/cursor', remediation: 'Cursor fix' }),
+    claude: Object.freeze({ seat: 'claude', verified: true, evidence: 'manifest', version: '6.0.2', path: 'C:/claude', remediation: 'Claude fix' }),
+  }),
+});
+
+const preflight = (options) => runPreflight({
+  verifySuperpowers: async () => VERIFIED_SUPERPOWERS,
+  probeVerifier: async () => ({ ok: true, reason: null }),
+  checkCommand: async () => true,
+  ...options,
+});
 
 const SAFE_SCRATCH_BASE = process.env.URO_TEST_SCRATCH_ROOT ?? (process.platform === 'win32'
   ? 'C:/ccc-test'
@@ -90,7 +106,11 @@ test('preflight rejects a missing corrected run and accepts an existing run dire
       task: 'A valid inline task.', target: d, gate, scratchRoot,
       correctsRunId: 'existing-prior-run', bins,
     });
-    assert.deepEqual(existing, { ok: true, reason: null },
+    assert.deepEqual(existing, {
+      ok: true,
+      reason: null,
+      superpowers: { required: true, bypassed: false, seats: VERIFIED_SUPERPOWERS.seats },
+    },
       'positive control: an existing prior run must pass the same preflight');
   } finally {
     rmSync(d, { recursive: true, force: true });
@@ -132,4 +152,73 @@ test('preflight accepts an injected passing verifier probe', async () => {
 
   assert.equal(r.ok, true);
   assert.equal(probed, process.execPath);
+});
+
+test('run and batch preflight reject an unverified seat before work can start', async () => {
+  const d = mkdtempSync(join(tmpdir(), 'p-superpowers-fail-'));
+  const gate = join(d, 'gate.json');
+  writeFileSync(gate, '[]');
+  const calls = [];
+  const failed = {
+    ok: false,
+    seats: {
+      ...VERIFIED_SUPERPOWERS.seats,
+      cursor: {
+        seat: 'cursor', verified: false, evidence: 'Cursor missing .cursor-plugin',
+        version: null, path: null,
+        remediation: 'Cursor: URO_SUPERPOWERS_DIR=<directory-with-.cursor-plugin>',
+      },
+    },
+  };
+  try {
+    for (const taskInputs of [{ task: 'Run task.' }, { tasks: ['Batch one.', 'Batch two.'] }]) {
+      const result = await preflight({
+        ...taskInputs,
+        target: d,
+        gate,
+        scratchRoot: 'C:/ccc/w',
+        bins: { git: 'git', codex: 'codex', agent: 'agent' },
+        checkCommand: async () => true,
+        probeVerifier: async () => ({ ok: true, reason: null }),
+        verifySuperpowers: async () => failed,
+      });
+      if (result.ok) calls.push('executor');
+      assert.equal(result.ok, false);
+      assert.match(result.reason, /Cursor.*[.]cursor-plugin/i);
+    }
+    assert.deepEqual(calls, [], 'neither run nor batch can dispatch an executor after failure');
+  } finally {
+    rmSync(d, { recursive: true, force: true });
+  }
+});
+
+test('URO_REQUIRE_SUPERPOWERS=0 explicitly bypasses a failed preflight and records it', async () => {
+  const d = mkdtempSync(join(tmpdir(), 'p-superpowers-bypass-'));
+  const gate = join(d, 'gate.json');
+  writeFileSync(gate, '[]');
+  const failed = {
+    ok: false,
+    seats: {
+      ...VERIFIED_SUPERPOWERS.seats,
+      claude: {
+        seat: 'claude', verified: false, evidence: 'Claude missing', version: null,
+        path: null, remediation: 'Claude fix',
+      },
+    },
+  };
+  try {
+    const result = await preflight({
+      task: 'Run deliberately.', target: d, gate, scratchRoot: 'C:/ccc/w',
+      bins: { git: 'git', codex: 'codex', agent: 'agent' },
+      checkCommand: async () => true,
+      probeVerifier: async () => ({ ok: true, reason: null }),
+      verifySuperpowers: async () => failed,
+      env: { URO_REQUIRE_SUPERPOWERS: '0' },
+    });
+    assert.equal(result.ok, true);
+    assert.equal(result.superpowers.bypassed, true);
+    assert.equal(result.superpowers.seats.claude.verified, false);
+  } finally {
+    rmSync(d, { recursive: true, force: true });
+  }
 });

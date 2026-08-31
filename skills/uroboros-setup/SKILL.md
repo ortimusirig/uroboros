@@ -72,8 +72,33 @@ is missing, repeat the probe in PowerShell before concluding that the CLI is not
    terminal, and repeat the matching check. If it fails, choose another short local path or repair
    its permissions; never mark the root green from path text alone.
 
+## Verify superpowers for every seat
+
+A directory existing is never proof that an actor can load it. Verify each mechanism separately:
+
+8. **Codex:** Run `codex plugin list` under the same `CODEX_HOME` used for `codex exec`. Require
+   the `superpowers@openai-curated` row to say `installed, enabled`, and record the row's version.
+   If it says `not installed`, ask consent to run
+   `codex plugin add superpowers@openai-curated`, then rerun the direct list probe. Never pass
+   `--plugin-dir` to Codex; that flag does not exist for `codex exec`.
+9. **Cursor:** Resolve only a superpowers directory carrying a valid
+   `.cursor-plugin/plugin.json`; require its version and every `skills/*/SKILL.md` to be readable.
+   A higher-version `.codex-plugin`-only directory is ineligible and must not be used as fallback.
+   Point Cursor at the eligible directory for doctor and later runs with
+   `$env:URO_SUPERPOWERS_DIR='<directory-with-.cursor-plugin>'` in PowerShell or
+   `export URO_SUPERPOWERS_DIR='<directory-with-.cursor-plugin>'` on macOS/Linux, then rerun
+   `/uroboros:doctor`.
+10. **Claude:** Require a valid `.claude-plugin/plugin.json`, its version, and readable
+    `skills/*/SKILL.md` files. If absent, tell the operator to run
+    `/plugin install superpowers@superpowers-marketplace` inside Claude Code, restart the session,
+    and rerun doctor.
+
+All three seats are required. `run`, `batch`, `plan`, and `queue` refuse before agent dispatch if
+any seat is unverified. `URO_REQUIRE_SUPERPOWERS=0` is the deliberate emergency bypass; when used,
+the failed evidence and bypass are retained in run facts and stated in the report.
+
 ## Hand off
 
-When all seven prerequisites are green, restart the Claude Code session. Slash commands do not
+When all ten prerequisites are green, restart the Claude Code session. Slash commands do not
 appear in a session that began before the plugin was installed. In the fresh session, run
 `/uroboros:setup` for the demo pass.

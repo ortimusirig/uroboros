@@ -1,4 +1,3 @@
-import { homedir } from 'node:os';
 import { buildCodexArgs, parseCodexStream } from './executor.js';
 import { spawnCapture } from './spawn.js';
 
@@ -79,8 +78,6 @@ export function createLivenessJudge({
   model,
   effort,
   env = process.env,
-  home = homedir(),
-  superpowersDir,
   timeoutMs = DEFAULT_LIVENESS_JUDGE_TIMEOUT_MS,
   runSeat = spawnCapture,
 } = {}) {
@@ -91,17 +88,15 @@ export function createLivenessJudge({
     ...(model === undefined ? {} : { model }),
     ...(effort === undefined ? {} : { effort }),
     sandbox: 'read-only',
-    env,
-    home,
-    superpowersDir,
   });
+  const launchEnv = { ...process.env, ...env };
 
   return async (evidence) => {
     let result;
     try {
       result = await runSeat(bin, args, {
         cwd,
-        env,
+        env: launchEnv,
         input: buildLivenessJudgePrompt(evidence),
         timeoutMs,
         timeoutSetting: 'liveness judge bound',

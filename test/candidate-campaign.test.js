@@ -9,13 +9,26 @@ import {
 } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { runCampaign } from '../src/campaign.js';
+import { runCampaign as executeCampaign } from '../src/campaign.js';
 import { exitCodeFor } from '../src/exit.js';
 import { spawnCapture } from '../src/spawn.js';
 
 const SAFE_SCRATCH_BASE = process.env.URO_TEST_SCRATCH_ROOT ?? (process.platform === 'win32'
   ? 'C:/ccc-test'
   : join(homedir(), '.ccc-test'));
+
+const VERIFIED_SUPERPOWERS = {
+  ok: true,
+  seats: {
+    codex: { seat: 'codex', verified: true, evidence: 'registry', version: '6.3.0' },
+    cursor: { seat: 'cursor', verified: true, evidence: 'manifest', version: '6.0.2' },
+    claude: { seat: 'claude', verified: true, evidence: 'manifest', version: '6.0.2' },
+  },
+};
+const runCampaign = (options) => executeCampaign({
+  verifySuperpowers: async () => VERIFIED_SUPERPOWERS,
+  ...options,
+});
 
 async function gitOk(cwd, ...args) {
   const result = await spawnCapture('git', ['-C', cwd, ...args]);

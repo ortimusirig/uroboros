@@ -17,6 +17,7 @@ function scratch() {
 
 test('the production launcher composes loop run and accepts facts from a stopping exit', async () => {
   const calls = [];
+  const env = { CODEX_HOME: 'C:/registered-codex-home' };
   const runCommand = async (bin, args, options) => {
     calls.push({ bin, args, options });
     return {
@@ -31,7 +32,7 @@ test('the production launcher composes loop run and accepts facts from a stoppin
     unit: { task: 'C:/repo/plan.md', gate: 'C:/repo/gate.json' },
     target: 'C:/repo',
     mode: 'autonomous',
-  }, { runCommand, loopPath: 'C:/tools/loop.js', nodePath: 'C:/node.exe' });
+  }, { runCommand, loopPath: 'C:/tools/loop.js', nodePath: 'C:/node.exe', env });
 
   assert.equal(calls.length, 1);
   assert.equal(calls[0].bin, 'C:/node.exe');
@@ -46,6 +47,8 @@ test('the production launcher composes loop run and accepts facts from a stoppin
     '--no-dashboard',
   ]);
   assert.equal(calls[0].options.cwd, resolve('C:/repo'));
+  assert.equal(calls[0].options.env.CODEX_HOME, env.CODEX_HOME);
+  assert.equal(calls[0].options.env.PATH, process.env.PATH);
   assert.deepEqual(result, {
     runId: 'run-17',
     runDirectory: 'C:/scratch/run-17/w',
@@ -55,6 +58,7 @@ test('the production launcher composes loop run and accepts facts from a stoppin
 
 test('the production plan launcher composes loop plan and accepts non-convergence', async () => {
   const calls = [];
+  const env = { CODEX_HOME: 'C:/registered-plan-home' };
   const runCommand = async (bin, args, options) => {
     calls.push({ bin, args, options });
     return {
@@ -66,13 +70,15 @@ test('the production plan launcher composes loop plan and accepts non-convergenc
   const result = await launchLoopPlan({
     unit: { goal: 'Improve the parser', out: 'C:/plans/x' },
     target: 'C:/repo',
-  }, { runCommand, loopPath: 'C:/tools/loop.js', nodePath: 'C:/node.exe' });
+  }, { runCommand, loopPath: 'C:/tools/loop.js', nodePath: 'C:/node.exe', env });
 
   assert.deepEqual(calls[0].args, [
     'C:/tools/loop.js', 'plan', '--goal', 'Improve the parser',
     '--target', resolve('C:/repo'), '--out', 'C:/plans/x',
   ]);
   assert.equal(calls[0].options.cwd, resolve('C:/repo'));
+  assert.equal(calls[0].options.env.CODEX_HOME, env.CODEX_HOME);
+  assert.equal(calls[0].options.env.PATH, process.env.PATH);
   assert.equal(result.converged, false);
   assert.equal(result.exitCode, 1);
 });

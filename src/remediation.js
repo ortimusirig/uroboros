@@ -39,12 +39,12 @@ export function remediationCommandText(command, inputs = {}) {
   throw new Error(`unsupported remediation command type: ${command?.type ?? 'none'}`);
 }
 
-export async function executeRemediation(command, inputs = {}) {
-  if (command?.type === 'spawn') return spawnCapture(command.binary, command.args);
+export async function executeRemediation(command, inputs = {}, options = {}) {
+  if (command?.type === 'spawn') return spawnCapture(command.binary, command.args, options);
   if (command?.type === 'shell') {
     return command.platform === 'win32'
-      ? spawnCapture('powershell.exe', ['-NoProfile', '-Command', command.command])
-      : spawnCapture('/bin/sh', ['-c', command.command]);
+      ? spawnCapture('powershell.exe', ['-NoProfile', '-Command', command.command], options)
+      : spawnCapture('/bin/sh', ['-c', command.command], options);
   }
   if (command?.type === 'mkdir') {
     mkdirSync(commandPath(command.path, inputs), { recursive: command.recursive === true });
@@ -69,6 +69,7 @@ export async function fixFailedCheck({
   inputs = {},
   consent,
   executor = executeRemediation,
+  executorOptions = {},
   write = () => {},
 }) {
   if (outcome?.status !== 'FAIL') return { status: 'not-failing', attempted: false };
@@ -85,7 +86,7 @@ export async function fixFailedCheck({
   }
 
   try {
-    const result = await executor(remediation.command, inputs);
+    const result = await executor(remediation.command, inputs, executorOptions);
     if (result?.stdout) write(result.stdout);
     if (result?.stderr) write(result.stderr);
     return {

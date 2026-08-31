@@ -11,11 +11,14 @@ import {
 } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { run } from '../src/run.js';
+import { run as executeRun } from '../src/run.js';
+import { withVerifiedSuperpowers } from '../fixtures/verified-superpowers.mjs';
 import { generateRunJournal } from '../src/run-journal.js';
 import { exitCodeFor } from '../src/exit.js';
 import { physicalRunIdFor } from '../src/run-id.js';
 import { isolate } from '../src/isolation.js';
+
+const run = (options) => executeRun(withVerifiedSuperpowers(options));
 
 const TEST_ROOT = fileURLToPath(new URL('../.ccc-test-run-artifacts/', import.meta.url));
 const PROJECT_RUNS = fileURLToPath(new URL('../docs/runs/', import.meta.url));

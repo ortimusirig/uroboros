@@ -15,6 +15,7 @@ import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import {
   applyStatementDeletion,
+  createMutationJudge,
   filterMutableAddedLines,
   formatMutationSummary,
   groupMutationStatements,
@@ -27,7 +28,9 @@ import {
   selectTouchingTests,
 } from '../src/mutate.js';
 import { createEvent, EVENT_PAIRS, EVENT_STAGES, EVENT_TYPES } from '../src/events.js';
-import { run } from '../src/run.js';
+import { run as executeRun } from '../src/run.js';
+import { withVerifiedSuperpowers } from '../fixtures/verified-superpowers.mjs';
+const run = (options) => executeRun(withVerifiedSuperpowers(options));
 
 function statement(id, line, {
   path = 'src/work.js',
@@ -163,6 +166,29 @@ test('grouping uses a semantic judge and otherwise one enclosing-function unit, 
   assert.equal(fallback.units.length, 1);
   assert.equal(fallback.units[0].statements.length, 7,
     'seven statements in one function must not become fixed-size chunks');
+});
+
+test('the mutation judge keeps the verified Codex registry and inherited launch environment', async () => {
+  const env = { CODEX_HOME: 'C:/registered-mutation-home' };
+  let launchOptions;
+  const judge = createMutationJudge({
+    cwd: process.cwd(),
+    env,
+    runSeat: async (_bin, _args, options) => {
+      launchOptions = options;
+      return {
+        code: 0,
+        stdout: `${JSON.stringify({
+          type: 'item.completed',
+          item: { type: 'agent_message', text: JSON.stringify({ units: [] }) },
+        })}\n`,
+      };
+    },
+  });
+
+  await judge({ statements: [] });
+  assert.equal(launchOptions.env.CODEX_HOME, env.CODEX_HOME);
+  assert.equal(launchOptions.env.PATH, process.env.PATH);
 });
 
 test('a red baseline stops before grouping or mutation and explains why', async () => {

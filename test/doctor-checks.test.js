@@ -49,8 +49,17 @@ function createPassingFixture() {
   mkdirSync(repository);
   const blocklist = join(root, 'publish-blocklist.txt');
   writeFileSync(blocklist, 'confidential-customer\n# Comments are ignored.\ninternal-project\n');
+  const superpowers = join(root, 'superpowers');
+  mkdirSync(join(superpowers, '.cursor-plugin'), { recursive: true });
+  mkdirSync(join(superpowers, '.claude-plugin'), { recursive: true });
+  mkdirSync(join(superpowers, 'skills', 'using-superpowers'), { recursive: true });
+  const manifest = JSON.stringify({ name: 'superpowers', version: '6.0.2' });
+  writeFileSync(join(superpowers, '.cursor-plugin', 'plugin.json'), manifest);
+  writeFileSync(join(superpowers, '.claude-plugin', 'plugin.json'), manifest);
+  writeFileSync(join(superpowers, 'skills', 'using-superpowers', 'SKILL.md'), '# skill\n');
   return {
     root,
+    superpowers,
     scratchRoot: join(root, 'scratch'),
     repository,
     bins: {
@@ -61,7 +70,10 @@ function createPassingFixture() {
       gitleaks: writeFakeBin(binRoot, 'golden-gitleaks', fakeGh),
       trufflehog: writeFakeBin(binRoot, 'golden-trufflehog', fakeGh),
       logdy: writeFakeBin(binRoot, 'golden-logdy', fakeGh),
-      environment: { URO_PUBLISH_BLOCKLIST: blocklist },
+      environment: {
+        URO_PUBLISH_BLOCKLIST: blocklist,
+        URO_SUPERPOWERS_DIR: superpowers,
+      },
     },
   };
 }
@@ -125,7 +137,7 @@ function doctorCheck(id) {
   return check;
 }
 
-test('doctor registry has every prerequisite id and exactly three auto-fixable checks', () => {
+test('doctor registry has every prerequisite id and exactly four auto-fixable checks', () => {
   const requiredPrerequisiteIds = [
     'node-version',
     'git-usable',
@@ -135,6 +147,9 @@ test('doctor registry has every prerequisite id and exactly three auto-fixable c
     'cursor-signed-in',
     'scratch-root-location',
     'scratch-root-writable',
+    'superpowers-codex',
+    'superpowers-cursor',
+    'superpowers-claude',
   ];
   assert.ok(DOCTOR_CHECKS.length > 0, 'the registry must not be empty');
   const ids = DOCTOR_CHECKS.map((check) => check.id);
@@ -166,7 +181,7 @@ test('doctor registry has every prerequisite id and exactly three auto-fixable c
   }
   assert.deepEqual(
     DOCTOR_CHECKS.filter((check) => check.remediation.autoFixable).map((check) => check.id).sort(),
-    ['codex-cli-installed', 'cursor-agent-installed', 'scratch-root-writable'],
+    ['codex-cli-installed', 'cursor-agent-installed', 'scratch-root-writable', 'superpowers-codex'],
   );
   assert.ok(
     DOCTOR_CHECKS.filter((check) => check.kind === 'optional')
@@ -211,25 +226,209 @@ test('publish guard blocklist fails when URO_PUBLISH_BLOCKLIST is unset', async 
   assert.match(outcome.detail, /publish refuses/);
 });
 
-test('superpowers doctor check reports resolution or actionable optional absence', async () => {
+test('superpowers doctor checks verify all three seats and make each one required', async () => {
   const root = mkdtempSync(join(tmpdir(), 'uro-superpowers-doctor-'));
-  const check = doctorCheck('superpowers-plugin');
+  const codexCheck = doctorCheck('superpowers-codex');
+  const cursorCheck = doctorCheck('superpowers-cursor');
+  const claudeCheck = doctorCheck('superpowers-claude');
   const emptyHome = join(root, 'empty-home');
   const configured = join(root, 'configured-superpowers');
   mkdirSync(emptyHome);
-  mkdirSync(configured);
+  mkdirSync(join(configured, '.cursor-plugin'), { recursive: true });
+  mkdirSync(join(configured, '.claude-plugin'), { recursive: true });
+  mkdirSync(join(configured, 'skills', 'using-superpowers'), { recursive: true });
+  const manifest = JSON.stringify({ name: 'superpowers', version: '6.0.2' });
+  writeFileSync(join(configured, '.cursor-plugin', 'plugin.json'), manifest);
+  writeFileSync(join(configured, '.claude-plugin', 'plugin.json'), manifest);
+  writeFileSync(join(configured, 'skills', 'using-superpowers', 'SKILL.md'), '# skill\n');
   try {
-    const absent = await check.probe({ env: {}, home: emptyHome, bins: {} });
-    assert.equal(absent.status, 'FAIL');
-    assert.match(absent.detail, /not found/);
-    assert.equal(check.kind, 'optional');
-    assert.match(check.remediation.prose, /URO_SUPERPOWERS_DIR/);
-
-    const found = await check.probe({
+    const codex = await codexCheck.probe({
+      bins: { codex: 'codex' },
+      spawn: async () => ({
+        code: 0, timedOut: false, stderr: '',
+        stdout: 'superpowers@openai-curated  installed, enabled  3fdeeb49  C:/plugin\n',
+      }),
+    });
+    const cursor = await cursorCheck.probe({
       env: { URO_SUPERPOWERS_DIR: configured }, home: emptyHome, bins: {},
     });
-    assert.equal(found.status, 'PASS');
-    assert.match(found.detail, new RegExp(resolve(configured).replaceAll('\\', '\\\\')));
+    const claude = await claudeCheck.probe({
+      env: { URO_SUPERPOWERS_DIR: configured }, home: emptyHome, bins: {},
+    });
+
+    assert.equal(codex.status, 'PASS');
+    assert.equal(cursor.status, 'PASS');
+    assert.equal(claude.status, 'PASS');
+    assert.deepEqual(
+      [codexCheck, cursorCheck, claudeCheck].map((check) => check.kind),
+      ['required', 'required', 'required'],
+    );
+    assert.match(codex.detail, /installed, enabled.*3fdeeb49/i);
+    assert.match(cursor.detail, /Cursor.*6[.]0[.]2/i);
+    assert.match(claude.detail, /Claude.*6[.]0[.]2/i);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('each failing superpowers doctor check names its seat and exact remediation command', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'uro-superpowers-doctor-fail-'));
+  const codexOnly = join(root, 'codex-only-superpowers');
+  mkdirSync(join(codexOnly, '.codex-plugin'), { recursive: true });
+  mkdirSync(join(codexOnly, 'skills', 'using-superpowers'), { recursive: true });
+  writeFileSync(join(codexOnly, '.codex-plugin', 'plugin.json'), JSON.stringify({
+    name: 'superpowers', version: '6.3.0',
+  }));
+  writeFileSync(join(codexOnly, 'skills', 'using-superpowers', 'SKILL.md'), '# skill\n');
+  try {
+    const outcomes = await Promise.all([
+      doctorCheck('superpowers-codex').probe({
+        bins: { codex: 'codex' },
+        spawn: async () => ({
+          code: 0, timedOut: false, stderr: '',
+          stdout: 'superpowers@openai-curated  not installed  C:/plugin\n',
+        }),
+      }),
+      doctorCheck('superpowers-cursor').probe({
+        env: { URO_SUPERPOWERS_DIR: codexOnly }, home: root, bins: {},
+      }),
+      doctorCheck('superpowers-claude').probe({ env: {}, home: root, bins: {} }),
+    ]);
+
+    for (const [index, seat] of ['Codex', 'Cursor', 'Claude'].entries()) {
+      const check = doctorCheck(`superpowers-${seat.toLowerCase()}`);
+      assert.equal(outcomes[index].status, 'FAIL');
+      assert.match(outcomes[index].detail, new RegExp(seat, 'i'));
+      assert.match(check.remediation.prose, new RegExp(seat, 'i'));
+    }
+    assert.match(doctorCheck('superpowers-codex').remediation.prose,
+      /codex plugin add superpowers@openai-curated/);
+    assert.match(doctorCheck('superpowers-cursor').remediation.prose,
+      /URO_SUPERPOWERS_DIR=.*[.]cursor-plugin/);
+    assert.match(outcomes[1].detail, /[.]cursor-plugin/,
+      'a Codex-only directory must fail Cursor verification at the manifest boundary');
+    assert.match(doctorCheck('superpowers-claude').remediation.prose,
+      /plugin install superpowers@superpowers-marketplace/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('a failed required superpowers seat makes doctor unhealthy', async () => {
+  const checks = ['superpowers-codex', 'superpowers-cursor', 'superpowers-claude'];
+  for (const failedId of checks) {
+    const seatChecks = checks.map((id) => ({
+      id,
+      phase: 'prerequisite',
+      kind: 'required',
+      name: id,
+      remediation: { prose: 'fix it', command: null, autoFixable: false },
+      probe: async () => ({ status: id === failedId ? 'FAIL' : 'PASS', detail: id }),
+    }));
+    const result = await runDoctor({
+      scratchRoot: join(tmpdir(), 'uro-doctor-required-seat'),
+      checks: seatChecks,
+    });
+    assert.equal(result.ok, false, `${failedId} must affect doctor health`);
+  }
+  const passing = await runDoctor({
+    scratchRoot: join(tmpdir(), 'uro-doctor-required-seats-pass'),
+    checks: checks.map((id) => ({
+      id,
+      phase: 'prerequisite',
+      kind: 'required',
+      name: id,
+      remediation: { prose: 'fix it', command: null, autoFixable: false },
+      probe: async () => ({ status: 'PASS', detail: id }),
+    })),
+  });
+  assert.equal(passing.ok, true, 'positive control: all three verified seats permit health');
+});
+
+test('doctor remediation uses the same Codex registry environment it probed', async () => {
+  const root = mkdtempSync(join(process.cwd(), '.ccc-doctor-remediation-env-'));
+  const env = { CODEX_HOME: join(root, 'codex-home') };
+  let remediationOptions;
+  const check = {
+    id: 'codex-registry-remediation-env',
+    phase: 'prerequisite',
+    kind: 'required',
+    name: 'Codex registry remediation environment',
+    remediation: {
+      prose: 'Codex: codex plugin add superpowers@openai-curated',
+      autoFixable: true,
+      command: {
+        type: 'spawn', binary: 'codex', args: ['plugin', 'add', 'superpowers@openai-curated'],
+      },
+    },
+    probe: async () => ({ status: 'FAIL', detail: 'not installed', remediationKey: 'default' }),
+  };
+  try {
+    await runDoctor({
+      scratchRoot: root,
+      checks: [check],
+      fix: true,
+      env,
+      consent: async () => true,
+      remediationExecutor: async (_command, _inputs, options) => {
+        remediationOptions = options;
+        return { code: 0 };
+      },
+    });
+
+    assert.equal(remediationOptions.env.CODEX_HOME, env.CODEX_HOME);
+    assert.equal(remediationOptions.env.PATH, process.env.PATH);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('doctor deep seat probes keep registry overrides and the inherited launch environment', async () => {
+  const root = mkdtempSync(join(process.cwd(), '.ccc-doctor-deep-env-'));
+  const plugin = join(root, 'superpowers');
+  for (const manifest of ['.cursor-plugin', '.claude-plugin']) {
+    mkdirSync(join(plugin, manifest), { recursive: true });
+    writeFileSync(join(plugin, manifest, 'plugin.json'), JSON.stringify({
+      name: 'superpowers', version: '6.0.2',
+    }));
+  }
+  mkdirSync(join(plugin, 'skills', 'using-superpowers'), { recursive: true });
+  writeFileSync(join(plugin, 'skills', 'using-superpowers', 'SKILL.md'), '# skill\n');
+  const env = { CODEX_HOME: join(root, 'codex-home'), URO_SUPERPOWERS_DIR: plugin };
+  const calls = [];
+  const spawn = async (bin, _args, options) => {
+    calls.push({ bin, options });
+    if (bin === 'codex') {
+      writeFileSync(join(options.cwd, 'ccc-doctor-write.txt'), 'URO_DOCTOR_WRITE_OK\n');
+    }
+    const stdout = bin === 'agent'
+      ? readFileSync(join(options.cwd, 'ccc-doctor-read.txt'), 'utf8')
+      : '';
+    return { code: 0, timedOut: false, stdout, stderr: '' };
+  };
+  try {
+    const codex = await doctorCheck('codex-write-probe').probe({
+      bins: { codex: 'codex', git: 'git' },
+      deep: true,
+      state: { codexPresent: true, git: { usable: true }, workspace: root },
+      env,
+      spawn,
+    });
+    const cursor = await doctorCheck('cursor-read-probe').probe({
+      bins: { agent: 'agent' },
+      deep: true,
+      state: { agentPresent: true, workspace: root },
+      env,
+      home: root,
+      spawn,
+    });
+
+    assert.equal(codex.status, 'PASS');
+    assert.equal(cursor.status, 'PASS');
+    for (const call of calls.filter(({ bin }) => bin === 'codex' || bin === 'agent')) {
+      assert.equal(call.options.env.CODEX_HOME, env.CODEX_HOME);
+      assert.equal(call.options.env.PATH, process.env.PATH);
+    }
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -346,7 +545,7 @@ test('optional publish guard failures do not affect core health, while required 
     ...fixture.bins,
     gitleaks: 'ccc-doctor-definitely-missing-gitleaks-core-health-58d9',
     trufflehog: 'ccc-doctor-definitely-missing-trufflehog-core-health-58d9',
-    environment: {},
+    environment: { URO_SUPERPOWERS_DIR: fixture.superpowers },
   };
   try {
     const healthy = await runDoctor({
@@ -355,7 +554,7 @@ test('optional publish guard failures do not affect core health, while required 
       nodeVersion: '24.9.0',
       bins,
     });
-    assert.equal(healthy.ok, true);
+    assert.equal(healthy.ok, true, healthy.output);
     assert.match(healthy.output, /Loop core health: HEALTHY/);
     assert.match(healthy.output, /FAIL \[optional\] Publish guard gitleaks/);
     assert.match(healthy.output, /FAIL \[optional\] Publish guard blocklist/);
@@ -400,6 +599,7 @@ test('doctor all-pass output is byte-identical to its committed golden', async (
     const expected = golden('doctor-all-pass.txt', {
       SCRATCH_ROOT: resolve(fixture.scratchRoot),
       REPOSITORY: resolve(fixture.repository),
+      SUPERPOWERS_DIR: resolve(fixture.superpowers),
       CODEX_BIN: fixture.bins.codex,
       AGENT_BIN: fixture.bins.agent,
       GH_BIN: fixture.bins.gh,
@@ -407,7 +607,7 @@ test('doctor all-pass output is byte-identical to its committed golden', async (
       TRUFFLEHOG_BIN: fixture.bins.trufflehog,
       LOGDY_BIN: fixture.bins.logdy,
     });
-    assert.equal(result.ok, true);
+    assert.equal(result.ok, true, result.output);
     assertGoldenEquality(result.output, expected);
 
     const oneCharacterWrong = `${expected.slice(0, -2)}X${expected.slice(-1)}`;

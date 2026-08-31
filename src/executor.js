@@ -4,9 +4,7 @@ import { encodeRecordedText } from './execution-record.js';
 import { annotateUsageConsistency, EMPTY_USAGE, normalizeCodexUsage } from './usage.js';
 import { resolveStageTimeouts } from './timeouts.js';
 import { StringDecoder } from 'node:string_decoder';
-import { homedir } from 'node:os';
 import { readEnv } from './env-compat.js';
-import { resolveSuperpowersDir } from './superpowers.js';
 import { inspectWorktreeActivity } from './liveness-evidence.js';
 import {
   createProgressWatchdog,
@@ -53,18 +51,12 @@ export function buildCodexArgs({
   model = DEFAULT_EXECUTOR_MODEL,
   effort = DEFAULT_EXECUTOR_EFFORT,
   sandbox = SANDBOX,
-  env = process.env,
-  home = homedir(),
-  superpowersDir,
 }) {
   // Codex discovers plugins from its own config under CODEX_HOME; it has no
   // --plugin-dir flag and exits 2 on one ("unexpected argument '--plugin-dir'").
   // That flag belongs to the Cursor CLI, and passing it here broke every run.
-  // Superpowers reaches the executor through Codex's plugin cache, so the
-  // resolved path is recorded for provenance and never injected as an argument.
-  void (superpowersDir === undefined
-    ? resolveSuperpowersDir({ env, home })
-    : superpowersDir);
+  // Superpowers reaches the executor through Codex's registry under CODEX_HOME.
+  // There is deliberately no directory resolution or plugin argument in this seat.
   return [
     'exec', '--json',
     '-m', model,
@@ -217,8 +209,6 @@ export async function runExecutor({
   getWorktreeActivity,
   onLivenessDecision,
   env = process.env,
-  home = homedir(),
-  superpowersDir,
 }) {
   const resolvedTimeoutMs = timeoutMs === undefined
     ? resolveStageTimeouts(env).executor
@@ -226,9 +216,8 @@ export async function runExecutor({
   const thresholds = resolveExecutorThresholds(env);
   const resolvedLivenessThresholdMs = livenessThresholdMs ?? thresholds.thresholdMs;
   const resolvedProgressThresholdMs = progressThresholdMs ?? thresholds.progressThresholdMs;
-  const args = [...extraArgv, ...buildCodexArgs({
-    cwd, model, effort, sandbox, env, home, superpowersDir,
-  })];
+  const args = [...extraArgv, ...buildCodexArgs({ cwd, model, effort, sandbox })];
+  const launchEnv = { ...process.env, ...env };
   const nowMs = () => {
     const value = now();
     return value instanceof Date ? value.getTime() : value;
@@ -271,6 +260,7 @@ export async function runExecutor({
   try {
     r = await spawnCapture(bin, args, {
       cwd,
+      env: launchEnv,
       input: plan,
       timeoutMs: resolvedTimeoutMs,
       signal,

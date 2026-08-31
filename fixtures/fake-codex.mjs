@@ -1,4 +1,6 @@
-if (process.argv[2] === 'login' && process.argv[3] === 'status') {
+if (process.argv[2] === 'plugin' && process.argv[3] === 'list') {
+  process.stdout.write('superpowers@openai-curated  installed, enabled  6.3.0  C:/fake/superpowers\n');
+} else if (process.argv[2] === 'login' && process.argv[3] === 'status') {
   process.stdout.write('Logged in using ChatGPT\n');
 } else {
   // Emits newline-delimited JSON events shaped like the REAL `codex exec --json` stream.

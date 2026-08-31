@@ -9,6 +9,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { randomUUID } from 'node:crypto';
+import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import {
   DebateLedger,
@@ -25,6 +26,10 @@ import { runPlanGate } from './plan-gate.js';
 import { parseReview } from './review.js';
 import { resolveStageTimeouts } from './timeouts.js';
 import { runVerifier } from './verifier.js';
+import {
+  applySuperpowersRequirement,
+  verifySuperpowersSeats,
+} from './superpowers.js';
 
 function isFile(path) {
   try { return statSync(path).isFile(); } catch { return false; }
@@ -131,6 +136,7 @@ async function productionDraft(request) {
     timeoutMs: request.timeoutMs,
     runId: request.runId,
     attempt: request.round,
+    env: request.env,
   });
   if (result.exitCode !== 0 || result.timedOut) {
     throw new Error(`planner seat exited ${result.exitCode}${result.timedOut ? ' after timing out' : ''}`);
@@ -145,7 +151,16 @@ function oneLineArtifact(text) {
     .trim();
 }
 
-async function productionReview({ plan, gate, target, verifierModel, timeoutMs }) {
+async function productionReview({
+  plan,
+  gate,
+  target,
+  verifierModel,
+  timeoutMs,
+  env,
+  home,
+  superpowersDir,
+}) {
   const prompt = [
     'Review the proposed implementation plan against the real repository.',
     'Emit REVIEW.md blocks using headings F1 and fields Severity, Category, Description, Test.',
@@ -160,6 +175,9 @@ async function productionReview({ plan, gate, target, verifierModel, timeoutMs }
     model: verifierModel,
     timeoutMs,
     pass: 'plan',
+    env,
+    home,
+    superpowersDir,
   });
   return { content: result.findings ?? '', verdict: result.verdict, usage: result.usage };
 }
@@ -242,11 +260,24 @@ export async function runPlan({
   runId = `plan-${randomUUID()}`,
   reporter,
   baseDirectory = process.cwd(),
+  env = process.env,
+  home = homedir(),
+  superpowers,
   adapters = {},
 } = {}) {
   if (rounds !== undefined && (!Number.isSafeInteger(rounds) || rounds < 1)) {
     throw new TypeError('rounds must be a positive integer');
   }
+  const verifySuperpowers = adapters.verifySuperpowers ?? verifySuperpowersSeats;
+  const verification = superpowers?.seats
+    ? { ok: Object.values(superpowers.seats).every((seat) => seat.verified === true), seats: superpowers.seats }
+    : await verifySuperpowers({ env, home });
+  const requirement = applySuperpowersRequirement(verification, env);
+  if (!requirement.ok) throw new Error(`superpowers preflight failed: ${requirement.reason}`);
+  const verifiedSeats = requirement.verification.seats;
+  const cursorSuperpowersDir = verifiedSeats.cursor.verified
+    ? verifiedSeats.cursor.path
+    : null;
   const request = validatePlanRequest({ goal, target, out, baseDirectory });
   reportEvent(reporter, runId, 'plan', 'start', {
     target: request.target, out: request.out, rounds, goalSource: request.goalSource,
@@ -287,6 +318,7 @@ export async function runPlan({
         sandbox: 'read-only',
         timeoutMs: executorTimeout,
         runId,
+        env,
       }));
     } catch (error) {
       artifact = {
@@ -329,6 +361,9 @@ export async function runPlan({
           verifierModel,
           timeoutMs: verifierTimeout,
           runId,
+          env,
+          home,
+          superpowersDir: cursorSuperpowersDir,
         }));
       } catch (error) {
         review = {
