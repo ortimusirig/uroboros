@@ -384,46 +384,43 @@ test('each gate command reports its exit code without its output tail', async ()
   assert.ok(commands.every((event) => !Object.hasOwn(event, 'outputTail')));
 });
 
-test('a retry event says which gate failure started the next attempt', async () => {
+test('a retry event says which stall started the next attempt', async () => {
   const scr = scratch();
   const tgt = target();
   const events = [];
-  let gateAttempt = 0;
+  let executorCalls = 0;
   try {
     const facts = await run({
-      task: 'Repair the gate.', target: tgt, gate: [], gateRetries: 1,
+      task: 'Recover from a stalled launch.', target: tgt, gate: [], gateRetries: 0,
       scratchRoot: scr, runId: 'retry-event', reporter: (event) => events.push(event),
+      stallPolicy: 'restart', stallThresholdMs: 25, stallRestartLimit: 1,
       adapters: {
-        runExecutor: async ({ cwd }) => {
-          writeFileSync(join(cwd, 'repair.txt'), 'repaired\n');
+        runExecutor: async (opts) => {
+          executorCalls++;
+          reportEvent(opts.reporter, opts.runId, 'executor', 'start', { attempt: opts.attempt });
+          if (executorCalls === 1) {
+            // Go silent past the watchdog threshold; the restart abort releases us.
+            await new Promise((resolve) => opts.signal.addEventListener('abort', resolve,
+              { once: true }));
+            return { changedFiles: [], lastMessage: 'stopped', aborted: true };
+          }
+          writeFileSync(join(opts.cwd, 'repair.txt'), 'repaired\n');
           return { changedFiles: ['repair.txt'], lastMessage: 'repaired' };
         },
-        runGate: async () => gateAttempt++ === 0
-          ? { passed: false, results: [{ bin: 'node', args: ['--test'], code: 9,
-              outputTail: 'details intentionally absent from the event' }] }
-          : { passed: true, results: [] },
+        runGate: async () => ({ passed: true, results: [] }),
         runVerifier: async () => ({ verdict: 'NO_BLOCKERS', launchFailed: false }),
       },
     });
     assert.equal(facts.outcome, 'review-ready');
     const retry = events.find((event) => event.type === 'retry');
-    assert.deepEqual({
-      stage: retry.stage,
-      attempt: retry.attempt,
-      source: retry.source,
-      reason: retry.reason,
-      bin: retry.bin,
-      args: retry.args,
-      code: retry.code,
-    }, {
-      stage: 'executor',
-      attempt: 2,
-      source: 'gate',
-      reason: 'gate command exited 9',
-      bin: 'node',
-      args: ['--test'],
-      code: 9,
-    });
+    assert.equal(retry.stage, 'executor');
+    assert.equal(retry.attempt, 2);
+    assert.equal(retry.source, 'stall');
+    assert.match(retry.reason, /^no event for \d+ ms$/);
+    assert.ok(Number.isSafeInteger(retry.gapMs) && retry.gapMs >= 25,
+      'the event carries the measured silence, not a command payload');
+    // The event names the trigger; command output stays in the evidence files.
+    assert.equal(Object.hasOwn(retry, 'bin'), false);
     assert.equal(Object.hasOwn(retry, 'outputTail'), false);
   } finally {
     rmSync(tgt, { recursive: true, force: true });
@@ -524,7 +521,7 @@ test('fully exercised runs have exact pair equality with both event vocabularies
   const success = (runId, tokens = {}) => ({
     runId,
     outcome: 'review-ready',
-    gateStatus: 'passed',
+    evidence: [],
     verdict: 'NO_BLOCKERS',
     verdictSource: 'result',
     verifierFindings: 'correctness review',
@@ -713,8 +710,11 @@ test('fully exercised runs have exact pair equality with both event vocabularies
       'debate/pivot': 'Requires a circling debate before a pivot strategy can be selected.',
       // Report writes are synchronous, so the event loop cannot observe a mid-write timer gap.
       'report/stalled': 'Unreachable during synchronous report writes.',
+      // Retries now start only from a stall restart, which needs deliberate
+      // executor silence; the payload is proved in the stall retry test above.
+      'executor/retry': 'Requires a stalled executor restart; payload proved by the stall retry test.',
     });
-    assert.equal(Object.keys(deliberatelyUncovered).length, 14,
+    assert.equal(Object.keys(deliberatelyUncovered).length, 15,
       'the deliberately-uncovered ratchet must not grow without an explicit test change');
     assert.ok(Object.values(deliberatelyUncovered).every((reason) => reason.length >= 24),
       'every allowlisted pair must carry a substantive reason');

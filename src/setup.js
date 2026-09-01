@@ -265,13 +265,13 @@ export async function runSetup({
 
   const changedFiles = facts.iterations?.at(-1)?.changedFiles ?? [];
   if (facts.outcome !== 'review-ready' || changedFiles.length === 0) {
-    write(`DEMO RUN FAILED: outcome ${facts.outcome}; gate ${facts.gateStatus}.\n`);
+    write(`DEMO RUN FAILED: outcome ${facts.outcome}.\n`);
     write('Prerequisites were green; this is a demo-run failure, not a broken installation.\n');
     return { ok: false, status: 'demo-failed', outcomes, facts, demoDirectory };
   }
 
   write(`Setup complete: isolated worktree ${facts.dir}\n`);
-  write(`Gate: ${facts.gateStatus}\n`);
+  write(`Evidence: ${(facts.evidence ?? []).length} command run(s), ${(facts.evidence ?? []).filter((entry) => entry.code !== 0).length} non-zero\n`);
   write(`Verifier verdict: ${facts.verdict ?? 'n/a'}\n`);
   write(`Diff files: ${changedFiles.join(', ')}\n`);
   return { ok: true, status: 'complete', outcomes, facts, demoDirectory };

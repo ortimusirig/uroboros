@@ -164,14 +164,8 @@ function evaluateFacts(facts) {
       questions: [],
     };
   }
-  if (facts.gateStatus !== 'passed') {
-    return {
-      action: 'stop',
-      reason: `gate reported ${facts.gateStatus ?? 'unknown'} for review-ready run`,
-      outcome: facts.outcome,
-      questions: [],
-    };
-  }
+  // There is no gate verdict to re-check: landing is the seats' agreement,
+  // and the evidence trail travels in the facts for any reader who wants it.
   return { action: 'land' };
 }
 
@@ -363,7 +357,6 @@ export async function runQueue({
             planConverged: false,
             planOutcome: planResult?.reason ?? 'unknown',
             implementationOutcome: null,
-            gateStatus: null,
             correctnessVerdict: null,
             intentVerdict: null,
             tokens: planTokens,
@@ -402,7 +395,6 @@ export async function runQueue({
         name: unit.name,
         runId: launch?.runId ?? null,
         outcome: null,
-        gateStatus: null,
         correctnessVerdict: null,
         intentVerdict: null,
         tokens: planTokens,
@@ -483,7 +475,6 @@ export async function runQueue({
       name: unit.name,
       runId: facts?.runId ?? launch?.runId ?? null,
       outcome: facts?.outcome ?? null,
-      gateStatus: facts?.gateStatus ?? null,
       correctnessVerdict: facts?.correctnessVerdict ?? null,
       intentVerdict: facts?.intentVerdict ?? null,
       tokens,

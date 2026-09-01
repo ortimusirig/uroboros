@@ -116,7 +116,7 @@ test('correctness and intent findings are separately lifted while verdict is mer
   rmSync(scr, { recursive: true, force: true });
 });
 
-test('executor retries accumulate usage and model overrides reach both agents and run facts', async () => {
+test('debate fix rounds accumulate usage and model overrides reach both agents and run facts', async () => {
   const scr = scratch();
   const executorCalls = [];
   const verifierCalls = [];
@@ -146,41 +146,49 @@ test('executor retries accumulate usage and model overrides reach both agents an
         return { changedFiles: ['new.txt'], lastMessage: `attempt ${executorCall + 1}`,
           usage: executorUsages[executorCall++] };
       },
-      runGate: async () => ({ passed: ++gateCall > 1, results: [] }),
-      runVerifier: async (opts) => {
-        verifierCalls.push(opts);
-        return opts.prompt === INTENT_PROMPT
-          ? { verdict: 'NO_BLOCKERS', launchFailed: false, findings: 'Intent is covered.',
-              verdictSource: 'result', plan: '# Intent review\n\nNO_BLOCKERS', usage: intentUsage }
-          : { verdict: 'ISSUES', launchFailed: false, findings: 'Found it.',
-              verdictSource: 'plan', plan: '# Review\n\nISSUES', usage: correctnessUsage };
-      },
+      runGate: async () => { gateCall++; return { passed: true, results: [] }; },
+      // Round one's correctness pass files a blocking finding to force a fix
+      // round; round two records the same ISSUES-with-plan shape but nothing
+      // blocking, so the debate converges with those retained verdicts.
+      runVerifier: (() => {
+        let correctnessCall = 0;
+        return async (opts) => {
+          verifierCalls.push(opts);
+          if (opts.prompt.startsWith(INTENT_PROMPT)) {
+            return { verdict: 'NO_BLOCKERS', launchFailed: false, findings: 'Intent is covered.',
+              verdictSource: 'result', plan: '# Intent review\n\nNO_BLOCKERS', usage: intentUsage };
+          }
+          correctnessCall++;
+          return { verdict: 'ISSUES', launchFailed: false,
+            findings: correctnessCall === 1 ? blockingReview() : 'Found it.',
+            verdictSource: 'plan', plan: '# Review\n\nISSUES', usage: correctnessUsage };
+        };
+      })(),
     },
   });
-  assert.equal(executorCalls.length, 2, 'initial execution plus one free retry');
+  assert.equal(executorCalls.length, 2, 'initial execution plus one debate fix round');
   for (const call of executorCalls) {
     assert.equal(call.model, 'executor-override');
     assert.equal(call.effort, 'medium');
   }
-  assert.equal(verifierCalls.length, 2);
+  assert.equal(verifierCalls.length, 4, 'two rounds, two passes each');
   for (const call of verifierCalls) assert.equal(call.model, 'verifier-override');
-  assert.deepEqual(verifierCalls.map((call) => call.prompt), [DEFAULT_PROMPT, INTENT_PROMPT]);
+  assert.deepEqual(verifierCalls.map((call) => call.prompt),
+    [DEFAULT_PROMPT, INTENT_PROMPT, DEFAULT_PROMPT, INTENT_PROMPT]);
   assert.deepEqual(facts.model, {
     executor: 'executor-override', executorEffort: 'medium', verifier: 'verifier-override',
     arbiter: DEFAULT_ARBITER_MODEL,
   });
-  assert.deepEqual(facts.iterations[0].executorUsage, {
-    inputTokens: 30, cachedInputTokens: 15, outputTokens: 5,
-    reasoningOutputTokens: 3, cacheWriteTokens: 1,
-  });
+  assert.deepEqual(facts.iterations[0].executorUsage, executorUsages[0]);
+  assert.deepEqual(facts.iterations[1].executorUsage, executorUsages[1]);
   assert.deepEqual(facts.tokens, {
     executor: { inputTokens: 30, cachedInputTokens: 15, outputTokens: 5,
       reasoningOutputTokens: 3, cacheWriteTokens: 1 },
-    verifier: { inputTokens: 18, cachedInputTokens: 9, outputTokens: 14,
-      reasoningOutputTokens: 0, cacheWriteTokens: 5 },
+    verifier: { inputTokens: 36, cachedInputTokens: 18, outputTokens: 28,
+      reasoningOutputTokens: 0, cacheWriteTokens: 10 },
     arbiter: EMPTY_USAGE,
-    total: { inputTokens: 48, cachedInputTokens: 24, outputTokens: 19,
-      reasoningOutputTokens: 3, cacheWriteTokens: 6 },
+    total: { inputTokens: 66, cachedInputTokens: 33, outputTokens: 33,
+      reasoningOutputTokens: 3, cacheWriteTokens: 11 },
   });
   assert.equal(facts.verdictSource, 'plan');
   assert.equal(facts.correctnessVerdict, 'ISSUES');
@@ -190,7 +198,7 @@ test('executor retries accumulate usage and model overrides reach both agents an
   assert.equal(facts.intentVerdict, 'NO_BLOCKERS');
   assert.equal(facts.intentVerdictSource, 'result');
   assert.equal(facts.intentVerifierPlan, '# Intent review\n\nNO_BLOCKERS');
-  assert.equal(facts.gateFailure, null);
+  assert.equal(Object.hasOwn(facts, 'gateFailure'), false);
   rmSync(scr, { recursive: true, force: true });
 });
 
@@ -394,7 +402,7 @@ test('run reads an existing .txt task file instead of executing its path string'
   rmSync(scr, { recursive: true, force: true });
 });
 
-test('first executor call gets the verbatim plan and a retry gets the preceding gate failure', async () => {
+test('the first call is verbatim and a fix round carries the failing evidence', async () => {
   const scr = scratch();
   const plan = 'Implement the requested behavior exactly.\nKeep the original plan unchanged.\n';
   const composedPlan = `${EXECUTOR_PREAMBLE}\n\n${plan}`;
@@ -415,27 +423,28 @@ test('first executor call gets the verbatim plan and a retry gets the preceding 
       runGate: async () => gateCall++ === 0
         ? { passed: false, results: [failure] }
         : { passed: true, results: [] },
-      runVerifier: async () => ({ verdict: 'NO_BLOCKERS', launchFailed: false }),
+      // The fix round is driven by a finding; the failing command travels with it.
+      runVerifier: (() => {
+        const verify = verifierForRounds([blockingReview()]);
+        return async (options) => verify(options);
+      })(),
     },
   });
 
-  assert.equal(facts.gateStatus, 'passed');
   assert.equal(executorPlans.length, 2);
   assert.equal(executorPlans[0], composedPlan,
     'the initial executor prompt must frame the verbatim plan');
-  assert.ok(executorPlans[1].startsWith(composedPlan),
-    'retry context must be appended to the same framed plan');
   assert.match(executorPlans[1], /Previous gate attempt failed/);
   assert.match(executorPlans[1], /"bin":"node"/);
   assert.match(executorPlans[1], /"--test","test\/repair[.]test[.]js"/);
   assert.match(executorPlans[1], /Exit code: 7/);
   assert.ok(executorPlans[1].includes(failure.outputTail));
   assert.equal(readFileSync(join(facts.dir, 'TASK.md'), 'utf8'), executorPlans[1],
-    'TASK.md must match the final retry text the executor received');
+    'TASK.md must match the final fix text the executor received');
   rmSync(scr, { recursive: true, force: true });
 });
 
-test('each retry receives only the immediately preceding distinguishable gate failure', async () => {
+test('each fix round receives only the immediately preceding failing evidence', async () => {
   const scr = scratch();
   const plan = 'Repair the implementation.';
   const composedPlan = `${EXECUTOR_PREAMBLE}\n\n${plan}`;
@@ -462,11 +471,14 @@ test('each retry receives only the immediately preceding distinguishable gate fa
         return writingExecutor(opts);
       },
       runGate: async () => gateResults.shift(),
-      runVerifier: async () => ({ verdict: 'NO_BLOCKERS', launchFailed: false }),
+      // Two rounds of findings drive two fix rounds; the third review is clean.
+      runVerifier: (() => {
+        const verify = verifierForRounds([blockingReview('F1'), blockingReview('F2'), null]);
+        return async (options) => verify(options);
+      })(),
     },
   });
 
-  assert.equal(facts.gateStatus, 'passed');
   assert.equal(executorPlans.length, 3);
   assert.equal(executorPlans[0], composedPlan);
   assert.ok(executorPlans[1].includes('FIRST_FAILURE_ONLY'));
@@ -498,7 +510,7 @@ test('a green first gate never augments the executor prompt', async () => {
     },
   });
 
-  assert.equal(facts.gateStatus, 'passed');
+  assert.equal(facts.outcome, 'review-ready');
   assert.deepEqual(executorPlans, [composedPlan]);
   assert.doesNotMatch(executorPlans[0], /Previous gate attempt failed/);
   rmSync(scr, { recursive: true, force: true });
@@ -666,7 +678,6 @@ test('a sentinel-only executor challenge needs a decision in manual mode', async
   });
 
   assert.equal(facts.outcome, 'needs-decision');
-  assert.equal(facts.gateStatus, 'not-run');
   assert.equal(gateCalls, 0);
   assert.equal(verifierCalls, 0);
   assert.equal(facts.decision.questions.length, 1);
@@ -921,48 +932,12 @@ test('a resolver returning no answers halts without rerunning the executor', asy
   rmSync(scr, { recursive: true, force: true });
 });
 
-test('a sentinel challenge from a gate-retry executor stops before another gate', async () => {
-  const scr = scratch();
-  let executorCalls = 0;
-  let gateCalls = 0;
-  let verifierCalls = 0;
-  const facts = await run({
-    task: 'do the task', target: makeTarget(), gate: [], gateRetries: 1,
-    scratchRoot: scr, runId: 'gate-retry-decision', mode: 'manual',
-    adapters: {
-      runExecutor: async ({ cwd }) => {
-        executorCalls++;
-        if (executorCalls === 2) writeFileSync(join(cwd, 'DECISION.md'), DECISION_CONTENT);
-        return {
-          changedFiles: executorCalls === 2 ? ['DECISION.md'] : [],
-          lastMessage: executorCalls === 2 ? 'need a decision' : 'initial attempt',
-          exitCode: 0,
-        };
-      },
-      runGate: async () => {
-        gateCalls++;
-        return gateCalls === 1
-          ? {
-              passed: false,
-              results: [{ bin: 'node', args: ['--test'], code: 1, outputTail: 'failed' }],
-            }
-          : { passed: true, results: [] };
-      },
-      runVerifier: async () => {
-        verifierCalls++;
-        throw new Error('verifier must not launch for a challenge');
-      },
-    },
-  });
-
-  assert.equal(facts.outcome, 'needs-decision');
-  assert.equal(facts.gateStatus, 'not-run');
-  assert.equal(executorCalls, 2);
-  assert.equal(gateCalls, 1);
-  assert.equal(verifierCalls, 0);
-  assert.equal(facts.decision.challengeRound, 1);
-  rmSync(scr, { recursive: true, force: true });
-});
+// The old "challenge during a gate retry" scenario has no equivalent in the
+// evidence flow: a debate fix round presupposes a substantive diff, and
+// routeChallenges deliberately ignores a sentinel beside one (a challenge
+// presupposes none). Both surviving behaviours are covered by their own tests:
+// "a sentinel-only executor challenge needs a decision in manual mode" and
+// "a sentinel plus substantive files follows the normal gate and verifier path".
 
 test('--mode accepts manual or autonomous and rejects other values', () => {
   const base = ['run', '--task', 'p', '--target', 't', '--gate', 'g'];
@@ -1030,7 +1005,6 @@ test('an approval-request message names the advisory no-op reason without changi
 
   assert.equal(facts.noOpReason, 'approval-requested');
   assert.equal(facts.outcome, 'no-op');
-  assert.equal(facts.gateStatus, 'passed');
   assert.equal(exitCodeFor(facts.outcome), 0);
   const report = readFileSync(join(facts.dir, 'uro-report.md'), 'utf8');
   assert.match(report, /approval-requested/);
@@ -1057,20 +1031,18 @@ test('unrelated executor prose does not label an empty successful pass as approv
     });
 
     assert.equal(facts.outcome, 'no-op');
-    assert.equal(facts.gateStatus, 'passed');
-    assert.equal(exitCodeFor(facts.outcome), 0);
+      assert.equal(exitCodeFor(facts.outcome), 0);
     assert.equal(Object.hasOwn(facts, 'noOpReason'), false);
     assert.doesNotMatch(readFileSync(join(facts.dir, 'uro-report.md'), 'utf8'),
       /approval-requested/);
     rmSync(scr, { recursive: true, force: true });
   });
 
-test('a red gate is reviewed anyway, and still cannot land', async () => {
-  // The old rule — red gate skips review — read every flaky command as a code
-  // problem and let nobody look. Reviews now run on the red gate, the verdict
-  // seats are told in one line, and the ONLY thing the gate keeps deciding is
-  // the landing: clean verdicts over a red gate end gate-failed, not
-  // review-ready.
+test('a non-zero exit is evidence in front of the seats, never a verdict', async () => {
+  // "No green, no red." The command ran once, its exit code and output are on
+  // the record, and the verdict seats are told in one argv-safe line and asked
+  // to judge. With both seats satisfied the run converges — nothing anywhere
+  // branches on the exit code, and no gateStatus or gateFailure field exists.
   let gateCalls = 0;
   const prompts = [];
   const scr = scratch();
@@ -1079,27 +1051,35 @@ test('a red gate is reviewed anyway, and still cannot land', async () => {
     scratchRoot: scr, runId: 'r1',
     adapters: {
       runExecutor: writingExecutor,
-      runGate: async () => { gateCalls++; return { passed: false, results: [{
-        bin: 'node', args: ['--test'], code: 1,
-        outputTail: '[stdout]\nfailed assertion\n[stderr]\nstack trace',
-      }] }; },
+      runGate: async ({ onEvidence }) => {
+        gateCalls++;
+        onEvidence?.({
+          bin: 'node', args: ['--test'], code: 1,
+          stdout: 'failed assertion', stderr: 'stack trace',
+        });
+        return { passed: false, results: [{
+          bin: 'node', args: ['--test'], code: 1,
+          outputTail: '[stdout]\nfailed assertion\n[stderr]\nstack trace',
+        }] };
+      },
       runVerifier: async ({ prompt }) => {
         prompts.push(prompt);
         return { verdict: 'NO_BLOCKERS' };
       },
     },
   });
-  assert.equal(facts.gateStatus, 'failed');
-  assert.equal(facts.outcome, 'gate-failed',
-    'the gate is still the only thing that can land a change');
-  assert.equal(prompts.length, 2, 'both verdict seats must review the red gate');
+  assert.equal(facts.outcome, 'review-ready',
+    'seats satisfied means converged; an exit code cannot veto them');
+  assert.equal(prompts.length, 2, 'both verdict seats review, whatever the exit');
   for (const prompt of prompts) {
-    assert.match(prompt, /GATE IS RED: node exited 1/);
-    assert.match(prompt, /indicts the change or the gate command itself/);
-    assert.doesNotMatch(prompt, /"/, 'the gate note must stay argv-safe');
+    assert.match(prompt, /EVIDENCE: node exited 1/);
+    assert.match(prompt, /indicts the change or the command itself/);
+    assert.doesNotMatch(prompt, /"/, 'the evidence note must stay argv-safe');
   }
-  assert.equal(gateCalls, 3, '1 initial + 2 free retries');
-  assert.equal(facts.gateFailure.code, 1);
+  assert.equal(gateCalls, 1, 'commands run once as evidence — the retry loop is gone');
+  assert.equal(Object.hasOwn(facts, 'gateStatus'), false, 'no verdict field survives');
+  assert.equal(Object.hasOwn(facts, 'gateFailure'), false);
+  assert.equal(facts.evidence.filter((entry) => entry.code !== 0).length, 1);
   rmSync(scr, { recursive: true, force: true });
 });
 
@@ -1263,10 +1243,9 @@ test('a timed-out gate command is distinguishable in run facts and the report', 
     stage: 'gate', iteration: 1, attempt: 1, timeoutMs: 60,
     bin: 'node', args: ['--test'],
   }]);
-  assert.equal(facts.gateFailure.timedOut, true);
   const report = readFileSync(join(facts.dir, 'uro-report.md'), 'utf8');
-  assert.match(report, /Gate failure/);
-  assert.match(report, /Timed out.*60 ms/i);
+  assert.match(report, /Stage timeouts/);
+  assert.match(report, /60 ms/);
   rmSync(scr, { recursive: true, force: true });
 });
 
@@ -1376,7 +1355,8 @@ Description: ${id} would make the implementation easier to maintain.
 function verifierForRounds(correctnessFindings) {
   let correctnessRound = 0;
   return async ({ prompt }) => {
-    if (prompt === INTENT_PROMPT) {
+    // The evidence note may be appended to either prompt; match by prefix.
+    if (prompt.startsWith(INTENT_PROMPT)) {
       return { verdict: 'NO_BLOCKERS', launchFailed: false, findings: 'Intent is covered.' };
     }
     const findings = correctnessFindings[correctnessRound++] ?? null;
@@ -1646,7 +1626,7 @@ test('URO_DEBATE_ROUNDS exhaustion stops honestly with unresolved findings', asy
   }
 });
 
-test('a fix round that breaks the gate keeps the debate alive, and lands nothing', async () => {
+test('a non-zero fix-round exit keeps the debate alive, and the seats decide', async () => {
   // Previously a red fix-round gate ended the run before anyone reviewed the
   // fix. Now the next review round sees the red gate and judges it; the run
   // still ends gate-failed because clean verdicts cannot land over red.
@@ -1676,12 +1656,13 @@ test('a fix round that breaks the gate keeps the debate alive, and lands nothing
       },
     });
 
-    assert.equal(facts.outcome, 'gate-failed');
-    assert.equal(facts.gateStatus, 'failed');
-    assert.equal(facts.gateFailure.code, 7);
+    // The exit-7 command is evidence in front of round 2's seats; they judged
+    // it not worth blocking on, so the run converges. Nothing branched on it.
+    assert.equal(facts.outcome, 'review-ready');
     assert.equal(verifierCalls, 4,
-      'the red fix gate must NOT prevent the next review round');
+      'a non-zero fix-round exit must NOT prevent the next review round');
     assert.equal(facts.debate.roundsRun, 2);
+    assert.equal(Object.hasOwn(facts, 'gateFailure'), false);
   } finally {
     rmSync(scr, { recursive: true, force: true });
   }

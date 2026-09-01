@@ -15,11 +15,12 @@ test('all-zero commands pass', async () => {
   assert.equal(r.results.length, 2);
 });
 
-test('a non-zero command fails the gate and short-circuits', async () => {
+test('every command runs whatever the previous one exited', async () => {
+  // Stopping at the first non-zero was verdict thinking: it hid the state of
+  // every later command from the seats. Each result is independent evidence.
   const r = await runGate({ commands: [ok, bad, ok], cwd: process.cwd() });
-  assert.equal(r.passed, false);
-  assert.equal(r.results.length, 2, 'stops at the first failure');
-  assert.equal(r.results[1].code, 1);
+  assert.equal(r.results.length, 3, 'no short-circuit — the record is complete');
+  assert.deepEqual(r.results.map((result) => result.code), [0, 1, 0]);
 });
 
 test('only the failing command retains labelled tails from both stdout and stderr', async () => {

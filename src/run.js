@@ -598,16 +598,15 @@ export async function run(opts) {
   const iterations = [];
   let activeBranch = iso.branch;
   let freshPivotCount = 0;
-  let gateStatus = 'failed';
   let verdict = null;
-  let outcome = 'gate-failed';
+  // The pessimistic default is a crashed executor: nothing else has happened
+  // yet. There is no gate verdict to default to any more.
+  let outcome = 'executor-failed';
   let executorUsage = EMPTY_USAGE;
   let verifierUsage = EMPTY_USAGE;
   let arbiterUsage = EMPTY_USAGE;
   const usageChecks = [];
-  let gateFailure = null;
   const timeoutEvents = [];
-  let gateRetryCount = 0;
   let executorLaunchCount = 0;
   let noOpReason;
   const debateLedger = new DebateLedger();
@@ -971,32 +970,11 @@ export async function run(opts) {
       }],
     };
   }
-  while (decision === null && !executorTimedOut && !conflictingIntent
-    && mergePreparationFailure === null
-    && !gateResult.passed && retries < gateRetries) {
-    retries++;
-    gateRetryCount++;
-    const retryPlan = planWithGateFailure(plan, gateResult);
-    const failed = gateResult.results.find((result) => result.code !== 0);
-    reportEvent(eventReporter, runId, 'executor', 'retry', {
-      attempt: executorLaunchCount + 1,
-      source: 'gate',
-      reason: failed ? `gate command exited ${failed.code}` : 'gate did not pass',
-      ...(failed ? { bin: failed.bin, args: failed.args, code: failed.code } : {}),
-    });
-    exec = await executePlan(retryPlan);
-    executorTimedOut = Boolean(exec.timedOut);
-    await routeChallenges();
-    if (decision === null && !executorTimedOut) {
-      gateResult = await runGate({
-      onEvidence: (entry) => evidence.write(entry),
-        commands: gateCommands(), cwd: iso.dir, timeoutMs: stageTimeouts.gate,
-        reporter: eventReporter, runId, attempt: retries + 1,
-        captureTestCount,
-      });
-      recordGateTimeout(gateResult, n, retries + 1);
-    }
-  }
+  // The verdict-driven free-retry loop is gone with the verdict: commands ran
+  // once as evidence, and what to do about a non-zero exit is the debate's
+  // question, not a rule's. `gateRetries` is accepted and ignored for
+  // compatibility during the staged removal.
+  void gateRetries;
   const makeIteration = (iteration, executorResult, iterationGate, timedOut) => ({
     n: iteration,
     changedFiles: executorResult.changedFiles,
@@ -1019,58 +997,27 @@ export async function run(opts) {
   let iter = makeIteration(n, exec, gateResult, executorTimedOut);
 
   if (executorTimedOut) {
-    gateStatus = gateResult ? 'failed' : 'not-run';
     outcome = 'timed-out';
     debateStopReason = 'executor-timed-out';
     iterations.push(iter);
   } else if (conflictingIntent) {
-    gateStatus = 'not-run';
     outcome = 'conflicting-intent';
     debateStopReason = 'conflicting-intent';
     iterations.push(iter);
   } else if (decision !== null) {
-    gateStatus = 'not-run';
     outcome = 'needs-decision';
     debateStopReason = 'needs-decision';
     iterations.push(iter);
-  } else if (!gateResult.passed
-    && gateResult.results.find((result) => result.code !== 0)?.timedOut) {
-    // A hung gate command is a liveness matter, not a debatable result.
-    gateStatus = 'failed';
-    const failed = gateResult.results.find((result) => result.code !== 0);
+  } else if (gateResult?.results?.some((result) => result.timedOut)) {
+    // A hung command is a liveness matter, not a debatable result.
     outcome = 'timed-out';
-    debateStopReason = 'gate-failed';
-    gateFailure = {
-      bin: failed.bin,
-      args: failed.args,
-      ...(failed.harness === undefined ? {} : { harness: failed.harness }),
-      code: failed.code,
-      timedOut: true,
-      timeoutMs: failed.timeoutMs,
-      outputTail: failed.outputTail,
-    };
+    debateStopReason = 'evidence-timed-out';
     iterations.push(iter);
   } else {
-    // A red gate no longer blocks the review. Skipping review on red raised
-    // "issues" where there were none — a flaky command or environment failure
-    // read as a code problem, and nobody was allowed to look and say the code
-    // is fine and the gate is wrong. The gate result now rides into the debate
-    // as evidence the seats argue about. What it does NOT do is stop deciding
-    // the landing: review-ready still requires a green gate, so seats approving
-    // over a red gate ends as gate-failed — reviewed, but unlandable.
-    gateStatus = gateResult.passed ? 'passed' : 'failed';
-    if (!gateResult.passed) {
-      const failed = gateResult.results.find((result) => result.code !== 0);
-      if (failed) {
-        gateFailure = {
-          bin: failed.bin,
-          args: failed.args,
-          ...(failed.harness === undefined ? {} : { harness: failed.harness }),
-          code: failed.code,
-          outputTail: failed.outputTail,
-        };
-      }
-    }
+    // There is no gate verdict any more. The commands ran once as evidence —
+    // whole output on disk, excerpts in facts — and what a non-zero exit MEANS
+    // is the seats' question: a defect, or a broken command. Nothing here reads
+    // green or red, and nothing downstream may.
     const refreshDiff = async () => {
       reportEvent(eventReporter, runId, 'diff', 'start');
       const value = await createDiff(
@@ -1090,13 +1037,10 @@ export async function run(opts) {
     let diff = await refreshDiff();
     if (diff.trim() === '') {
       // A non-zero exit with no diff is a crashed/aborted executor, not a legitimate no-op.
-      // With a red gate and no diff there is nothing to review either way.
-      outcome = !gateResult.passed
-        ? 'gate-failed'
-        : Number.isInteger(iter.executor.exitCode) && iter.executor.exitCode !== 0
-          ? 'executor-failed'
-          : 'no-op';
-      debateStopReason = !gateResult.passed ? 'gate-failed' : 'no-substantive-diff';
+      outcome = Number.isInteger(iter.executor.exitCode) && iter.executor.exitCode !== 0
+        ? 'executor-failed'
+        : 'no-op';
+      debateStopReason = 'no-substantive-diff';
       if (outcome === 'no-op'
         && iter.executor.exitCode === 0
         && !existsSync(join(iso.dir, 'DECISION.md'))
@@ -1105,17 +1049,17 @@ export async function run(opts) {
       }
       iterations.push(iter);
     } else {
-      // When the gate is red the verdict seats are told so, in one argv-safe
-      // line, and asked to judge whether the failure indicts the change or the
-      // gate command itself — the question a skipped review could never answer.
+      // When a command exited non-zero the verdict seats are told so, in one
+      // argv-safe line, and asked to judge whether the exit indicts the change
+      // or the command itself. Evidence in front of the seats, never a rule.
       const gateNote = () => {
-        if (gateResult.passed) return '';
-        const failed = gateResult.results.find((result) => result.code !== 0);
+        const failed = gateResult?.results?.find((result) => result.code !== 0);
+        if (!failed) return '';
         const tail = String(failed?.outputTail ?? '')
           .replace(/["\r\n]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 160);
-        return ` GATE IS RED: ${failed?.bin ?? 'command'} exited ${failed?.code ?? 'non-zero'}.`
+        return ` EVIDENCE: ${failed?.bin ?? 'command'} exited ${failed?.code ?? 'non-zero'}.`
           + (tail ? ` Tail: ${tail}.` : '')
-          + ' Judge whether the failure indicts the change or the gate command itself.';
+          + ' Judge whether that exit indicts the change or the command itself; full output is in __uro_evidence/.';
       };
       let debateRound = 0;
       while (true) {
@@ -1306,85 +1250,18 @@ export async function run(opts) {
 
         if (acceptedFindings.length === 0) {
           const allBlockingOverruled = blockingFindings.length > 0;
-          let convergenceGateRetries = 0;
           if (!allBlockingOverruled && accumulatedReviewTests.size > 0) {
+            // The reviewer's own tests run once more as closing evidence — the
+            // seats asked for them, so their final state belongs on the record.
+            // Whatever they exited, nothing branches: the record speaks.
             gateResult = await runGate({
-      onEvidence: (entry) => evidence.write(entry),
+              onEvidence: (entry) => evidence.write(entry),
               commands: gateCommands(), cwd: iso.dir, timeoutMs: stageTimeouts.gate,
               reporter: eventReporter, runId, attempt: 1,
               captureTestCount,
             });
             iter.gate = gateResult;
             recordGateTimeout(gateResult, n, 1);
-          }
-          while (!allBlockingOverruled && accumulatedReviewTests.size > 0
-            && decision === null && !executorTimedOut && !conflictingIntent
-            && mergePreparationFailure === null && !gateResult.passed
-            && convergenceGateRetries < gateRetries) {
-            convergenceGateRetries++;
-            gateRetryCount++;
-            const retryPlan = planWithGateFailure(plan, gateResult);
-            const failed = gateResult.results.find((result) => result.code !== 0);
-            reportEvent(eventReporter, runId, 'executor', 'retry', {
-              attempt: executorLaunchCount + 1,
-              source: 'gate',
-              reason: failed ? `gate command exited ${failed.code}` : 'gate did not pass',
-              ...(failed ? { bin: failed.bin, args: failed.args, code: failed.code } : {}),
-            });
-            n++;
-            iterationExecutorUsage = EMPTY_USAGE;
-            exec = await executePlan(retryPlan);
-            executorTimedOut = Boolean(exec.timedOut);
-            await routeChallenges();
-            if (decision === null && !executorTimedOut && !conflictingIntent
-              && mergePreparationFailure === null) {
-              gateResult = await runGate({
-      onEvidence: (entry) => evidence.write(entry),
-                commands: gateCommands(), cwd: iso.dir, timeoutMs: stageTimeouts.gate,
-                reporter: eventReporter, runId, attempt: convergenceGateRetries + 1,
-                captureTestCount,
-              });
-              recordGateTimeout(gateResult, n, convergenceGateRetries + 1);
-            }
-            iter = makeIteration(n, exec, gateResult, executorTimedOut);
-          }
-          if (executorTimedOut || conflictingIntent || decision !== null
-            || mergePreparationFailure !== null || !gateResult.passed) {
-            if (convergenceGateRetries > 0) iterations.push(iter);
-            if (executorTimedOut) {
-              gateStatus = gateResult ? 'failed' : 'not-run';
-              outcome = 'timed-out';
-              debateStopReason = 'executor-timed-out';
-            } else if (conflictingIntent) {
-              gateStatus = 'not-run';
-              outcome = 'conflicting-intent';
-              debateStopReason = 'conflicting-intent';
-            } else if (decision !== null) {
-              gateStatus = 'not-run';
-              outcome = 'needs-decision';
-              debateStopReason = 'needs-decision';
-            } else {
-              gateStatus = 'failed';
-              const failed = gateResult.results.find((result) => result.code !== 0);
-              outcome = failed?.timedOut ? 'timed-out' : 'gate-failed';
-              debateStopReason = 'gate-failed';
-              if (failed) {
-                gateFailure = {
-                  bin: failed.bin,
-                  args: failed.args,
-                  ...(failed.harness === undefined ? {} : { harness: failed.harness }),
-                  code: failed.code,
-                  ...(failed.timedOut ? { timedOut: true, timeoutMs: failed.timeoutMs } : {}),
-                  outputTail: failed.outputTail,
-                };
-              }
-            }
-            break;
-          }
-          if (convergenceGateRetries > 0) {
-            gateStatus = 'passed';
-            await refreshDiff();
-            continue;
           }
           outcome = 'review-ready';
           debateStopReason = 'converged';
@@ -1421,7 +1298,7 @@ export async function run(opts) {
             task: originalPlan,
             diff,
             findings: acceptedFindings,
-            gate: gateResult.passed ? null : gateFailure,
+            evidence: (gateResult?.results ?? []).filter((result) => result.code !== 0),
           }));
           if (independent.verdict === 'answered') {
             latestIndependentReview = independent;
@@ -1645,10 +1522,12 @@ export async function run(opts) {
           originalTask: originalPlan,
         });
         if (amendPlan) fixPlan = amendFixPlanWithLedger(fixPlan, debateLedger);
-        // A red gate is part of the argument now, so the fix plan carries it:
-        // Codex may fix the code, or defend it and name the gate command as the
+        // A non-zero exit is part of the argument now, so the fix plan carries
+        // it: Codex may fix the code, or defend it and name the command as the
         // defect — the reviewers see the same evidence and judge.
-        if (!gateResult.passed) fixPlan = planWithGateFailure(fixPlan, gateResult);
+        if ((gateResult.results ?? []).some((result) => result.code !== 0)) {
+          fixPlan = planWithGateFailure(fixPlan, gateResult);
+        }
         if (latestIndependentReview !== null) {
           fixPlan = [
             fixPlan,
@@ -1668,7 +1547,6 @@ export async function run(opts) {
         executorTimedOut = Boolean(exec.timedOut);
         await routeChallenges();
 
-        let fixGateRetries = 0;
         gateResult = null;
         if (decision === null && !executorTimedOut && !conflictingIntent
           && mergePreparationFailure === null) {
@@ -1680,99 +1558,42 @@ export async function run(opts) {
           });
           recordGateTimeout(gateResult, n, 1);
         }
-        while (decision === null && !executorTimedOut && !conflictingIntent
-          && mergePreparationFailure === null && !gateResult.passed
-          && fixGateRetries < gateRetries) {
-          fixGateRetries++;
-          gateRetryCount++;
-          const retryPlan = planWithGateFailure(plan, gateResult);
-          const failed = gateResult.results.find((result) => result.code !== 0);
-          reportEvent(eventReporter, runId, 'executor', 'retry', {
-            attempt: executorLaunchCount + 1,
-            source: 'gate',
-            reason: failed ? `gate command exited ${failed.code}` : 'gate did not pass',
-            ...(failed ? { bin: failed.bin, args: failed.args, code: failed.code } : {}),
-          });
-          exec = await executePlan(retryPlan);
-          executorTimedOut = Boolean(exec.timedOut);
-          await routeChallenges();
-          if (decision === null && !executorTimedOut) {
-            gateResult = await runGate({
-      onEvidence: (entry) => evidence.write(entry),
-              commands: gateCommands(), cwd: iso.dir, timeoutMs: stageTimeouts.gate,
-              reporter: eventReporter, runId, attempt: fixGateRetries + 1,
-              captureTestCount,
-            });
-            recordGateTimeout(gateResult, n, fixGateRetries + 1);
-          }
-        }
-
         iter = makeIteration(n, exec, gateResult, executorTimedOut);
         if (executorTimedOut) {
-          gateStatus = gateResult ? 'failed' : 'not-run';
           outcome = 'timed-out';
           debateStopReason = 'executor-timed-out';
           iterations.push(iter);
           break;
         }
         if (conflictingIntent) {
-          gateStatus = 'not-run';
           outcome = 'conflicting-intent';
           debateStopReason = 'conflicting-intent';
           iterations.push(iter);
           break;
         }
         if (decision !== null) {
-          gateStatus = 'not-run';
           outcome = 'needs-decision';
           debateStopReason = 'needs-decision';
           iterations.push(iter);
           break;
         }
-        if (!gateResult.passed) {
-          const failed = gateResult.results.find((result) => result.code !== 0);
-          if (failed?.timedOut) {
-            // A hung gate is a liveness matter; the debate cannot argue with it.
-            gateStatus = 'failed';
-            outcome = 'timed-out';
-            debateStopReason = 'gate-failed';
-            gateFailure = {
-              bin: failed.bin,
-              args: failed.args,
-              ...(failed.harness === undefined ? {} : { harness: failed.harness }),
-              code: failed.code,
-              timedOut: true,
-              timeoutMs: failed.timeoutMs,
-              outputTail: failed.outputTail,
-            };
-            iterations.push(iter);
-            break;
-          }
-          // Still red after the fix round: the debate continues rather than a
-          // rule ending it. The next review round sees the red gate and judges;
-          // termination comes from convergence (which still requires green),
-          // the arbiter's pivot, the token budget, or the round bound.
-          gateStatus = 'failed';
-          if (failed) {
-            gateFailure = {
-              bin: failed.bin,
-              args: failed.args,
-              ...(failed.harness === undefined ? {} : { harness: failed.harness }),
-              code: failed.code,
-              outputTail: failed.outputTail,
-            };
-          }
-        } else {
-          gateStatus = 'passed';
+        if (gateResult?.results?.some((result) => result.timedOut)) {
+          // A hung command is a liveness matter; the debate cannot argue with it.
+          outcome = 'timed-out';
+          debateStopReason = 'evidence-timed-out';
+          iterations.push(iter);
+          break;
         }
+        // Whatever the commands exited, the debate continues: the next review
+        // round reads the evidence and judges. Termination is convergence, the
+        // arbiter's pivot, the token budget, or the round bound — never a rule
+        // about an exit code.
         diff = await refreshDiff();
         if (diff.trim() === '') {
-          outcome = !gateResult.passed
-            ? 'gate-failed'
-            : Number.isInteger(iter.executor.exitCode) && iter.executor.exitCode !== 0
-              ? 'executor-failed'
-              : 'no-op';
-          debateStopReason = !gateResult.passed ? 'gate-failed' : 'no-substantive-diff';
+          outcome = Number.isInteger(iter.executor.exitCode) && iter.executor.exitCode !== 0
+            ? 'executor-failed'
+            : 'no-op';
+          debateStopReason = 'no-substantive-diff';
           iterations.push(iter);
           break;
         }
@@ -1870,7 +1691,7 @@ export async function run(opts) {
     },
   };
   let mutation = null;
-  if (gateStatus === 'passed' && opts.mutation !== undefined) {
+  if (outcome === 'review-ready' && opts.mutation !== undefined) {
     const mutationOptions = opts.mutation === true ? {} : opts.mutation;
     try {
       mutation = await runMutation({
@@ -1895,13 +1716,13 @@ export async function run(opts) {
     target, targetPath: resolve(target),
     dir: iso.dir, isRepo: iso.isRepo,
     baseRef: iso.baseRef, baseCommit: iso.baseCommit, branch: activeBranch,
-    iterations, gateStatus, verdict, verdictSource,
+    iterations, verdict, verdictSource,
     correctnessVerdict, correctnessVerdictSource, verifierFindings,
     verifierPlan, verifierEvidence, verifierConsistency,
     intentVerifierFindings, intentVerdict, intentVerdictSource,
     intentVerifierPlan, intentVerifierEvidence, intentVerifierConsistency,
     evidence: evidence.records(),
-    gateFailure, tokens, usageConsistency, outcome, gateRetries, debate,
+    tokens, usageConsistency, outcome, debate,
     ...(noOpReason === undefined ? {} : { noOpReason }),
     timeouts: stageTimeouts, timeoutEvents,
     ...(campaignId === undefined
@@ -1913,7 +1734,6 @@ export async function run(opts) {
       progressThresholdMs: stallConfig.progressThresholdMs,
       restartLimit: stallConfig.restartLimit,
       restartCount: stallRestartCount,
-      gateRetryCount,
       stallEvents: stallRecords,
       livenessChecks,
     } : null,

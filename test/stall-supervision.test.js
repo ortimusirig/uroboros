@@ -134,7 +134,7 @@ test('restart relaunches once, then a second silence remains a terminal liveness
     }
   });
 
-test('stall restarts and gate retries have independent counters with different values', async () => {
+test('stall restarts count alone now that verdict-driven retries are gone', async () => {
   const scr = scratch();
   const tgt = target();
   let executorCalls = 0;
@@ -159,20 +159,16 @@ test('stall restarts and gate retries have independent counters with different v
           executorEvent(opts, 'finish', { code: 0 });
           return { changedFiles: ['changed.txt'], lastMessage: 'changed', timedOut: false };
         },
-        runGate: async () => ++gateCalls <= 2
-          ? { passed: false, results: [{ bin: 'node', args: ['--test'], code: 9,
-              outputTail: 'still red' }] }
-          : { passed: true, results: [] },
+        runGate: async () => { gateCalls++; return { passed: true, results: [] }; },
         runVerifier: async () => ({ verdict: 'NO_BLOCKERS', launchFailed: false }),
       },
     });
     assert.equal(facts.outcome, 'review-ready');
-    assert.deepEqual(facts.retryCounts, { gate: 2, stall: 1 },
-      'a shared retry counter could not produce these distinct values');
-    assert.equal(facts.limits.gateRetries, 2);
+    assert.deepEqual(facts.retryCounts, { stall: 1 },
+      'only the stall restart counter remains; verdict retries are gone');
     assert.equal(facts.limits.stall.restartLimit, 1);
-    assert.equal(executorCalls, 4, 'killed launch + replacement + two gate-driven launches');
-    assert.equal(gateCalls, 3);
+    assert.equal(executorCalls, 2, 'killed launch + its replacement, nothing gate-driven');
+    assert.equal(gateCalls, 1, 'commands run once as evidence');
   } finally {
     rmSync(tgt, { recursive: true, force: true });
     rmSync(scr, { recursive: true, force: true });

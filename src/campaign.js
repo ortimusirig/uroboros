@@ -88,10 +88,11 @@ function candidateFailureReason(entry) {
     return `${timeout.stage ?? 'stage'} timed out after ${timeout.timeoutMs ?? 'unknown'} ms`;
   }
   if (facts.outcome === 'timed-out') return 'candidate execution timed out';
-  if (facts.gateFailure) {
-    const command = [facts.gateFailure.bin, ...(facts.gateFailure.args ?? [])]
+  const failedEvidence = (facts.evidence ?? []).find((entry) => entry.code !== 0);
+  if (failedEvidence) {
+    const command = [failedEvidence.bin, ...(failedEvidence.args ?? [])]
       .filter(Boolean).join(' ');
-    return `${command || 'gate command'} ${facts.gateFailure.timedOut ? 'timed out' : `exited with code ${facts.gateFailure.code}`}`;
+    return `${command || 'command'} ${failedEvidence.timedOut ? 'timed out' : `exited with code ${failedEvidence.code}`}`;
   }
   if (facts.outcome === 'verifier-failed') {
     return 'one or both verifier passes did not produce usable verdict evidence';
@@ -136,7 +137,7 @@ function plannerReview(entry) {
     findings: facts?.intentVerifierFindings ?? null,
     consistency: facts?.intentVerifierConsistency?.status ?? null,
   };
-  const reviewExpected = facts?.gateStatus === 'passed' && facts?.outcome !== 'no-op';
+  const reviewExpected = facts?.outcome !== 'no-op';
   const missing = reviewExpected
     ? [
         ...(correctness?.verdict ? [] : ['correctness']),
@@ -148,7 +149,6 @@ function plannerReview(entry) {
     unitKind: entry.unitKind,
     ...(entry.perspective === undefined ? {} : { perspective: entry.perspective }),
     outcome: facts?.outcome ?? (entry.status === 'failed' ? 'internal-error' : entry.status),
-    gateStatus: facts?.gateStatus ?? null,
     expected: reviewExpected,
     complete: missing.length === 0,
     missing,
@@ -684,7 +684,6 @@ async function runCampaignRound(options) {
           lifecycle(unit.unitId, 'unit', 'finish', {
             index: unit.index,
             outcome: facts?.outcome ?? 'unknown',
-            gateStatus: facts?.gateStatus ?? null,
             correctnessVerdict: facts?.correctnessVerdict ?? null,
             correctnessVerdictSource: facts?.correctnessVerdictSource ?? null,
             intentVerdict: facts?.intentVerdict ?? null,
@@ -702,7 +701,6 @@ async function runCampaignRound(options) {
           lifecycle(unit.unitId, 'unit', 'finish', {
             index: unit.index,
             outcome: 'internal-error',
-            gateStatus: null,
             correctnessVerdict: null,
             correctnessVerdictSource: null,
             intentVerdict: null,
@@ -719,7 +717,6 @@ async function runCampaignRound(options) {
             plannerReviews.push(review);
             lifecycle(unit.unitId, 'planner', 'review_received', {
               outcome: review.outcome,
-              gateStatus: review.gateStatus,
               expected: review.expected,
               complete: review.complete,
               missing: review.missing,

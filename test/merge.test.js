@@ -317,9 +317,14 @@ test('the merge gate test-count floor fails when conflict repair drops one paren
     const facts = result.units[2].facts;
     assert.equal(facts.merge.testCounts.required, 2);
     assert.equal(facts.merge.testCounts.actual, 1);
-    assert.equal(facts.outcome, 'gate-failed');
-    assert.equal(facts.gateFailure.harness, TEST_COUNT_FLOOR_BIN);
-    assert.match(facts.gateFailure.outputTail, /actual=1 required=2/);
+    // The dropped-test floor exits non-zero. That exit is evidence in front
+    // of the seats, never a verdict: the run still converges review-ready and
+    // the record names the floor harness with its measurement.
+    assert.equal(facts.outcome, 'review-ready');
+    const floorEvidence = (facts.evidence ?? []).find(
+      (entry) => entry.harness === TEST_COUNT_FLOOR_BIN && entry.code !== 0);
+    assert.ok(floorEvidence, 'the dropped-test floor exit must be on the record');
+    assert.match(floorEvidence.excerpt, /actual=1 required=2/);
     assert.equal(readFileSync(join(facts.dir, 'left.test.js'), 'utf8'),
       'left behavior test plus a nominal seam in the same file\n');
     assert.throws(() => readFileSync(join(facts.dir, 'right.test.js'), 'utf8'), /ENOENT/);
@@ -380,7 +385,7 @@ test('genuinely conflicting intent stops with a distinct terminal outcome before
     assert.equal(facts.outcome, 'conflicting-intent');
     assert.notEqual(exitCodeFor(facts.outcome), 0);
     assert.notEqual(exitCodeFor(facts.outcome), exitCodeFor('gate-failed'));
-    assert.equal(facts.gateStatus, 'not-run');
+    assert.deepEqual(facts.evidence ?? [], [], 'no command ran before the intent stop');
     assert.equal(mergeGateCalls, 0);
     assert.equal(verifierCalls, 0);
     assert.equal(facts.merge.resolutions[0].reason,

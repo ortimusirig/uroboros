@@ -23,7 +23,7 @@ const COLUMNS = [
   {
     key: 'failed',
     title: 'Failed',
-    outcomes: new Set(['gate-failed', 'executor-failed', 'timed-out', 'verifier-failed']),
+    outcomes: new Set(['executor-failed', 'timed-out', 'verifier-failed']),
     empty: 'No failed runs.',
   },
   {

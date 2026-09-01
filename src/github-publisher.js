@@ -57,7 +57,7 @@ function readCompletedRun(runDirectory) {
   if (!facts || typeof facts !== 'object' || Array.isArray(facts)) {
     throw new Error(`invalid completed run facts at ${factsPath}`);
   }
-  for (const field of ['runId', 'branch', 'baseCommit', 'outcome', 'gateStatus']) {
+  for (const field of ['runId', 'branch', 'baseCommit', 'outcome']) {
     if (typeof facts[field] !== 'string' || facts[field] === '') {
       throw new Error(`completed run facts are missing ${field}`);
     }
@@ -136,7 +136,7 @@ export function buildPullRequestContent({ facts, task }) {
     '## Run facts',
     '',
     `- Outcome: ${facts.outcome}`,
-    `- Gate status: ${facts.gateStatus}`,
+    `- Evidence: ${(facts.evidence ?? []).length} command run(s), ${(facts.evidence ?? []).filter((entry) => entry.code !== 0).length} non-zero`,
     ...passes.map((pass) => (
       `- ${pass.label} verdict: ${pass.verdict} (source: ${pass.source})`
         + (pass.source === 'none'

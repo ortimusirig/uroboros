@@ -326,8 +326,9 @@ function digestRunDirectory(runDirectory) {
   const tokenUsage = recordedTokenUsage !== null && typeof recordedTokenUsage === 'object'
     && !Array.isArray(recordedTokenUsage)
     ? recordedTokenUsage : eventUsage;
-  if (gateResult === 'pending' && (facts?.gateStatus === 'passed' || facts?.gateStatus === 'failed')) {
-    gateResult = facts.gateStatus;
+  // The gate verdict is gone; evidence records carry the command results.
+  if (gateResult === 'pending' && Array.isArray(facts?.evidence) && facts.evidence.length > 0) {
+    gateResult = facts.evidence.some((entry) => entry.code !== 0) ? 'non-zero evidence' : 'evidence clean';
   }
   if (gateResult === 'pending' && gateCommands.some((command) => (
     command.timedOut || (command.code !== null && command.code !== 0)

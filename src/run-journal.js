@@ -152,7 +152,7 @@ function frontmatterFor(facts, touchedFiles) {
     `runId: ${yamlScalar(facts.runId)}`,
     `date: ${dateFor(facts)}`,
     `outcome: ${yamlScalar(facts.outcome)}`,
-    `gateStatus: ${yamlScalar(facts.gateStatus)}`,
+    `evidenceNonZero: ${yamlScalar((facts.evidence ?? []).filter((entry) => entry.code !== 0).length)}`,
     `verdict: ${yamlScalar(facts.verdict)}`,
     `intentVerdict: ${yamlScalar(facts.intentVerdict)}`,
     `verdictSource: ${yamlScalar(facts.verdictSource)}`,

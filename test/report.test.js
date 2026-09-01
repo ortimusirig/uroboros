@@ -101,7 +101,6 @@ test('run facts and markdown retain mutation measurement and arbiter judgement w
     branch: 'uro/mutation-report', iterations: [], gateStatus: 'passed', verdict: 'NO_BLOCKERS',
     outcome: 'review-ready', gateRetries: 0, mutation,
   });
-  assert.equal(withMutation.gateStatus, 'passed');
   assert.equal(withMutation.outcome, 'review-ready');
   assert.equal(withMutation.mutation, mutation);
   const markdown = buildReportMarkdown(withMutation);
@@ -235,7 +234,7 @@ test('facts carry an explicit null when no findings were recorded', () => {
   assert.equal(facts.intentVerdict, null);
   assert.equal(facts.intentVerdictSource, null);
   assert.equal(facts.intentVerifierPlan, null);
-  assert.equal(facts.gateFailure, null);
+  assert.deepEqual(facts.evidence, []);
   assert.deepEqual(facts.tokens, {
     executor: EMPTY_USAGE,
     verifier: EMPTY_USAGE,
@@ -255,10 +254,12 @@ test('writeReport emits retained diagnostics, verdict provenance, fail-safe word
     intentVerifierFindings: 'Intent verifier preamble only.',
     intentVerdict: 'ISSUES', intentVerdictSource: 'none',
     intentVerifierPlan: '# Intent review\n\nShared scope was omitted.\n\nISSUES',
-    gateFailure: {
-      bin: 'node', args: ['--test'], code: 1,
-      outputTail: '[stdout]\nFAIL specific assertion\n[stderr]\nstack detail',
-    },
+    evidence: [{
+      source: 'command', bin: 'node', args: ['--test'], code: 1, timedOut: false,
+      round: 1, excerpt: '[stdout]\nFAIL specific assertion\n[stderr]\nstack detail',
+      outFile: '__uro_evidence/round-1-01.out.txt',
+      errFile: '__uro_evidence/round-1-01.err.txt',
+    }],
     tokens: {
       executor: { inputTokens: 11, cachedInputTokens: 7, outputTokens: 5,
         reasoningOutputTokens: 3, cacheWriteTokens: 2 },
@@ -267,7 +268,7 @@ test('writeReport emits retained diagnostics, verdict provenance, fail-safe word
       total: { inputTokens: 24, cachedInputTokens: 16, outputTokens: 11,
         reasoningOutputTokens: 3, cacheWriteTokens: 6 },
     },
-    outcome: 'gate-failed', gateRetries: 0,
+    outcome: 'executor-failed', gateRetries: 0,
   });
   const d = mkdtempSync(join(tmpdir(), 'rep-diag-'));
   const { mdPath } = writeReport({ dir: d, facts: diagnosticFacts });
@@ -288,9 +289,10 @@ test('writeReport emits retained diagnostics, verdict provenance, fail-safe word
   assert.ok(md.indexOf('## Intent verifier plan artifact')
     < md.indexOf('## Intent verifier findings'),
   'the intent verdict artifact must lead its reasoning stream');
-  assert.match(md, /## Gate failure/);
+  assert.match(md, /## Evidence — commands that exited non-zero/);
   assert.match(md, /node --test/);
-  assert.match(md, /exit code:.*1/i);
+  assert.match(md, /Exit code:\*\* 1/);
+  assert.match(md, /__uro_evidence\/round-1-01[.]out[.]txt/);
   assert.match(md, /FAIL specific assertion/);
   assert.match(md, /stack detail/);
   assert.match(md, /## Tokens/);

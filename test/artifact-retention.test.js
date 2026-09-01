@@ -40,7 +40,7 @@ function facts(runId = '2026-08-29T01-02-03-004Z-artifact-test') {
     runId,
     iterations: [],
     outcome: 'review-ready',
-    gateStatus: 'passed',
+    evidenceNonZero: 0,
     correctnessVerdict: 'NO_BLOCKERS',
     intentVerdict: 'ISSUES',
     tokens: { total: { inputTokens: 17, outputTokens: 9 } },
@@ -99,7 +99,7 @@ test('a completed record copies every produced artifact and appends the exact in
       endedAt: '2026-08-29T01:02:05.010Z',
       durationMs: 2006,
       outcome: 'review-ready',
-      gateStatus: 'passed',
+      evidenceNonZero: 0,
       correctnessVerdict: 'NO_BLOCKERS',
       intentVerdict: 'ISSUES',
       inputTokens: 17,
@@ -152,7 +152,6 @@ test('an unusable artifact root records failure without changing the run result'
   const runFacts = facts('2026-08-29T03-00-00-000Z-blocked');
   const invariant = {
     outcome: runFacts.outcome,
-    gateStatus: runFacts.gateStatus,
     correctnessVerdict: runFacts.correctnessVerdict,
     intentVerdict: runFacts.intentVerdict,
   };
@@ -173,8 +172,7 @@ test('an unusable artifact root records failure without changing the run result'
     assert.equal(runFacts.artifacts.status, 'failed');
     assert.deepEqual({
       outcome: runFacts.outcome,
-      gateStatus: runFacts.gateStatus,
-      correctnessVerdict: runFacts.correctnessVerdict,
+        correctnessVerdict: runFacts.correctnessVerdict,
       intentVerdict: runFacts.intentVerdict,
     }, invariant);
     const persisted = JSON.parse(readFileSync(join(worktree, 'uro-runfacts.json'), 'utf8'));

@@ -343,7 +343,7 @@ test('publishing creates one PR, posts two distinguishable pass comments, and re
   assert.match(firstState.pull.title, /guarded widget publishing/i);
   assert.match(firstState.pull.body, /Executor rationale[\s\S]*old path dropped failures/);
   assert.match(firstState.pull.body, /Outcome: review-ready/);
-  assert.match(firstState.pull.body, /Gate status: passed/);
+  assert.match(firstState.pull.body, /Evidence: 0 command run[(]s[)], 0 non-zero/);
   assert.match(firstState.pull.body, /Correctness verdict: ISSUES \(source: none\)/);
   assert.match(firstState.pull.body, /fail-safe because no verdict marker.*not a reviewer finding/i);
   assert.match(firstState.pull.body, /Intent verdict: NO_BLOCKERS \(source: result\)/);

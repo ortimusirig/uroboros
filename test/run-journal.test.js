@@ -49,7 +49,6 @@ const fixtureFacts = {
     lastMessage: 'Kept the loop unchanged.\nAdded the offline journal only.',
     gate: { passed: true, results: [] },
   }],
-  gateStatus: 'passed',
   verdict: 'ISSUES',
   verdictSource: 'assistant',
   verifierFindings: correctnessFindings,
@@ -58,12 +57,17 @@ const fixtureFacts = {
   intentVerdict: 'NO_BLOCKERS',
   intentVerdictSource: 'result',
   intentVerifierPlan: '# Intent plan\n\nCompare every requirement.',
-  gateFailure: {
+  evidence: [{
+    source: 'command',
     bin: 'node',
     args: ['--test', 'test/cache.test.js'],
     code: 1,
-    outputTail: '[stdout]\nexpected fresh cache\n[stderr]\nassertion failed',
-  },
+    timedOut: false,
+    round: 1,
+    excerpt: '[stdout]\nexpected fresh cache\n[stderr]\nassertion failed',
+    outFile: '__uro_evidence/round-1-01.out.txt',
+    errFile: '__uro_evidence/round-1-01.err.txt',
+  }],
   limits: { gateRetries: 0, timeoutsMs: { executor: null, verifier: null, gate: null } },
   timeoutEvents: [],
   tokens: {
@@ -136,14 +140,14 @@ test('frontmatter parses with every required property and Bases-compatible types
   const note = buildRunJournalNote(fixtureFacts, fixtureEvents);
   const { parsed } = parseFrontmatter(note);
   const required = [
-    'runId', 'date', 'outcome', 'gateStatus', 'verdict', 'intentVerdict',
+    'runId', 'date', 'outcome', 'evidenceNonZero', 'verdict', 'intentVerdict',
     'verdictSource', 'tokensTotal', 'branch', 'filesChanged',
   ];
   assert.deepEqual(Object.keys(parsed), required);
   assert.equal(typeof parsed.runId, 'string');
   assert.ok(parsed.date instanceof Date);
   assert.equal(parsed.date.toISOString(), '2026-08-14T00:00:00.000Z');
-  for (const key of ['outcome', 'gateStatus', 'verdict', 'intentVerdict', 'verdictSource', 'branch']) {
+  for (const key of ['outcome', 'verdict', 'intentVerdict', 'verdictSource', 'branch']) {
     assert.equal(typeof parsed[key], 'string', `${key} must remain a string`);
   }
   assert.equal(typeof parsed.tokensTotal, 'number');
@@ -191,18 +195,19 @@ test('the journal note carries no recorded event content', () => {
   assert.ok(!note.includes('sensitive output'));
 });
 
-test('gate failures are conditional and both verifier passes remain distinguishable', () => {
+test('non-zero evidence is conditional and both verifier passes remain distinguishable', () => {
   const withGate = buildRunJournalNote(fixtureFacts, fixtureEvents);
-  assert.match(withGate, /## Gate failure/);
+  assert.match(withGate, /## Evidence — commands that exited non-zero/);
   assert.match(withGate, /node --test test\/cache[.]test[.]js/);
   assert.match(withGate, /expected fresh cache/);
+  assert.match(withGate, /__uro_evidence\/round-1-01[.]out[.]txt/);
   assert.match(withGate, /## Verifier findings\nCorrectness:/);
   assert.match(withGate, /## Intent verifier findings\nIntent:/);
   assert.notEqual(correctnessFindings, intentFindings, 'positive control: pass fixtures must differ');
   assert.ok(withGate.indexOf(correctnessFindings) < withGate.indexOf(intentFindings));
 
-  const withoutGate = buildRunJournalNote({ ...fixtureFacts, gateFailure: null }, fixtureEvents);
-  assert.doesNotMatch(withoutGate, /## Gate failure/);
+  const withoutGate = buildRunJournalNote({ ...fixtureFacts, evidence: [] }, fixtureEvents);
+  assert.doesNotMatch(withoutGate, /## Evidence — commands that exited non-zero/);
   assert.match(withoutGate, /## Tokens\n\| Seat \| Input \| Cached input/);
 });
 

@@ -114,7 +114,7 @@ test('run archives its complete record to the default root and preserves its jou
     const index = JSON.parse(indexLines[0]);
     assert.equal(index.runId, runId);
     assert.equal(index.outcome, facts.outcome);
-    assert.equal(index.gateStatus, facts.gateStatus);
+    assert.equal(index.evidenceNonZero, (facts.evidence ?? []).filter((entry) => entry.code !== 0).length);
     assert.equal(index.correctnessVerdict, facts.correctnessVerdict);
     assert.equal(index.intentVerdict, facts.intentVerdict);
     assert.ok(Number.isFinite(index.durationMs) && index.durationMs >= 0);
@@ -181,7 +181,6 @@ test('run records an artifact-root failure without changing its outcome', async 
       adapters: adapters(scratchRoot, runId),
     });
     assert.equal(facts.outcome, 'review-ready');
-    assert.equal(facts.gateStatus, 'passed');
     assert.equal(facts.correctnessVerdict, 'NO_BLOCKERS');
     assert.equal(facts.intentVerdict, 'NO_BLOCKERS');
     assert.equal(facts.artifacts.status, 'failed');

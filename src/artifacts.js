@@ -106,7 +106,7 @@ function indexEntry(facts, dir, startedAt, endedAt) {
     endedAt: end.toISOString(),
     durationMs: Math.max(0, end.getTime() - start.getTime()),
     outcome: facts.outcome ?? null,
-    gateStatus: facts.gateStatus ?? null,
+    evidenceNonZero: (facts.evidence ?? []).filter((entry) => entry.code !== 0).length,
     correctnessVerdict: facts.correctnessVerdict ?? null,
     intentVerdict: facts.intentVerdict ?? null,
     inputTokens: tokenCount(facts.tokens?.total?.inputTokens),

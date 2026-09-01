@@ -135,7 +135,7 @@ test('two unavailable verifier seats remain pending rather than becoming a disag
 
 test('every human-stop outcome enters the attention filter', () => {
   const outcomes = [
-    'needs-decision', 'needs-pivot', 'gate-failed',
+    'needs-decision', 'needs-pivot',
     'executor-failed', 'timed-out', 'conflicting-intent',
   ];
   const runs = outcomes.map((outcome) => run(outcome, { state: 'finished', outcome }));
@@ -487,7 +487,6 @@ test('every recorded outcome is grouped into its pipeline column', () => {
     ['needs-decision', 'needs-decision'],
     ['needs-pivot', 'needs-decision'],
     ['conflicting-intent', 'needs-decision'],
-    ['gate-failed', 'failed'],
     ['executor-failed', 'failed'],
     ['timed-out', 'failed'],
     ['verifier-failed', 'failed'],
@@ -605,7 +604,7 @@ test('verifier disagreement has a distinct visible treatment from agreement', ()
 
 test('cards are newest first within a column', () => {
   const older = run('older', {
-    outcome: 'gate-failed',
+    outcome: 'executor-failed',
     endTs: '2026-08-28T12:01:00.000Z',
     lastEventTs: '2026-08-28T12:01:00.000Z',
   });
@@ -654,7 +653,7 @@ test('changing a run outcome moves its card to a different column', () => {
 test('changing a stopped run outcome moves it into the attention filter', () => {
   const item = run('classification-control', { state: 'finished', outcome: 'no-op' });
   const before = renderDashboardBoard(snapshot(item));
-  const after = renderDashboardBoard(snapshot({ ...item, outcome: 'gate-failed' }));
+  const after = renderDashboardBoard(snapshot({ ...item, outcome: 'executor-failed' }));
 
   assert.deepEqual(cardRunIds(before), []);
   assert.deepEqual(cardRunIds(after), ['classification-control']);
@@ -695,7 +694,7 @@ test('the transcript default comes from the filtered runs, not the newest overal
       verifiers: { correctness: { verdict: 'NO_BLOCKERS' }, intent: { verdict: 'NO_BLOCKERS' } },
     }),
     run('older-gate-failed', {
-      state: 'finished', outcome: 'gate-failed',
+      state: 'finished', outcome: 'executor-failed',
       startTs: '2026-08-28T09:00:00.000Z',
       verifiers: { correctness: { verdict: 'ISSUES' }, intent: { verdict: 'ISSUES' } },
     }),

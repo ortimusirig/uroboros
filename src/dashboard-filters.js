@@ -10,7 +10,6 @@ export const DASHBOARD_FILTERS = Object.freeze([
 const HUMAN_STOP_OUTCOMES = new Set([
   'needs-decision',
   'needs-pivot',
-  'gate-failed',
   'executor-failed',
   'timed-out',
   'conflicting-intent',

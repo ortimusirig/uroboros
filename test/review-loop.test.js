@@ -232,7 +232,7 @@ test('executor review-file restoration and reviewer tests accumulate across roun
   }
 });
 
-test('a failing reviewer test fails the gate and its failure is fed back to the executor', async () => {
+test('a failing reviewer test is evidence fed back to the executor through the debate', async () => {
   const plans = [];
   let gateCall = 0;
   let reviewRound = 0;
@@ -248,9 +248,15 @@ test('a failing reviewer test fails the gate and its failure is fed back to the 
         reviewRound++;
         if (reviewRound === 1) {
           writeReview(cwd, {
-            id: 'F1', severity: 'suggestion', testFile: '__uro_review/tests/f1.test.js',
+            id: 'F1', severity: 'blocking', testFile: '__uro_review/tests/f1.test.js',
           });
-        } else writeReview(cwd, { id: 'F2', severity: 'suggestion' });
+        } else if (reviewRound === 2) {
+          // The reviewer's f1 test just exited 9; a second blocking finding
+          // drives the fix round whose plan must carry that evidence.
+          writeReview(cwd, {
+            id: 'F2', severity: 'blocking', testFile: '__uro_review/tests/f2.test.js',
+          });
+        } else writeReview(cwd, { id: 'F3', severity: 'suggestion' });
         return { launchFailed: false, timedOut: false };
       },
       runGate: async ({ commands }) => {
@@ -267,10 +273,12 @@ test('a failing reviewer test fails the gate and its failure is fed back to the 
   try {
     const facts = await executeRun(fixture.options);
     assert.equal(facts.outcome, 'review-ready');
-    assert.equal(plans.length, 2);
-    assert.match(plans[1], /Previous gate attempt failed/);
-    assert.match(plans[1], /__uro_review\/tests\/f1[.]test[.]js/);
-    assert.match(plans[1], /reviewer proof failed/);
+    assert.equal(plans.length, 3);
+    // The round-2 fix plan carries the reviewer test's non-zero exit as
+    // evidence — name, code and tail — in front of the executor.
+    assert.match(plans[2], /Previous gate attempt failed/);
+    assert.match(plans[2], /__uro_review\/tests\/f1[.]test[.]js/);
+    assert.match(plans[2], /reviewer proof failed/);
   } finally {
     rmSync(fixture.root, { recursive: true, force: true });
   }

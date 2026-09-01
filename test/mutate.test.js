@@ -714,7 +714,6 @@ test('an opted-in passing run records mutation survivors without changing its ou
       },
     });
     assert.deepEqual(order, ['executor', 'gate', 'verifier', 'verifier', 'mutation']);
-    assert.equal(facts.gateStatus, 'passed');
     assert.equal(facts.outcome, 'review-ready');
     assert.equal(facts.mutation, mutation);
     assert.match(readFileSync(join(isolated, 'uro-report.md'), 'utf8'), /Mutation survivors:\*\* 1/);

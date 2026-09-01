@@ -48,16 +48,17 @@ function adapterFacts(runId, outcome = 'review-ready') {
   return {
     runId,
     outcome,
-    gateStatus: outcome === 'gate-failed' ? 'failed' : 'passed',
-    verdict: outcome === 'gate-failed' ? null : 'NO_BLOCKERS',
-    verdictSource: outcome === 'gate-failed' ? null : 'result',
-    verifierConsistency: outcome === 'gate-failed' ? null : { status: 'consistent' },
-    intentVerdict: outcome === 'gate-failed' ? null : 'NO_BLOCKERS',
-    intentVerdictSource: outcome === 'gate-failed' ? null : 'assistant',
-    intentVerifierConsistency: outcome === 'gate-failed' ? null : { status: 'consistent' },
-    gateFailure: outcome === 'gate-failed'
-      ? { bin: 'node', args: ['--test'], code: 1 }
-      : null,
+    verdict: outcome === 'executor-failed' ? null : 'NO_BLOCKERS',
+    verdictSource: outcome === 'executor-failed' ? null : 'result',
+    verifierConsistency: outcome === 'executor-failed' ? null : { status: 'consistent' },
+    intentVerdict: outcome === 'executor-failed' ? null : 'NO_BLOCKERS',
+    intentVerdictSource: outcome === 'executor-failed' ? null : 'assistant',
+    intentVerifierConsistency: outcome === 'executor-failed' ? null : { status: 'consistent' },
+    evidence: outcome === 'executor-failed'
+      ? [{ source: 'command', bin: 'node', args: ['--test'], code: 1, timedOut: false,
+          round: 1, excerpt: 'failing alternative', outFile: '__uro_evidence/round-1-01.out.txt',
+          errFile: '__uro_evidence/round-1-01.err.txt' }]
+      : [],
     branch: `ccc/${runId}`,
     baseCommit: '0123456789abcdef0123456789abcdef01234567',
     dir: join(SAFE_SCRATCH_BASE, runId, 'w'),
@@ -313,7 +314,7 @@ test('a failed alternative remains useful evidence while successful candidates c
     reporter: (event) => events.push(event),
     runUnit: async ({ runId }) => adapterFacts(
       runId,
-      runId === 'candidate-two' ? 'gate-failed' : 'review-ready',
+      runId === 'candidate-two' ? 'executor-failed' : 'review-ready',
     ),
   });
 
@@ -328,7 +329,7 @@ test('a failed alternative remains useful evidence while successful candidates c
     candidate.unitId === 'candidate-two'
   ));
   assert.equal(failed.status, 'failed');
-  assert.equal(failed.outcome, 'gate-failed');
+  assert.equal(failed.outcome, 'executor-failed');
   assert.equal(failed.successful, false);
   assert.match(failed.reason, /node --test exited with code 1/i);
   assert.equal(failed.verdicts.correctness.verdict, null);
@@ -336,7 +337,7 @@ test('a failed alternative remains useful evidence while successful candidates c
   assert.ok(events.some((event) => (
     event.type === 'review_received'
       && event.unitId === 'candidate-two'
-      && event.outcome === 'gate-failed'
+      && event.outcome === 'executor-failed'
   )));
 
   const forbiddenKeys = [];

@@ -175,26 +175,25 @@ export async function runGate({
     reportEvent(reporter, runId, 'gate', 'gate_command', {
       ...result, timedOut: r.timedOut, attempt,
     });
-    if (r.code !== 0) {
-      results.push({
-        ...result,
-        ...(r.timedOut ? { timedOut: true, timeoutMs: r.timeoutMs } : {}),
-        outputTail: outputTail(r.stdout, r.stderr),
-      });
-      reportEvent(reporter, runId, 'gate', 'finish', {
-        verdict: 'failed', code: r.code, attempt,
-      });
-      return {
-        passed: false,
-        results,
-        ...(observedTestCount ? { testCount } : {}),
-      };
-    }
-    results.push(result);
+    // Every command runs, whatever the previous one exited. Stopping at the
+    // first non-zero was verdict thinking: it hid the state of every later
+    // command from the seats. Each result is independent evidence now.
+    results.push(r.code === 0 ? result : {
+      ...result,
+      ...(r.timedOut ? { timedOut: true, timeoutMs: r.timeoutMs } : {}),
+      outputTail: outputTail(r.stdout, r.stderr),
+    });
   }
-  reportEvent(reporter, runId, 'gate', 'finish', { verdict: 'passed', attempt });
+  // `passed` survives only as a summary for legacy readers during the staged
+  // removal; the run loop no longer branches on it anywhere.
+  const passed = results.every((result) => result.code === 0);
+  reportEvent(reporter, runId, 'gate', 'finish', {
+    attempt,
+    commands: results.length,
+    nonZero: results.filter((result) => result.code !== 0).length,
+  });
   return {
-    passed: true,
+    passed,
     results,
     ...(observedTestCount ? { testCount } : {}),
   };

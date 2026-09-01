@@ -359,7 +359,9 @@ test('gate-failed stops without attempting to apply the failed unit', async () =
   }
 });
 
-test('review-ready cannot land unless the recorded gate status passed', async () => {
+test('landing consults the seats only; no gate field exists to re-check', async () => {
+  // The gate verdict is gone. A stale gateStatus key in the facts is inert —
+  // landing is the seats' recorded agreement and nothing else.
   const fixture = makeFixture();
   try {
     const runtime = fakeRuntime([
@@ -374,9 +376,8 @@ test('review-ready cannot land unless the recorded gate status passed', async ()
       dependencies: runtime.dependencies,
     });
 
-    assert.equal(runtime.launches.length, 1);
-    assert.equal(runtime.landings.length, 0);
-    assert.match(result.stop.reason, /gate reported failed/);
+    assert.equal(runtime.landings.length, 3, 'clean verdicts land; a stray field cannot veto');
+    assert.equal(result.stop, null);
   } finally {
     fixture.cleanup();
   }

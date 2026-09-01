@@ -7,8 +7,10 @@ test('only review-ready and no-op are successes', () => {
   assert.equal(exitCodeFor('no-op'), 0);
 });
 
-test('gate-failed is non-zero', () => {
-  assert.equal(exitCodeFor('gate-failed'), 1);
+test('gate-failed is retired: an unmapped outcome is deliberately not a success', () => {
+  // The gate verdict is gone; the outcome no longer exists. The unknown-outcome
+  // fallback keeps any stale caller from reading it as success.
+  assert.equal(exitCodeFor('gate-failed'), 3);
 });
 
 // The regression this suite exists for: verifier-failed used to exit 0, so a run

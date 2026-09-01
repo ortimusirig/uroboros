@@ -7,7 +7,6 @@
 export const EXIT_BY_OUTCOME = {
   'review-ready': 0,
   'no-op': 0,
-  'gate-failed': 1,
   'verifier-failed': 4,
   'timed-out': 5,
   'campaign-failed': 6,

@@ -17,7 +17,6 @@ export function buildRunFacts({
   baseCommit = null,
   branch,
   iterations,
-  gateStatus,
   verdict,
   verdictSource = null,
   correctnessVerdict = null,
@@ -32,7 +31,6 @@ export function buildRunFacts({
   intentVerifierPlan = null,
   intentVerifierEvidence = null,
   intentVerifierConsistency = null,
-  gateFailure = null,
   evidence = [],
   tokens = {},
   usageConsistency = null,
@@ -79,7 +77,7 @@ export function buildRunFacts({
       },
     },
     timeoutEvents: Array.isArray(timeoutEvents) ? timeoutEvents : [],
-    iterations, gateStatus, verdict,
+    iterations, verdict,
     verdictSource: verdictSource ?? null,
     correctnessVerdict: correctnessVerdict ?? null,
     correctnessVerdictSource: correctnessVerdictSource ?? null,
@@ -93,7 +91,6 @@ export function buildRunFacts({
     intentVerifierPlan: intentVerifierPlan ?? null,
     intentVerifierEvidence: intentVerifierEvidence ?? null,
     intentVerifierConsistency: intentVerifierConsistency ?? null,
-    gateFailure: gateFailure ?? null,
     evidence,
     tokens: {
       executor: addUsage(EMPTY_USAGE, tokens?.executor),
@@ -141,7 +138,6 @@ export function buildRunFacts({
       restartLimit: supervision.restartLimit,
     };
     facts.retryCounts = {
-      gate: supervision.gateRetryCount,
       stall: supervision.restartCount,
     };
     facts.stallEvents = Array.isArray(supervision.stallEvents) ? supervision.stallEvents : [];
@@ -234,7 +230,7 @@ export function buildReportMarkdown(facts, {
       : []),
     `- **Outcome:** ${facts.outcome}`,
     ...(facts.noOpReason === undefined ? [] : [`- **No-op reason:** ${facts.noOpReason}`]),
-    `- **Gate:** ${facts.gateStatus}`,
+    `- **Evidence:** ${(facts.evidence ?? []).length} command run(s); non-zero exits: ${(facts.evidence ?? []).filter((entry) => entry.code !== 0).length}`,
     `- **Verdict:** ${facts.verdict ?? 'n/a'} (source: ${facts.verdictSource ?? 'n/a'})`,
     `- **Intent verdict:** ${facts.intentVerdict ?? 'n/a'} (source: ${facts.intentVerdictSource ?? 'n/a'})`,
     `- **Verdict evidence consistency:** ${facts.verifierConsistency?.status ?? 'n/a'}`,
@@ -280,8 +276,7 @@ export function buildReportMarkdown(facts, {
       ? [
           `- **Stall policy:** ${facts.limits.stall.policy}; gap ${facts.limits.stall.thresholdMs} ms`,
           `- **Progress notice:** ${facts.limits.stall.progressThresholdMs} ms`,
-          `- **Retries used:** gate ${facts.retryCounts?.gate ?? 0}/${facts.limits.gateRetries}; ` +
-            `stall ${facts.retryCounts?.stall ?? 0}/${facts.limits.stall.restartLimit}`,
+          `- **Restarts used:** stall ${facts.retryCounts?.stall ?? 0}/${facts.limits.stall.restartLimit}`,
         ]
       : []),
     ...(correctnessUnverified
@@ -357,24 +352,23 @@ export function buildReportMarkdown(facts, {
     `## Intent verifier findings`,
     facts.intentVerifierFindings || '(none recorded)',
   ];
-  if (facts.gateFailure !== null) {
-    const command = [facts.gateFailure.bin, ...(facts.gateFailure.args ?? [])].join(' ');
-    md.push(
-      ``,
-      `## Gate failure`,
-      ...(facts.gateFailure.harness
-        ? [`- **Harness check:** ${facts.gateFailure.harness}`]
-        : []),
-      `- **Command:** ${command}`,
-      `- **Exit code:** ${facts.gateFailure.code}`,
-      ...(facts.gateFailure.timedOut
-        ? [`- **Timed out:** yes, after ${facts.gateFailure.timeoutMs} ms`]
-        : []),
-      ``,
-      '```text',
-      facts.gateFailure.outputTail ?? '',
-      '```',
-    );
+  const nonZeroEvidence = (facts.evidence ?? []).filter((entry) => entry.code !== 0);
+  if (nonZeroEvidence.length > 0) {
+    md.push(``, `## Evidence — commands that exited non-zero`);
+    for (const entry of nonZeroEvidence) {
+      const command = [entry.bin, ...(entry.args ?? [])].join(' ');
+      md.push(
+        ``,
+        ...(entry.harness ? [`- **Harness check:** ${entry.harness}`] : []),
+        `- **Command:** ${command}`,
+        `- **Exit code:** ${entry.code}${entry.timedOut ? ' (timed out)' : ''}`,
+        `- **Full output:** ${entry.outFile} · ${entry.errFile}`,
+        ``,
+        '```text',
+        entry.excerpt ?? '',
+        '```',
+      );
+    }
   }
   if ((facts.timeoutEvents ?? []).length > 0) {
     md.push(``, `## Stage timeouts`);
