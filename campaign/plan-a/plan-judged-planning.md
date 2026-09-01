@@ -109,9 +109,9 @@ understand the plan well enough to proceed.
 
 ### 4. Convergence is judged
 
-A plan is approved when the reviewing seat says it is ready and the arbiter
-agrees, not when a rule set is satisfied. The existing pivot judgement decides
-when a planning approach is dead and a fresh one is needed.
+A plan is approved by judgement, not by a rule set being satisfied — see §6 for
+exactly whose judgement and how many. The existing pivot judgement decides when
+a planning approach is dead and a fresh one is needed.
 
 The inspection's observations are evidence available to that judgement, never a
 precondition for it.
