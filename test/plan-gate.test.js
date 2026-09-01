@@ -55,24 +55,47 @@ test('positive control: a well-formed plan passes every mechanical check', async
       target: item.target,
       executeGate: passes,
     });
-    assert.deepEqual(result, { passed: true, failures: [] });
+    assert.deepEqual(result, { passed: true, failures: [], observations: [] });
   } finally {
     item.cleanup();
   }
 });
 
-test('an unrunnable proposed gate fails independently and names the command', async () => {
+test('a proposed gate that RAN and failed is observed, not failed', async () => {
+  // The check is named gate-runs, and it ran. Before implementation a TDD-shaped
+  // gate is supposed to fail — `pytest -k test_new_thing` exits 5 (collected
+  // nothing) for tests the plan will create — and that used to hard-fail the
+  // candidate with no way to express "collects nothing yet".
   const item = fixture();
   try {
     const result = await runPlanGate({
       plan: validPlan(), gate: validGate, target: item.target,
       executeGate: async ({ commands }) => ({
-        passed: false, results: [{ ...commands[0], code: 9 }],
+        passed: false, results: [{ ...commands[0], code: 5 }],
       }),
+    });
+    assert.equal(result.passed, true, 'a gate that ran must not fail the plan');
+    assert.deepEqual(result.failures, []);
+    assert.equal(result.observations.length, 1);
+    assert.match(result.observations[0].message, /exited 5 before implementation/);
+    assert.equal(result.observations[0].code, 5);
+  } finally { item.cleanup(); }
+});
+
+test('a gate that cannot launch at all still fails, and names why', async () => {
+  // Narrowness control. The genuine "this gate is broken" case is a launch
+  // failure — spawnCapture throws ENOENT for a missing binary — and it must
+  // survive the change above.
+  const item = fixture();
+  try {
+    const result = await runPlanGate({
+      plan: validPlan(), gate: validGate, target: item.target,
+      executeGate: async () => { throw new Error('spawn nonexistent-bin ENOENT'); },
     });
     assert.equal(result.passed, false);
     assert.equal(result.failures.length, 1);
-    assert.match(result.failures[0].message, /exited 9.*test[/\\]real[.]test[.]js/i);
+    assert.equal(result.failures[0].id, 'PG_GATE_LAUNCH');
+    assert.match(result.failures[0].message, /ENOENT/);
   } finally { item.cleanup(); }
 });
 

@@ -172,6 +172,7 @@ export async function runPlanGate({
 } = {}) {
   const resolvedTarget = resolve(target);
   const failures = [];
+  const observations = [];
 
   const shapeFailures = gateShapeFailures(gate);
   failures.push(...shapeFailures);
@@ -257,33 +258,42 @@ export async function runPlanGate({
   // path or line evidence used to validate the plan that proposed it.
   if (shapeFailures.length === 0) {
     let result;
+    let launchFailed = false;
     try {
       result = await executeGate({ commands: gate, cwd: resolvedTarget, timeoutMs });
     } catch (error) {
+      launchFailed = true;
       failures.push(failure(
         'PG_GATE_LAUNCH',
         'gate-runs',
         `gate.json could not run: ${error?.message ?? String(error)}`,
       ));
     }
+    // A gate command that RAN and exited non-zero is not a broken gate. The check
+    // is named gate-runs, and it ran. Before implementation a TDD-shaped gate is
+    // supposed to fail: `pytest -k test_new_thing` exits 5 (collected nothing)
+    // for tests the plan will create, and that hard-failed the candidate with no
+    // way to express "collects nothing yet". Whether the gate passes is the code
+    // gate's question at implementation time, not the plan gate's.
+    //
+    // The genuine "this gate cannot run" case is a launch failure, which
+    // spawnCapture throws on (ENOENT) and PG_GATE_LAUNCH above already records.
+    // No exit-code allowlist is needed, and none is used.
     if (result !== undefined && result?.passed !== true) {
-      const failedCommands = result.results?.filter((item) => item.code !== 0) ?? [];
-      if (failedCommands.length === 0) {
-        failures.push(failure('PG_GATE_EXIT', 'gate-runs', 'gate.json did not pass'));
-      } else {
-        for (const [index, command] of failedCommands.entries()) {
-          failures.push(failure(
-            `PG_GATE_EXIT_${index + 1}`,
-            'gate-runs',
-            `gate command exited ${command.code}: ${commandText(command)}`,
-            { command: commandText(command), code: command.code },
-          ));
-        }
+      for (const command of result.results?.filter((item) => item.code !== 0) ?? []) {
+        observations.push({
+          check: 'gate-runs',
+          message: `gate command exited ${command.code} before implementation: ${commandText(command)}`,
+          command: commandText(command),
+          code: command.code,
+        });
       }
-    } else if (result === undefined) {
+    } else if (result === undefined && !launchFailed) {
+      // A thrown launch already reported PG_GATE_LAUNCH with the actual cause;
+      // adding "did not return a gate result" on top buries it.
       failures.push(failure('PG_GATE_EXIT', 'gate-runs', 'gate.json did not return a gate result'));
     }
   }
 
-  return { passed: failures.length === 0, failures };
+  return { passed: failures.length === 0, failures, observations };
 }
