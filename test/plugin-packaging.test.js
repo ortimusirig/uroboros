@@ -104,8 +104,8 @@ test('plugin packages exactly the uroboros and uroboros-setup skills', () => {
     .filter((entry) => entry.isDirectory())
     .map((entry) => entry.name)
     .sort();
-  assert.deepEqual(skillNames, ['uroboros', 'uroboros-setup'],
-    'skills/ must contain exactly the two packaged skills');
+  assert.deepEqual(skillNames, ['uroboros', 'uroboros-chunk', 'uroboros-setup'],
+    'skills/ must contain exactly the three packaged skills');
   assert.ok(existsSync(skillPath), 'skills/uroboros/SKILL.md must be packaged');
   assert.ok(existsSync(setupSkillPath),
     'skills/uroboros-setup/SKILL.md must be packaged alongside skills/uroboros/SKILL.md');
