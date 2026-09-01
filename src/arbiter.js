@@ -10,12 +10,27 @@ import { resolveStageTimeouts } from './timeouts.js';
 export const DEFAULT_ARBITER_MODEL = 'sonnet';
 export const ARBITER_UNVERIFIED = 'UNVERIFIED';
 
+// The prompt goes on STDIN, never in argv. When `claude` resolves to the npm
+// .cmd shim, Windows routes the launch through cmd.exe, whose command line is
+// capped at 8191 characters — an arbiter prompt carrying a plan blows past that
+// and the shim exits 1 with "The command line is too long" in under a second.
+// The arbiter then reads as UNVERIFIED, so every blocking finding stands with no
+// appeal and the run looks judged when nothing judged it.
+//
+// Measured on Windows with a 10,022-character prompt:
+//   claude.cmd -p <prompt>        -> exit 1, "The command line is too long"
+//   claude.exe -p <prompt>        -> exit 0
+//   <prompt> | claude.cmd -p      -> exit 0        <- uniform, shim or exe
+//
+// Preferring the nested claude.exe would also work, but only where npm happens
+// to have unpacked one. Stdin has no length limit anywhere and needs no
+// threshold deciding which path to take.
 export function buildClaudeArgs({ prompt, model = DEFAULT_ARBITER_MODEL } = {}) {
   if (typeof prompt !== 'string' || prompt.trim() === '') {
     throw new TypeError('arbiter prompt must be a non-empty string');
   }
   return [
-    '-p', prompt,
+    '-p',
     '--output-format', 'stream-json',
     '--verbose',
     '--permission-mode', 'plan',
@@ -225,6 +240,7 @@ export async function runArbiter({
   try {
     captured = await spawnCapture(bin, args, {
       cwd,
+      input: prompt,
       env: { ...process.env, ...env },
       timeoutMs: resolvedTimeoutMs,
       timeoutSetting: 'URO_ARBITER_TIMEOUT_MS',

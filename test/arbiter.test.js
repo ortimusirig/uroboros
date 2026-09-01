@@ -23,7 +23,7 @@ function fakeChild() {
 
 test('Claude arbiter arguments are headless and read-only', () => {
   const args = buildClaudeArgs({ prompt: 'judge this', model: 'claude-test' });
-  assert.deepEqual(args.slice(0, 4), ['-p', 'judge this', '--output-format', 'stream-json']);
+  assert.deepEqual(args.slice(0, 3), ['-p', '--output-format', 'stream-json']);
   assert.deepEqual(args.slice(args.indexOf('--permission-mode'), args.indexOf('--permission-mode') + 2),
     ['--permission-mode', 'plan']);
   assert.deepEqual(args.slice(args.indexOf('--model')), ['--model', 'claude-test']);
@@ -107,4 +107,38 @@ test('runArbiter is injectable and records a readable judgement without launchin
   assert.deepEqual(events.map((event) => `${event.stage}/${event.type}`), [
     'arbiter/start', 'arbiter/finish',
   ]);
+});
+
+test('the arbiter prompt never rides in argv, whatever its size', async () => {
+  // On Windows `claude` is usually the npm .cmd shim, so the launch goes through
+  // cmd.exe and its 8191-character command line. Measured: a 10,022-character
+  // prompt makes the shim exit 1 with "The command line is too long" in under a
+  // second, the arbiter reads UNVERIFIED, and every blocking finding stands with
+  // no appeal. The same prompt on stdin returns 0 through the same shim.
+  const huge = `${'word '.repeat(2000)}judge this`;
+  assert.ok(huge.length > 8191, 'the fixture must exceed the cmd.exe limit');
+
+  const args = buildClaudeArgs({ prompt: huge, model: 'claude-test' });
+  assert.equal(args.includes(huge), false, 'the prompt must not be an argument');
+  assert.ok(args.join(' ').length < 8191, 'the whole command line must clear the limit');
+
+  // ...and it must actually reach the process on stdin.
+  const child = fakeChild();
+  let delivered = null;
+  child.stdin = { end(value) { delivered = value ?? null; } };
+  const pending = runArbiter({
+    cwd: process.cwd(),
+    request: { type: 'finding', finding: { id: 'F1', description: 'x' } },
+    prompt: huge,
+    spawnProcess: () => {
+      setImmediate(() => {
+        child.stdout.emit('data', Buffer.from(`${JSON.stringify({ type: 'result', result: '{"verdict":"valid"}' })}
+`));
+        child.emit('close', 0);
+      });
+      return child;
+    },
+  });
+  await pending;
+  assert.equal(delivered, huge, 'the prompt must be written to stdin');
 });
