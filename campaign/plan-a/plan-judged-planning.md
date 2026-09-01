@@ -116,10 +116,82 @@ when a planning approach is dead and a fresh one is needed.
 The inspection's observations are evidence available to that judgement, never a
 precondition for it.
 
+### 5. The debate always happens
+
+No path may end a round before the seats have talked. Two can today, and both
+go:
+
+- `src/plan.js` (~854): when no candidate passes the mechanical gate the run
+  returns `candidates-exhausted` — **with no seat having read any plan.**
+- `src/plan.js` (~921): a failed gate skips `reviewPlan` entirely.
+
+With no pass/fail there is no surviving subset at ~599: **every candidate goes to
+the selection seat**, which compares them and picks. `exhausted` then means only
+that drafting produced nothing to discuss — not that a rule rejected everything.
+
+Ending the debate becomes something the arbiter **decides**, never something a
+rule causes.
+
+### 6. A pass is three seats converging
+
+Approval today is an absence: `gateResult.passed === true && surviving.length === 0`.
+Nobody has to actually agree. It becomes a presence — **all three seats
+affirmatively agree**:
+
+- **The drafting seat** states that it understands the plan and can implement it.
+  It says nothing at all today; producing an artifact is not agreement.
+- **The reviewing seat** states the plan is ready.
+- **The arbiter** agrees.
+
+Silence is not consent. A seat that did not run, or returned nothing readable,
+has not agreed and cannot be counted toward convergence — the same rule
+`UNVERIFIED` already encodes for diffs.
+
+**An overruled objection is not agreement.** The arbiter may overrule a finding,
+and that finding stops blocking, but the reviewing seat must still come back and
+say ready. Claude persuades by answering, not by outvoting. If a seat will not
+agree, the escape is the **pivot** — replan or conclude, which the arbiter
+already judges — never forcing the plan through.
+
+A question is how a seat says *not yet*: it is neither agreement nor objection,
+and it leaves the round unconverged by definition.
+
+### 7. An answer carries its provenance
+
+When the arbiter answers a question about a plan, the run records **whether the
+answering seat also authored that plan**. In `loop plan` the draft comes from
+the executor seat, so the arbiter is genuinely third-party; on the `loop run`
+path the operator may have written the plan the arbiter is now interpreting.
+
+This is recorded, not forbidden. A reader must be able to weigh an answer rather
+than assume independence — the same defect as the executor answering its own
+questions, one layer up.
+
+### 8. An overlooked observation is overruled out loud
+
+The inspection's observations are advisory, which creates a real risk: a
+reviewer skims past *"cited path does not exist"* and approves a plan with
+fabricated citations.
+
+A seat may disregard any observation, but must **say so and say why**. The
+outcome is not forced; the judgement is made visible. This mirrors the existing
+rule that a blocking finding without a test is demoted — the seat still decides,
+it simply has to state the decision.
+
+### 9. A question may be judged unnecessary
+
+The arbiter may answer a question with *"that is answerable from the plan"*,
+naming where, and record that. Without this, questions become a free way to
+stall — endless clarification instead of commitment. The arbiter pushes back
+rather than only serving.
+
 ## Invariants
 
 - **No mechanical rule decides whether a plan proceeds.** Not headings, not
   citation counts, not thresholds.
+- **No code path returns from a round without the seats having spoken.**
+- **A pass requires all three seats to agree.** An absence of objections is not
+  agreement, and an overruled objection is not agreement.
 - Factual observations are still gathered, and are always advisory.
 - The reviewer runs on every round.
 - An `authority` question still stops the run for the operator.
@@ -158,6 +230,21 @@ Use injected seams; no test may spawn a real agent.
     `EVENT_TYPES` and `EVENT_PAIRS` in this same change, and round-trips through
     `createEvent`. Undeclared pairs have been silently swallowed four times in
     this repository.
+
+13. A plan whose every candidate would have failed the old gate still reaches the
+    seats — assert `candidates-exhausted` is not returned for that reason.
+14. Convergence requires all three seats; assert a round where the reviewer is
+    ready and the arbiter agrees but the drafting seat has not, does **not**
+    converge.
+15. An overruled finding stops blocking but does **not** by itself converge the
+    round — the reviewing seat must still say ready.
+16. A seat that did not run cannot be counted as agreeing.
+17. An answer records whether the answering arbiter also authored the plan.
+18. A disregarded observation is recorded with the seat's stated reason.
+19. The arbiter may judge a question answerable from the plan, and that is
+    recorded rather than treated as an answer to a new question.
+20. **Mutation control:** removing the drafting seat's agreement from the
+    convergence condition makes a test fail.
 
 Do not delete, skip, or weaken any existing test. Where an existing test asserts
 the removed required-section rule, replace it with one asserting the new
