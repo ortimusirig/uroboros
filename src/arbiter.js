@@ -102,6 +102,17 @@ export function buildArbiterPrompt(request = {}) {
       `PLAN ${String(request.plan ?? '')}`,
     ].join('\n\n');
   }
+  if (request.type === 'review') {
+    return [...common,
+      'The debate has circled without progress, so you now read the change YOURSELF instead of judging other seats\' claims about it. Review the diff against the task first-hand: are the recurring objections real defects, or is the executor\'s defence right?',
+      'Severities are your own judgement of priority (P0/P1/P2 or your own words); nothing mechanical acts on them.',
+      'Schema: {"stance":"reviewer|executor|mixed","findings":[{"id":"C1","severity":"P0","text":"..."}],"reasoning":"what you verified first-hand"}.',
+      `TASK ${String(request.task ?? '')}`,
+      `DIFF ${String(request.diff ?? '')}`,
+      `STANDING_FINDINGS ${compact(request.findings ?? [])}`,
+      ...(request.gate ? [`GATE_RED ${compact(request.gate)}`] : []),
+    ].join('\n\n');
+  }
   if (request.type === 'pivot') {
     return [...common,
       'Choose how to respond to deterministic evidence that the debate is circling.',
@@ -109,6 +120,9 @@ export function buildArbiterPrompt(request = {}) {
       `LEDGER ${compact(request.ledger)}`,
       `RECURRING ${compact(request.recurringFindings ?? [])}`,
       `ATTEMPTED ${compact(request.attempted ?? [])}`,
+      ...(request.independentReview
+        ? [`YOUR_INDEPENDENT_REVIEW ${compact(request.independentReview)}`]
+        : []),
       `PLAN ${String(request.plan ?? '')}`,
     ].join('\n\n');
   }
@@ -206,7 +220,7 @@ function directOrAnswer(response) {
     const embedded = jsonAnswer(response.answer);
     if (embedded) return embedded;
   }
-  const directKeys = ['answer', 'decision', 'capable', 'alternative', 'converged'];
+  const directKeys = ['answer', 'decision', 'capable', 'alternative', 'converged', 'stance'];
   if (directKeys.some((key) => Object.hasOwn(response, key))) return response;
   if (response.verdict === 'valid' || response.verdict === 'invalid') return response;
   return jsonAnswer(response.answer);
@@ -235,6 +249,31 @@ export function parsePivotJudgement(response) {
   return ['amend', 'fresh', 'conclude'].includes(decision)
     ? { verdict: 'answered', decision, reason: String(value.reason ?? '').trim() }
     : { verdict: ARBITER_UNVERIFIED };
+}
+
+export function parseIndependentReview(response) {
+  const value = directOrAnswer(response);
+  const stance = String(value?.stance ?? '').toLowerCase();
+  if (!['reviewer', 'executor', 'mixed'].includes(stance)) {
+    return { verdict: ARBITER_UNVERIFIED };
+  }
+  // Findings are carried as given — id, severity and text are the arbiter's own
+  // words. Severity is never validated or filtered; it is input to judgement.
+  const findings = Array.isArray(value.findings)
+    ? value.findings
+      .filter((finding) => finding && typeof finding.text === 'string' && finding.text.trim() !== '')
+      .map((finding, index) => ({
+        id: String(finding.id ?? `C${index + 1}`),
+        severity: String(finding.severity ?? ''),
+        text: finding.text.trim(),
+      }))
+    : [];
+  return {
+    verdict: 'answered',
+    stance,
+    findings,
+    reasoning: String(value.reasoning ?? '').trim(),
+  };
 }
 
 export function parseAgreementJudgement(response) {

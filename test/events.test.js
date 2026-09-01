@@ -215,7 +215,7 @@ test('every debate event pair round-trips and is retained in events.jsonl', () =
   try {
     const debatePairs = EVENT_PAIRS.filter((pair) => pair.startsWith('debate/'));
     assert.deepEqual(debatePairs.sort(), [
-      'debate/circling', 'debate/converged', 'debate/pivot', 'debate/resist', 'debate/round',
+      'debate/circling', 'debate/converged', 'debate/independent_review', 'debate/pivot', 'debate/resist', 'debate/round',
     ]);
     for (const pair of debatePairs) {
       const [, type] = pair.split('/');
@@ -704,6 +704,9 @@ test('fully exercised runs have exact pair equality with both event vocabularies
       'executor/scope_violation': 'Requires an executor to modify or delete a protected reviewer file.',
       // The clean verifier presents no blocking finding for the executor to resist.
       'debate/resist': 'Requires at least one structured blocking review finding.',
+      // Claude's first-hand review fires only when the debate circles; the
+      // healthy conformance run converges on its first round.
+      'debate/independent_review': 'Requires a circling debate; covered by the circling suite in run.test.js.',
       // Healthy conformance converges on its first review and therefore cannot circle.
       'debate/circling': 'Requires unresolved blockers across three consecutive review rounds.',
       // A pivot is only selected after the debate has been detected as circling.
@@ -711,7 +714,7 @@ test('fully exercised runs have exact pair equality with both event vocabularies
       // Report writes are synchronous, so the event loop cannot observe a mid-write timer gap.
       'report/stalled': 'Unreachable during synchronous report writes.',
     });
-    assert.equal(Object.keys(deliberatelyUncovered).length, 13,
+    assert.equal(Object.keys(deliberatelyUncovered).length, 14,
       'the deliberately-uncovered ratchet must not grow without an explicit test change');
     assert.ok(Object.values(deliberatelyUncovered).every((reason) => reason.length >= 24),
       'every allowlisted pair must carry a substantive reason');

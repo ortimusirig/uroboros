@@ -62,6 +62,7 @@ import {
   ARBITER_UNVERIFIED,
   buildArbiterPrompt,
   DEFAULT_ARBITER_MODEL,
+  parseIndependentReview,
   parsePivotJudgement,
   runArbiter as realArbiter,
 } from './arbiter.js';
@@ -390,7 +391,17 @@ export async function run(opts) {
   const maxChallengeRounds = Math.min(challengeRounds, 2);
   const runExecutor = adapters.runExecutor ?? realExecutor;
   const runGate = adapters.runGate ?? realGate;
-  const runVerifier = adapters.runVerifier ?? realVerifier;
+  // Hermetic guard, same pattern as the arbiter and reviewer seats: a test that
+  // injects the executor but not the verifier must never launch the real CLI.
+  // Reviews running on a red gate made that reachable for the first time.
+  const runVerifier = adapters.runVerifier
+    ?? (adapters.runExecutor === undefined ? realVerifier : null);
+  const invokeVerdictSeat = (options) => (runVerifier === null
+    ? {
+      verdict: 'UNVERIFIED', launchFailed: true, verdictSource: 'none',
+      usage: EMPTY_USAGE, stderr: 'verifier seat not injected in a hermetic run',
+    }
+    : runVerifier(options));
   const runReview = adapters.runReview
     ?? (adapters.runVerifier === undefined ? realReviewPass : null);
   const runMutation = adapters.runMutation ?? realMutation;
@@ -596,6 +607,8 @@ export async function run(opts) {
   let noOpReason;
   const debateLedger = new DebateLedger();
   const debateRoundHistory = [];
+  const independentReviews = [];
+  let latestIndependentReview = null;
   let debateCirclingDetected = false;
   let debatePivotCount = 0;
   let finalPivotDecision = null;
@@ -1013,24 +1026,44 @@ export async function run(opts) {
     outcome = 'needs-decision';
     debateStopReason = 'needs-decision';
     iterations.push(iter);
-  } else if (!gateResult.passed) {
+  } else if (!gateResult.passed
+    && gateResult.results.find((result) => result.code !== 0)?.timedOut) {
+    // A hung gate command is a liveness matter, not a debatable result.
     gateStatus = 'failed';
     const failed = gateResult.results.find((result) => result.code !== 0);
-    outcome = failed?.timedOut ? 'timed-out' : 'gate-failed';
+    outcome = 'timed-out';
     debateStopReason = 'gate-failed';
-    if (failed) {
-      gateFailure = {
-        bin: failed.bin,
-        args: failed.args,
-        ...(failed.harness === undefined ? {} : { harness: failed.harness }),
-        code: failed.code,
-        ...(failed.timedOut ? { timedOut: true, timeoutMs: failed.timeoutMs } : {}),
-        outputTail: failed.outputTail,
-      };
-    }
+    gateFailure = {
+      bin: failed.bin,
+      args: failed.args,
+      ...(failed.harness === undefined ? {} : { harness: failed.harness }),
+      code: failed.code,
+      timedOut: true,
+      timeoutMs: failed.timeoutMs,
+      outputTail: failed.outputTail,
+    };
     iterations.push(iter);
   } else {
-    gateStatus = 'passed';
+    // A red gate no longer blocks the review. Skipping review on red raised
+    // "issues" where there were none — a flaky command or environment failure
+    // read as a code problem, and nobody was allowed to look and say the code
+    // is fine and the gate is wrong. The gate result now rides into the debate
+    // as evidence the seats argue about. What it does NOT do is stop deciding
+    // the landing: review-ready still requires a green gate, so seats approving
+    // over a red gate ends as gate-failed — reviewed, but unlandable.
+    gateStatus = gateResult.passed ? 'passed' : 'failed';
+    if (!gateResult.passed) {
+      const failed = gateResult.results.find((result) => result.code !== 0);
+      if (failed) {
+        gateFailure = {
+          bin: failed.bin,
+          args: failed.args,
+          ...(failed.harness === undefined ? {} : { harness: failed.harness }),
+          code: failed.code,
+          outputTail: failed.outputTail,
+        };
+      }
+    }
     const refreshDiff = async () => {
       reportEvent(eventReporter, runId, 'diff', 'start');
       const value = await createDiff(
@@ -1050,10 +1083,13 @@ export async function run(opts) {
     let diff = await refreshDiff();
     if (diff.trim() === '') {
       // A non-zero exit with no diff is a crashed/aborted executor, not a legitimate no-op.
-      outcome = Number.isInteger(iter.executor.exitCode) && iter.executor.exitCode !== 0
-        ? 'executor-failed'
-        : 'no-op';
-      debateStopReason = 'no-substantive-diff';
+      // With a red gate and no diff there is nothing to review either way.
+      outcome = !gateResult.passed
+        ? 'gate-failed'
+        : Number.isInteger(iter.executor.exitCode) && iter.executor.exitCode !== 0
+          ? 'executor-failed'
+          : 'no-op';
+      debateStopReason = !gateResult.passed ? 'gate-failed' : 'no-substantive-diff';
       if (outcome === 'no-op'
         && iter.executor.exitCode === 0
         && !existsSync(join(iso.dir, 'DECISION.md'))
@@ -1062,6 +1098,18 @@ export async function run(opts) {
       }
       iterations.push(iter);
     } else {
+      // When the gate is red the verdict seats are told so, in one argv-safe
+      // line, and asked to judge whether the failure indicts the change or the
+      // gate command itself — the question a skipped review could never answer.
+      const gateNote = () => {
+        if (gateResult.passed) return '';
+        const failed = gateResult.results.find((result) => result.code !== 0);
+        const tail = String(failed?.outputTail ?? '')
+          .replace(/["\r\n]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 160);
+        return ` GATE IS RED: ${failed?.bin ?? 'command'} exited ${failed?.code ?? 'non-zero'}.`
+          + (tail ? ` Tail: ${tail}.` : '')
+          + ' Judge whether the failure indicts the change or the gate command itself.';
+      };
       let debateRound = 0;
       while (true) {
         const consumedBeforeRound = addUsage(addUsage(executorUsage, verifierUsage), arbiterUsage);
@@ -1130,8 +1178,8 @@ export async function run(opts) {
           }
         }
         iter.reviewer = reviewer;
-        const v = annotateVerifierConsistency(observeUsage(await runVerifier({
-          cwd: iso.dir, bin: verifierBin, model: verifierModel, prompt: DEFAULT_PROMPT,
+        const v = annotateVerifierConsistency(observeUsage(await invokeVerdictSeat({
+          cwd: iso.dir, bin: verifierBin, model: verifierModel, prompt: DEFAULT_PROMPT + gateNote(),
           superpowersDir: cursorSuperpowersDir,
           env: runEnvironment,
           timeoutMs: stageTimeouts.verifier,
@@ -1144,8 +1192,8 @@ export async function run(opts) {
           livenessThresholdMs: executorThresholds.thresholdMs,
           progressThresholdMs: executorThresholds.progressThresholdMs,
         }), { seat: 'verifier', pass: 'correctness', iteration: n }));
-        const intentVerifier = annotateVerifierConsistency(observeUsage(await runVerifier({
-          cwd: iso.dir, bin: verifierBin, model: verifierModel, prompt: INTENT_PROMPT,
+        const intentVerifier = annotateVerifierConsistency(observeUsage(await invokeVerdictSeat({
+          cwd: iso.dir, bin: verifierBin, model: verifierModel, prompt: INTENT_PROMPT + gateNote(),
           superpowersDir: cursorSuperpowersDir,
           env: runEnvironment,
           timeoutMs: stageTimeouts.verifier,
@@ -1353,8 +1401,35 @@ export async function run(opts) {
             debateRound,
             stuckFindingIds,
           });
+          // The debate has gone on for some time without progress — the measured
+          // signal, not a round count. Claude now stops refereeing the other
+          // seats' claims and reads TASK.md and the diff itself, producing its
+          // own findings and a stance: are the recurring objections real, or is
+          // the executor's defence right? That first-hand view informs the pivot.
+          const independent = parseIndependentReview(await arbitrate({
+            type: 'review',
+            task: originalPlan,
+            diff,
+            findings: acceptedFindings,
+            gate: gateResult.passed ? null : gateFailure,
+          }));
+          if (independent.verdict === 'answered') {
+            latestIndependentReview = independent;
+            independentReviews.push({ debateRound, ...independent });
+            reportEvent(eventReporter, runId, 'debate', 'independent_review', {
+              debateRound,
+              stance: independent.stance,
+              findingIds: independent.findings.map((finding) => finding.id),
+            });
+          } else {
+            independentReviews.push({ debateRound, unjudged: true });
+            reportEvent(eventReporter, runId, 'debate', 'independent_review', {
+              debateRound, unjudged: true,
+            });
+          }
           const pivotJudgement = parsePivotJudgement(await arbitrate({
             type: 'pivot',
+            independentReview: independent.verdict === 'answered' ? independent : null,
             ledger: Array.from({ length: debateLedger.currentRound }, (_, index) => ({
               round: index + 1,
               findingIds: debateLedger.round(index + 1),
@@ -1560,6 +1635,22 @@ export async function run(opts) {
           originalTask: originalPlan,
         });
         if (amendPlan) fixPlan = amendFixPlanWithLedger(fixPlan, debateLedger);
+        // A red gate is part of the argument now, so the fix plan carries it:
+        // Codex may fix the code, or defend it and name the gate command as the
+        // defect — the reviewers see the same evidence and judge.
+        if (!gateResult.passed) fixPlan = planWithGateFailure(fixPlan, gateResult);
+        if (latestIndependentReview !== null) {
+          fixPlan = [
+            fixPlan,
+            '',
+            '## Claude independent review (read the change itself)',
+            `Stance: ${latestIndependentReview.stance}`,
+            ...latestIndependentReview.findings.map(
+              (finding) => `- ${finding.id} ${finding.severity}: ${finding.text}`,
+            ),
+            latestIndependentReview.reasoning,
+          ].join('\n');
+        }
         plan = fixPlan;
         n++;
         iterationExecutorUsage = EMPTY_USAGE;
@@ -1627,32 +1718,49 @@ export async function run(opts) {
           break;
         }
         if (!gateResult.passed) {
-          gateStatus = 'failed';
           const failed = gateResult.results.find((result) => result.code !== 0);
-          outcome = failed?.timedOut ? 'timed-out' : 'gate-failed';
-          debateStopReason = 'gate-failed';
+          if (failed?.timedOut) {
+            // A hung gate is a liveness matter; the debate cannot argue with it.
+            gateStatus = 'failed';
+            outcome = 'timed-out';
+            debateStopReason = 'gate-failed';
+            gateFailure = {
+              bin: failed.bin,
+              args: failed.args,
+              ...(failed.harness === undefined ? {} : { harness: failed.harness }),
+              code: failed.code,
+              timedOut: true,
+              timeoutMs: failed.timeoutMs,
+              outputTail: failed.outputTail,
+            };
+            iterations.push(iter);
+            break;
+          }
+          // Still red after the fix round: the debate continues rather than a
+          // rule ending it. The next review round sees the red gate and judges;
+          // termination comes from convergence (which still requires green),
+          // the arbiter's pivot, the token budget, or the round bound.
+          gateStatus = 'failed';
           if (failed) {
             gateFailure = {
               bin: failed.bin,
               args: failed.args,
               ...(failed.harness === undefined ? {} : { harness: failed.harness }),
               code: failed.code,
-              ...(failed.timedOut
-                ? { timedOut: true, timeoutMs: failed.timeoutMs } : {}),
               outputTail: failed.outputTail,
             };
           }
-          iterations.push(iter);
-          break;
+        } else {
+          gateStatus = 'passed';
         }
-
-        gateStatus = 'passed';
         diff = await refreshDiff();
         if (diff.trim() === '') {
-          outcome = Number.isInteger(iter.executor.exitCode) && iter.executor.exitCode !== 0
-            ? 'executor-failed'
-            : 'no-op';
-          debateStopReason = 'no-substantive-diff';
+          outcome = !gateResult.passed
+            ? 'gate-failed'
+            : Number.isInteger(iter.executor.exitCode) && iter.executor.exitCode !== 0
+              ? 'executor-failed'
+              : 'no-op';
+          debateStopReason = !gateResult.passed ? 'gate-failed' : 'no-substantive-diff';
           iterations.push(iter);
           break;
         }
@@ -1716,6 +1824,7 @@ export async function run(opts) {
     resolvedFindingIds: [...debateLedger.resolvedFindings()],
     stuckFindingIds: [...debateLedger.stuckFindings()],
     circlingDetected: debateCirclingDetected,
+    independentReviews: independentReviews.map((item) => ({ ...item })),
     pivotCount: debatePivotCount,
     finalPivotDecision,
     pivotHistory: pivotHistory.map((item) => ({ ...item })),

@@ -304,7 +304,8 @@ test('the merge gate test-count floor fails when conflict repair drops one paren
           runGate,
           runVerifier: async ({ runId }) => {
             if (runId === 'floor-join') {
-              throw new Error('a failed floor must stop before verification');
+              // The red floor no longer stops review — the seats look and judge.
+              return { verdict: 'NO_BLOCKERS', launchFailed: false };
             }
             return cleanVerifier();
           },

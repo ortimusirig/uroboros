@@ -1065,8 +1065,14 @@ test('unrelated executor prose does not label an empty successful pass as approv
     rmSync(scr, { recursive: true, force: true });
   });
 
-test('red gate exhausts retries → gate-failed, verifier never launched', async () => {
-  let gateCalls = 0, launches = 0;
+test('a red gate is reviewed anyway, and still cannot land', async () => {
+  // The old rule — red gate skips review — read every flaky command as a code
+  // problem and let nobody look. Reviews now run on the red gate, the verdict
+  // seats are told in one line, and the ONLY thing the gate keeps deciding is
+  // the landing: clean verdicts over a red gate end gate-failed, not
+  // review-ready.
+  let gateCalls = 0;
+  const prompts = [];
   const scr = scratch();
   const facts = await run({
     task: 'do the task', target: makeTarget(), gate: [], gateRetries: 2,
@@ -1077,18 +1083,23 @@ test('red gate exhausts retries → gate-failed, verifier never launched', async
         bin: 'node', args: ['--test'], code: 1,
         outputTail: '[stdout]\nfailed assertion\n[stderr]\nstack trace',
       }] }; },
-      runVerifier: async () => { launches++; return { verdict: 'NO_BLOCKERS' }; },
+      runVerifier: async ({ prompt }) => {
+        prompts.push(prompt);
+        return { verdict: 'NO_BLOCKERS' };
+      },
     },
   });
   assert.equal(facts.gateStatus, 'failed');
-  assert.equal(facts.outcome, 'gate-failed');
-  assert.equal(launches, 0);
+  assert.equal(facts.outcome, 'gate-failed',
+    'the gate is still the only thing that can land a change');
+  assert.equal(prompts.length, 2, 'both verdict seats must review the red gate');
+  for (const prompt of prompts) {
+    assert.match(prompt, /GATE IS RED: node exited 1/);
+    assert.match(prompt, /indicts the change or the gate command itself/);
+    assert.doesNotMatch(prompt, /"/, 'the gate note must stay argv-safe');
+  }
   assert.equal(gateCalls, 3, '1 initial + 2 free retries');
-  assert.deepEqual(facts.gateFailure, {
-    bin: 'node', args: ['--test'], code: 1,
-    outputTail: '[stdout]\nfailed assertion\n[stderr]\nstack trace',
-  });
-  assert.deepEqual(facts.tokens.executor, EMPTY_USAGE);
+  assert.equal(facts.gateFailure.code, 1);
   rmSync(scr, { recursive: true, force: true });
 });
 
@@ -1635,7 +1646,10 @@ test('URO_DEBATE_ROUNDS exhaustion stops honestly with unresolved findings', asy
   }
 });
 
-test('a fix round that breaks the gate fails like an initial gate failure', async () => {
+test('a fix round that breaks the gate keeps the debate alive, and lands nothing', async () => {
+  // Previously a red fix-round gate ended the run before anyone reviewed the
+  // fix. Now the next review round sees the red gate and judges it; the run
+  // still ends gate-failed because clean verdicts cannot land over red.
   const scr = scratch();
   try {
     let gateCall = 0;
@@ -1649,17 +1663,25 @@ test('a fix round that breaks the gate fails like an initial gate failure', asyn
           ? { passed: true, results: [] }
           : { passed: false, results: [{ bin: 'node', args: ['--test'], code: 7,
               outputTail: 'review regression failed' }] },
-        runVerifier: async (options) => {
-          verifierCalls++;
-          return verifierForRounds([blockingReview()])(options);
-        },
+        // One closure for the whole run — rebuilding it per call re-served the
+        // blocking finding every round, a latent fixture bug the old
+        // review-skip behaviour never exposed.
+        runVerifier: (() => {
+          const verify = verifierForRounds([blockingReview()]);
+          return async (options) => {
+            verifierCalls++;
+            return verify(options);
+          };
+        })(),
       },
     });
 
     assert.equal(facts.outcome, 'gate-failed');
     assert.equal(facts.gateStatus, 'failed');
     assert.equal(facts.gateFailure.code, 7);
-    assert.equal(verifierCalls, 2, 'the failed fix gate must prevent another review');
+    assert.equal(verifierCalls, 4,
+      'the red fix gate must NOT prevent the next review round');
+    assert.equal(facts.debate.roundsRun, 2);
   } finally {
     rmSync(scr, { recursive: true, force: true });
   }
@@ -1719,4 +1741,61 @@ test('debate rounds are unbounded by default and accept any positive operator bo
   assert.equal(resolveDebateRounds({ URO_DEBATE_ROUNDS: '50' }), 50);
   assert.throws(() => resolveDebateRounds({ URO_DEBATE_ROUNDS: '0' }), /positive integer/);
   assert.throws(() => resolveDebateRounds({ URO_DEBATE_ROUNDS: '2.5' }), /positive integer/);
+});
+
+test('circling triggers Claude to read the change itself, and its view reaches everyone', async () => {
+  // The owner's rule: once the debate has gone on for some time — the measured
+  // circling signal, never a round count — Claude stops refereeing the other
+  // seats' claims and reviews the diff first-hand. Its stance and findings are
+  // recorded, handed to the pivot judgement, and put in front of Codex.
+  const scr = scratch();
+  try {
+    const arbiterRequests = [];
+    const executorPlans = [];
+    const facts = await run({
+      task: 'do the task', target: makeTarget(), gate: [], gateRetries: 0,
+      scratchRoot: scr, runId: 'debate-independent-review',
+      adapters: {
+        runExecutor: async (options) => {
+          executorPlans.push(options.plan);
+          return writingExecutor(options);
+        },
+        runGate: async () => ({ passed: true, results: [] }),
+        runVerifier: verifierForRounds([
+          blockingReview(), blockingReview(), blockingReview(), null,
+        ]),
+        runArbiter: async ({ request }) => {
+          arbiterRequests.push(request);
+          if (request.type === 'finding') return { verdict: 'valid' };
+          if (request.type === 'review') {
+            return {
+              stance: 'mixed',
+              findings: [{ id: 'C1', severity: 'P0', text: 'the recurring objection is real at line 4' }],
+              reasoning: 'read the diff first-hand',
+            };
+          }
+          if (request.type === 'pivot') return { decision: 'amend', reason: 'the review shows it is fixable' };
+          return { verdict: 'valid' };
+        },
+      },
+    });
+
+    assert.equal(facts.outcome, 'review-ready', 'the amended round converges');
+    const reviewRequest = arbiterRequests.find((request) => request.type === 'review');
+    assert.ok(reviewRequest, 'circling must trigger an independent review before the pivot');
+    assert.match(String(reviewRequest.diff), /diff --git/);
+    const pivotRequest = arbiterRequests.find((request) => request.type === 'pivot');
+    assert.equal(pivotRequest.independentReview.stance, 'mixed',
+      'the pivot must be judged WITH the first-hand view in hand');
+    assert.equal(facts.debate.independentReviews.length, 1);
+    assert.deepEqual(facts.debate.independentReviews[0].findings,
+      [{ id: 'C1', severity: 'P0', text: 'the recurring objection is real at line 4' }]);
+    const amendedPlan = executorPlans.find((plan) => plan.includes('Claude independent review'));
+    assert.ok(amendedPlan, 'the amended fix plan must carry the first-hand findings to Codex');
+    assert.match(amendedPlan, /C1 P0: the recurring objection is real at line 4/);
+    // Severity travels verbatim; nothing filtered it on the way through.
+    assert.equal(facts.debate.independentReviews[0].findings[0].severity, 'P0');
+  } finally {
+    rmSync(scr, { recursive: true, force: true });
+  }
 });
