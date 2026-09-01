@@ -126,6 +126,10 @@ export async function runGate({
   runId,
   attempt,
   captureTestCount = commands.some((command) => command.harness === 'ccc-test-count-floor'),
+  // Evidence sink: receives every command's FULL stdout/stderr, untruncated.
+  // The tail below is a facts-sized excerpt; the sink is how the complete
+  // output reaches disk so seats judge from whole evidence, never a cut string.
+  onEvidence,
 }) {
   const results = [];
   let testCount = 0;
@@ -156,6 +160,18 @@ export async function runGate({
       ...(cmd.harness === undefined ? {} : { harness: cmd.harness }),
       code: r.code,
     };
+    try {
+      onEvidence?.({
+        bin: cmd.bin,
+        args: cmd.args,
+        ...(cmd.harness === undefined ? {} : { harness: cmd.harness }),
+        code: r.code,
+        timedOut: r.timedOut,
+        attempt,
+        stdout: r.stdout,
+        stderr: r.stderr,
+      });
+    } catch { /* evidence capture must never alter execution */ }
     reportEvent(reporter, runId, 'gate', 'gate_command', {
       ...result, timedOut: r.timedOut, attempt,
     });

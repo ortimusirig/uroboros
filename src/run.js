@@ -8,6 +8,7 @@ import {
   EXECUTOR_PREAMBLE,
   runExecutor as realExecutor,
 } from './executor.js';
+import { createEvidenceWriter } from './evidence.js';
 import { buildReviewerTestCommands, runGate as realGate } from './gate.js';
 import {
   annotateVerifierConsistency,
@@ -536,6 +537,10 @@ export async function run(opts) {
     campaignId,
     campaignBase,
   });
+  // Execution evidence, kept whole: every command run in this worktree writes
+  // its complete output to __uro_evidence/ for the seats to read; the facts
+  // carry excerpts plus paths. Records, never verdicts.
+  const evidence = createEvidenceWriter({ dir: iso.dir });
   if (judgeLiveness === null && productionLivenessJudge) {
     judgeLiveness = createLivenessJudge({
       cwd: iso.dir,
@@ -949,6 +954,7 @@ export async function run(opts) {
   if (decision === null && !executorTimedOut && !conflictingIntent
     && mergePreparationFailure === null) {
     gateResult = await runGate({
+      onEvidence: (entry) => evidence.write(entry),
       commands: gateCommands(), cwd: iso.dir, timeoutMs: stageTimeouts.gate,
       reporter: eventReporter, runId, attempt: 1,
       captureTestCount,
@@ -983,6 +989,7 @@ export async function run(opts) {
     await routeChallenges();
     if (decision === null && !executorTimedOut) {
       gateResult = await runGate({
+      onEvidence: (entry) => evidence.write(entry),
         commands: gateCommands(), cwd: iso.dir, timeoutMs: stageTimeouts.gate,
         reporter: eventReporter, runId, attempt: retries + 1,
         captureTestCount,
@@ -1120,6 +1127,7 @@ export async function run(opts) {
           break;
         }
         debateRound++;
+        evidence.setRound(debateRound);
         let reviewer = { launchFailed: false, timedOut: false, skipped: true };
         if (runReview !== null) {
           try {
@@ -1301,6 +1309,7 @@ export async function run(opts) {
           let convergenceGateRetries = 0;
           if (!allBlockingOverruled && accumulatedReviewTests.size > 0) {
             gateResult = await runGate({
+      onEvidence: (entry) => evidence.write(entry),
               commands: gateCommands(), cwd: iso.dir, timeoutMs: stageTimeouts.gate,
               reporter: eventReporter, runId, attempt: 1,
               captureTestCount,
@@ -1330,6 +1339,7 @@ export async function run(opts) {
             if (decision === null && !executorTimedOut && !conflictingIntent
               && mergePreparationFailure === null) {
               gateResult = await runGate({
+      onEvidence: (entry) => evidence.write(entry),
                 commands: gateCommands(), cwd: iso.dir, timeoutMs: stageTimeouts.gate,
                 reporter: eventReporter, runId, attempt: convergenceGateRetries + 1,
                 captureTestCount,
@@ -1663,6 +1673,7 @@ export async function run(opts) {
         if (decision === null && !executorTimedOut && !conflictingIntent
           && mergePreparationFailure === null) {
           gateResult = await runGate({
+      onEvidence: (entry) => evidence.write(entry),
             commands: gateCommands(), cwd: iso.dir, timeoutMs: stageTimeouts.gate,
             reporter: eventReporter, runId, attempt: 1,
             captureTestCount,
@@ -1687,6 +1698,7 @@ export async function run(opts) {
           await routeChallenges();
           if (decision === null && !executorTimedOut) {
             gateResult = await runGate({
+      onEvidence: (entry) => evidence.write(entry),
               commands: gateCommands(), cwd: iso.dir, timeoutMs: stageTimeouts.gate,
               reporter: eventReporter, runId, attempt: fixGateRetries + 1,
               captureTestCount,
@@ -1888,6 +1900,7 @@ export async function run(opts) {
     verifierPlan, verifierEvidence, verifierConsistency,
     intentVerifierFindings, intentVerdict, intentVerdictSource,
     intentVerifierPlan, intentVerifierEvidence, intentVerifierConsistency,
+    evidence: evidence.records(),
     gateFailure, tokens, usageConsistency, outcome, gateRetries, debate,
     ...(noOpReason === undefined ? {} : { noOpReason }),
     timeouts: stageTimeouts, timeoutEvents,

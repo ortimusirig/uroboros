@@ -33,6 +33,7 @@ export function buildRunFacts({
   intentVerifierEvidence = null,
   intentVerifierConsistency = null,
   gateFailure = null,
+  evidence = [],
   tokens = {},
   usageConsistency = null,
   models = {},
@@ -93,6 +94,7 @@ export function buildRunFacts({
     intentVerifierEvidence: intentVerifierEvidence ?? null,
     intentVerifierConsistency: intentVerifierConsistency ?? null,
     gateFailure: gateFailure ?? null,
+    evidence,
     tokens: {
       executor: addUsage(EMPTY_USAGE, tokens?.executor),
       verifier: addUsage(EMPTY_USAGE, tokens?.verifier),

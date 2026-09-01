@@ -1799,3 +1799,44 @@ test('circling triggers Claude to read the change itself, and its view reaches e
     rmSync(scr, { recursive: true, force: true });
   }
 });
+
+test('every command run in the worktree leaves whole evidence on disk', async () => {
+  // "No green, no red" starts here: the harness executes as a stenographer.
+  // Full stdout/stderr per command goes to __uro_evidence/ files the seats can
+  // read; the facts carry a tail excerpt plus the paths. Nothing may branch on
+  // these records — they are transcript, not verdict.
+  const scr = scratch();
+  try {
+    const facts = await run({
+      task: 'do the task', target: makeTarget(), gate: [], gateRetries: 0,
+      scratchRoot: scr, runId: 'evidence-run',
+      adapters: {
+        runExecutor: writingExecutor,
+        runGate: async ({ onEvidence }) => {
+          onEvidence?.({
+            bin: 'node', args: ['--test'], code: 0, timedOut: false, attempt: 1,
+            stdout: `${'noise line\n'.repeat(200)}tests 823 pass 823 fail 0\n`,
+            stderr: '',
+          });
+          return { passed: true, results: [] };
+        },
+        runVerifier: async () => ({ verdict: 'NO_BLOCKERS' }),
+      },
+    });
+
+    assert.equal(facts.evidence.length, 1);
+    const record = facts.evidence[0];
+    assert.equal(record.code, 0);
+    // The excerpt keeps the TAIL — the end of a run is where it says why it
+    // stopped — and the full text lives on disk, untruncated.
+    assert.match(record.excerpt, /tests 823 pass 823 fail 0/);
+    assert.ok(record.excerpt.length <= 500);
+    const full = readFileSync(join(facts.dir, record.outFile), 'utf8');
+    assert.match(full, /^noise line/, 'the file must hold the WHOLE output, head included');
+    assert.equal((full.match(/noise line/g) ?? []).length, 200);
+    assert.equal(Object.hasOwn(record, 'passed'), false,
+      'an evidence record must never carry a verdict field');
+  } finally {
+    rmSync(scr, { recursive: true, force: true });
+  }
+});
