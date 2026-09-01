@@ -277,6 +277,7 @@ export async function runQueue({
   const launchPlan = dependencies.launchPlan ?? missingDependency('launchPlan');
   const readRunFacts = dependencies.readRunFacts ?? missingDependency('readRunFacts');
   const landDiff = dependencies.landDiff ?? missingDependency('landDiff');
+  const judgeLanding = dependencies.judgeLanding ?? missingDependency('judgeLanding');
   const appendLog = dependencies.appendLog ?? appendQueueLog;
   const now = dependencies.now ?? (() => Date.now());
 
@@ -422,24 +423,54 @@ export async function runQueue({
     }
 
     let landed = false;
+    let landingJudgement = null;
     if (evaluation.action === 'land') {
+      // The hierarchy's last step: with the reviewer's findings closed,
+      // Claude reads the change first-hand and judges the landing. Nothing
+      // lands unseen — an unavailable or unreadable judgement is a stop,
+      // never consent.
       try {
-        await landDiff({
-          target: resolve(target),
-          diffPath: join(launch.runDirectory, 'CHANGES.diff'),
+        landingJudgement = await judgeLanding({
           unit,
-          runId: facts?.runId ?? launch?.runId ?? 'unknown',
-          allowedDirtyPaths: allowedQueuePaths,
-        });
-        landed = true;
-        landedCount++;
+          facts,
+          runDirectory: launch.runDirectory,
+        }) ?? { approved: null, reasoning: 'landing judge returned nothing' };
       } catch (error) {
-        const reason = error?.message ?? String(error);
+        landingJudgement = {
+          approved: null,
+          reasoning: error?.message ?? String(error),
+        };
+      }
+      if (landingJudgement.approved === true) {
+        try {
+          await landDiff({
+            target: resolve(target),
+            diffPath: join(launch.runDirectory, 'CHANGES.diff'),
+            unit,
+            runId: facts?.runId ?? launch?.runId ?? 'unknown',
+            allowedDirtyPaths: allowedQueuePaths,
+          });
+          landed = true;
+          landedCount++;
+        } catch (error) {
+          const reason = error?.message ?? String(error);
+          stop = {
+            kind: 'apply-failed',
+            unit: unit.name,
+            unitIndex: unit.index,
+            reason,
+            outcome: facts?.outcome ?? null,
+            questions: [],
+          };
+        }
+      } else {
         stop = {
-          kind: 'apply-failed',
+          kind: 'final-review',
           unit: unit.name,
           unitIndex: unit.index,
-          reason,
+          reason: landingJudgement.approved === false
+            ? `Claude refused the landing: ${landingJudgement.reasoning || '(no reasoning recorded)'}`
+            : `Claude's final review was unavailable — nothing lands unseen: ${landingJudgement.reasoning || '(no detail)'}`,
           outcome: facts?.outcome ?? null,
           questions: [],
         };
@@ -464,6 +495,15 @@ export async function runQueue({
       durationMs,
       landed,
       stoppedOn: stop !== null,
+      ...(landingJudgement === null ? {} : {
+        finalReview: {
+          approved: landingJudgement.approved,
+          reasoning: landingJudgement.reasoning ?? '',
+          ...(Array.isArray(landingJudgement.findings) && landingJudgement.findings.length > 0
+            ? { findings: landingJudgement.findings }
+            : {}),
+        },
+      }),
       ...(tokenReading.valid ? {} : { tokenAccounting: 'invalid' }),
       ...(stop === null ? {} : { stopReason: stop.reason }),
       ...(evaluation.questions?.length > 0 ? { questions: evaluation.questions } : {}),

@@ -4,6 +4,7 @@ import { join, resolve } from 'node:path';
 import test from 'node:test';
 import {
   assertCleanTarget,
+  judgeLandingWithClaude,
   landQueueDiff,
   launchLoopPlan,
   launchLoopRun,
@@ -326,4 +327,59 @@ test('a failed dry-run apply check performs no mutating Git command', async () =
 
   assert.equal(calls.length, 3);
   assert.deepEqual(calls[2].args.slice(2, 5), ['apply', '--check', '--index']);
+});
+
+test('judgeLandingWithClaude hands Claude the composed task, diff, findings, and evidence', async () => {
+  const directory = mkdtempSync(join(process.cwd(), '.ccc-test-landing-'));
+  try {
+    writeFileSync(join(directory, 'TASK.md'), 'Composed task exactly as executed.');
+    writeFileSync(join(directory, 'CHANGES.diff'), 'diff --git a/x b/x');
+    const requests = [];
+    const judgement = await judgeLandingWithClaude({
+      unit: { name: 'unit-1' },
+      facts: {
+        debate: { roundHistory: [{ findings: [{ id: 'F1', severity: 'suggestion', description: 'nit' }] }] },
+        evidence: [
+          { bin: 'node', code: 0, excerpt: 'fine' },
+          { bin: 'npm', code: 2, excerpt: 'lint failed' },
+        ],
+      },
+      runDirectory: directory,
+    }, {
+      arbiter: async ({ request }) => {
+        requests.push(request);
+        return { approved: true, reasoning: 'verified the diff first-hand' };
+      },
+    });
+    assert.deepEqual(judgement, {
+      approved: true, reasoning: 'verified the diff first-hand', findings: [],
+    });
+    assert.equal(requests[0].type, 'landing');
+    assert.equal(requests[0].task, 'Composed task exactly as executed.');
+    assert.equal(requests[0].diff, 'diff --git a/x b/x');
+    assert.deepEqual(requests[0].findings.map((finding) => finding.id), ['F1']);
+    assert.deepEqual(requests[0].evidence.map((entry) => entry.bin), ['npm'],
+      'only non-zero exits travel as landing evidence');
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('judgeLandingWithClaude treats an unreachable or unreadable arbiter as not-approved', async () => {
+  const directory = mkdtempSync(join(process.cwd(), '.ccc-test-landing-down-'));
+  try {
+    const thrown = await judgeLandingWithClaude({
+      unit: { name: 'unit-1' }, facts: {}, runDirectory: directory,
+    }, { arbiter: async () => { throw new Error('spawn claude ENOENT'); } });
+    assert.equal(thrown.approved, null);
+    assert.match(thrown.reasoning, /ENOENT/);
+
+    const unreadable = await judgeLandingWithClaude({
+      unit: { name: 'unit-1' }, facts: {}, runDirectory: directory,
+    }, { arbiter: async () => ({ answer: 'sure, ship it' }) });
+    assert.equal(unreadable.approved, null,
+      'prose without a readable approval boolean is never consent');
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 });

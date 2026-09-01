@@ -2,11 +2,13 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import {
+  buildArbiterPrompt,
   buildClaudeArgs,
   parseArbiterStream,
   parseCapabilityJudgement,
   parseDecisionJudgement,
   parseFindingJudgement,
+  parseLandingJudgement,
   parsePivotJudgement,
   runArbiter,
 } from '../src/arbiter.js';
@@ -141,4 +143,47 @@ test('the arbiter prompt never rides in argv, whatever its size', async () => {
   });
   await pending;
   assert.equal(delivered, huge, 'the prompt must be written to stdin');
+});
+
+test('the landing judgement carries approval, reasoning, and findings verbatim', () => {
+  assert.deepEqual(parseLandingJudgement({
+    approved: false,
+    reasoning: 'the diff narrows shared scope',
+    findings: [{ id: 'L1', severity: 'P0', text: 'scope narrowed' }],
+  }), {
+    verdict: 'answered',
+    approved: false,
+    reasoning: 'the diff narrows shared scope',
+    findings: [{ id: 'L1', severity: 'P0', text: 'scope narrowed' }],
+  });
+  assert.deepEqual(parseLandingJudgement({ answer: '{"approved":true,"reasoning":"sound"}' }), {
+    verdict: 'answered', approved: true, reasoning: 'sound', findings: [],
+  });
+  // Silence is not consent: no readable boolean means UNVERIFIED, never yes.
+  assert.equal(parseLandingJudgement({ answer: 'looks fine to me' }).verdict, 'UNVERIFIED');
+  assert.equal(parseLandingJudgement(undefined).verdict, 'UNVERIFIED');
+  // Severity travels verbatim; nothing validates or filters it.
+  const carried = parseLandingJudgement({
+    approved: true, reasoning: 'r',
+    findings: [{ id: 'L9', severity: 'whatever-claude-said', text: 'note' }],
+  });
+  assert.equal(carried.findings[0].severity, 'whatever-claude-said');
+});
+
+test('the landing prompt puts the task, diff, closed findings, and evidence in front of Claude', () => {
+  const prompt = buildArbiterPrompt({
+    type: 'landing',
+    task: 'Implement the guarded path.',
+    diff: 'diff --git a/x b/x',
+    findings: [{ id: 'F1', severity: 'suggestion', description: 'closed nit' }],
+    evidence: [{ bin: 'node', code: 1, excerpt: 'boom' }],
+  });
+  assert.match(prompt, /review it YOURSELF, first-hand/);
+  assert.match(prompt, /"approved":true\|false/);
+  assert.match(prompt, /TASK Implement the guarded path\./);
+  assert.match(prompt, /DIFF diff --git a\/x b\/x/);
+  assert.match(prompt, /CLOSED_FINDINGS \[/);
+  assert.match(prompt, /closed nit/);
+  assert.match(prompt, /EVIDENCE \[/);
+  assert.match(prompt, /boom/);
 });

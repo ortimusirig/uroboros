@@ -113,6 +113,17 @@ export function buildArbiterPrompt(request = {}) {
       ...(request.gate ? [`GATE_RED ${compact(request.gate)}`] : []),
     ].join('\n\n');
   }
+  if (request.type === 'landing') {
+    return [...common,
+      'The reviewer has closed its findings and the debate converged. Before this change lands on the operator\'s tree, review it YOURSELF, first-hand: read the diff against the task, weigh the closed findings and the command evidence, and judge whether it should land.',
+      'Landing is your judgement, not a checklist: approve when you are satisfied the change achieves the task without a defect worth stopping for; refuse when you are not, and say exactly why. Severities in your findings are your own words; nothing mechanical acts on them.',
+      'Schema: {"approved":true|false,"reasoning":"what you verified first-hand","findings":[{"id":"L1","severity":"P0","text":"..."}]}.',
+      `TASK ${String(request.task ?? '')}`,
+      `DIFF ${String(request.diff ?? '')}`,
+      `CLOSED_FINDINGS ${compact(request.findings ?? [])}`,
+      `EVIDENCE ${compact(request.evidence ?? [])}`,
+    ].join('\n\n');
+  }
   if (request.type === 'pivot') {
     return [...common,
       'Choose how to respond to deterministic evidence that the debate is circling.',
@@ -220,7 +231,7 @@ function directOrAnswer(response) {
     const embedded = jsonAnswer(response.answer);
     if (embedded) return embedded;
   }
-  const directKeys = ['answer', 'decision', 'capable', 'alternative', 'converged', 'stance'];
+  const directKeys = ['answer', 'decision', 'capable', 'alternative', 'converged', 'stance', 'approved'];
   if (directKeys.some((key) => Object.hasOwn(response, key))) return response;
   if (response.verdict === 'valid' || response.verdict === 'invalid') return response;
   return jsonAnswer(response.answer);
@@ -273,6 +284,28 @@ export function parseIndependentReview(response) {
     stance,
     findings,
     reasoning: String(value.reasoning ?? '').trim(),
+  };
+}
+
+export function parseLandingJudgement(response) {
+  const value = directOrAnswer(response);
+  if (typeof value?.approved !== 'boolean') return { verdict: ARBITER_UNVERIFIED };
+  // Findings and severities are carried as given — the arbiter's own words,
+  // never validated or filtered on the way through.
+  const findings = Array.isArray(value.findings)
+    ? value.findings
+      .filter((finding) => finding && typeof finding.text === 'string' && finding.text.trim() !== '')
+      .map((finding, index) => ({
+        id: String(finding.id ?? `L${index + 1}`),
+        severity: String(finding.severity ?? ''),
+        text: finding.text.trim(),
+      }))
+    : [];
+  return {
+    verdict: 'answered',
+    approved: value.approved,
+    reasoning: String(value.reasoning ?? '').trim(),
+    findings,
   };
 }
 

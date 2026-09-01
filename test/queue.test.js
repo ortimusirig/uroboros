@@ -52,12 +52,21 @@ function reviewReady(runId, overrides = {}) {
 function fakeRuntime(facts, overrides = {}) {
   const launches = [];
   const landings = [];
+  const judgements = [];
   const directories = new Map();
   return {
     launches,
     landings,
+    judgements,
     dependencies: {
       assertCleanTarget: async () => {},
+      // Tests declare their world: the default final review approves so
+      // landing-mechanics tests stay focused; refusal and unavailability
+      // are exercised explicitly below.
+      judgeLanding: async (request) => {
+        judgements.push(request);
+        return { approved: true, reasoning: 'reviewed first-hand in fixture' };
+      },
       launchRun: async (request) => {
         const index = launches.length;
         launches.push(request);
@@ -740,6 +749,84 @@ test('an unnamed unit uses its task basename in commits and logs', async () => {
 
     assert.equal(runtime.landings[0].unit.name, basename(declaration[0].task));
     assert.equal(readLog(fixture.logPath)[0].name, basename(declaration[0].task));
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test('Claude final review runs before every landing and its judgement is recorded', async () => {
+  const fixture = makeFixture();
+  try {
+    const runtime = fakeRuntime([reviewReady('run-1')]);
+    await runQueue({
+      file: fixture.file,
+      target: fixture.target,
+      dependencies: runtime.dependencies,
+    });
+    assert.equal(runtime.judgements.length, 1, 'no landing without the final review');
+    assert.equal(runtime.judgements[0].runDirectory, 'run-directory-1');
+    assert.equal(runtime.landings.length, 1);
+    const log = readLog(fixture.logPath);
+    assert.equal(log[0].finalReview.approved, true);
+    assert.equal(log[0].finalReview.reasoning, 'reviewed first-hand in fixture');
+    assert.equal(log[0].landed, true);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test('a refused final review stops the queue with Claude reasoning and lands nothing', async () => {
+  const fixture = makeFixture();
+  try {
+    const runtime = fakeRuntime([
+      reviewReady('run-1'),
+      reviewReady('run-2'),
+      reviewReady('run-3'),
+    ], {
+      judgeLanding: async ({ runDirectory }) => runDirectory === 'run-directory-2'
+        ? {
+            approved: false,
+            reasoning: 'the diff narrows shared scope the task requires',
+            findings: [{ id: 'L1', severity: 'P0', text: 'shared scope narrowed' }],
+          }
+        : { approved: true, reasoning: 'sound' },
+    });
+    const result = await runQueue({
+      file: fixture.file,
+      target: fixture.target,
+      dependencies: runtime.dependencies,
+    });
+    assert.equal(runtime.landings.length, 1, 'only the approved unit lands');
+    assert.equal(result.stop.kind, 'final-review');
+    assert.match(result.stop.reason, /Claude refused the landing/);
+    assert.match(result.stop.reason, /narrows shared scope/);
+    const log = readLog(fixture.logPath);
+    assert.equal(log[1].landed, false);
+    assert.equal(log[1].finalReview.approved, false);
+    assert.deepEqual(log[1].finalReview.findings,
+      [{ id: 'L1', severity: 'P0', text: 'shared scope narrowed' }]);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test('an unavailable final review never lands — silence is not consent at landing', async () => {
+  const fixture = makeFixture(1);
+  try {
+    const runtime = fakeRuntime([reviewReady('run-1')], {
+      judgeLanding: async () => { throw new Error('claude CLI unreachable'); },
+    });
+    const result = await runQueue({
+      file: fixture.file,
+      target: fixture.target,
+      dependencies: runtime.dependencies,
+    });
+    assert.equal(runtime.landings.length, 0);
+    assert.equal(result.stop.kind, 'final-review');
+    assert.match(result.stop.reason, /unavailable — nothing lands unseen/);
+    assert.match(result.stop.reason, /claude CLI unreachable/);
+    const log = readLog(fixture.logPath);
+    assert.equal(log[0].finalReview.approved, null);
   } finally {
     fixture.cleanup();
   }

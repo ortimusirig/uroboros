@@ -7,6 +7,7 @@ import {
   resolve,
 } from 'node:path';
 import { spawnCapture } from './spawn.js';
+import { parseLandingJudgement, runArbiter } from './arbiter.js';
 
 const GIT_TIMEOUT_MS = 30_000;
 const DEFAULT_LOOP_PATH = fileURLToPath(new URL('../bin/loop.js', import.meta.url));
@@ -298,6 +299,48 @@ export async function landQueueDiff({
   }
 }
 
+// Claude's final review before landing — the hierarchy's last step. Claude
+// reads the composed task and the diff first-hand, with the closed findings
+// and the non-zero evidence in front of it, and judges the landing. An
+// unreachable or unreadable judgement returns approved: null; the queue
+// treats anything but an explicit yes as a stop.
+export async function judgeLandingWithClaude({ unit, facts, runDirectory }, {
+  arbiter = runArbiter,
+  cwd = process.cwd(),
+} = {}) {
+  const readOptional = (path) => {
+    try { return readFileSync(path, 'utf8'); } catch { return ''; }
+  };
+  const request = {
+    type: 'landing',
+    task: readOptional(join(runDirectory, 'TASK.md')) || unit?.name || '',
+    diff: readOptional(join(runDirectory, 'CHANGES.diff')),
+    findings: facts?.debate?.roundHistory?.at(-1)?.findings ?? [],
+    evidence: (facts?.evidence ?? []).filter((entry) => entry.code !== 0),
+  };
+  let result;
+  try {
+    result = await arbiter({ cwd, request });
+  } catch (error) {
+    return {
+      approved: null,
+      reasoning: error instanceof Error ? error.message : String(error),
+    };
+  }
+  const judgement = parseLandingJudgement(result);
+  if (judgement.verdict !== 'answered') {
+    return {
+      approved: null,
+      reasoning: result?.error ?? 'no readable landing judgement',
+    };
+  }
+  return {
+    approved: judgement.approved,
+    reasoning: judgement.reasoning,
+    findings: judgement.findings,
+  };
+}
+
 export function createQueueRuntime(options = {}) {
   return {
     assertCleanTarget: (target, request = {}) => assertCleanTarget(target, { ...options, ...request }),
@@ -305,5 +348,6 @@ export function createQueueRuntime(options = {}) {
     launchRun: (request) => launchLoopRun(request, options),
     readRunFacts,
     landDiff: (request) => landQueueDiff(request, options),
+    judgeLanding: (request) => judgeLandingWithClaude(request, options),
   };
 }
