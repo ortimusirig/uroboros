@@ -49,8 +49,49 @@ function byEntryKey([a], [b]) {
   return a < b ? -1 : a > b ? 1 : 0;
 }
 
-function noSurvey(reason) {
-  return `${HEADER}${(reason || 'git ls-files failed').trim()} — no file survey was produced; explore the directory directly.\n`;
+// Detail-shortening marker for the no-survey path: explicit, like every other
+// truncation note in this file ('…'-prefixed), so a shortened git-error detail
+// is never mistaken for the whole message.
+const NO_SURVEY_SHORTENED_MARKER = '… (git error detail shortened: budget)';
+const NO_SURVEY_SUFFIX = ' — no file survey was produced; explore the directory directly.\n';
+
+function renderNoSurvey(detail) {
+  return `${HEADER}${detail}${NO_SURVEY_SUFFIX}`;
+}
+
+// The floor of the no-survey path: even when the error detail is shortened
+// all the way down to nothing, the shortened-marker itself still has to fit.
+// This is the smallest noSurvey() can ever render — DERIVED by actually
+// rendering it, never guessed — and feeds MINIMUM_MAP_BUDGET below.
+function renderNoSurveyMinimal() {
+  return renderNoSurvey(NO_SURVEY_SHORTENED_MARKER);
+}
+
+// noSurvey() joins the same measured discipline as buildRepoMap's fallback
+// ladder below: build the full text, and only if it overflows `budget`,
+// shorten ONLY the error-detail portion, marking the cut explicitly so
+// nothing is silently withheld. The surrounding self-declaration ('no file
+// survey was produced...') is fixed text and is never what gets cut.
+function noSurvey(reason, budget) {
+  const detail = (reason || 'git ls-files failed').trim();
+  const full = renderNoSurvey(detail);
+  if (full.length <= budget) return full;
+
+  const overhead = HEADER.length + NO_SURVEY_SHORTENED_MARKER.length + NO_SURVEY_SUFFIX.length;
+  const shortenedDetail = detail.slice(0, Math.max(0, budget - overhead));
+  const shortened = renderNoSurvey(`${shortenedDetail}${NO_SURVEY_SHORTENED_MARKER}`);
+
+  // Defensive final guard, in the same spirit as the fallback ladder's last
+  // rung further down: impossible by construction (budget >= MINIMUM_MAP_BUDGET,
+  // and MINIMUM_MAP_BUDGET is derived from — among other things — this exact
+  // zero-detail rendering) — but self-naming and loud rather than a silent
+  // overflow if a future edit ever breaks that invariant.
+  if (shortened.length > budget) {
+    throw new Error(
+      `repo-map bug: the shortened no-survey self-declaration (${shortened.length} chars) exceeds budget ${budget} even though budget >= MINIMUM_MAP_BUDGET (${MINIMUM_MAP_BUDGET}) — this should be impossible; noSurvey() and MINIMUM_MAP_BUDGET have drifted apart`,
+    );
+  }
+  return shortened;
 }
 
 // The last line a map can EVER lose: even when nothing else fits, this alone
@@ -62,11 +103,13 @@ function renderMinimal() {
   return `${HEADER}${LAST_RESORT_LINE}\n`;
 }
 
-// The floor: below this, not even the last-resort self-declaration (header +
-// the one line above) fits, so there is no honest string buildRepoMap could
-// return. DERIVED from the actual minimal output — never a guessed number —
-// so it can never drift from what renderMinimal() really produces.
-export const MINIMUM_MAP_BUDGET = renderMinimal().length;
+// The floor: below this, not even the least detailed honest output fits, so
+// there is no honest string buildRepoMap could return. DERIVED from the max
+// of the two candidates that could each, on their own path, be the smallest
+// thing this module ever returns — the ladder's last-resort line and the
+// no-survey path's fully-shortened form — never a guessed number, so it can
+// never drift from what those renders really produce.
+export const MINIMUM_MAP_BUDGET = Math.max(renderMinimal().length, renderNoSurveyMinimal().length);
 
 export async function buildRepoMap({
   target,
@@ -90,10 +133,10 @@ export async function buildRepoMap({
     // A launch failure (ENOENT, permissions, ...) is exactly as honest a "no
     // survey" as a non-zero exit — both mean git never handed back a file list.
     // Reject instead of throw so the caller always gets the self-declaring text.
-    return noSurvey(error?.message ?? String(error));
+    return noSurvey(error?.message ?? String(error), budget);
   }
   if (ls.code !== 0) {
-    return noSurvey(ls.stderr);
+    return noSurvey(ls.stderr, budget);
   }
   const paths = ls.stdout.split(/\r?\n/).filter(Boolean);
   const entries = paths.map((path) => {
@@ -158,11 +201,17 @@ export async function buildRepoMap({
     spent += row.length + 1;
     symbolFilesShown++;
   }
+  // Snapshot BEFORE the Symbols section (if any) is spliced in, for the
+  // collapsedNoSymbols rung below — that rung must never show a Symbols
+  // section (partial or not) whose incompleteness it isn't declaring, so it
+  // renders from a base that never had one, rather than trusting a dropped
+  // note to speak for content that's still sitting in `lines`.
+  const linesWithoutSymbols = [...lines];
   if (symbolLines.length > 0) lines.push('', '## Symbols (largest files first)', ...symbolLines);
 
   const symbolsSkipped = largestFirst.length - symbolFilesShown;
-  const render = (notes) => {
-    const withNotes = notes.length > 0 ? [...lines, '', '## Withheld by the budget', ...notes] : lines;
+  const render = (notes, baseLines = lines) => {
+    const withNotes = notes.length > 0 ? [...baseLines, '', '## Withheld by the budget', ...notes] : baseLines;
     return `${withNotes.join('\n')}\n`;
   };
 
@@ -174,12 +223,29 @@ export async function buildRepoMap({
   // ...and when it doesn't fit, collapse every omitted directory into one bounded
   // summary line instead of truncating mid-list (a silent, undeclared cap — the
   // exact defect this exists to prevent).
+  const omittedFilesTotal = [...omitted.values()].reduce((sum, count) => sum + count, 0);
   const directoryNotesCollapsed = omitted.size > 0
-    ? [`… omissions for ${omitted.size} directories (${[...omitted.values()].reduce((sum, count) => sum + count, 0)} files) withheld (budget) — this survey is incomplete; read the tree directly.`]
+    ? [`… omissions for ${omitted.size} directories (${omittedFilesTotal} files) withheld (budget) — this survey is incomplete; read the tree directly.`]
     : [];
   const symbolsNote = symbolsSkipped > 0
     ? [`… symbol scans withheld for ${symbolsSkipped} more files (budget) — read them directly if relevant.`]
     : [];
+
+  // The collapsedNoSymbols rung (below) strips the '## Symbols' section
+  // entirely rather than merely dropping its note — so from that rung's
+  // perspective ALL symbol info is withheld, not just whatever symbolsNote
+  // above would have named. Fold that into ONE line with the directory
+  // omissions so a dropped note can never leave an (im)partial section
+  // undeclared.
+  const symbolsWithheldEntirely = largestFirst.length > 0;
+  const collapsedNoSymbolsNotes = (() => {
+    const clauses = [];
+    if (omitted.size > 0) clauses.push(`omissions for ${omitted.size} directories (${omittedFilesTotal} files)`);
+    if (symbolsWithheldEntirely) clauses.push('all symbol scans');
+    return clauses.length > 0
+      ? [`… ${clauses.join(' and ')} withheld (budget) — this survey is incomplete; read the tree directly.`]
+      : [];
+  })();
 
   // Fallback ladder from most to least detailed, MEASURING THE ACTUAL RENDERED
   // STRING at every step — the `reserve` above is a packing heuristic that keeps
@@ -191,7 +257,7 @@ export async function buildRepoMap({
   const collapsed = render([...directoryNotesCollapsed, ...symbolsNote]);
   if (collapsed.length <= budget) return collapsed;
 
-  const collapsedNoSymbols = render(directoryNotesCollapsed);
+  const collapsedNoSymbols = render(collapsedNoSymbolsNotes, linesWithoutSymbols);
   if (collapsedNoSymbols.length <= budget) return collapsedNoSymbols;
 
   // Last rung: drop the Files/Symbols sections entirely and fall back to the

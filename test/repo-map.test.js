@@ -50,6 +50,17 @@ test('outside a git repository the map says so instead of pretending', async () 
   assert.match(map, /no file survey was produced/i);
 });
 
+test('a no-git fixture is measured against the budget too, even at the survey minimum', async () => {
+  const map = await buildRepoMap({
+    target: 'T',
+    budget: MINIMUM_MAP_BUDGET,
+    spawn: async () => ({ code: 128, stdout: '', stderr: 'fatal: not a git repository' }),
+    readFile: fakeRead({}),
+  });
+  assert.ok(map.length <= MINIMUM_MAP_BUDGET, `map ${map.length} exceeds MINIMUM_MAP_BUDGET ${MINIMUM_MAP_BUDGET}`);
+  assert.match(map, /no file survey was produced/i);
+});
+
 test('many omitted directories collapse into one bounded note — the budget bounds the notes too', async () => {
   const files = Array.from({ length: 60 }, (_, i) => `d${String(i).padStart(2, '0')}/a.js`);
   const contents = Object.fromEntries(files.map((f) => [f, 'export const x = 1;\n']));
@@ -70,6 +81,18 @@ test('a spawn rejection (e.g. ENOENT) is as honest a "no survey" as a non-zero e
   assert.match(map, /no file survey was produced/i);
 });
 
+test('a long spawn-rejection message is shortened to fit the budget, with an explicit marker', async () => {
+  const longMessage = `spawn git ENOENT: ${'a'.repeat(180)}`;
+  const map = await buildRepoMap({
+    target: 'T',
+    budget: MINIMUM_MAP_BUDGET,
+    spawn: async () => { throw new Error(longMessage); },
+    readFile: fakeRead({}),
+  });
+  assert.ok(map.length <= MINIMUM_MAP_BUDGET, `map ${map.length} exceeds MINIMUM_MAP_BUDGET ${MINIMUM_MAP_BUDGET}`);
+  assert.match(map, /shortened: budget/);
+});
+
 test('every budget from the minimum up stays within itself and stays honest', async () => {
   const files = Array.from({ length: 60 }, (_, i) => `d${String(i).padStart(2, '0')}/a.js`);
   const contents = Object.fromEntries(files.map((f) => [f, 'export const x = 1;\n']));
@@ -83,6 +106,19 @@ test('every budget from the minimum up stays within itself and stays honest', as
       /read the tree directly|read any file directly/i,
       `budget ${budget}: no fetchability/withholding line survived`,
     );
+
+    // The no-survey path is bound by the exact same budget, at every rung.
+    const noGitMap = await buildRepoMap({
+      target: 'T', budget,
+      spawn: async () => ({ code: 128, stdout: '', stderr: 'fatal: not a git repository' }),
+      readFile: fakeRead({}),
+    });
+    assert.ok(noGitMap.length <= budget, `budget ${budget}: no-git map ${noGitMap.length} exceeds it`);
+    assert.match(
+      noGitMap,
+      /no file survey was produced/i,
+      `budget ${budget}: no-git declaration did not survive`,
+    );
   }
 });
 
@@ -94,6 +130,6 @@ test("a budget below the survey's minimum is rejected, never silently overflowed
       spawn: fakeSpawnFor(['src/a.js']),
       readFile: fakeRead({ 'src/a.js': 'x\n' }),
     }),
-    /at least .*characters/,
+    new RegExp('at least MINIMUM_MAP_BUDGET \\(' + MINIMUM_MAP_BUDGET + '\\) characters'),
   );
 });
