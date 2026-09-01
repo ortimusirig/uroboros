@@ -35,15 +35,34 @@ function scanSymbols(text) {
   return symbols;
 }
 
+// Sort [key, ...] entry pairs by the key alone. Array#sort()'s default comparator
+// stringifies and compares lexicographically too, but leaving it implicit invites
+// exactly the bug it doesn't have yet — spell out what's actually being compared.
+function byEntryKey([a], [b]) {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+function noSurvey(reason) {
+  return `${HEADER}${(reason || 'git ls-files failed').trim()} — no file survey was produced; explore the directory directly.\n`;
+}
+
 export async function buildRepoMap({
   target,
   budget = DEFAULT_MAP_BUDGET,
   spawn = spawnCapture,
   readFile = readFileSync,
 } = {}) {
-  const ls = await spawn('git', ['-C', target, 'ls-files']);
+  let ls;
+  try {
+    ls = await spawn('git', ['-C', target, 'ls-files']);
+  } catch (error) {
+    // A launch failure (ENOENT, permissions, ...) is exactly as honest a "no
+    // survey" as a non-zero exit — both mean git never handed back a file list.
+    // Reject instead of throw so the caller always gets the self-declaring text.
+    return noSurvey(error?.message ?? String(error));
+  }
   if (ls.code !== 0) {
-    return `${HEADER}${(ls.stderr || 'git ls-files failed').trim()} — no file survey was produced; explore the directory directly.\n`;
+    return noSurvey(ls.stderr);
   }
   const paths = ls.stdout.split(/\r?\n/).filter(Boolean);
   const entries = paths.map((path) => {
@@ -68,9 +87,13 @@ export async function buildRepoMap({
 
   const lines = [HEADER, '## Files', ''];
   const omitted = new Map();
-  const reserve = 400; // space kept for omission notes + symbols header — itself declared: notes always fit.
+  // Space kept clear of Files/Symbols content for whatever the '## Withheld by the
+  // budget' section below needs. That section is itself bound to fit: it prefers one
+  // note per omission, but collapses to a single bounded summary line when detail
+  // would not fit — so this reserve only ever has to cover the collapsed case.
+  const reserve = 400;
   let spent = lines.join('\n').length;
-  for (const [directory, group] of [...byDirectory.entries()].sort()) {
+  for (const [directory, group] of [...byDirectory.entries()].sort(byEntryKey)) {
     const heading = `### ${directory}/`;
     if (spent + heading.length + 1 > budget - reserve) {
       omitted.set(directory, group.length);
@@ -98,6 +121,8 @@ export async function buildRepoMap({
     const symbols = scanSymbols(entry.text);
     if (symbols.length === 0) continue;
     const row = `- ${entry.path}: ${symbols.join(', ')}`;
+    // +24 reserves room for the '## Symbols (largest files first)' section header
+    // line this loop prepends below once any symbol row has been queued.
     if (spent + row.length + 24 > budget - reserve) break;
     symbolLines.push(row);
     spent += row.length + 1;
@@ -105,14 +130,37 @@ export async function buildRepoMap({
   }
   if (symbolLines.length > 0) lines.push('', '## Symbols (largest files first)', ...symbolLines);
 
-  const notes = [];
-  for (const [directory, count] of [...omitted.entries()].sort()) {
-    notes.push(`… and ${count} more files under ${directory}/ (budget) — read them directly if relevant.`);
-  }
   const symbolsSkipped = largestFirst.length - symbolFilesShown;
-  if (symbolsSkipped > 0) {
-    notes.push(`… symbol scans withheld for ${symbolsSkipped} more files (budget) — read them directly if relevant.`);
+  const render = (notes) => {
+    const withNotes = notes.length > 0 ? [...lines, '', '## Withheld by the budget', ...notes] : lines;
+    return `${withNotes.join('\n')}\n`;
+  };
+
+  // Prefer one note per omitted directory — most specific — but the budget bounds
+  // this section too: with many small omitted directories, one line each is
+  // unbounded and can itself blow the budget. Try the detailed form first...
+  const detailedNotes = [];
+  for (const [directory, count] of [...omitted.entries()].sort(byEntryKey)) {
+    detailedNotes.push(`… and ${count} more files under ${directory}/ (budget) — read them directly if relevant.`);
   }
-  if (notes.length > 0) lines.push('', '## Withheld by the budget', ...notes);
-  return `${lines.join('\n')}\n`;
+  if (symbolsSkipped > 0) {
+    detailedNotes.push(`… symbol scans withheld for ${symbolsSkipped} more files (budget) — read them directly if relevant.`);
+  }
+  const detailed = render(detailedNotes);
+  if (detailed.length <= budget) return detailed;
+
+  // ...and when it doesn't fit, collapse every omitted directory into one bounded
+  // summary line instead of truncating mid-list (a silent, undeclared cap — the
+  // exact defect this exists to prevent). The reserve above sizes for this line.
+  const collapsedNotes = [];
+  if (omitted.size > 0) {
+    const fileCount = [...omitted.values()].reduce((sum, count) => sum + count, 0);
+    collapsedNotes.push(
+      `… omissions for ${omitted.size} directories (${fileCount} files) withheld (budget) — this survey is incomplete; read the tree directly.`,
+    );
+  }
+  if (symbolsSkipped > 0) {
+    collapsedNotes.push(`… symbol scans withheld for ${symbolsSkipped} more files (budget) — read them directly if relevant.`);
+  }
+  return render(collapsedNotes);
 }

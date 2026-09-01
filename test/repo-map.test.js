@@ -49,3 +49,23 @@ test('outside a git repository the map says so instead of pretending', async () 
   assert.match(map, /not a git repository/i);
   assert.match(map, /no file survey was produced/i);
 });
+
+test('many omitted directories collapse into one bounded note — the budget bounds the notes too', async () => {
+  const files = Array.from({ length: 60 }, (_, i) => `d${String(i).padStart(2, '0')}/a.js`);
+  const contents = Object.fromEntries(files.map((f) => [f, 'export const x = 1;\n']));
+  const map = await buildRepoMap({
+    target: 'T', budget: 900, spawn: fakeSpawnFor(files), readFile: fakeRead(contents),
+  });
+  assert.ok(map.length <= 900, `map ${map.length} exceeds its declared budget of 900`);
+  assert.match(map, /withheld|more files/i, 'the omission declaration survives collapsing');
+  assert.match(map, /may read any file directly/i, 'fetchability line survives collapsing');
+});
+
+test('a spawn rejection (e.g. ENOENT) is as honest a "no survey" as a non-zero exit', async () => {
+  const map = await buildRepoMap({
+    target: 'T',
+    spawn: async () => { throw new Error('spawn git ENOENT'); },
+    readFile: fakeRead({}),
+  });
+  assert.match(map, /no file survey was produced/i);
+});
