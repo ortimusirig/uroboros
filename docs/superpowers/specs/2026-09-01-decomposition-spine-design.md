@@ -81,10 +81,13 @@ construction. This design keeps the goal level for what it is good at
   the named project-runner follow-up.
 - `queue.json` is a standard uroboros queue file (task units only):
   `[{ "name": "T1-…", "task": "T1-plan.md", "gate": "T1-gate.json" }, …]`,
-  ordered topologically from the seats' declared task dependencies. A
-  dependency cycle in the declared tasks is a draft failure (artifact
-  availability, same class as invalid gate JSON) — the writer refuses; it never
-  silently reorders.
+  ordered topologically from the seats' declared task dependencies
+  (serializing a declared partial order is bookkeeping, never judgement). A
+  dependency cycle is a CONTRADICTION, and contradiction asks: it goes back to
+  the conversation as named feedback ("T2 and T4 depend on each other —
+  resolve or merge them") for the next round. Only a conversation that then
+  fails to converge terminates, through its ordinary reasons. The writer never
+  silently reorders and never flatly refuses a repairable artifact.
 
 ## Command surface
 
@@ -122,13 +125,18 @@ Seat transports are unchanged: Codex stdin, Claude stdin, Cursor via file
 workspace (`withSeatWorkspace`) receiving `PROJECT.md`/`GOAL_SPEC.md`,
 `CONSTITUTION.md` when present, `REPO_MAP.md`, and `FEEDBACK.md`.
 
-### Proposal artifact contracts (parse failure = draft failure, availability only)
+### Proposal artifact contracts (malformed output is fed back, not refused)
 
 - **Tier 1** returns exactly two tagged artifacts:
   - `<GOALS_JSON>[ { id, slug, statement, capability, dependsOn, rationale } … ]</GOALS_JSON>`
   - `<GOALS_MD>` — markdown containing one `## G<n>: <title>` section per goal;
     each section becomes that goal's `spec.md` verbatim.
-  Mismatched ids between the two artifacts are a draft failure.
+  Mismatched ids between the two artifacts, missing tags, or unparseable JSON
+  in a PROPOSAL are contradictions fed back verbatim to the proposer for the
+  next round ("repair until it works") — never an instant terminal. Only a
+  proposer that stays unreachable (launch failure, timeout, no output at all)
+  is `arbiter-unavailable`, because a seat that did not run cannot be repaired
+  by feedback. The same rule applies to tier-2 artifacts.
 - **Tier 2** returns exactly two tagged artifacts:
   - `<TASKS_JSON>[ { id, name, dependsOn, gate: [ {bin,args} … ] } … ]</TASKS_JSON>`
   - `<TASKS_MD>` — one `## T<n>: <title>` section per task; each section becomes
@@ -153,12 +161,15 @@ ladder recorded unjudged. Capability vetoes run before tier-2 convergence
 Zero-dependency input ration for drafting/review prompts on big trees:
 
 - Built from `git ls-files` (tracked files only) with per-file line counts,
-  grouped by directory; plus, for the 40 largest source files by line count, a
-  head scan of exported symbols (regex over `export|function |class |def `
-  first matches, at most 8 symbols per file).
-- Hard character budget (`--map-budget`, default 12000). When the budget trims,
-  the map SAYS SO explicitly (`… and N more files under <dir>`) — bounded input
-  is a ration and must never be a silent truncation.
+  grouped by directory; then exported-symbol head scans (regex over
+  `export|function |class |def `) added largest-file-first until the budget is
+  reached. No fixed file or symbol counts exist — the single operator-set
+  budget (`--map-budget`, default 12000 chars) is the only bound.
+- The map DECLARES ITSELF: a header states its evidence grade
+  ("heuristic file/symbol survey, not the repository"), exactly what it
+  withheld (`… and N more files under <dir>`), and that the seat may read any
+  file directly — a ration the model knows it can reach past, never a wall.
+  A bound that hides what it withheld is a defect.
 - Wired into both decompose tiers now. Adoption by `loop plan` and the run-side
   FRESH replanner is a named follow-up, not in this spec.
 - This rations INPUT context. It never touches seat OUTPUT: the judged-text
@@ -237,6 +248,67 @@ with applied guards, including at minimum: a convergence that ignores a seat's
 AGREE turns the suite red; a dependency cycle silently reordered instead of
 refused turns it red; a repo map that trims without saying so turns it red; an
 acceptance that treats unavailable as approved turns it red.
+
+## Standing DNA (embedded from the owner's Standing Instructions, generalized)
+
+A shared prompt preamble, `CONVERSATION_DNA`, is included verbatim in every
+tier's drafting, proposing, reviewing, and agreement prompts (and exported so
+`loop plan` adopts it in the engine extraction). Its lines, generalized from
+`Obsidian-ai/EULR/Standing Instructions.md` where they apply to uroboros:
+
+1. **Determinism advises; the model decides; contradiction asks.** Anything
+   mechanical in this system ranks, flags, records, or rations — it never
+   decides, hides an option, or asserts a conclusion. Where a mechanical
+   signal disagrees with a seat, that is a question put to a seat.
+2. **No silent caps, gates, or refusals.** Every bound states what it
+   withheld. A check that did not run must never read as one that passed —
+   an empty result may mean "never ran", and no completion signal is trusted
+   (exit 0 has lied here before).
+3. **Never cut judged text short.** No truncation on any judged path
+   (shipped: `9299df3`); correctness beats speed and cost; no wall-clock
+   deadline substitutes for judged liveness.
+4. **Corrections show BOTH.** When a proposal reverses an earlier round's
+   decision, it marks the reversal explicitly (SUPERSEDED: …) next to what
+   must survive — never a silent rewrite. Recommending with a reason is
+   welcome; withholding the alternative is not.
+5. **The loop writes the tests too.** Every task's plan carries test
+   requirements the executor implements, and the reviewer still writes its
+   own independent tests — no wave grades its own homework.
+6. **Surface owner decisions; record assumptions.** A question about product
+   intent that the arbiter cannot ground in `project.md` or the constitution
+   is answered conservatively AND recorded in the converged artifact under an
+   `## Assumptions` section, so the owner sees every decision taken on their
+   behalf. Their decisions are surfaced with a recommendation, never taken.
+7. **Repair until it works.** Malformed artifacts, contradictions, and cycles
+   are fed back to the seats with the error verbatim; refusal is reserved for
+   a seat that did not run.
+8. **Depth over breadth — and the model knows it can fetch.** Rations (the
+   repo map) always say the tail is reachable and how.
+
+Alignment notes, not new work: "watch, nudge, change approach after 3 rounds"
+is exactly the shipped circling window (measured trigger, judged meaning);
+"launchFailed means no review happened" and "never mutate a live loop tree"
+are shipped uroboros law. EULR-specific instructions (admin-mode engine, no
+guest access, launcher/Ollama/browser-suite traps, no pie charts) do NOT enter
+uroboros core: they are exactly what `constitution.md` is for — the operator
+seeds EULR's constitution from Standing Instructions, and every tier quotes
+it. Uroboros never generates or edits a constitution.
+
+## Determinism and caps audit (every mechanical element, named)
+
+| Element | Class | Why it is not a decision |
+|---|---|---|
+| Repo-map budget (`--map-budget`) | input ration | Operator-set, self-declaring, fetch-past-able; no fixed internal counts |
+| Topological task ordering | bookkeeping | Serializes the seats' own declared order; cycles go back as feedback |
+| Write-once artifacts (`wx`) | safety | Protects prior judgements from silent overwrite; collision is loud |
+| Tag parsing (`GOALS_JSON` …) | availability | Malformed goes back as feedback; only a seat that never ran is unavailable |
+| Circling window (3 rounds) | measured trigger | Starts a judgement (pivot), never renders one |
+| Acceptance/landing "no readable boolean" | fail-closed reading | Absence of consent is never consent; stops, never passes |
+| Stage liveness | measured, judged | Silence is judged alive-or-stuck; extensions judged; no flat deadline |
+| `rounds`, `max-runs`, `token-budget` | operator's own caps | Set by the owner, forecast declared, run-in-flight always finishes |
+
+Nothing else mechanical exists in this design. Any future bound must join this
+table with its class and its self-declaration, or it does not ship.
 
 ## Global constraints (inherited, non-negotiable)
 
