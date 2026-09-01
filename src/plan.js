@@ -3,13 +3,15 @@ import {
   constants,
   existsSync,
   mkdirSync,
+  mkdtempSync,
   readFileSync,
+  rmSync,
   statSync,
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { randomUUID } from 'node:crypto';
-import { homedir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import {
   DebateLedger,
@@ -317,43 +319,79 @@ function parseSeatReview(text) {
   };
 }
 
+// Cursor's CLI takes its prompt on argv and cannot read stdin, so a prompt
+// embedding a whole proposal dies on the Windows 8191-character command line —
+// the same wall that silenced the arbiter until its prompt moved to stdin.
+// Measured live: the seat went mute in every call of the first three-way run.
+// The hand-off is therefore the repo's established file pattern: artifacts on
+// disk in a scratch directory, a short prompt naming their absolute paths —
+// exactly how run-mode reviews already read TASK.md and CHANGES.diff.
+function withSeatWorkspace(files, work) {
+  const directory = mkdtempSync(join(tmpdir(), 'uro-plan-seat-'));
+  try {
+    for (const [name, content] of Object.entries(files)) {
+      writeFileSync(join(directory, name), content, 'utf8');
+    }
+    return work(directory);
+  } finally {
+    try { rmSync(directory, { recursive: true, force: true }); } catch { /* scratch */ }
+  }
+}
+
 async function productionCursorDraft({
   goal, target, verifierModel, timeoutMs, runId, env, home, superpowersDir, feedback, failedPlan,
 }) {
-  const prompt = [
-    '# Cursor plan drafting seat',
-    'You are one of three seats drafting independently from the same raw goal. Draft from your own reading of the repository.',
-    'Draft an implementation plan and its executable gate.json for this goal:',
-    oneLineArtifact(goal),
-    'Every cited path and line must already exist in the target; verify each citation by reading before citing.',
-    ...(feedback ? ['Required corrections:', oneLineArtifact(feedback)] : []),
-    ...(failedPlan ? ['Discarded framing, choose a genuinely different strategy:', oneLineArtifact(failedPlan)] : []),
-    'Return exactly <PLAN_MD>...markdown...</PLAN_MD> then <GATE_JSON>[...]</GATE_JSON> and no prose outside them.',
-  ].join(' ');
-  const result = await runVerifier({
-    cwd: target, prompt, model: verifierModel, timeoutMs, pass: 'plan', env, home, superpowersDir,
+  return withSeatWorkspace({
+    'GOAL.md': `${goal}\n`,
+    ...(feedback ? { 'FEEDBACK.md': `${feedback}\n` } : {}),
+    ...(failedPlan ? { 'FAILED_PLAN.md': `${failedPlan}\n` } : {}),
+  }, async (workspace) => {
+    const prompt = [
+      '# Cursor plan drafting seat',
+      'You are one of three seats drafting independently from the same raw goal. Draft from your own reading of the repository.',
+      `Read the goal from ${oneLineArtifact(join(workspace, 'GOAL.md'))} and draft an implementation plan and its executable gate.json for it.`,
+      ...(feedback ? [`Apply the required corrections in ${oneLineArtifact(join(workspace, 'FEEDBACK.md'))}.`] : []),
+      ...(failedPlan ? [`${oneLineArtifact(join(workspace, 'FAILED_PLAN.md'))} holds a discarded framing; choose a genuinely different strategy.`] : []),
+      'Every cited path and line must already exist in the target; verify each citation by reading before citing.',
+      'Reply in plain chat text, not a plan tool artifact.',
+      'Return exactly <PLAN_MD>...markdown...</PLAN_MD> then <GATE_JSON>[...]</GATE_JSON> and no prose outside them.',
+    ].join(' ');
+    const result = await runVerifier({
+      cwd: target, prompt, model: verifierModel, timeoutMs, pass: 'plan', env, home, superpowersDir,
+    });
+    const artifact = parseDraftArtifact(`${result.findings ?? ''}\n${result.plan ?? ''}`);
+    return { ...artifact, usage: result.usage };
   });
-  const artifact = parseDraftArtifact(`${result.findings ?? ''}\n${result.plan ?? ''}`);
-  return { ...artifact, usage: result.usage };
 }
 
 async function productionCursorReview({
   goal, plan, gate, round, target, verifierModel, timeoutMs, env, home, superpowersDir,
 }) {
-  const result = await runVerifier({
-    cwd: target,
-    prompt: reviewSeatPrompt({ seat: 'Cursor', goal, plan, gate, round }),
-    model: verifierModel,
-    timeoutMs,
-    pass: 'plan',
-    env,
-    home,
-    superpowersDir,
+  return withSeatWorkspace({
+    'GOAL.md': `${goal}\n`,
+    'PROPOSAL.md': `${plan}\n`,
+    'PROPOSED_GATE.json': `${JSON.stringify(gate, null, 2)}\n`,
+  }, async (workspace) => {
+    const prompt = [
+      '# Cursor plan review seat',
+      `Read the raw goal from ${oneLineArtifact(join(workspace, 'GOAL.md'))} and the proposed plan from ${oneLineArtifact(join(workspace, 'PROPOSAL.md'))} with its gate ${oneLineArtifact(join(workspace, 'PROPOSED_GATE.json'))}.`,
+      'Judge independently whether the plan achieves the goal; explore the target repository for real evidence.',
+      `ROUND ${round}.`,
+      'Respond in plain chat text, in exactly this structure and nothing else:',
+      'AGREE: yes or AGREE: no.',
+      'Then zero or more suggestion lines, one per line, formatted: S<id> P0: description (or P1, P2 — your judgement of priority; nothing mechanical acts on it).',
+      'Reuse the same S<id> for a suggestion you have raised in an earlier round so recurrence is visible.',
+      'Then zero or more question lines formatted: Q<id>: question.',
+      'AGREE: yes means you are satisfied the plan achieves the goal and you could work from it as written.',
+    ].join(' ');
+    const result = await runVerifier({
+      cwd: target, prompt, model: verifierModel, timeoutMs, pass: 'plan', env, home, superpowersDir,
+    });
+    if (result.launchFailed || result.timedOut) {
+      return { agree: false, readable: false, suggestions: [], questions: [], content: '', unavailable: true, usage: result.usage };
+    }
+    return { ...parseSeatReview(`${result.findings ?? ''}\n${result.plan ?? ''}`), usage: result.usage };
   });
-  if (result.launchFailed || result.timedOut) {
-    return { agree: false, readable: false, suggestions: [], questions: [], content: '', unavailable: true, usage: result.usage };
-  }
-  return { ...parseSeatReview(`${result.findings ?? ''}\n${result.plan ?? ''}`), usage: result.usage };
 }
 
 async function productionCodexReview({
