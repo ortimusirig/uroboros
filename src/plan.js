@@ -350,11 +350,11 @@ async function productionCursorDraft({
     const prompt = [
       '# Cursor plan drafting seat',
       'You are one of three seats drafting independently from the same raw goal. Draft from your own reading of the repository.',
-      `Read the goal from ${oneLineArtifact(join(workspace, 'GOAL.md'))} and draft an implementation plan and its executable gate.json for it.`,
+      `Read the goal from ${oneLineArtifact(join(workspace, 'GOAL.md'))} and draft an implementation plan and its evidence commands (gate.json) for it. The harness runs those commands once per round and records their output as evidence for the seats; no exit code passes or fails the change.`,
       ...(feedback ? [`Apply the required corrections in ${oneLineArtifact(join(workspace, 'FEEDBACK.md'))}.`] : []),
       ...(failedPlan ? [`${oneLineArtifact(join(workspace, 'FAILED_PLAN.md'))} holds a discarded framing; choose a genuinely different strategy.`] : []),
       'Every cited path and line must already exist in the target; verify each citation by reading before citing.',
-      'Reply in plain chat text, not a plan tool artifact.',
+      'Reply in plain chat text, not a plan tool artifact. If your client renders a plan tool anyway, ALSO print both tagged artifacts as chat text — the tags are the only thing read.',
       'Return exactly <PLAN_MD>...markdown...</PLAN_MD> then <GATE_JSON>[...]</GATE_JSON> and no prose outside them.',
     ].join(' ');
     const result = await runVerifier({
@@ -375,8 +375,9 @@ async function productionCursorReview({
   }, async (workspace) => {
     const prompt = [
       '# Cursor plan review seat',
-      `Read the raw goal from ${oneLineArtifact(join(workspace, 'GOAL.md'))} and the proposed plan from ${oneLineArtifact(join(workspace, 'PROPOSAL.md'))} with its gate ${oneLineArtifact(join(workspace, 'PROPOSED_GATE.json'))}.`,
+      `Read the raw goal from ${oneLineArtifact(join(workspace, 'GOAL.md'))} and the proposed plan from ${oneLineArtifact(join(workspace, 'PROPOSAL.md'))} with its evidence commands ${oneLineArtifact(join(workspace, 'PROPOSED_GATE.json'))}.`,
       'Judge independently whether the plan achieves the goal; explore the target repository for real evidence.',
+      'Your review is of THIS proposal only: every AGREE, suggestion, and question must be about the plan in PROPOSAL.md as it addresses the goal in GOAL.md. Repository exploration is evidence about this plan, never a licence to review other features or files on their own.',
       `ROUND ${round}.`,
       'Respond in plain chat text, in exactly this structure and nothing else:',
       'AGREE: yes or AGREE: no.',
