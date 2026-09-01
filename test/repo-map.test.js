@@ -1,7 +1,7 @@
 // test/repo-map.test.js
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildRepoMap, DEFAULT_MAP_BUDGET } from '../src/repo-map.js';
+import { buildRepoMap, DEFAULT_MAP_BUDGET, MINIMUM_MAP_BUDGET } from '../src/repo-map.js';
 
 function fakeSpawnFor(files) {
   return async (bin, args) => {
@@ -68,4 +68,32 @@ test('a spawn rejection (e.g. ENOENT) is as honest a "no survey" as a non-zero e
     readFile: fakeRead({}),
   });
   assert.match(map, /no file survey was produced/i);
+});
+
+test('every budget from the minimum up stays within itself and stays honest', async () => {
+  const files = Array.from({ length: 60 }, (_, i) => `d${String(i).padStart(2, '0')}/a.js`);
+  const contents = Object.fromEntries(files.map((f) => [f, 'export const x = 1;\n']));
+  for (let budget = MINIMUM_MAP_BUDGET; budget <= 1500; budget += 7) {
+    const map = await buildRepoMap({
+      target: 'T', budget, spawn: fakeSpawnFor(files), readFile: fakeRead(contents),
+    });
+    assert.ok(map.length <= budget, `budget ${budget}: map ${map.length} exceeds it`);
+    assert.match(
+      map,
+      /read the tree directly|read any file directly/i,
+      `budget ${budget}: no fetchability/withholding line survived`,
+    );
+  }
+});
+
+test("a budget below the survey's minimum is rejected, never silently overflowed", async () => {
+  await assert.rejects(
+    () => buildRepoMap({
+      target: 'T',
+      budget: MINIMUM_MAP_BUDGET - 1,
+      spawn: fakeSpawnFor(['src/a.js']),
+      readFile: fakeRead({ 'src/a.js': 'x\n' }),
+    }),
+    /at least .*characters/,
+  );
 });

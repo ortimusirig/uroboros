@@ -12,6 +12,13 @@ export const DEFAULT_MAP_BUDGET = 12_000;
 const SYMBOL_PATTERN = /^\s*(?:export\s+(?:default\s+)?(?:async\s+)?)?(?:function\s+([A-Za-z_$][\w$]*)|class\s+([A-Za-z_$][\w$]*)|const\s+([A-Za-z_$][\w$]*)\s*=|def\s+([A-Za-z_]\w*)\s*\()/;
 const SOURCE_EXTENSIONS = new Set(['.js', '.mjs', '.cjs', '.ts', '.tsx', '.jsx', '.py']);
 
+// Extra characters the '## Symbols (largest files first)' section header costs
+// once the symbol loop below prepends it — DERIVED from the same two elements
+// that lines.push() adds ('' then the header, each costing its length plus a
+// join separator), so this margin and that push can never drift apart the way
+// a hand-picked number silently could.
+const SYMBOLS_HEADER_MARGIN = ['', '## Symbols (largest files first)'].join('\n').length + 1;
+
 const HEADER = [
   '# Repository map (heuristic file/symbol survey, not the repository)',
   '',
@@ -46,12 +53,36 @@ function noSurvey(reason) {
   return `${HEADER}${(reason || 'git ls-files failed').trim()} — no file survey was produced; explore the directory directly.\n`;
 }
 
+// The last line a map can EVER lose: even when nothing else fits, this alone
+// must survive, because a bound that hides its own withholding is the exact
+// defect this module exists to prevent.
+const LAST_RESORT_LINE = "survey withheld (budget below the survey's minimum); read the tree directly.";
+
+function renderMinimal() {
+  return `${HEADER}${LAST_RESORT_LINE}\n`;
+}
+
+// The floor: below this, not even the last-resort self-declaration (header +
+// the one line above) fits, so there is no honest string buildRepoMap could
+// return. DERIVED from the actual minimal output — never a guessed number —
+// so it can never drift from what renderMinimal() really produces.
+export const MINIMUM_MAP_BUDGET = renderMinimal().length;
+
 export async function buildRepoMap({
   target,
   budget = DEFAULT_MAP_BUDGET,
   spawn = spawnCapture,
   readFile = readFileSync,
 } = {}) {
+  // Loud input validation, like the repo's other argument checks: below this
+  // floor no return path — not even the last-resort one — can be honest, so
+  // there is nothing truthful buildRepoMap could hand back. Fail before doing
+  // any work rather than let a later step overflow trying anyway.
+  if (budget < MINIMUM_MAP_BUDGET) {
+    throw new TypeError(
+      `map budget must be at least MINIMUM_MAP_BUDGET (${MINIMUM_MAP_BUDGET}) characters — below that no honest self-declaration fits`,
+    );
+  }
   let ls;
   try {
     ls = await spawn('git', ['-C', target, 'ls-files']);
@@ -87,10 +118,11 @@ export async function buildRepoMap({
 
   const lines = [HEADER, '## Files', ''];
   const omitted = new Map();
-  // Space kept clear of Files/Symbols content for whatever the '## Withheld by the
-  // budget' section below needs. That section is itself bound to fit: it prefers one
-  // note per omission, but collapses to a single bounded summary line when detail
-  // would not fit — so this reserve only ever has to cover the collapsed case.
+  // Space kept clear of Files/Symbols content so the '## Withheld by the budget'
+  // section below usually has room without falling back further. A packing
+  // heuristic only, not a correctness guarantee — the fallback ladder after this
+  // function measures every candidate's actual rendered length against `budget`
+  // regardless of what this reserve left behind.
   const reserve = 400;
   let spent = lines.join('\n').length;
   for (const [directory, group] of [...byDirectory.entries()].sort(byEntryKey)) {
@@ -121,9 +153,7 @@ export async function buildRepoMap({
     const symbols = scanSymbols(entry.text);
     if (symbols.length === 0) continue;
     const row = `- ${entry.path}: ${symbols.join(', ')}`;
-    // +24 reserves room for the '## Symbols (largest files first)' section header
-    // line this loop prepends below once any symbol row has been queued.
-    if (spent + row.length + 24 > budget - reserve) break;
+    if (spent + row.length + SYMBOLS_HEADER_MARGIN > budget - reserve) break;
     symbolLines.push(row);
     spent += row.length + 1;
     symbolFilesShown++;
@@ -139,28 +169,43 @@ export async function buildRepoMap({
   // Prefer one note per omitted directory — most specific — but the budget bounds
   // this section too: with many small omitted directories, one line each is
   // unbounded and can itself blow the budget. Try the detailed form first...
-  const detailedNotes = [];
-  for (const [directory, count] of [...omitted.entries()].sort(byEntryKey)) {
-    detailedNotes.push(`… and ${count} more files under ${directory}/ (budget) — read them directly if relevant.`);
-  }
-  if (symbolsSkipped > 0) {
-    detailedNotes.push(`… symbol scans withheld for ${symbolsSkipped} more files (budget) — read them directly if relevant.`);
-  }
-  const detailed = render(detailedNotes);
-  if (detailed.length <= budget) return detailed;
-
+  const directoryNotesDetailed = [...omitted.entries()].sort(byEntryKey)
+    .map(([directory, count]) => `… and ${count} more files under ${directory}/ (budget) — read them directly if relevant.`);
   // ...and when it doesn't fit, collapse every omitted directory into one bounded
   // summary line instead of truncating mid-list (a silent, undeclared cap — the
-  // exact defect this exists to prevent). The reserve above sizes for this line.
-  const collapsedNotes = [];
-  if (omitted.size > 0) {
-    const fileCount = [...omitted.values()].reduce((sum, count) => sum + count, 0);
-    collapsedNotes.push(
-      `… omissions for ${omitted.size} directories (${fileCount} files) withheld (budget) — this survey is incomplete; read the tree directly.`,
+  // exact defect this exists to prevent).
+  const directoryNotesCollapsed = omitted.size > 0
+    ? [`… omissions for ${omitted.size} directories (${[...omitted.values()].reduce((sum, count) => sum + count, 0)} files) withheld (budget) — this survey is incomplete; read the tree directly.`]
+    : [];
+  const symbolsNote = symbolsSkipped > 0
+    ? [`… symbol scans withheld for ${symbolsSkipped} more files (budget) — read them directly if relevant.`]
+    : [];
+
+  // Fallback ladder from most to least detailed, MEASURING THE ACTUAL RENDERED
+  // STRING at every step — the `reserve` above is a packing heuristic that keeps
+  // this ladder short in the common case, never a guarantee, so nothing here
+  // trusts it. Every rung but the last is checked before it is returned.
+  const detailed = render([...directoryNotesDetailed, ...symbolsNote]);
+  if (detailed.length <= budget) return detailed;
+
+  const collapsed = render([...directoryNotesCollapsed, ...symbolsNote]);
+  if (collapsed.length <= budget) return collapsed;
+
+  const collapsedNoSymbols = render(directoryNotesCollapsed);
+  if (collapsedNoSymbols.length <= budget) return collapsedNoSymbols;
+
+  // Last rung: drop the Files/Symbols sections entirely and fall back to the
+  // header plus the one last-resort line. Not measured against `budget` above
+  // like the rungs before it — by construction (MINIMUM_MAP_BUDGET is this
+  // exact string's length, and budget was already rejected below that floor)
+  // it always fits. The check below is not what makes that true; it is a
+  // defensive, self-explaining guard against a future edit breaking the
+  // invariant silently instead of loudly.
+  const minimal = renderMinimal();
+  if (minimal.length > budget) {
+    throw new Error(
+      `repo-map bug: the minimal self-declaration (${minimal.length} chars) exceeds budget ${budget} even though budget >= MINIMUM_MAP_BUDGET (${MINIMUM_MAP_BUDGET}) — this should be impossible; renderMinimal() and MINIMUM_MAP_BUDGET have drifted apart`,
     );
   }
-  if (symbolsSkipped > 0) {
-    collapsedNotes.push(`… symbol scans withheld for ${symbolsSkipped} more files (budget) — read them directly if relevant.`);
-  }
-  return render(collapsedNotes);
+  return minimal;
 }
