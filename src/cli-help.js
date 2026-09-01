@@ -27,7 +27,7 @@ Shapes (choose by how the plans relate):
   Rounds      candidates refined over 2-3 rounds: add --rounds (iterative-candidate-set)
 
 Commands:
-  run        Execute one isolated Codex/gate/Cursor debate with Claude arbitrating read-only.
+  run        Execute one isolated Codex/evidence/Cursor debate with Claude arbitrating read-only.
   mutate     Delete changed statements temporarily and report which selected tests do not notice.
   plan       Debate a goal into a mechanically checked plan and gate without changing the target.
   queue      Run and safely land queue units in order; never retry, skip, or push.

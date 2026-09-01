@@ -6,7 +6,7 @@
 
 [![tests](https://github.com/ortimusirig/uroboros/actions/workflows/tests.yml/badge.svg)](https://github.com/ortimusirig/uroboros/actions/workflows/tests.yml) [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) ![node](https://img.shields.io/badge/node-%3E%3D24-brightgreen) ![runtime dependencies](https://img.shields.io/badge/runtime%20dependencies-0-brightgreen)
 
-Codex writes in a git-isolated copy, command exit codes gate the change, Cursor reviews it read-only, and a spawned read-only Claude seat arbitrates findings and challenges.
+Codex writes in a git-isolated copy, every declared command runs once with its full output kept as evidence, Cursor reviews the change read-only, and a spawned read-only Claude seat arbitrates findings, reviews first-hand when the debate circles, and judges every landing.
 
 ### If you are an AI agent setting this up for someone
 
@@ -45,8 +45,8 @@ the plugin was installed. After `/plugin install`, restart the Claude Code sessi
 
 `setup` is the guided path. It checks everything the loop needs and, once the prerequisites are
 green, scaffolds a throwaway demo project and executes one real pass against it. You finish
-having watched an isolated worktree, a green gate, a verifier verdict and a real diff, rather
-than having ticked off a checklist. The demo is written under the scratch root, never into a
+having watched an isolated worktree, recorded command evidence, a real review report and a
+real diff, rather than having ticked off a checklist. The demo is written under the scratch root, never into a
 project of yours.
 
 Re-running `setup` is safe: it re-checks and skips whatever is already green.
@@ -82,18 +82,20 @@ runs, and the bypass is recorded in run facts and the report.
 are separate add-ons. A machine with none of them has a fully working loop.
 
 `init` creates two starter inputs without overwriting existing files. `plan.md` tells Codex
-what result to produce and what must not change. `gate.json` is a JSON list of commands whose
-exit codes decide whether the result passes. Replace the generated prompts and placeholder
-gate with the real task and project checks before relying on the result.
+what result to produce and what must not change. `gate.json` is a JSON list of commands the
+harness runs once per round as evidence: full output lands in `__uro_evidence/`, exit codes
+are recorded for the seats to judge, and nothing mechanical passes or fails the change.
+Replace the generated prompts and placeholder commands with the real task and project checks
+before relying on the result.
 
 ## How the loop works
 
 One `loop run` is one pass:
 
 ```
-plan.md ──► Codex writes (isolated copy) ──► gate (exit codes) ──► debate ──► report
-                                                              │
-                          Cursor ×2 review ──► findings ──► arbiter judges ──► fix / pivot
+plan.md ──► Codex writes (isolated copy) ──► commands run once (evidence) ──► debate ──► report
+                                                                        │
+                Cursor writes one review report ──► findings ──► Claude judges ──► fix / pivot
 ```
 
 Run approved plans sequentially with `loop queue`. Relative task, gate, goal-file, and output
@@ -121,9 +123,10 @@ Wherever an approach is being chosen — the initial plan, and again when the ar
 approach is dead rather than merely wrong — several candidates are drafted from deliberately
 distinct declared perspectives and one is selected, so the loop compares approaches instead of
 polishing the first one it thought of. A dead plan is replaced, not abandoned.
-The queue stops on the first non-approved result. A change lands only when the code gate
-passed and both verifier seats reported `NO_BLOCKERS`; `ISSUES` and `UNVERIFIED` always
-stop the queue. Each landed unit is committed locally, nothing is pushed, and
+The queue stops on the first non-approved result. A change lands only when the debate
+converged with every blocking finding resolved AND Claude, reading the diff first-hand at
+landing time, approves it; a refusal or an unreachable final review always stops the queue
+with the judgement recorded. Each landed unit is committed locally, nothing is pushed, and
 `queue-log.jsonl` is appended beside the queue file. Use `--dry-run` to validate and
 print every resolved path without starting a run or spending tokens.
 An untracked `queue-log.jsonl` inside the target is the sole clean-tree exception; the
@@ -138,21 +141,27 @@ only fully approved diffs to the clean target, one at a time.
 Three separate failure modes get three separate seats:
 
 - **Codex writes but cannot mark its own homework.** It never decides whether it succeeded.
-- **The gate is the only thing that can pass a change.** It runs your commands and reads
-  exit codes. An agent cannot argue with a non-zero exit.
-- **Cursor reviews and writes only its own tests.** Two seats run with different prompts:
-  one judges correctness, one judges whether the diff implements the task. They may write
+- **The harness executes but never judges.** Every declared command runs exactly once per
+  round, whatever its neighbours exited; full stdout/stderr land in `__uro_evidence/` and
+  the exit codes travel to the seats as recorded evidence. No exit code passes or fails a
+  change — what a non-zero exit MEANS is the seats' question.
+- **Cursor reviews holistically and writes only its own tests.** One review pass reads
+  TASK.md and the diff and reports correctness AND intent findings in a single
+  `__uro_review/REVIEW.md` — an unmet requirement is a finding like any other. It may write
   into `__uro_review/` and nowhere else — the worktree is snapshotted around the review and
   everything outside that directory is restored, so the boundary is enforced rather than
-  trusted. A blocking finding without a test is demoted to a suggestion.
-- **Claude arbitrates.** The seats disagree, and something has to decide. The arbiter judges
-  each finding (a reviewer objection can be overruled, but an unavailable arbiter preserves
-  the objection), answers the executor's own questions instead of letting it answer them,
-  and decides when to amend, replan, or conclude. The debate is not round-capped; it ends
-  when the arbiter says so or the findings stop recurring.
+  trusted. A blocking finding without a test is demoted to a suggestion, and a seat that
+  runs but writes no report did not review.
+- **Claude arbitrates, then reviews first-hand.** The arbiter judges each finding (a
+  reviewer objection can be overruled, but an unavailable arbiter preserves the objection),
+  answers the executor's own questions instead of letting it answer them, reads the change
+  itself when the debate circles, and decides when to amend, replan, or conclude. The debate
+  is not round-capped; it ends when the arbiter says so or the findings stop recurring. At
+  landing, Claude reviews the final diff first-hand and nothing lands without its recorded
+  approval — silence is never consent.
 
-The loop refuses to report success over a red gate. If the verifier fails to launch, that is
-reported as `verifier-failed` — never silently downgraded to a review verdict.
+If the reviewer fails to launch, times out, or produces no report, that is reported as
+`verifier-failed` — never silently treated as a clean review.
 
 **No credentials are stored or passed by this package.** Each CLI authenticates itself on
 your machine with your own subscription, and cost follows those subscriptions. Nothing is
@@ -211,8 +220,8 @@ A `plan.md` saying *"create hello.txt containing HELLO WORLD"*, this `gate.json`
 [{ "bin": "node", "args": ["-e", "process.exit(require('fs').existsSync('hello.txt')?0:1)"] }]
 ```
 
-and any throwaway folder as `--target`. Expect `outcome: review-ready`, `gateStatus: passed`,
-and a verdict.
+and any throwaway folder as `--target`. Expect `outcome: review-ready`, an `evidence` list
+recording each command run, and the review's findings in `debate.roundHistory`.
 
 
 ## Known gotchas

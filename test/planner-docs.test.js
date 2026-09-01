@@ -62,7 +62,7 @@ test('SKILL.md starts its guidance with the non-waivable eight-step planner law'
   const law = markdownSection(skill, 'Governing law');
   const steps = [
     'Build',
-    'Gate verification',
+    'Evidence verification',
     'Adversarial review',
     'Correction loop',
     'Scoped re-verify',

@@ -12,11 +12,13 @@ not per-run content: never restate it in `TASK.md`, and no plan can waive it. A 
 to authorize skipping or combining a step is itself the defect.
 
 1. **Build** — Codex writes in isolation. The planner never implements.
-2. **Gate verification** — Confirm the true exit code of every gate command. Stdout text is not
-   status. Never accept a piped exit code: a pipe reports the last command's exit code rather
-   than the gate's.
-3. **Adversarial review** — Cursor performs the full hunt list: correctness, regressions,
-   security, edge cases, test adequacy, and violations of intent, scope, or invariants.
+2. **Evidence verification** — Confirm the true exit code of every declared command. The
+   harness runs each once and records full output in `__uro_evidence/`; exit codes are
+   evidence for the seats, never a verdict. Stdout text is not status.
+   Never accept a piped exit code: a pipe reports the last exit code, not the command's.
+3. **Adversarial review** — Cursor writes ONE holistic report covering the full hunt list:
+   correctness, regressions, security, edge cases, test adequacy, and violations of intent,
+   scope, or invariants — an unmet requirement is a finding like any other.
    Claude then validates each blocking finding read-only. An invalid finding is recorded as
    overruled; an unavailable or unreadable arbiter preserves the objection.
 4. **Correction loop** — The planner authors *finding → fix design → mutation pin*; Codex
@@ -101,9 +103,9 @@ For a simple Graph, keep the flag form: give every task a `--unit-id`, then repe
   the authoritative artifact.
 - **One failed parent skips a fan-in immediately.** The fan-in child is marked skipped as soon
   as any parent fails; the scheduler does not wait for the other parents, which continue running.
-- **`no-op` is scheduler success, not proof of work.** An empty diff skips both verifier passes,
+- **`no-op` is scheduler success, not proof of work.** An empty diff skips the review,
   exits zero, releases dependents, and counts as a successful alternative. Positive evidence of
-  implementation is a non-empty diff together with a passed gate.
+  implementation is a non-empty diff together with its recorded command evidence.
 - **Waiting costs no slot.** A waiting dependent does not hold a concurrency slot. The Graph
   topology, rather than `--concurrency`, is usually the real parallelism bound.
 - **Only three commands are genuinely read-only:** `status`, `dashboard`, and `help`.
@@ -111,18 +113,20 @@ For a simple Graph, keep the flag form: give every task a `--unit-id`, then repe
   pushes a branch and creates or updates a pull request. `doctor` also performs disposable
   scratch writes even without `--deep`.
 - **Claude has a spawned, read-only arbiter seat.** It validates blocking findings, answers
-  autonomous `DECISION.md` challenges on their merits, and judges pivots. It never writes the
-  worktree and never substitutes for the gate. Missing arbitration accepts reviewer objections,
-  halts challenges for the operator, and marks deterministic pivot fallback as unjudged.
+  autonomous `DECISION.md` challenges on their merits, judges pivots, reviews the change
+  first-hand when the debate circles, and judges every queue landing before anything touches
+  the operator's tree. It never writes the worktree. Missing arbitration preserves reviewer
+  objections, halts challenges for the operator, marks deterministic pivot fallback as
+  unjudged, and stops a landing — silence is never consent.
 - **Capability vetoes are seat-authoritative.** Before a generated plan converges, executor,
   reviewer, and arbiter each assess only their own work. A veto must name what is impossible,
   why, and a remedy (or explicitly admit no alternative); incomplete vetoes are re-asked and
   remedies are mandatory input to the next draft. No other seat may overrule one.
 - **Publishing is per unit, evidence-presence-gated, and parent-first for a Graph.** `publish`
-  requires both verifier verdicts and their sources, but does not require clean verdicts or a
-  successful outcome. Thus gate-failed, no-op, and executor/gate-timeout units lack a delivery
-  path; a verifier-timeout unit can still qualify when both verifier records exist. A child pull
-  request uses its parent's branch as its base, so publish the parent branch first.
+  requires a review report in the run record, but does not require a clean report or a
+  successful outcome. Runs with no report (no-op, executor/evidence timeouts, reviewer
+  failures) lack a delivery path. A child pull request uses its parent's branch as its base,
+  so publish the parent branch first.
 - **The execution scratch root is environment-only and flat.** `run` and `batch` take it from
 `URO_SCRATCH_ROOT` (or the platform default), not a run flag. Unit worktrees live under the
   unit id, so two campaigns that reuse a unit id collide even when they target different

@@ -1,5 +1,13 @@
 # Uroboros: Claude ↔ Codex ↔ Cursor — The Three-Way Debate Loop
 
+> **Historical design document.** This is the original three-way debate design as first
+> drafted. The shipped flow has since moved past it in three ways (2026-09-01): there is no
+> gate verdict — declared commands run once per round as recorded evidence and no exit code
+> passes or fails a change; Cursor's review is ONE holistic report (correctness and intent
+> together) instead of separate verdict passes, so NO_BLOCKERS/ISSUES no longer exist as run
+> state; and Claude reviews the final diff first-hand before any queue landing. See README.md
+> and docs/usage.md for the current flow.
+
 > Final flow document. Copy to `C:\Users\SGIRI\Documents\Obsidian-ai\Claude-Codex-Cursor-Loop\`
 
 ---

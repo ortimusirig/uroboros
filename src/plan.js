@@ -173,7 +173,7 @@ function draftingPrompt({
     '# Plan drafting seat',
     '',
     'Work only as a planner. Explore the target for real evidence, but do not modify any file.',
-    'Draft an implementation plan and its executable gate.json for this goal:',
+    'Draft an implementation plan and its evidence commands (gate.json) for this goal. The harness runs those commands once per round and records their full output as evidence for the seats; no exit code passes or fails the change.',
     '',
     goal,
     '',

@@ -10,9 +10,10 @@ Run `loop queue --file queue.json --dry-run` before an unattended session to val
 input and goal output path without launching an agent.
 
 The default mode is `manual`. `--mode autonomous` is passed to each `loop run`, so the
-planner can resolve executor challenges. A safe result still requires all three
-signals: `gateStatus: passed`, correctness `NO_BLOCKERS`, and intent `NO_BLOCKERS`.
-Any other outcome or verdict stops the queue; it is never retried or skipped.
+planner can resolve executor challenges. A unit lands only when its debate converged
+(outcome `review-ready`) AND Claude, reading the final diff first-hand at landing time,
+records its approval. Any other outcome, a refusal, or an unreachable final review stops
+the queue with the judgement in `queue-log.jsonl`; nothing is retried or skipped.
 
 Use `--max-runs <n>` to bound the number of attempted units and `--token-budget <n>`
 to bound observed input-plus-output tokens. After the first unit, the runner forecasts
@@ -53,9 +54,9 @@ The corresponding plugin commands are `/uroboros:run`, `/uroboros:mutate`, `/uro
 `/uroboros:init`, and `/uroboros:help`. Install them with
 `/plugin marketplace add <absolute-clone-path>` and `/plugin install uroboros@uroboros`.
 
-`loop plan` runs the drafting seat read-only against the target, executes the proposed gate,
-checks cited paths and lines, named test files, required sections, and absence-assertion positive
-controls, then asks a read-only verifier for structured findings. It writes `plan.md` and
+`loop plan` runs a three-way STORM read-only against the target: Codex, Cursor and Claude
+draft from the same raw goal, Claude collates one proposal, and both other seats review it
+with structured suggestions. It writes `plan.md` and
 `gate.json` under `--out` only after convergence; exhaustion and pivot conclusion write neither.
 Initial planning generates three distinct-perspective candidates and selects among the plans
 that drafted successfully; no mechanical gate judges a plan, the seats do. Use `--candidates 1` for the previous single-draft behavior. A FRESH
@@ -68,16 +69,16 @@ that count with `--pivot-candidates` (1–5).
 deletes added statements in semantic units inside temporary worktrees, subdivides every killed
 multi-statement unit, and reports survivors for arbiter judgement. `--tests` replaces the test
 launcher; use `{tests}` when that launcher should receive the statically selected paths.
-`--dry-run` executes neither tests nor judging seats. Mutation survivors are evidence and do not
-change a gate command's exit-code meaning.
-Add `--mutate` to `loop run` to perform the same advisory measurement after a passing gate and
-retain the evidence beside the gate and verifier verdicts in `uro-runfacts.json` and
-`uro-report.md`. A survivor, red mutation baseline, or unavailable mutation seat does not alter
-the already-observed gate status or run outcome.
+`--dry-run` executes neither tests nor judging seats. Mutation survivors are evidence like any
+other command output.
+Add `--mutate` to `loop run` to perform the same advisory measurement after a converged run
+and retain the evidence beside the command records and review findings in
+`uro-runfacts.json` and `uro-report.md`. A survivor, red mutation baseline, or unavailable
+mutation seat does not alter the already-observed run outcome.
 
 `init` never overwrites `plan.md` or `gate.json`. It detects a `package.json` test script;
-otherwise it emits a valid, runnable placeholder gate with an explicit comment telling you to
-replace it. `doctor` runs Node, Git, PATH, local Codex/Cursor/Claude sign-in, scratch-safety,
+otherwise it emits a valid, runnable placeholder command list with an explicit comment telling
+you to replace it. `doctor` runs Node, Git, PATH, local Codex/Cursor/Claude sign-in, scratch-safety,
 scratch-writability, Codex registry, Cursor `.cursor-plugin`, and Claude `.claude-plugin` checks
 by default without spending agent tokens. All three superpowers checks are required. The Codex
 write and Cursor read probes spend real agent tokens, so they are marked `SKIP` until `--deep` is supplied.
@@ -102,7 +103,7 @@ directory is modified.
 
 `batch` accepts one or more repeated `--task` options. The target, gate, retry, and model
 options have exactly the same meaning they do for `run`; every task gets its own isolated
-worktree, gate, two read-only verifier passes, run facts, and `events.jsonl`.
+worktree, evidence commands, one read-only review pass, run facts, and `events.jsonl`.
 
 `prune` is the only scratch-retention command. It keeps the 20 most recent completed run
 directories by default. `--keep N` changes that count; `--older-than DAYS` adds an age rule,
@@ -158,7 +159,7 @@ Dependencies are a declared DAG topology: roots fan out up to the concurrency li
 dependent waits without occupying a slot. After a successful predecessor finishes, its staged
 result is committed on that unit's result branch and the dependent isolates from that branch.
 `no-op` is also successful and releases dependents; its result branch simply still names its
-base commit. A `gate-failed`, `timed-out`, or `verifier-failed` predecessor does not release
+base commit. A failed, `timed-out`, or `verifier-failed` predecessor does not release
 broken work: its dependents are marked `skipped`, and that skip cascades transitively. Unrelated
 roots continue normally. Unknown parents, self-dependencies, duplicate edges, and cycles are
 rejected before any executor launches.
@@ -166,7 +167,7 @@ rejected before any executor launches.
 Giving one child several parents makes it a merge unit. Parent order is canonicalized by graph
 declaration order; the merge starts from the first parent's result branch and brings every other
 parent into the merge unit's own worktree. A clean merge continues through the normal executor,
-gate, diff, and two verifier passes. A text conflict is handed to the executor with every
+evidence commands, diff, and the review pass. A text conflict is handed to the executor with every
 conflicting path named in `TASK.md`; each resolution and its reason must be recorded in
 `uro-merge-resolutions.json`, then reaches both run facts and the report. Genuine intent conflicts stop
 as `conflicting-intent` for human direction. Merge gates add a derived test-count floor of the sum
@@ -180,7 +181,10 @@ processes all succeeded and `git fsck` stayed clean. Prefer `batch` because it
 schedules, budgets, and records one campaign. The real cross-process hazard is reusing a unit id:
 the execution scratch root is flat, so unit ids collide even across different repositories.
 
-`gate.json` is a JSON array of commands; **pass/fail is by exit code only**:
+`gate.json` is a JSON array of commands the harness runs once per round as evidence. Full
+stdout/stderr per command land in `__uro_evidence/` inside the worktree, exit codes are
+recorded in `facts.evidence`, and **no exit code passes or fails the change** — the seats
+judge what a non-zero exit means:
 
 ```json
 [
@@ -197,11 +201,10 @@ error; multi-word inline prose is used verbatim.
 
 | Outcome | Meaning | Exit |
 |---|---|---|
-| `review-ready` | gate green, diff produced, verdict recorded | 0 |
+| `review-ready` | the debate converged: findings closed, diff produced | 0 |
 | `no-op` | executor changed nothing | 0 |
-| `gate-failed` | a gate command exited non-zero | 1 |
-| `verifier-failed` | either Cursor pass exited non-zero with no result or assistant event | 4 |
-| `timed-out` | the final executor, gate, or verifier stage exceeded its deadline | 5 |
+| `verifier-failed` | the reviewer failed to launch, timed out, or wrote no report | 4 |
+| `timed-out` | the final executor, evidence, or reviewer stage exceeded its deadline | 5 |
 | `campaign-failed` | at least one dispatched batch unit failed | 6 |
 | `budget-exhausted` | a batch exceeded its token budget | 7 |
 | `conflicting-intent` | a merge found incompatible parent intents and needs human direction | 8 |
@@ -217,11 +220,11 @@ become a success.
 ## Iterating
 
 One `loop run` invocation debates until the reviews converge or the pivot ladder stops it.
-Structured blocking review findings are converted into executor work, followed by the full gate
-and both verifier seats. `URO_DEBATE_ROUNDS` is an optional operator cap; the tool supplies no
+Structured blocking review findings are converted into executor work, followed by another
+evidence run and the reviewer's next report. `URO_DEBATE_ROUNDS` is an optional operator cap; the tool supplies no
 round limit of its own. On FRESH, the run creates a branch at the pre-debate commit, restores
 the accumulated `__uro_review/` tests byte-for-byte, generates ledger-informed STORM plans, and
-executes only the selected gate-passing plan. The ledger is not reset. `needs-pivot` returns
+executes only the selected plan. The ledger is not reset. `needs-pivot` returns
 control only when the arbiter concludes or no viable FRESH plan survives.
 
 Claude is spawned read-only to validate each blocking finding, answer autonomous challenges,
