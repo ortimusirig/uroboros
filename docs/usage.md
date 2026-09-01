@@ -58,7 +58,7 @@ checks cited paths and lines, named test files, required sections, and absence-a
 controls, then asks a read-only verifier for structured findings. It writes `plan.md` and
 `gate.json` under `--out` only after convergence; exhaustion and pivot conclusion write neither.
 Initial planning generates three distinct-perspective candidates and selects among the plans
-that pass the plan gate. Use `--candidates 1` for the previous single-draft behavior. A FRESH
+that drafted successfully; no mechanical gate judges a plan, the seats do. Use `--candidates 1` for the previous single-draft behavior. A FRESH
 pivot uses the same process with the debate ledger and defaults to three candidates; configure
 that count with `--pivot-candidates` (1–5).
 

@@ -167,8 +167,13 @@ async function runFreshScenario({ allCandidatesFail = false, clean = false } = {
           reviewPaths: ['__uro_review/tests/f1.test.js'],
         };
       },
+      // There is no mechanical plan gate any more. A candidate can only fail by
+      // its DRAFT failing, so the discard scenarios throw from the draft seat.
       draftPlanCandidate: async (request) => {
         candidateRequests.push(request);
+        if (allCandidatesFail || request.candidateId === 'candidate-2') {
+          throw new Error(`${request.candidateId} draft failed`);
+        }
         return {
           plan: `fresh ${request.candidateId} plan\n`,
           gate: [],
@@ -181,12 +186,6 @@ async function runFreshScenario({ allCandidatesFail = false, clean = false } = {
           },
         };
       },
-      runPlanGate: async ({ candidateId }) => allCandidatesFail || candidateId === 'candidate-2'
-        ? {
-          passed: false,
-          failures: [{ id: 'PG_TEST', check: 'gate-runs', message: `${candidateId} failed` }],
-        }
-        : { passed: true, failures: [] },
       selectPlanCandidate: async (request) => {
         selectionRequests.push(request);
         return {
@@ -214,7 +213,7 @@ async function runFreshScenario({ allCandidatesFail = false, clean = false } = {
   };
 }
 
-test('FRESH replans with ledger-informed candidates, discards gate failures, and continues', async () => {
+test('FRESH replans with ledger-informed candidates, discards failed drafts, and continues', async () => {
   const scenario = await runFreshScenario();
   try {
     const {
@@ -271,7 +270,9 @@ test('FRESH replans with ledger-informed candidates, discards gate failures, and
     assert.equal(facts.debate.pivotHistory[0].candidates[1].selected, false);
     assert.equal(facts.debate.ledger.rounds.length, 4,
       'the post-FRESH finding must extend, not reset, the ledger');
-    assert.equal(facts.tokens.executor.inputTokens, 11,
+    // Candidates 1 and 3 drafted (usage 1 + 3) plus selection (5). Candidate 2's
+    // draft threw, so it has no usage to count — a failed draft costs nothing.
+    assert.equal(facts.tokens.executor.inputTokens, 9,
       'candidate drafting and selection must count against the run budget');
     for (const pair of [
       'pivot/replan_start', 'pivot/candidate', 'pivot/selected',
@@ -281,7 +282,7 @@ test('FRESH replans with ledger-informed candidates, discards gate failures, and
   } finally { scenario.item.cleanup(); }
 });
 
-test('all FRESH candidates failing the plan gate escalates honestly to CONCLUDE', async () => {
+test('every FRESH draft failing escalates honestly to CONCLUDE', async () => {
   const scenario = await runFreshScenario({ allCandidatesFail: true });
   try {
     assert.equal(scenario.facts.outcome, 'needs-pivot');

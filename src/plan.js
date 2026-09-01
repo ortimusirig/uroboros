@@ -19,19 +19,19 @@ import {
   PIVOT_FRESH,
   shouldPivot,
 } from './debate.js';
-import { buildFixPlan, validateFindings } from './fix-plan.js';
+
 import {
   ARBITER_UNVERIFIED,
   buildArbiterPrompt,
   DEFAULT_ARBITER_MODEL,
+  parseAgreementJudgement,
   parseCapabilityJudgement,
   parsePivotJudgement,
   runArbiter,
 } from './arbiter.js';
 import { reportEvent } from './events.js';
 import { runExecutor } from './executor.js';
-import { runPlanGate } from './plan-gate.js';
-import { parseReview } from './review.js';
+
 import { resolveStageTimeouts } from './timeouts.js';
 import { runVerifier } from './verifier.js';
 import {
@@ -277,27 +277,72 @@ function oneLineArtifact(text) {
     .trim();
 }
 
-async function productionReview({
-  plan,
-  gate,
-  target,
-  verifierModel,
-  timeoutMs,
-  env,
-  home,
-  superpowersDir,
-}) {
-  const prompt = [
-    'Review the proposed implementation plan against the real repository.',
-    'Emit REVIEW.md blocks using headings F1 and fields Severity, Category, Description, Test.',
-    'Every blocking finding must name a test. Suggestions are nonblocking.',
-    'End with exactly ISSUES when any blocking finding exists, otherwise exactly NO_BLOCKERS.',
+// Structured seat responses. The format is prompt discipline, not protocol: the
+// parser extracts what matches and carries severities VERBATIM. Nothing anywhere
+// validates a severity, filters by one, or branches on one — they are input to
+// the arbiter's judgement and nothing else.
+function reviewSeatPrompt({ seat, goal, plan, gate, round }) {
+  return [
+    `# ${seat} plan review seat`,
+    'You receive the raw goal and a proposed implementation plan. Judge independently whether the plan achieves the goal; explore the target repository for real evidence.',
+    `GOAL ${oneLineArtifact(goal)}`,
     `PLAN ${oneLineArtifact(plan)}`,
     `GATE ${oneLineArtifact(JSON.stringify(gate))}`,
+    `ROUND ${round}`,
+    'Respond in exactly this structure and nothing else:',
+    'AGREE: yes or AGREE: no.',
+    'Then zero or more suggestion lines, one per line, formatted: S<id> P0: description (or P1, P2 — your judgement of priority; nothing mechanical acts on it).',
+    'Reuse the same S<id> for a suggestion you have raised in an earlier round so recurrence is visible.',
+    'Then zero or more question lines formatted: Q<id>: question.',
+    'AGREE: yes means you are satisfied the plan achieves the goal and you could work from it as written.',
+  ].join(' ');
+}
+
+function parseSeatReview(text) {
+  const source = String(text ?? '');
+  const agreeMatches = [...source.matchAll(/(?:^|\n|\s)AGREE:\s*(yes|no)\b/gi)];
+  const agree = agreeMatches.length > 0
+    ? agreeMatches.at(-1)[1].toLowerCase() === 'yes'
+    : null;
+  const suggestions = [...source.matchAll(/(?:^|\n)\s*(S[\w-]+)\s+([^\s:]{1,12}):\s*(.+?)(?=\n|$)/g)]
+    .map((match) => ({ id: match[1], severity: match[2], text: match[3].trim() }));
+  const questions = [...source.matchAll(/(?:^|\n)\s*(Q[\w-]+):\s*(.+?)(?=\n|$)/g)]
+    .map((match) => ({ id: match[1], text: match[2].trim() }));
+  return {
+    agree: agree === true,
+    readable: agree !== null,
+    suggestions,
+    questions,
+    content: source,
+  };
+}
+
+async function productionCursorDraft({
+  goal, target, verifierModel, timeoutMs, runId, env, home, superpowersDir, feedback, failedPlan,
+}) {
+  const prompt = [
+    '# Cursor plan drafting seat',
+    'You are one of three seats drafting independently from the same raw goal. Draft from your own reading of the repository.',
+    'Draft an implementation plan and its executable gate.json for this goal:',
+    oneLineArtifact(goal),
+    'Every cited path and line must already exist in the target; verify each citation by reading before citing.',
+    ...(feedback ? ['Required corrections:', oneLineArtifact(feedback)] : []),
+    ...(failedPlan ? ['Discarded framing, choose a genuinely different strategy:', oneLineArtifact(failedPlan)] : []),
+    'Return exactly <PLAN_MD>...markdown...</PLAN_MD> then <GATE_JSON>[...]</GATE_JSON> and no prose outside them.',
   ].join(' ');
   const result = await runVerifier({
+    cwd: target, prompt, model: verifierModel, timeoutMs, pass: 'plan', env, home, superpowersDir,
+  });
+  const artifact = parseDraftArtifact(`${result.findings ?? ''}\n${result.plan ?? ''}`);
+  return { ...artifact, usage: result.usage };
+}
+
+async function productionCursorReview({
+  goal, plan, gate, round, target, verifierModel, timeoutMs, env, home, superpowersDir,
+}) {
+  const result = await runVerifier({
     cwd: target,
-    prompt,
+    prompt: reviewSeatPrompt({ seat: 'Cursor', goal, plan, gate, round }),
     model: verifierModel,
     timeoutMs,
     pass: 'plan',
@@ -305,7 +350,28 @@ async function productionReview({
     home,
     superpowersDir,
   });
-  return { content: result.findings ?? '', verdict: result.verdict, usage: result.usage };
+  if (result.launchFailed || result.timedOut) {
+    return { agree: false, readable: false, suggestions: [], questions: [], content: '', unavailable: true, usage: result.usage };
+  }
+  return { ...parseSeatReview(`${result.findings ?? ''}\n${result.plan ?? ''}`), usage: result.usage };
+}
+
+async function productionCodexReview({
+  goal, plan, gate, round, target, plannerModel, timeoutMs, runId, env,
+}) {
+  const result = await runExecutor({
+    plan: reviewSeatPrompt({ seat: 'Codex', goal, plan, gate, round }),
+    cwd: target,
+    model: plannerModel,
+    sandbox: 'read-only',
+    timeoutMs,
+    runId,
+    env,
+  });
+  if (result.exitCode !== 0 || result.timedOut) {
+    return { agree: false, readable: false, suggestions: [], questions: [], content: '', unavailable: true, usage: result.usage };
+  }
+  return { ...parseSeatReview(result.lastMessage), usage: result.usage };
 }
 
 function capabilityPrompt({ seat, plan, remedyOnly = false, previousAnswer }) {
@@ -513,7 +579,6 @@ export async function runPlanCandidateSet({
   runId = `plan-candidates-${randomUUID()}`,
   env = process.env,
   draft,
-  checkGate = runPlanGate,
   select,
 } = {}) {
   validatePlanCandidateCount(count, mode === 'fresh' ? 'pivotCandidates' : 'candidates');
@@ -571,29 +636,10 @@ export async function runPlanCandidateSet({
     } catch (error) {
       gateResult = candidateFailure(error);
     }
-    if (artifact) {
-      try {
-        gateResult = await checkGate({
-          plan: artifact.plan,
-          gate: artifact.gate,
-          target,
-          timeoutMs: gateTimeout,
-          round,
-          runId,
-          candidateId: definition.id,
-          perspective: definition.perspective,
-        });
-      } catch (error) {
-        gateResult = {
-          passed: false,
-          failures: [{
-            id: 'PG_GATE',
-            check: 'gate-runs',
-            message: `plan gate failed to run: ${error?.message ?? String(error)}`,
-          }],
-        };
-      }
-    }
+    // No mechanical gate judges a candidate. Drafting is the only thing that can
+    // fail here; every drafted plan reaches the selection seat, which judges.
+    // gateResult keeps its shape because run.js facts and the dashboard read it.
+    if (artifact) gateResult = { passed: true, failures: [] };
     return { ...definition, input, ...(artifact ?? {}), gateResult };
   }));
   const surviving = candidates.filter((candidate) => candidate.gateResult?.passed === true);
@@ -640,47 +686,6 @@ export async function runPlanCandidateSet({
     exhausted: false,
     ...(selectionUsage === undefined ? {} : { selectionUsage }),
   };
-}
-
-function normalizeReview(value) {
-  if (typeof value === 'string') {
-    const parsed = parseReview(value);
-    const verdict = parsed !== null
-      ? undefined
-      : /(?:^|\n)\s*NO_BLOCKERS\s*$/i.test(value) ? 'NO_BLOCKERS' : 'UNVERIFIED';
-    return { content: value, verdict };
-  }
-  if (Array.isArray(value)) return { findings: value, verdict: undefined };
-  if (value && typeof value === 'object') return value;
-  return { content: '', verdict: 'UNVERIFIED' };
-}
-
-function reviewFindings(review) {
-  const findings = Array.isArray(review.findings)
-    ? review.findings
-    : parseReview(review.content ?? '') ?? [];
-  if (findings.some((finding) => finding.severity === 'blocking')) return findings;
-  if (findings.length > 0) return findings;
-  if (review.verdict !== undefined && review.verdict !== 'NO_BLOCKERS') {
-    return [...findings, {
-      id: 'F_UNVERIFIED',
-      severity: 'blocking',
-      category: 'review',
-      description: `plan reviewer did not approve the draft (${review.verdict})`,
-      test: 'plan review retry',
-    }];
-  }
-  return findings;
-}
-
-function gateFindings(failures) {
-  return failures.map((item, index) => ({
-    id: item.id || `PG${index + 1}`,
-    severity: 'blocking',
-    category: item.check,
-    description: item.message,
-    test: 'mechanical plan gate',
-  }));
 }
 
 function writeArtifacts(out, plan, gate) {
@@ -746,27 +751,23 @@ export async function runPlan({
     return result;
   }
 
-  const draft = adapters.draft ?? productionDraft;
-  const reviewPlan = adapters.review ?? productionReview;
-  const runArbiterSeat = adapters.runArbiter
-    ?? (adapters.draft === undefined ? runArbiter : null);
+  // Seat wiring. Injecting `draft` marks a hermetic test: production seats then
+  // stay out unless explicitly supplied, so a unit test can never launch a CLI.
+  const draftCodex = adapters.draft ?? productionDraft;
+  const hermetic = adapters.draft !== undefined;
+  const draftCursor = adapters.cursorDraft ?? (hermetic ? null : productionCursorDraft);
+  const reviewCursor = adapters.review ?? (hermetic ? null : productionCursorReview);
+  const reviewCodex = adapters.codexReview ?? (hermetic ? null : productionCodexReview);
+  const runArbiterSeat = adapters.runArbiter ?? (hermetic ? null : runArbiter);
   const checkCapability = adapters.checkCapability
     ?? adapters.capabilityCheck
-    ?? (adapters.draft === undefined && adapters.review === undefined
-      ? productionCapability
-      : null);
-  const checkGate = adapters.runPlanGate ?? runPlanGate;
-  const selectPlanCandidate = adapters.selectPlanCandidate ?? adapters.selectCandidate;
+    ?? (hermetic || adapters.review !== undefined ? null : productionCapability);
   const ledger = new DebateLedger();
-  let previousPlan = '';
-  let feedback = '';
-  let pivotInstruction = '';
   let pivotCount = 0;
   const pivotHistory = [];
   const capabilityHistory = [];
-  const candidateHistory = [];
-  let pendingFreshCandidates = null;
-  let lastGate = null;
+  const stormHistory = [];
+  const roundHistory = [];
 
   const arbitrate = async (arbiterRequest) => {
     if (typeof runArbiterSeat !== 'function') {
@@ -798,179 +799,264 @@ export async function runPlan({
     return result;
   };
 
-  for (let round = 1; rounds === undefined || round <= rounds; round++) {
-    let artifact;
-    let gateResult;
-    const storm = round === 1 && candidates > 1
-      ? { mode: 'initial', count: candidates, ledger: null, failedPlan: '' }
-      : pendingFreshCandidates;
-    if (storm) {
-      pendingFreshCandidates = null;
-      const generated = await runPlanCandidateSet({
-        goal: request.goal,
-        target: request.target,
-        count: storm.count,
-        mode: storm.mode,
-        round,
-        ledger: storm.ledger,
-        failedPlan: storm.failedPlan,
-        previousPlan: storm.mode === 'fresh' ? '' : previousPlan,
-        feedback,
-        pivot: pivotInstruction,
-        plannerModel,
-        timeoutMs: executorTimeout,
-        gateTimeout,
-        runId,
-        env,
-        draft,
-        checkGate,
-        select: selectPlanCandidate
-          ?? (adapters.draft === undefined ? productionSelect : undefined),
-      });
-      const selectedId = generated.selected?.id ?? null;
-      const history = {
-        round,
-        mode: storm.mode,
-        candidates: generated.candidates.map((candidate) => (
-          planCandidateFacts(candidate, selectedId)
-        )),
-        selectedCandidateId: selectedId,
-        exhausted: generated.exhausted,
-      };
-      candidateHistory.push(history);
-      if (generated.exhausted) {
-        const failures = history.candidates.flatMap((candidate) => (
-          candidate.failures.map((failure) => ({ ...failure, candidateId: candidate.id }))
-        ));
-        lastGate = { passed: false, failures };
-        if (storm.mode === 'fresh' && pivotHistory.length > 0) {
-          Object.assign(pivotHistory.at(-1), {
-            candidates: history.candidates,
-            selectedCandidateId: null,
-            exhausted: true,
-            escalatedTo: PIVOT_CONCLUDE,
+  const finish = (reason, round, extra = {}) => {
+    const converged = reason === 'converged';
+    const result = {
+      runId,
+      dryRun: false,
+      converged,
+      reason,
+      rounds: round,
+      target: request.target,
+      out: request.out,
+      storm: stormHistory,
+      roundHistory,
+      capabilityVetoes: capabilityHistory,
+      pivotHistory,
+      ...extra,
+    };
+    reportEvent(reporter, runId, 'plan', 'finish', {
+      converged, reason, rounds: round,
+      ...(extra.pivot === undefined ? {} : { pivot: extra.pivot }),
+    });
+    return result;
+  };
+
+  const failureMessage = (error) => (error instanceof Error ? error.message : String(error));
+
+  // All three seats draft independently from the SAME raw goal - never from a
+  // paraphrase, so their takes stay uncorrelated.
+  const stormOnce = async ({ round, feedback, failedPlan }) => {
+    const attempts = await Promise.all([
+      (async () => {
+        try {
+          const input = draftingPrompt({
+            goal: request.goal, round, previousPlan: '', feedback, pivot: '', failedPlan,
           });
-        }
-        const reason = storm.mode === 'fresh' ? 'pivot-conclude' : 'candidates-exhausted';
-        const result = {
-          runId, dryRun: false, converged: false, reason, rounds: round,
-          target: request.target, out: request.out, gate: lastGate,
-          capabilityVetoes: capabilityHistory,
-          pivotHistory,
-          candidateHistory,
-        };
-        reportEvent(reporter, runId, 'plan', 'finish', {
-          converged: false, reason, rounds: round,
-          ...(storm.mode === 'fresh' ? { pivot: PIVOT_CONCLUDE } : {}),
+          const artifact = normalizeDraft(await draftCodex({
+            input, goal: request.goal, target: request.target, out: request.out, round,
+            plannerModel, sandbox: 'read-only', timeoutMs: executorTimeout, runId, env,
+          }));
+          return { seat: 'codex', ...artifact };
+        } catch (error) { return { seat: 'codex', error: failureMessage(error) }; }
+      })(),
+      (async () => {
+        if (typeof draftCursor !== 'function') return { seat: 'cursor', error: 'cursor drafting seat unavailable' };
+        try {
+          const artifact = normalizeDraft(await draftCursor({
+            goal: request.goal, target: request.target, round, verifierModel,
+            timeoutMs: verifierTimeout, runId, env, home,
+            superpowersDir: cursorSuperpowersDir, feedback, failedPlan,
+          }));
+          return { seat: 'cursor', ...artifact };
+        } catch (error) { return { seat: 'cursor', error: failureMessage(error) }; }
+      })(),
+      (async () => {
+        const response = await arbitrate({
+          type: 'draft', goal: request.goal, feedback, failedPlan,
         });
-        return result;
-      }
-      artifact = { plan: generated.selected.plan, gate: generated.selected.gate };
-      gateResult = generated.selected.gateResult;
-    } else {
-      const input = draftingPrompt({
-        goal: request.goal,
-        round,
-        previousPlan,
-        feedback,
-        pivot: pivotInstruction,
-      });
-      try {
-        artifact = normalizeDraft(await draft({
-          input,
-          goal: request.goal,
-          target: request.target,
-          out: request.out,
-          round,
-          plannerModel,
-          sandbox: 'read-only',
-          timeoutMs: executorTimeout,
-          runId,
-          env,
-        }));
-      } catch (error) {
-        artifact = {
-          plan: previousPlan,
-          gate: null,
-          draftFailure: `planner artifacts are invalid: ${error?.message ?? String(error)}`,
-        };
-      }
-      gateResult = artifact.draftFailure
-        ? {
-          passed: false,
-          failures: [{ id: 'PG_DRAFT', check: 'gate-runs', message: artifact.draftFailure }],
+        if (!response || response.verdict === ARBITER_UNVERIFIED
+          || response.launchFailed || response.timedOut) {
+          return { seat: 'claude', error: 'claude drafting seat unavailable' };
         }
-        : await checkGate({
-          plan: artifact.plan,
-          gate: artifact.gate,
-          target: request.target,
-          timeoutMs: gateTimeout,
-          round,
-          runId,
-        });
-    }
-    lastGate = gateResult;
-    reportEvent(reporter, runId, 'plan', 'gate', {
+        try {
+          const text = typeof response === 'string' ? response : response.answer ?? response;
+          return { seat: 'claude', ...normalizeDraft(text) };
+        } catch (error) { return { seat: 'claude', error: failureMessage(error) }; }
+      })(),
+    ]);
+    reportEvent(reporter, runId, 'plan', 'storm', {
       planRound: round,
-      passed: gateResult.passed === true,
-      failures: gateResult.failures ?? [],
+      drafts: attempts.map(({ seat, error }) => ({ seat, ok: !error, ...(error ? { error } : {}) })),
+    });
+    stormHistory.push({
+      round,
+      drafts: attempts.map(({ seat, error }) => ({ seat, ok: !error, ...(error ? { error } : {}) })),
+    });
+    return attempts;
+  };
+
+  const normalizeSeatReview = (value) => {
+    if (typeof value === 'string') return parseSeatReview(value);
+    if (value && typeof value === 'object' && typeof value.agree === 'boolean') {
+      return {
+        readable: true,
+        suggestions: [],
+        questions: [],
+        content: '',
+        ...value,
+      };
+    }
+    return parseSeatReview(String(value?.content ?? ''));
+  };
+
+  const unavailableReview = () => ({
+    agree: false, readable: false, suggestions: [], questions: [], content: '', unavailable: true,
+  });
+
+  const reviewBoth = async ({ round, proposal, gate }) => {
+    const [codex, cursor] = await Promise.all([
+      (async () => {
+        if (typeof reviewCodex !== 'function') return unavailableReview();
+        try {
+          return normalizeSeatReview(await reviewCodex({
+            goal: request.goal, plan: proposal, gate, round,
+            target: request.target, plannerModel, timeoutMs: executorTimeout, runId, env,
+          }));
+        } catch { return unavailableReview(); }
+      })(),
+      (async () => {
+        if (typeof reviewCursor !== 'function') return unavailableReview();
+        try {
+          return normalizeSeatReview(await reviewCursor({
+            goal: request.goal, plan: proposal, gate, round,
+            target: request.target, verifierModel, timeoutMs: verifierTimeout,
+            env, home, superpowersDir: cursorSuperpowersDir,
+          }));
+        } catch { return unavailableReview(); }
+      })(),
+    ]);
+    for (const [seat, review] of [['codex', codex], ['cursor', cursor]]) {
+      reportEvent(reporter, runId, 'plan', 'review', {
+        planRound: round,
+        seat,
+        agree: review.agree === true,
+        readable: review.readable !== false,
+        suggestionIds: review.suggestions.map((item) => item.id),
+        questionCount: review.questions.length,
+        ...(review.unavailable ? { unavailable: true } : {}),
+      });
+    }
+    return { codex, cursor };
+  };
+
+  let stormDrafts = null;
+  let reStorm = true;
+  let feedback = '';
+  let failedPlan = '';
+  let previousProposal = '';
+  let openQuestions = [];
+  let round = 0;
+
+  for (round = 1; rounds === undefined || round <= rounds; round++) {
+    if (reStorm) {
+      stormDrafts = await stormOnce({ round, feedback, failedPlan });
+      reStorm = false;
+      if (stormDrafts.every((attempt) => attempt.error)) {
+        // Nothing was drafted, so there is nothing to talk about. This is
+        // inability, not a mechanical verdict on any plan.
+        return finish('storm-exhausted', round);
+      }
+    }
+
+    const proposeResponse = await arbitrate({
+      type: 'propose',
+      goal: request.goal,
+      drafts: stormDrafts.filter((attempt) => !attempt.error)
+        .map(({ seat, plan, gate }) => ({ seat, plan, gate })),
+      feedback,
+      questions: openQuestions,
+      previousProposal,
+    });
+    let proposal = null;
+    if (proposeResponse && proposeResponse.verdict !== ARBITER_UNVERIFIED
+      && !proposeResponse.launchFailed && !proposeResponse.timedOut) {
+      try {
+        const text = typeof proposeResponse === 'string'
+          ? proposeResponse
+          : proposeResponse.answer ?? proposeResponse;
+        proposal = normalizeDraft(text);
+      } catch { proposal = null; }
+    }
+    reportEvent(reporter, runId, 'plan', 'proposal', {
+      planRound: round, ok: proposal !== null,
+    });
+    if (proposal === null) {
+      // The collating seat did not produce a proposal. A seat that did not run
+      // cannot be substituted by a rule, so the round cannot proceed.
+      return finish('arbiter-unavailable', round);
+    }
+    previousProposal = proposal.plan;
+
+    const reviews = await reviewBoth({ round, proposal: proposal.plan, gate: proposal.gate });
+    openQuestions = [
+      ...reviews.codex.questions.map((question) => ({ seat: 'codex', ...question })),
+      ...reviews.cursor.questions.map((question) => ({ seat: 'cursor', ...question })),
+    ];
+
+    const agreementResponse = await arbitrate({
+      type: 'agreement',
+      goal: request.goal,
+      proposal: proposal.plan,
+      gate: proposal.gate,
+      reviews: {
+        codex: {
+          agree: reviews.codex.agree,
+          suggestions: reviews.codex.suggestions,
+          questions: reviews.codex.questions,
+          content: reviews.codex.content,
+        },
+        cursor: {
+          agree: reviews.cursor.agree,
+          suggestions: reviews.cursor.suggestions,
+          questions: reviews.cursor.questions,
+          content: reviews.cursor.content,
+        },
+      },
+    });
+    const agreement = parseAgreementJudgement(agreementResponse);
+    reportEvent(reporter, runId, 'plan', 'agreement', {
+      planRound: round,
+      converged: agreement.verdict === 'answered' && agreement.converged === true,
+      unjudged: agreement.verdict !== 'answered',
+      ...(agreement.reason ? { reason: agreement.reason } : {}),
     });
 
-    let findings;
-    let reviewed = false;
-    if (gateResult.passed === true) {
-      reviewed = true;
-      let review;
-      try {
-        review = normalizeReview(await reviewPlan({
-          plan: artifact.plan,
-          gate: artifact.gate,
-          target: request.target,
-          round,
-          verifierModel,
-          timeoutMs: verifierTimeout,
-          runId,
-          env,
-          home,
-          superpowersDir: cursorSuperpowersDir,
-        }));
-      } catch (error) {
-        review = {
-          content: '',
-          verdict: `failed: ${error?.message ?? String(error)}`,
-        };
-      }
-      findings = reviewFindings(review);
-    } else {
-      findings = gateFindings(gateResult.failures ?? []);
-    }
-    const blocking = findings.filter((finding) => finding.severity === 'blocking');
-    const validation = blocking.length === 0
-      ? { accepted: [], rejected: [], judgements: [] }
-      : await validateFindings(blocking, {
-          arbiter: arbitrate,
-          diff: `PLAN\n${artifact.plan}\nGATE\n${JSON.stringify(artifact.gate)}`,
-          plan: request.goal,
-          reporter,
-          runId,
-          debateRound: round,
-        });
-    const survivingIds = new Set(validation.accepted);
-    const surviving = blocking.filter((finding) => survivingIds.has(finding.id));
-    ledger.record(round, surviving.map((finding) => finding.id));
+    // Convergence is three seats actually agreeing. Silence, an unreadable
+    // response, or an absent seat is not agreement; an overruled objection does
+    // not exist here at all - Claude persuades through feedback, never outvotes.
+    const seatsAgree = reviews.codex.agree === true && reviews.cursor.agree === true;
+    const converged = seatsAgree
+      && agreement.verdict === 'answered'
+      && agreement.converged === true;
+
+    const suggestionIds = [
+      ...reviews.codex.suggestions.map((item) => `codex-${item.id}`),
+      ...reviews.cursor.suggestions.map((item) => `cursor-${item.id}`),
+    ];
+    ledger.record(round, suggestionIds);
+    roundHistory.push({
+      round,
+      reviews: {
+        codex: {
+          agree: reviews.codex.agree,
+          readable: reviews.codex.readable !== false,
+          suggestions: reviews.codex.suggestions,
+          questions: reviews.codex.questions,
+          ...(reviews.codex.unavailable ? { unavailable: true } : {}),
+        },
+        cursor: {
+          agree: reviews.cursor.agree,
+          readable: reviews.cursor.readable !== false,
+          suggestions: reviews.cursor.suggestions,
+          questions: reviews.cursor.questions,
+          ...(reviews.cursor.unavailable ? { unavailable: true } : {}),
+        },
+      },
+      agreement,
+      converged,
+    });
     reportEvent(reporter, runId, 'plan', 'round', {
       planRound: round,
-      gatePassed: gateResult.passed === true,
-      reviewed,
-      findingIds: findings.map((finding) => finding.id),
-      blockingFindingIds: blocking.map((finding) => finding.id),
-      acceptedFindingIds: validation.accepted,
-      rejectedFindingIds: validation.rejected,
+      suggestionIds,
+      codexAgrees: reviews.codex.agree === true,
+      cursorAgrees: reviews.cursor.agree === true,
+      converged,
     });
 
-    if (gateResult.passed === true && surviving.length === 0) {
+    if (converged) {
       const vetoes = await capabilityVetoes({
-        plan: artifact.plan,
+        plan: proposal.plan,
         checkCapability,
         context: {
           target: request.target,
@@ -991,51 +1077,35 @@ export async function runPlan({
       });
       if (vetoes.length > 0) {
         capabilityHistory.push({ round, vetoes });
-        previousPlan = artifact.plan;
         feedback = vetoFeedback(vetoes);
-        pivotInstruction = '';
         continue;
       }
-      const paths = writeArtifacts(request.out, artifact.plan, artifact.gate);
+      const paths = writeArtifacts(request.out, proposal.plan, proposal.gate);
       reportEvent(reporter, runId, 'plan', 'converged', {
-        planRound: round, suggestions: findings.length,
+        planRound: round,
+        suggestions: suggestionIds.length,
       });
-      const result = {
-        runId,
-        dryRun: false,
-        converged: true,
-        reason: 'converged',
-        rounds: round,
-        target: request.target,
-        out: request.out,
-        capabilityVetoes: capabilityHistory,
-        pivotHistory,
-        candidateHistory,
-        ...paths,
-      };
-      reportEvent(reporter, runId, 'plan', 'finish', {
-        converged: true, reason: result.reason, rounds: round,
-      });
-      return result;
+      return finish('converged', round, paths);
     }
 
-    feedback = buildFixPlan({
-      findings: blocking,
-      accepted: validation.accepted,
-      rejected: validation.rejected,
-      originalTask: request.goal,
-    });
-    previousPlan = artifact.plan;
-    pivotInstruction = '';
+    // Claude's feedback leads; the seats' own words follow verbatim so the next
+    // proposal answers them rather than a summary of them.
+    feedback = [
+      agreement.feedback || '',
+      ...['codex', 'cursor'].flatMap((seat) => reviews[seat].suggestions.map(
+        (item) => `${seat} ${item.id} ${item.severity}: ${item.text}`,
+      )),
+    ].filter(Boolean).join('\n');
+
     if (detectCircling(ledger)) {
       const pivotJudgement = parsePivotJudgement(await arbitrate({
         type: 'pivot',
         ledger: Array.from({ length: ledger.currentRound }, (_, index) => ({
           round: index + 1, findingIds: ledger.round(index + 1),
         })),
-        recurringFindings: surviving.filter((finding) => ledger.stuckFindings().has(finding.id)),
+        recurringFindings: suggestionIds.filter((id) => ledger.stuckFindings().has(id)),
         attempted: pivotHistory,
-        plan: artifact.plan,
+        plan: proposal.plan,
       }));
       const unjudged = pivotJudgement.verdict !== 'answered';
       const decision = unjudged ? shouldPivot(pivotCount) : pivotJudgement.decision;
@@ -1046,54 +1116,19 @@ export async function runPlan({
         ...(pivotJudgement.reason ? { reason: pivotJudgement.reason } : {}),
       });
       if (decision === PIVOT_CONCLUDE) {
-        const result = {
-          runId, dryRun: false, converged: false, reason: 'pivot-conclude', rounds: round,
-          target: request.target, out: request.out, gate: lastGate,
-          capabilityVetoes: capabilityHistory,
-          pivotHistory,
-        };
-        reportEvent(reporter, runId, 'plan', 'finish', {
-          converged: false, reason: result.reason, rounds: round, pivot: decision,
-        });
-        return result;
+        return finish('pivot-conclude', round, { pivot: PIVOT_CONCLUDE });
       }
       if (decision === PIVOT_FRESH) {
-        const ledgerAtPivot = {
-          rounds: Array.from({ length: ledger.currentRound }, (_, index) => ({
-            round: index + 1, findingIds: ledger.round(index + 1),
-          })),
-          recurredFindingIds: [...ledger.stuckFindings()],
-          resolvedFindingIds: [...ledger.resolvedFindings()],
-        };
-        pendingFreshCandidates = {
-          mode: 'fresh',
-          count: pivotCandidates,
-          ledger: ledgerAtPivot,
-          failedPlan: artifact.plan,
-        };
-        previousPlan = '';
+        reStorm = true;
+        failedPlan = proposal.plan;
+        previousProposal = '';
+        openQuestions = [];
+        feedback = '';
+      } else {
+        feedback = `${feedback}\nAmend the approach specifically to break the recurring suggestions.`;
       }
-      pivotInstruction = decision === PIVOT_AMEND
-        ? 'Amend the approach specifically to break the recurring findings.'
-        : 'Start from a genuinely fresh approach while preserving the goal and invariants.';
     }
   }
 
-  const result = {
-    runId,
-    dryRun: false,
-    converged: false,
-    reason: 'rounds-exhausted',
-    rounds,
-    target: request.target,
-    out: request.out,
-    gate: lastGate,
-    capabilityVetoes: capabilityHistory,
-    pivotHistory,
-    candidateHistory,
-  };
-  reportEvent(reporter, runId, 'plan', 'finish', {
-    converged: false, reason: result.reason, rounds,
-  });
-  return result;
+  return finish('rounds-exhausted', round - 1);
 }

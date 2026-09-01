@@ -111,8 +111,12 @@ Each unit carries either `task` plus `gate`, or `goal` plus `out`:
 loop queue --file queue.json --mode autonomous --max-runs 3 --token-budget 50000
 ```
 
-For a goal unit, `loop plan` first debates a draft with a read-only drafting seat, a mechanical
-plan gate, and a read-only reviewer. Implementation never starts unless that plan converges.
+For a goal unit, `loop plan` runs a three-way STORM: Codex, Cursor and Claude each draft
+independently from the same raw goal, Claude collates them into one proposal, and both other
+seats review it — structured suggestions carrying P0/P1/P2 priorities that nothing mechanical
+acts on. A plan converges only when all three seats actually agree, with Claude as the final
+arbiter; nothing mechanical judges a plan. Implementation never starts unless that plan
+converges.
 Wherever an approach is being chosen — the initial plan, and again when the arbiter decides an
 approach is dead rather than merely wrong — several candidates are drafted from deliberately
 distinct declared perspectives and one is selected, so the loop compares approaches instead of

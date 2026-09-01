@@ -60,7 +60,7 @@ const freshPlanningAdapters = {
     plan: `Fresh implementation plan from ${candidateId}.\n`,
     gate: [],
   }),
-  runPlanGate: async () => ({ passed: true, failures: [] }),
+  
   selectPlanCandidate: async () => ({ selectedCandidateId: 'candidate-1' }),
 };
 

@@ -13,18 +13,6 @@ const VERIFIED_SUPERPOWERS = {
   },
 };
 
-const runPlan = (options) => executePlan({
-  ...options,
-  // The pre-STORM cases below are single-draft regression controls. Dedicated
-  // tests exercise the new default candidate set explicitly.
-  candidates: options.candidates ?? 1,
-  pivotCandidates: options.pivotCandidates ?? 1,
-  adapters: {
-    verifySuperpowers: async () => VERIFIED_SUPERPOWERS,
-    ...options.adapters,
-  },
-});
-
 const planText = [
   '## Title', '', 'Plan test', '',
   '## Required behavior', '', 'Implement the goal.', '',
@@ -42,361 +30,430 @@ function fixture() {
   };
 }
 
-function draft() {
-  return { plan: planText, gate: [] };
+// Claude in one injectable seat: draft / propose / agreement / pivot are all
+// arbiter request types, exactly as production routes them.
+function makeArbiter(handlers = {}) {
+  return async ({ request }) => {
+    const handler = handlers[request.type];
+    if (handler === undefined) return { verdict: 'UNVERIFIED' };
+    return typeof handler === 'function' ? handler(request) : handler;
+  };
 }
 
-const passingGate = async () => ({ passed: true, failures: [] });
+const agreeingReview = () => 'AGREE: yes';
 
-test('a one-round convergence writes both artifacts and emits plan/converged', async () => {
+function seats({ arbiter = {}, codexReview, review, draft, cursorDraft } = {}) {
+  return {
+    verifySuperpowers: async () => VERIFIED_SUPERPOWERS,
+    draft: draft ?? (async () => ({ plan: planText, gate: [] })),
+    cursorDraft: cursorDraft ?? (async () => ({ plan: `${planText}cursor view\n`, gate: [] })),
+    codexReview: codexReview ?? (async () => agreeingReview()),
+    review: review ?? (async () => agreeingReview()),
+    runArbiter: makeArbiter({
+      draft: { plan: `${planText}claude view\n`, gate: [] },
+      propose: { plan: planText, gate: [] },
+      agreement: { converged: true, reason: 'all seats satisfied' },
+      ...arbiter,
+    }),
+  };
+}
+
+const runPlan = (options) => executePlan({ ...options, adapters: { ...seats(), ...options.adapters } });
+
+test('three seats storm, Claude proposes, both seats agree, Claude converges', async () => {
   const item = fixture();
   const events = [];
+  const stormInputs = [];
   try {
-    const result = await runPlan({
-      goal: 'Implement the approved behavior', target: item.target, out: item.out,
+    const result = await executePlan({
+      goal: 'Implement the approved behavior',
+      target: item.target,
+      out: item.out,
       reporter: (event) => events.push(event),
-      adapters: {
+      adapters: seats({
         draft: async (request) => {
+          stormInputs.push(request.input);
           assert.equal(request.sandbox, 'read-only');
-          return draft();
+          return { plan: planText, gate: [] };
         },
-        runPlanGate: passingGate,
-        review: async () => 'NO_BLOCKERS',
-      },
+      }),
     });
     assert.equal(result.converged, true);
+    assert.equal(result.reason, 'converged');
     assert.equal(result.rounds, 1);
     assert.equal(readFileSync(result.planPath, 'utf8'), planText);
     assert.deepEqual(JSON.parse(readFileSync(result.gatePath, 'utf8')), []);
-    assert.ok(events.some((event) => `${event.stage}/${event.type}` === 'plan/converged'));
+    // Every seat drafted from the RAW goal, not a paraphrase.
+    assert.match(stormInputs[0], /Implement the approved behavior/);
+    // arbiter/start+finish bracket each of Claude's judgements — the draft, the
+    // proposal, and the agreement. That is the live transcript of the third seat.
     assert.deepEqual(events.map((event) => `${event.stage}/${event.type}`), [
-      'plan/start', 'plan/gate', 'plan/round', 'plan/converged', 'plan/finish',
+      'plan/start',
+      'arbiter/start', 'arbiter/finish',
+      'plan/storm',
+      'arbiter/start', 'arbiter/finish',
+      'plan/proposal',
+      'plan/review', 'plan/review',
+      'arbiter/start', 'arbiter/finish',
+      'plan/agreement',
+      'plan/round',
+      'plan/converged',
+      'plan/finish',
     ]);
+    assert.deepEqual(
+      result.storm[0].drafts.map((draftRecord) => `${draftRecord.seat}:${draftRecord.ok}`),
+      ['codex:true', 'cursor:true', 'claude:true'],
+    );
   } finally { item.cleanup(); }
 });
 
-test('initial planning defaults to three distinct STORM perspectives and selects one', async () => {
+test('mutation control: convergence requires the codex seat to actually agree', async () => {
   const item = fixture();
-  const requests = [];
-  const selections = [];
-  try {
-    const result = await executePlan({
-      goal: 'Choose an implementation approach', target: item.target, out: item.out,
-      adapters: {
-        verifySuperpowers: async () => VERIFIED_SUPERPOWERS,
-        draft: async (request) => {
-          requests.push(request);
-          return { plan: `${planText}\nSelected source: ${request.candidateId}\n`, gate: [] };
-        },
-        runPlanGate: passingGate,
-        review: async () => 'NO_BLOCKERS',
-        selectPlanCandidate: async (request) => {
-          selections.push(request);
-          return { selectedCandidateId: 'candidate-2' };
-        },
-      },
-    });
-
-    assert.equal(result.converged, true);
-    assert.equal(requests.length, 3);
-    assert.equal(new Set(requests.map((request) => request.perspective)).size, 3);
-    for (const request of requests) {
-      assert.match(request.input, /Declared perspective:/);
-      assert.equal(request.mode, 'initial');
-    }
-    assert.equal(selections.length, 1);
-    assert.equal(result.candidateHistory[0].selectedCandidateId, 'candidate-2');
-    assert.match(readFileSync(result.planPath, 'utf8'), /Selected source: candidate-2/);
-  } finally { item.cleanup(); }
-});
-
-test('--candidates 1 restores single-draft initial planning', async () => {
-  const item = fixture();
-  let drafts = 0;
-  let selections = 0;
   try {
     const result = await runPlan({
-      goal: 'Use one draft', target: item.target, out: item.out, candidates: 1,
-      adapters: {
-        draft: async (request) => {
-          drafts++;
-          assert.equal(request.candidateId, undefined);
-          return draft();
-        },
-        runPlanGate: passingGate,
-        review: async () => 'NO_BLOCKERS',
-        selectPlanCandidate: async () => { selections++; return 'candidate-1'; },
-      },
+      goal: 'Needs all three', target: item.target, out: item.out, rounds: 1,
+      adapters: seats({ codexReview: async () => 'AGREE: no\nS1 P1: unclear rollout' }),
     });
-    assert.equal(result.converged, true);
-    assert.equal(drafts, 1);
-    assert.equal(selections, 0);
-    assert.deepEqual(result.candidateHistory, []);
+    assert.equal(result.converged, false,
+      'codex withheld agreement, so two agreeing seats must not converge the plan');
+    assert.equal(existsSync(join(item.out, 'plan.md')), false);
+    assert.equal(result.roundHistory[0].reviews.codex.agree, false);
   } finally { item.cleanup(); }
 });
 
-test('a named-finding fix round remains single-draft after initial STORM selection', async () => {
+test('mutation control: convergence requires the cursor seat to actually agree', async () => {
   const item = fixture();
-  const requests = [];
-  let reviews = 0;
   try {
     const result = await runPlan({
-      goal: 'Repair a named finding', target: item.target, out: item.out, candidates: 3,
-      rounds: 2,
-      adapters: {
-        draft: async (request) => { requests.push(request); return draft(); },
-        runPlanGate: passingGate,
-        review: async () => reviews++ === 0 ? [
-          '## F1', 'Severity: blocking', 'Category: correctness',
-          'Description: Repair the named edge.', 'Test: test/edge.test.js',
-        ].join('\n') : 'NO_BLOCKERS',
-        selectPlanCandidate: async () => ({ selectedCandidateId: 'candidate-1' }),
-      },
-    });
-    assert.equal(result.converged, true);
-    assert.equal(requests.filter((request) => request.mode === 'initial').length, 3);
-    const fixRequests = requests.filter((request) => request.mode === undefined);
-    assert.equal(fixRequests.length, 1);
-    assert.match(fixRequests[0].input, /F1 \(blocking\): Repair the named edge/);
-  } finally { item.cleanup(); }
-});
-
-test('a gate-failed draft skips review and sends the exact failure into the next round', async () => {
-  const item = fixture();
-  const inputs = [];
-  let gateCalls = 0;
-  let reviews = 0;
-  try {
-    const result = await runPlan({
-      goal: 'Repair planning evidence', target: item.target, out: item.out, rounds: 2,
-      adapters: {
-        draft: async (request) => { inputs.push(request.input); return draft(); },
-        runPlanGate: async () => gateCalls++ === 0
-          ? { passed: false, failures: [{ id: 'PG_PATH', check: 'cited-paths', message: 'cited path does not exist: src/ghost.js' }] }
-          : { passed: true, failures: [] },
-        review: async () => { reviews++; return 'NO_BLOCKERS'; },
-      },
-    });
-    assert.equal(result.converged, true);
-    assert.equal(reviews, 1, 'the failed first draft must not reach review');
-    assert.match(inputs[1], /cited path does not exist: src[/\\]ghost[.]js/);
-  } finally { item.cleanup(); }
-});
-
-test('blocking review findings drive another round through the fix plan', async () => {
-  const item = fixture();
-  const inputs = [];
-  let reviews = 0;
-  try {
-    const result = await runPlan({
-      goal: 'Cover the edge case', target: item.target, out: item.out, rounds: 2,
-      adapters: {
-        draft: async (request) => { inputs.push(request.input); return draft(); },
-        runPlanGate: passingGate,
-        review: async () => reviews++ === 0 ? [
-          '## F1', 'Severity: blocking', 'Category: tests',
-          'Description: The edge case is uncovered.', 'Test: test/edge.test.js',
-        ].join('\n') : 'NO_BLOCKERS',
-      },
-    });
-    assert.equal(result.converged, true);
-    assert.equal(result.rounds, 2);
-    assert.match(inputs[1], /# Fix Plan[\s\S]*F1 \(blocking\): The edge case is uncovered/);
-  } finally { item.cleanup(); }
-});
-
-test('suggestions alone converge without driving another round', async () => {
-  const item = fixture();
-  let drafts = 0;
-  try {
-    const result = await runPlan({
-      goal: 'Keep suggestions optional', target: item.target, out: item.out,
-      adapters: {
-        draft: async () => { drafts++; return draft(); },
-        runPlanGate: passingGate,
-        review: async () => ({
-          verdict: 'ISSUES',
-          content: [
-            '## F1', 'Severity: suggestion', 'Category: style',
-            'Description: Consider different wording.', 'Test:',
-          ].join('\n'),
-        }),
-      },
-    });
-    assert.equal(result.converged, true);
-    assert.equal(drafts, 1);
-  } finally { item.cleanup(); }
-});
-
-test('a capability veto is unoverrulable and its remedy drives the next draft', async () => {
-  const item = fixture();
-  const inputs = [];
-  const capabilityCalls = [];
-  try {
-    const result = await runPlan({
-      goal: 'Use a supported launch mechanism', target: item.target, out: item.out, rounds: 2,
-      adapters: {
-        draft: async (request) => { inputs.push(request.input); return draft(); },
-        runPlanGate: passingGate,
-        review: async () => 'NO_BLOCKERS',
-        runArbiter: async () => ({ verdict: 'valid' }),
-        checkCapability: async ({ seat, remedyOnly }) => {
-          capabilityCalls.push({ seat, remedyOnly: remedyOnly === true });
-          if (seat !== 'executor' || inputs.length > 1) return { capable: true };
-          if (!remedyOnly) {
-            return 'I cannot use --plugin-dir.';
-          }
-          return {
-            capable: false,
-            what: '--plugin-dir',
-            why: 'the flag does not exist',
-            alternative: 'register the plugin marketplace and reuse CODEX_HOME',
-          };
-        },
-      },
-    });
-    assert.equal(result.converged, true);
-    assert.equal(result.rounds, 2);
-    assert.match(inputs[1], /register the plugin marketplace and reuse CODEX_HOME/);
-    assert.ok(capabilityCalls.some((call) => call.seat === 'executor' && call.remedyOnly));
-    assert.equal(result.capabilityVetoes[0].vetoes[0].answers.length, 2);
-  } finally { item.cleanup(); }
-});
-
-test('an arbiter cannot overrule a seat capability veto', async () => {
-  const item = fixture();
-  let arbiterCalls = 0;
-  try {
-    const result = await runPlan({
-      goal: 'Respect seat limits', target: item.target, out: item.out, rounds: 1,
-      adapters: {
-        draft,
-        runPlanGate: passingGate,
-        review: async () => 'NO_BLOCKERS',
-        runArbiter: async () => { arbiterCalls++; return { verdict: 'valid' }; },
-        checkCapability: async ({ seat }) => seat === 'reviewer'
-          ? {
-              capable: false,
-              what: 'write outside the review directory',
-              why: 'the reviewer is scoped read-only',
-              alternative: 'have the executor perform implementation writes',
-            }
-          : { capable: true },
-      },
+      goal: 'Needs all three', target: item.target, out: item.out, rounds: 1,
+      adapters: seats({ review: async () => 'AGREE: no\nS1 P0: goal not achieved' }),
     });
     assert.equal(result.converged, false);
-    assert.equal(result.reason, 'rounds-exhausted');
-    assert.equal(result.capabilityVetoes[0].vetoes[0].seat, 'reviewer');
-    assert.equal(arbiterCalls, 0, 'clean reviews need no arbiter and vetoes are never arbitrated');
+    assert.equal(existsSync(join(item.out, 'plan.md')), false);
   } finally { item.cleanup(); }
 });
 
-test('without --rounds recurring findings run until the pivot ladder concludes', async () => {
+test('Claude is the final arbiter: both seats agreeing does not converge without it', async () => {
   const item = fixture();
-  const inputs = [];
   try {
     const result = await runPlan({
-      goal: 'Escape a circular plan', target: item.target, out: item.out,
-      adapters: {
-        draft: async (request) => { inputs.push(request.input); return draft(); },
-        runPlanGate: async () => ({
-          passed: false,
-          failures: [{ id: 'PG_REPEAT', check: 'cited-paths', message: 'same recurring defect' }],
-        }),
-        review: async () => { throw new Error('a gate-failed plan must not be reviewed'); },
-      },
+      goal: 'Claude still judges', target: item.target, out: item.out, rounds: 1,
+      adapters: seats({
+        arbiter: { agreement: { converged: false, reason: 'proposal drifts from the goal', feedback: 'realign with the goal' } },
+      }),
+    });
+    assert.equal(result.converged, false);
+    assert.equal(result.roundHistory[0].agreement.converged, false);
+    assert.equal(result.roundHistory[0].agreement.reason, 'proposal drifts from the goal');
+  } finally { item.cleanup(); }
+});
+
+test('silence is not consent: an unreadable agreement cannot converge the round', async () => {
+  const item = fixture();
+  try {
+    const result = await runPlan({
+      goal: 'No judged agreement', target: item.target, out: item.out, rounds: 1,
+      adapters: seats({ arbiter: { agreement: { verdict: 'UNVERIFIED' } } }),
+    });
+    assert.equal(result.converged, false);
+    assert.equal(result.roundHistory[0].agreement.verdict, 'UNVERIFIED');
+  } finally { item.cleanup(); }
+});
+
+test('severities are carried verbatim and never filtered or validated', async () => {
+  const item = fixture();
+  let agreementRequest = null;
+  try {
+    const result = await runPlan({
+      goal: 'Severity is input, not a rule', target: item.target, out: item.out, rounds: 1,
+      adapters: seats({
+        codexReview: async () => 'AGREE: yes\nS1 P0: risky migration\nS2 CRITICAL: made-up level',
+        review: async () => 'AGREE: yes\nSx P2: naming nit',
+        arbiter: {
+          agreement: (request) => {
+            agreementRequest = request;
+            return { converged: true, reason: 'P0 noted and acceptable' };
+          },
+        },
+      }),
+    });
+    // A P0 blocks nothing by rule: with all three agreeing, the plan converges.
+    assert.equal(result.converged, true);
+    // The made-up severity travels untouched to the arbiter and the facts.
+    assert.deepEqual(
+      agreementRequest.reviews.codex.suggestions.map((item2) => item2.severity),
+      ['P0', 'CRITICAL'],
+    );
+    assert.deepEqual(
+      result.roundHistory[0].reviews.codex.suggestions.map((item2) => `${item2.id} ${item2.severity}`),
+      ['S1 P0', 'S2 CRITICAL'],
+    );
+    assert.equal(result.roundHistory[0].reviews.cursor.suggestions[0].severity, 'P2');
+  } finally { item.cleanup(); }
+});
+
+test('every draft failing is storm-exhausted: inability, not a mechanical verdict', async () => {
+  const item = fixture();
+  try {
+    const result = await runPlan({
+      goal: 'Nothing drafted', target: item.target, out: item.out,
+      adapters: seats({
+        draft: async () => { throw new Error('codex draft failed'); },
+        cursorDraft: async () => { throw new Error('cursor draft failed'); },
+        arbiter: { draft: { verdict: 'UNVERIFIED' } },
+      }),
+    });
+    assert.equal(result.converged, false);
+    assert.equal(result.reason, 'storm-exhausted');
+    assert.deepEqual(
+      result.storm[0].drafts.map((draftRecord) => draftRecord.ok),
+      [false, false, false],
+    );
+  } finally { item.cleanup(); }
+});
+
+test('a missing proposal ends the round as arbiter-unavailable, never a substitute rule', async () => {
+  const item = fixture();
+  try {
+    const result = await runPlan({
+      goal: 'No proposer', target: item.target, out: item.out,
+      adapters: seats({ arbiter: { propose: { verdict: 'UNVERIFIED' } } }),
+    });
+    assert.equal(result.converged, false);
+    assert.equal(result.reason, 'arbiter-unavailable');
+    assert.equal(existsSync(join(item.out, 'plan.md')), false);
+  } finally { item.cleanup(); }
+});
+
+test('a seat question reaches the next proposal instead of blocking or vanishing', async () => {
+  const item = fixture();
+  const proposeRequests = [];
+  let cursorRound = 0;
+  try {
+    const result = await runPlan({
+      goal: 'Ask then converge', target: item.target, out: item.out,
+      adapters: seats({
+        review: async () => {
+          cursorRound++;
+          return cursorRound === 1
+            ? 'AGREE: no\nQ1: which store holds the sessions?'
+            : agreeingReview();
+        },
+        arbiter: {
+          propose: (request) => {
+            proposeRequests.push(request);
+            return { plan: planText, gate: [] };
+          },
+          agreement: (request) => ({
+            converged: request.reviews.cursor.agree === true,
+            reason: request.reviews.cursor.agree ? 'ready' : 'cursor still asking',
+            feedback: 'answer the session-store question in the plan',
+          }),
+        },
+      }),
+    });
+    assert.equal(result.converged, true);
+    assert.equal(result.rounds, 2);
+    assert.deepEqual(proposeRequests[1].questions, [
+      { seat: 'cursor', id: 'Q1', text: 'which store holds the sessions?' },
+    ]);
+    assert.match(proposeRequests[1].feedback, /answer the session-store question/);
+  } finally { item.cleanup(); }
+});
+
+test('seat suggestions reach the next proposal verbatim behind Claude feedback', async () => {
+  const item = fixture();
+  const proposeRequests = [];
+  let round = 0;
+  try {
+    await runPlan({
+      goal: 'Feedback carries the words', target: item.target, out: item.out, rounds: 2,
+      adapters: seats({
+        codexReview: async () => {
+          round++;
+          return round === 1 ? 'AGREE: no\nS7 P1: split the migration into two steps' : agreeingReview();
+        },
+        arbiter: {
+          propose: (request) => { proposeRequests.push(request); return { plan: planText, gate: [] }; },
+          agreement: { converged: false, reason: 'not yet', feedback: 'address the codex migration concern' },
+        },
+      }),
+    });
+    assert.match(proposeRequests[1].feedback, /address the codex migration concern/);
+    assert.match(proposeRequests[1].feedback, /codex S7 P1: split the migration into two steps/);
+  } finally { item.cleanup(); }
+});
+
+test('circling is measured, the pivot is judged, and FRESH re-storms all three seats', async () => {
+  const item = fixture();
+  let stormCount = 0;
+  const pivotRequests = [];
+  try {
+    const result = await executePlan({
+      goal: 'Recurring disagreement pivots', target: item.target, out: item.out, rounds: 4,
+      adapters: seats({
+        draft: async () => { stormCount++; return { plan: planText, gate: [] }; },
+        codexReview: async () => 'AGREE: no\nS1 P0: same objection every round',
+        arbiter: {
+          agreement: { converged: false, reason: 'codex still objects', feedback: 'try again' },
+          pivot: (request) => {
+            pivotRequests.push(request);
+            return { decision: 'fresh', reason: 'the framing is dead, restart' };
+          },
+        },
+      }),
+    });
+    assert.equal(result.converged, false);
+    // Three identical rounds of S1 is the deterministic evidence...
+    assert.ok(pivotRequests.length >= 1, 'circling must reach the arbiter');
+    // ...and the judged FRESH decision re-storms: codex drafted more than once.
+    assert.ok(stormCount >= 2, `FRESH must re-storm the seats (drafted ${stormCount} times)`);
+    assert.equal(result.pivotHistory[0].decision, 'fresh');
+    assert.equal(result.pivotHistory[0].unjudged, false);
+    assert.equal(result.pivotHistory[0].reason, 'the framing is dead, restart');
+  } finally { item.cleanup(); }
+});
+
+test('a judged conclude ends the plan as pivot-conclude', async () => {
+  const item = fixture();
+  try {
+    const result = await runPlan({
+      goal: 'Concluded by judgement', target: item.target, out: item.out,
+      adapters: seats({
+        codexReview: async () => 'AGREE: no\nS1 P0: unresolvable here',
+        arbiter: {
+          agreement: { converged: false, reason: 'stuck' },
+          pivot: { decision: 'conclude', reason: 'no framing survives this constraint' },
+        },
+      }),
     });
     assert.equal(result.converged, false);
     assert.equal(result.reason, 'pivot-conclude');
-    assert.equal(result.rounds, 5);
-    assert.match(inputs[3], /Amend the approach/);
-    assert.match(inputs[4], /genuinely fresh approach/);
+  } finally { item.cleanup(); }
+});
+
+test('an unjudged pivot falls back to the ladder and says so', async () => {
+  const item = fixture();
+  try {
+    const result = await runPlan({
+      goal: 'Ladder fallback', target: item.target, out: item.out, rounds: 5,
+      adapters: seats({
+        codexReview: async () => 'AGREE: no\nS1 P0: recurring',
+        arbiter: {
+          agreement: { converged: false, reason: 'stuck' },
+          pivot: { verdict: 'UNVERIFIED' },
+        },
+      }),
+    });
+    assert.equal(result.converged, false);
+    assert.ok(result.pivotHistory.length >= 1);
+    assert.equal(result.pivotHistory[0].unjudged, true);
+  } finally { item.cleanup(); }
+});
+
+test('round exhaustion reports rounds-exhausted and writes nothing', async () => {
+  const item = fixture();
+  try {
+    const result = await runPlan({
+      goal: 'Bounded rounds', target: item.target, out: item.out, rounds: 2,
+      adapters: seats({ codexReview: async () => 'AGREE: no' }),
+    });
+    assert.equal(result.converged, false);
+    assert.equal(result.reason, 'rounds-exhausted');
+    assert.equal(result.rounds, 2);
     assert.equal(existsSync(join(item.out, 'plan.md')), false);
   } finally { item.cleanup(); }
 });
 
-test('round exhaustion writes no plan and reports the mechanical reason', async () => {
+test('a capability veto is unoverrulable and its remedy drives the next round', async () => {
   const item = fixture();
+  const feedbackSeen = [];
+  let vetoed = false;
   try {
     const result = await runPlan({
-      goal: 'Do not emit an untrusted plan', target: item.target, out: item.out, rounds: 1,
+      goal: 'Veto loops with remedy', target: item.target, out: item.out,
       adapters: {
-        draft,
-        runPlanGate: async () => ({
-          passed: false,
-          failures: [{ id: 'PG_GATE', check: 'gate-runs', message: 'gate command exited 1: node --test' }],
+        ...seats({
+          arbiter: {
+            propose: (request) => {
+              feedbackSeen.push(request.feedback ?? '');
+              return { plan: planText, gate: [] };
+            },
+            agreement: { converged: true, reason: 'seats agree' },
+          },
         }),
-        review: async () => { throw new Error('must not review'); },
+        checkCapability: async ({ seat }) => {
+          if (seat === 'reviewer' && !vetoed) {
+            vetoed = true;
+            return { capable: false, what: 'cannot run the named harness', why: 'no binary', alternative: 'use node --test' };
+          }
+          return { capable: true };
+        },
       },
     });
-    assert.equal(result.reason, 'rounds-exhausted');
-    assert.match(result.gate.failures[0].message, /exited 1/);
-    assert.equal(existsSync(join(item.out, 'plan.md')), false);
-    assert.equal(existsSync(join(item.out, 'gate.json')), false);
+    assert.equal(result.converged, true);
+    assert.equal(result.rounds, 2, 'the veto must consume a round and redraft');
+    assert.equal(result.capabilityVetoes.length, 1);
+    assert.match(feedbackSeen[1], /Capability veto remedies/);
+    assert.match(feedbackSeen[1], /use node --test/);
   } finally { item.cleanup(); }
 });
 
-test('dry-run validates output without drafting or writing', async () => {
+test('dry-run validates output without invoking any seat', async () => {
   const item = fixture();
+  let touched = 0;
   try {
-    const result = await runPlan({
-      goal: 'Validate this goal', target: item.target, out: item.out, dryRun: true,
-      adapters: { draft: async () => { throw new Error('must not draft'); } },
+    const result = await executePlan({
+      goal: 'Dry run only', target: item.target, out: item.out, dryRun: true,
+      adapters: {
+        verifySuperpowers: async () => VERIFIED_SUPERPOWERS,
+        draft: async () => { touched++; return { plan: planText, gate: [] }; },
+        runArbiter: async () => { touched++; return {}; },
+      },
     });
     assert.equal(result.dryRun, true);
-    assert.equal(existsSync(item.out), false);
+    assert.equal(result.converged, false);
+    assert.equal(touched, 0);
   } finally { item.cleanup(); }
 });
 
-test('plan refuses an unverified seat before invoking either agent', async () => {
+test('plan refuses an unverified seat before invoking any agent', async () => {
   const item = fixture();
-  let drafts = 0;
-  let reviews = 0;
+  let touched = 0;
   try {
-    await assert.rejects(runPlan({
-      goal: 'Do not spend tokens', target: item.target, out: item.out,
+    await assert.rejects(executePlan({
+      goal: 'Refuse early', target: item.target, out: item.out,
       adapters: {
         verifySuperpowers: async () => ({
           ok: false,
           seats: {
             ...VERIFIED_SUPERPOWERS.seats,
-            codex: {
-              seat: 'codex', verified: false, evidence: 'Codex not installed', version: null,
-              remediation: 'Codex: codex plugin add superpowers@openai-curated',
-            },
+            cursor: { seat: 'cursor', verified: false, evidence: 'missing manifest', version: null, path: null },
           },
         }),
-        draft: async () => { drafts++; return draft(); },
-        review: async () => { reviews++; return 'NO_BLOCKERS'; },
+        draft: async () => { touched++; return { plan: planText, gate: [] }; },
       },
-    }), /Codex.*codex plugin add superpowers@openai-curated/i);
-    assert.equal(drafts, 0);
-    assert.equal(reviews, 0);
+    }), /superpowers preflight failed/);
+    assert.equal(touched, 0);
   } finally { item.cleanup(); }
 });
 
-test('plan launches use the environment and Cursor directory that were verified', async () => {
+test('the verified Cursor directory and raw goal reach the cursor seats', async () => {
   const item = fixture();
-  const env = { CODEX_HOME: 'C:/registered-codex-home' };
-  const home = 'C:/seat-home';
-  let draftRequest;
-  let reviewRequest;
+  const cursorCalls = [];
   try {
-    const result = await runPlan({
-      goal: 'Use verified seat configuration', target: item.target, out: item.out,
-      env,
-      home,
-      adapters: {
-        draft: async (request) => { draftRequest = request; return draft(); },
-        runPlanGate: passingGate,
-        review: async (request) => { reviewRequest = request; return 'NO_BLOCKERS'; },
-      },
+    await runPlan({
+      goal: 'Cursor gets the goal and the directory', target: item.target, out: item.out, rounds: 1,
+      adapters: seats({
+        review: async (request) => {
+          cursorCalls.push(request);
+          return agreeingReview();
+        },
+      }),
     });
-
-    assert.equal(result.converged, true);
-    assert.equal(draftRequest.env, env);
-    assert.equal(reviewRequest.env, env);
-    assert.equal(reviewRequest.home, home);
-    assert.equal(reviewRequest.superpowersDir, VERIFIED_SUPERPOWERS.seats.cursor.path);
+    assert.equal(cursorCalls.length, 1);
+    assert.equal(cursorCalls[0].superpowersDir, 'C:/cursor-superpowers');
+    assert.equal(cursorCalls[0].goal, 'Cursor gets the goal and the directory');
+    assert.equal(typeof cursorCalls[0].plan, 'string');
   } finally { item.cleanup(); }
 });

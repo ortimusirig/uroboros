@@ -248,10 +248,17 @@ test('every debate event pair round-trips and is retained in events.jsonl', () =
 
 test('every plan event pair round-trips through the declared vocabulary', () => {
   assert.ok(EVENT_STAGES.includes('plan'));
-  assert.ok(EVENT_TYPES.includes('gate'));
+  // plan/gate is gone with the mechanical plan gate; the planning conversation
+  // emits storm, proposal, review and agreement instead.
+  for (const type of ['storm', 'proposal', 'review', 'agreement']) {
+    assert.ok(EVENT_TYPES.includes(type), `missing type: ${type}`);
+  }
+  assert.equal(EVENT_TYPES.includes('gate'), false,
+    'the orphaned plan-gate type must not linger in the vocabulary');
   const pairs = EVENT_PAIRS.filter((pair) => pair.startsWith('plan/')).sort();
   assert.deepEqual(pairs, [
-    'plan/converged', 'plan/finish', 'plan/gate', 'plan/round', 'plan/start',
+    'plan/agreement', 'plan/converged', 'plan/finish', 'plan/proposal',
+    'plan/review', 'plan/round', 'plan/start', 'plan/storm',
   ]);
   for (const pair of pairs) {
     const [, type] = pair.split('/');
@@ -664,8 +671,15 @@ test('fully exercised runs have exact pair equality with both event vocabularies
       reporter: (event) => planEvents.push(event),
       adapters: {
         draft: async () => ({ plan: 'event conformance\n', gate: [] }),
-        runPlanGate: async () => ({ passed: true, failures: [] }),
-        review: async () => 'NO_BLOCKERS',
+        cursorDraft: async () => ({ plan: 'cursor conformance\n', gate: [] }),
+        codexReview: async () => 'AGREE: yes',
+        review: async () => 'AGREE: yes',
+        runArbiter: async ({ request }) => {
+          if (request.type === 'draft') return { plan: 'claude conformance\n', gate: [] };
+          if (request.type === 'propose') return { plan: 'event conformance\n', gate: [] };
+          if (request.type === 'agreement') return { converged: true, reason: 'conformance' };
+          return { verdict: 'UNVERIFIED' };
+        },
       },
     });
 

@@ -168,7 +168,7 @@ test('unavailable pivot arbitration records fallback as unjudged and the ladder 
           plan: `Fresh fallback plan from ${candidateId}.\n`,
           gate: [],
         }),
-        runPlanGate: async () => ({ passed: true, failures: [] }),
+        
         selectPlanCandidate: async () => ({ selectedCandidateId: 'candidate-1' }),
       },
     });

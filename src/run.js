@@ -1452,9 +1452,6 @@ export async function run(opts) {
               runId,
               env: runEnvironment,
               ...(injectedCandidateDraft === undefined ? {} : { draft: injectedCandidateDraft }),
-              ...(adapters.runPlanGate === undefined
-                ? {}
-                : { checkGate: adapters.runPlanGate }),
               ...((adapters.selectPlanCandidate ?? adapters.selectCandidate) === undefined
                 ? {}
                 : { select: adapters.selectPlanCandidate ?? adapters.selectCandidate }),
@@ -1533,7 +1530,7 @@ export async function run(opts) {
                 branch: activeBranch,
                 decision: PIVOT_CONCLUDE,
                 candidateCount: candidateFacts.length,
-                reason: 'every fresh plan candidate failed the plan gate',
+                reason: 'no fresh plan candidate produced artifacts',
               });
               break;
             }
