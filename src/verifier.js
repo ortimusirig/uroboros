@@ -98,6 +98,7 @@ export function buildCursorReviewArgs({
   env = process.env,
   home = homedir(),
   superpowersDir,
+  platform = process.platform,
 } = {}) {
   assertUsablePrompt(prompt);
   const resolvedSuperpowersDir = superpowersDir === undefined
@@ -112,8 +113,21 @@ export function buildCursorReviewArgs({
       throw new Error(`Cursor superpowers plugin directory is unusable: ${inspected.reason}`);
     }
   }
+  // Cursor's own sandbox exists only on macOS and Linux. Passing it anywhere else
+  // makes the CLI exit 1 with "Sandbox mode is enabled but not available on this
+  // system", which failed EVERY reviewer-write pass on Windows — the primary
+  // target — so the reviewer never wrote a single test. Measured against the real
+  // binary: with the flag it errors, without it the same prompt returns normally.
+  //
+  // The flag was never the guarantee. The reviewer's writes are scoped by
+  // snapshotting the worktree around the review and restoring everything outside
+  // __uro_review/, which is platform-independent and does the actual confining.
+  // Where Cursor's sandbox exists it is kept as a second layer; where it does not,
+  // its absence must not disable the capability.
+  const sandboxed = platform === 'darwin' || platform === 'linux';
   const args = [
-    '-p', prompt, '--output-format', 'stream-json', '--trust', '--sandbox', 'enabled',
+    '-p', prompt, '--output-format', 'stream-json', '--trust',
+    ...(sandboxed ? ['--sandbox', 'enabled'] : []),
     '--plugin-dir', VERIFIER_PLUGIN_DIR,
     ...(resolvedSuperpowersDir === null
       ? []
@@ -428,6 +442,7 @@ export async function runReviewPass({
   env = process.env,
   home = homedir(),
   superpowersDir,
+  platform = process.platform,
   signal,
   beforeKill,
   onLiveness,
@@ -441,6 +456,7 @@ export async function runReviewPass({
     ? resolveStageTimeouts(env).verifier
     : timeoutMs;
   const args = [...extraArgv, ...buildCursorReviewArgs({
+    platform,
     prompt, model, env, home, superpowersDir,
   })];
   assertNoForbiddenFlags(args);

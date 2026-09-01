@@ -297,7 +297,12 @@ test('review launch is write-capable while both verdict launches remain read-onl
   const reviewArgs = buildCursorReviewArgs({ superpowersDir: null });
   assert.equal(reviewArgs.includes('--mode'), false,
     'the review writer must omit Cursor read-only plan mode');
-  assert.deepEqual(reviewArgs.slice(reviewArgs.indexOf('--sandbox'), reviewArgs.indexOf('--sandbox') + 2),
+  // Write capability comes from omitting --mode, NOT from --sandbox. This
+  // previously asserted the sandbox flag unconditionally, which is why a launch
+  // line the real Cursor rejects on Windows shipped green. Platform behaviour is
+  // asserted separately; what matters here is that the pass can write.
+  const sandboxed = buildCursorReviewArgs({ platform: 'linux', superpowersDir: null });
+  assert.deepEqual(sandboxed.slice(sandboxed.indexOf('--sandbox'), sandboxed.indexOf('--sandbox') + 2),
     ['--sandbox', 'enabled']);
   assert.match(REVIEW_PROMPT, /^\/uro-review\b/);
 
@@ -323,6 +328,7 @@ test('runReviewPass launches the separate sandboxed writer without verdict mode'
     superpowersDir: null,
     runId: 'review-writer',
     reporter: (event) => events.push(event),
+    platform: 'linux',
     spawnProcess: (_bin, _args, _options) => child,
   });
   await new Promise((resolve) => setImmediate(resolve));
@@ -331,6 +337,8 @@ test('runReviewPass launches the separate sandboxed writer without verdict mode'
 
   const args = events.find((event) => event.type === 'start')?.args;
   assert.equal(args.includes('--mode'), false);
+  // Pin the platform: on Windows the real Cursor rejects --sandbox, so asserting
+  // it unconditionally is what let a broken launch line ship green.
   assert.deepEqual(args.slice(args.indexOf('--sandbox'), args.indexOf('--sandbox') + 2),
     ['--sandbox', 'enabled']);
   assert.equal(result.launchFailed, false);
@@ -791,4 +799,34 @@ test('narrowness control: a rendered verdict survives a non-zero exit', async ()
   assert.equal(r.verdict, 'ISSUES');
   assert.equal(r.verdictSource, 'result');
   assert.equal(r.launchFailed, false);
+});
+
+test('the reviewer sandbox flag is used only where Cursor supports it', () => {
+  // Measured against the real binary on Windows:
+  //   agent -p ... --sandbox enabled  -> Error: Sandbox mode is enabled but not
+  //                                      available on this system.
+  //   agent -p ... (no flag)          -> OK
+  // Passing it unconditionally failed every reviewer-write pass on the primary
+  // target, so the reviewer never wrote a single test.
+  const on = (platform) => buildCursorReviewArgs({ platform, superpowersDir: null });
+
+  assert.equal(on('win32').includes('--sandbox'), false,
+    'Windows has no Cursor sandbox; requiring it disables the reviewer entirely');
+  for (const platform of ['darwin', 'linux']) {
+    const args = on(platform);
+    assert.ok(args.includes('--sandbox'), `${platform} keeps the second layer`);
+    assert.equal(args[args.indexOf('--sandbox') + 1], 'enabled');
+  }
+
+  // Narrowness control: only that flag differs. Everything else that makes the
+  // review pass work must survive on every platform.
+  for (const platform of ['win32', 'darwin', 'linux']) {
+    const args = on(platform);
+    assert.ok(args.includes('--trust'), 'workspace trust is still cleared');
+    assert.ok(args.includes('--plugin-dir'), 'the review skill is still supplied');
+    assert.deepEqual(args.slice(0, 6),
+      ['-p', REVIEW_PROMPT, '--output-format', 'stream-json', '--trust']
+        .concat(platform === 'win32' ? ['--plugin-dir'] : ['--sandbox']));
+    assert.equal(args.includes('--mode'), false, 'the review pass must stay writable');
+  }
 });
