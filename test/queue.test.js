@@ -137,7 +137,10 @@ test('a non-converged goal plan stops before implementation starts', async () =>
       target: fixture.target,
       dependencies: {
         assertCleanTarget: async () => {},
-        launchPlan: async () => ({ converged: false, rounds: 3, reason: 'rounds-exhausted' }),
+        launchPlan: async () => ({
+          converged: false, rounds: 3, reason: 'rounds-exhausted',
+          tokens: { total: { inputTokens: 120_000, outputTokens: 8_000 } },
+        }),
         launchRun: async () => { runLaunches++; },
       },
     });
@@ -147,6 +150,12 @@ test('a non-converged goal plan stops before implementation starts', async () =>
     assert.equal(log.planRounds, 3);
     assert.equal(log.planConverged, false);
     assert.equal(log.implementationOutcome, null);
+    // The taxi meter runs whether or not you arrive: a failed plan's spend is
+    // real spend. Reported as zero, an operator cannot see what planning cost.
+    assert.deepEqual(log.tokens,
+      { inputTokens: 120_000, outputTokens: 8_000, total: 128_000 });
+    assert.equal(result.totalTokens.total, 128_000,
+      'the queue summary must include planning spend from unconverged units');
   } finally { fixture.cleanup(); }
 });
 

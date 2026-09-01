@@ -335,10 +335,16 @@ export async function runQueue({
     let facts;
     let launch;
     let planResult = null;
+    let planTokens = zeroTokens;
     let implementationUnit = unit;
     try {
       if (unit.kind === 'goal') {
         planResult = await launchPlan({ unit, target: resolve(target) });
+        // The taxi meter runs whether or not you arrive: planning spend counts
+        // on every path, not only when a unit lands.
+        const planTokenReading = factTokens(planResult);
+        if (planTokenReading.valid) totalTokens = addTokens(totalTokens, planTokenReading.tokens);
+        planTokens = planTokenReading.valid ? planTokenReading.tokens : zeroTokens;
         if (planResult?.converged !== true) {
           const durationMs = Math.max(0, now() - startedAt);
           const reason = `plan did not converge: ${planResult?.reason ?? 'unknown reason'}`;
@@ -360,7 +366,7 @@ export async function runQueue({
             gateStatus: null,
             correctnessVerdict: null,
             intentVerdict: null,
-            tokens: zeroTokens,
+            tokens: planTokens,
             durationMs,
             landed: false,
             stoppedOn: true,
@@ -399,7 +405,7 @@ export async function runQueue({
         gateStatus: null,
         correctnessVerdict: null,
         intentVerdict: null,
-        tokens: zeroTokens,
+        tokens: planTokens,
         durationMs,
         landed: false,
         stoppedOn: true,

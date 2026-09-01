@@ -43,9 +43,13 @@ test('the production launcher composes loop run and accepts facts from a stoppin
     '--target', resolve('C:/repo'),
     '--gate', 'C:/repo/gate.json',
     '--mode', 'autonomous',
-    '--quiet',
     '--no-dashboard',
   ]);
+  // The child is NOT silenced, and its stderr streams through live — a queue
+  // that buffers heartbeats until exit leaves the operator unable to tell
+  // deliberation from a hang for the length of a unit.
+  assert.equal(typeof calls[0].options.onStderr, 'function',
+    'the launcher must forward the child heartbeat as it arrives');
   assert.equal(calls[0].options.cwd, resolve('C:/repo'));
   assert.equal(calls[0].options.env.CODEX_HOME, env.CODEX_HOME);
   assert.equal(calls[0].options.env.PATH, process.env.PATH);

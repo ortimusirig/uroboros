@@ -36,6 +36,7 @@ import { runExecutor } from './executor.js';
 
 import { resolveStageTimeouts } from './timeouts.js';
 import { runVerifier } from './verifier.js';
+import { addUsage, EMPTY_USAGE } from './usage.js';
 import {
   applySuperpowersRequirement,
   verifySuperpowersSeats,
@@ -801,6 +802,10 @@ export async function runPlan({
     ?? adapters.capabilityCheck
     ?? (hermetic || adapters.review !== undefined ? null : productionCapability);
   const ledger = new DebateLedger();
+  // Every seat call adds its usage here, so a plan that never converges still
+  // reports what it spent. The taxi meter runs whether or not you arrive.
+  let usageTotal = EMPTY_USAGE;
+  const tallyUsage = (value) => { if (value?.usage) usageTotal = addUsage(usageTotal, value.usage); return value; };
   let pivotCount = 0;
   const pivotHistory = [];
   const capabilityHistory = [];
@@ -834,7 +839,7 @@ export async function runPlan({
       verdict: result?.verdict ?? (result ? 'ANSWERED' : ARBITER_UNVERIFIED),
       judgement: arbiterRequest.type,
     });
-    return result;
+    return tallyUsage(result);
   };
 
   const finish = (reason, round, extra = {}) => {
@@ -851,6 +856,7 @@ export async function runPlan({
       roundHistory,
       capabilityVetoes: capabilityHistory,
       pivotHistory,
+      tokens: { total: { ...usageTotal } },
       ...extra,
     };
     reportEvent(reporter, runId, 'plan', 'finish', {
@@ -875,6 +881,7 @@ export async function runPlan({
             input, goal: request.goal, target: request.target, out: request.out, round,
             plannerModel, sandbox: 'read-only', timeoutMs: executorTimeout, runId, env,
           }));
+          tallyUsage(artifact);
           return { seat: 'codex', ...artifact };
         } catch (error) { return { seat: 'codex', error: failureMessage(error) }; }
       })(),
@@ -886,6 +893,7 @@ export async function runPlan({
             timeoutMs: verifierTimeout, runId, env, home,
             superpowersDir: cursorSuperpowersDir, feedback, failedPlan,
           }));
+          tallyUsage(artifact);
           return { seat: 'cursor', ...artifact };
         } catch (error) { return { seat: 'cursor', error: failureMessage(error) }; }
       })(),
@@ -937,20 +945,20 @@ export async function runPlan({
       (async () => {
         if (typeof reviewCodex !== 'function') return unavailableReview();
         try {
-          return normalizeSeatReview(await reviewCodex({
+          return normalizeSeatReview(tallyUsage(await reviewCodex({
             goal: request.goal, plan: proposal, gate, round,
             target: request.target, plannerModel, timeoutMs: executorTimeout, runId, env,
-          }));
+          })));
         } catch { return unavailableReview(); }
       })(),
       (async () => {
         if (typeof reviewCursor !== 'function') return unavailableReview();
         try {
-          return normalizeSeatReview(await reviewCursor({
+          return normalizeSeatReview(tallyUsage(await reviewCursor({
             goal: request.goal, plan: proposal, gate, round,
             target: request.target, verifierModel, timeoutMs: verifierTimeout,
             env, home, superpowersDir: cursorSuperpowersDir,
-          }));
+          })));
         } catch { return unavailableReview(); }
       })(),
     ]);

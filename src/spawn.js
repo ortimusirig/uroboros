@@ -549,7 +549,21 @@ export async function spawnCapture(bin, args, opts = {}) {
         }
       }
     });
-    child.stderr.on('data', (d) => errChunks.push(d));
+    child.stderr.on('data', (d) => {
+      errChunks.push(d);
+      if (typeof opts.onStderr === 'function') {
+        try {
+          // Same additive contract as onStdout: the observer gets a copy, the
+          // capture keeps the original. This is how a parent process streams a
+          // child's heartbeat through live instead of sitting silent for the
+          // whole run and dumping everything at exit.
+          const observed = opts.onStderr(Buffer.from(d));
+          if (observed && typeof observed.catch === 'function') observed.catch(() => {});
+        } catch {
+          // Capture is part of the run; an optional observer is disposable.
+        }
+      }
+    });
     child.on('error', (error) => {
       childClosed = true;
       if (timer) clearTimer(timer);

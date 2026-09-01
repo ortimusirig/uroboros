@@ -37,9 +37,15 @@ export async function launchLoopRun({ unit, target, mode }, {
     '--target', resolvedTarget,
     '--gate', unit.gate,
     '--mode', mode,
-    '--quiet',
     '--no-dashboard',
-  ], { cwd: resolvedTarget, env: launchEnvironment(env) });
+  ], {
+    cwd: resolvedTarget,
+    env: launchEnvironment(env),
+    // The child's stderr heartbeat streams through LIVE. Buffered-until-exit
+    // meant 25-50 silent minutes per unit: an operator could not tell deep
+    // deliberation from a hang and babysat by polling artifacts instead.
+    onStderr: (chunk) => { process.stderr.write(chunk); },
+  });
 
   let facts;
   try {
@@ -73,7 +79,14 @@ export async function launchLoopPlan({ unit, target }, {
     '--goal', unit.goal,
     '--target', resolvedTarget,
     '--out', unit.out,
-  ], { cwd: resolvedTarget, env: launchEnvironment(env) });
+  ], {
+    cwd: resolvedTarget,
+    env: launchEnvironment(env),
+    // Planning heartbeats stream through live, same as runs: the three-way
+    // conversation can deliberate for a long time, and silence must mean
+    // stopped, not buffered.
+    onStderr: (chunk) => { process.stderr.write(chunk); },
+  });
 
   let planResult;
   try {

@@ -457,3 +457,32 @@ test('the verified Cursor directory and raw goal reach the cursor seats', async 
     assert.equal(typeof cursorCalls[0].plan, 'string');
   } finally { item.cleanup(); }
 });
+
+test('a plan that never converges still reports what it spent', async () => {
+  // R1 from the field: queue summaries printed "Total tokens: 0" after hours
+  // of planning, because usage was only tallied on landed paths. The meter
+  // runs whether or not you arrive.
+  const usage = (inputTokens, outputTokens) => ({
+    inputTokens, cachedInputTokens: 0, outputTokens, reasoningOutputTokens: 0, cacheWriteTokens: 0,
+  });
+  const item = fixture();
+  try {
+    const result = await runPlan({
+      goal: 'Spend and fail honestly', target: item.target, out: item.out, rounds: 1,
+      adapters: seats({
+        draft: async () => ({ plan: planText, gate: [], usage: usage(1000, 50) }),
+        cursorDraft: async () => ({ plan: planText, gate: [], usage: usage(600, 30) }),
+        codexReview: async () => ({ agree: false, suggestions: [], questions: [], content: 'AGREE: no', usage: usage(200, 10) }),
+        arbiter: {
+          draft: { plan: planText, gate: [], usage: usage(400, 20) },
+          propose: { plan: planText, gate: [], usage: usage(300, 15) },
+          agreement: { converged: false, reason: 'codex declined', usage: usage(100, 5) },
+        },
+      }),
+    });
+    assert.equal(result.converged, false);
+    assert.equal(result.tokens.total.inputTokens, 2600,
+      'every seat call must be tallied: 1000+600+400+300+200+100');
+    assert.equal(result.tokens.total.outputTokens, 130);
+  } finally { item.cleanup(); }
+});
