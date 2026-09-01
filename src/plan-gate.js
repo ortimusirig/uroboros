@@ -31,6 +31,11 @@ function normalizedCitation(value) {
   const citation = value.trim()
     .replace(/^<|>$/g, '')
     .replace(/[.,;)]$/g, '')
+    // Codex on Windows cites files in the file-URL shape /C:/repo/src/thing.js.
+    // Left alone, resolve() turns that into C:\C:\repo\src\thing.js, so a TRUE
+    // citation inside the target is reported as "outside the target" — a peer
+    // measured 11 of 13 failures in one round being this false positive.
+    .replace(/^\/([A-Za-z]:[\\/])/, '$1')
     .replace(/^\.\//, '');
   if (citation === '' || citation.includes('://')) return null;
   if (citation.startsWith('-')) return null;
@@ -72,7 +77,21 @@ export function collectPlanCitations(plan) {
       }
     }
   }
-  return { paths: [...citations], lineReferences };
+  // A bare dotted token carries no path separator, so nothing distinguishes a
+  // real citation like README.md from ordinary prose like `args.instruction` or
+  // `facts.runId`. Both match name.ext. Reporting the identifier as a missing
+  // file is a false positive that a reader then has to disprove, so bare tokens
+  // are separated out: they still feed line-reference checks, and a missing one
+  // is simply not claimed. Anything carrying a separator is unambiguously a path
+  // and is still reported.
+  // normalizedCitation has already turned every backslash into a forward slash.
+  const separated = (path) => path.includes('/');
+  const all = [...citations];
+  return {
+    paths: all.filter(separated),
+    ambiguousPaths: all.filter((path) => !separated(path)),
+    lineReferences,
+  };
 }
 
 function sectionEntries(plan, sectionName) {
