@@ -319,3 +319,7 @@ embedded Obsidian Bases campaign table.
   impose an operator-owned cap. `loop plan --rounds` has the same optional-cap semantics.
 - **Terminal heartbeat:** pass `--quiet` to suppress event summaries on stderr without
   disabling the isolated `events.jsonl` stream.
+
+## Chunking wave goals
+
+Large goals should be decomposed BEFORE the loop runs: the `uroboros-chunk` skill (skills/uroboros-chunk/SKILL.md) runs in the calling session, cuts the goal into small units from reasoning (never size rules), verifies declared structure (acyclic dependencies, disjoint parallel files) as report-back advisories, executes each unit's evidence commands so they are provably runnable today, and emits the queue/campaign file. The loop core is unchanged; it simply receives smaller units.

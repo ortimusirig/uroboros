@@ -12,3 +12,6 @@ is not success or failure, and an exit code obtained through a pipe is never acc
 the command's true exit code and its relevant stdout and stderr to the user. Use `--dry-run` to
 validate all queue paths without starting a run or spending tokens. Queue units may carry either
 `task` plus `gate`, or `goal` plus `out`; goal units debate the plan before implementation starts.
+
+
+Before launching on a goal that spans more than one file-cluster or names several distinct behaviors, invoke the uroboros-chunk skill first: decompose in the calling session (where project context lives), emit small per-unit goal files plus a queue/campaign file, and launch on those units instead. Measured: wave-scale goals do not converge; small units do.
