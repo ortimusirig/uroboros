@@ -21,6 +21,11 @@ the next unit from the observed average cost and stops before that forecast woul
 the budget. A run already in flight always finishes and an approved result is landed
 before the budget stop takes effect.
 
+**Recalibrate `--token-budget` after the metering fix (`c09a558`).** Earlier meters
+under-counted seat spend badly; every seat now reports honestly, and a real unit costs
+millions of tokens, not thousands (5–12M per unit observed on a large repository). A
+budget calibrated in the broken-meter era will trip after the first unit.
+
 The target must be a clean Git worktree before execution. Approved diffs are checked
 with a non-mutating Git apply first, applied and committed only for their touched paths,
 and never pushed. `queue-log.jsonl` beside the queue file receives one JSON line per
