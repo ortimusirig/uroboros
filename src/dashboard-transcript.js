@@ -185,98 +185,55 @@ function renderGate(run, event) {
   const resultClass = run.gateResult === 'passed' ? 'passed'
     : run.gateResult === 'failed' ? 'failed' : 'pending';
   return `<li class="gate-seam"><section class="transcript-gate ${resultClass}">`
-    + '<header><span>Gate proof</span>'
+    + '<header><span>Evidence</span>'
     + `<strong>${escapeHtml(run.gateResult)}</strong>${renderTime(event)}</header>`
     + commands + '</section></li>';
 }
 
-function verifierVerdict(verifier) {
-  if (verifier === null) return 'Pending';
-  if (verifier.verdictSource === 'none') return 'No verdict — unknown';
-  return verifier.verdict ?? 'Unknown';
+function reviewClass(review) {
+  if (review === null || review === undefined) return 'pending';
+  if (review.reported !== true) return 'unknown';
+  return (review.blocking ?? 0) > 0 ? 'issues' : 'clean';
 }
 
-function verifierClass(verifier) {
-  if (verifier === null) return 'pending';
-  if (verifier.verdictSource === 'none') return 'unknown';
-  if (verifier.verdict === 'NO_BLOCKERS') return 'clean';
-  if (verifier.verdict === 'ISSUES') return 'issues';
-  return 'pending';
+function reviewValue(review) {
+  if (review === null || review === undefined) return 'Pending';
+  if (review.reported !== true) return review.timedOut ? 'Timed out' : 'No report';
+  if ((review.blocking ?? 0) > 0) return `${review.blocking} blocking`;
+  if ((review.findings ?? 0) > 0) return `${review.findings} finding(s)`;
+  return 'No findings';
 }
 
-function renderVerifierSeat(pass, verifier, event = {}) {
-  const name = pass === 'correctness' ? 'Correctness' : 'Intent';
+function renderReviewSeat(review, event = {}) {
   return '<li class="transcript-row verifier-row">'
     + renderTime(event)
-    + `<div class="transcript-verifier-seat ${verifierClass(verifier)}" data-verifier-seat="${pass}">`
-    + `<strong>${name}</strong><span>${escapeHtml(verifierVerdict(verifier))}</span></div></li>`;
-}
-
-function consensus(run) {
-  const correctnessSeat = run.verifiers.correctness;
-  const intentSeat = run.verifiers.intent;
-  const correctness = correctnessSeat?.verdict ?? null;
-  const intent = intentSeat?.verdict ?? null;
-  if (correctness === null || intent === null) return { kind: 'pending', text: 'Seats pending' };
-  const correctnessUnavailable = correctnessSeat.verdictSource === 'none';
-  const intentUnavailable = intentSeat.verdictSource === 'none';
-  if (correctnessUnavailable && intentUnavailable) {
-    return { kind: 'pending', text: 'Seats unavailable' };
-  }
-  if (correctnessUnavailable !== intentUnavailable) {
-    return { kind: 'disagreement', text: 'Seats disagree' };
-  }
-  return correctness === intent
-    ? { kind: 'agreement', text: 'Seats agree' }
-    : { kind: 'disagreement', text: 'Seats disagree' };
-}
-
-function renderVerifierReport(pass, verifier) {
-  const name = pass === 'correctness' ? 'Correctness pass' : 'Intent pass';
-  if (verifier === null) {
-    return `<article class="verifier-report pending" data-verifier-report="${pass}">`
-      + `<header><strong>${name}</strong><span>Pending</span></header></article>`;
-  }
-  const source = verifier.verdictSource ?? 'unknown';
-  const consistency = verifier.verdictConsistency ?? 'not recorded';
-  const report = verifier.plan ?? verifier.findings;
-  const trace = verifier.plan === null || verifier.plan === undefined ? null : verifier.findings;
-  const failSafe = source === 'none';
-  const verdictKind = failSafe ? 'fail-safe' : 'reviewer';
-  const reportLabel = failSafe
-    ? `${name} retained ${verifier.plan == null ? 'output' : 'report'} (not authoritative reviewer findings)`
-    : `${name} ${verifier.plan == null ? 'findings' : 'report'}`;
-  const explanation = failSafe
-    ? `Recorded fail-safe value: ${verifier.verdict ?? 'ISSUES'}. ISSUES is a fail-safe, not a reviewer finding.`
-    : verifier.verdict === 'ISSUES'
-      ? 'Reviewer reported ISSUES — a real problem'
-      : verifier.verdict === 'NO_BLOCKERS' ? 'NO_BLOCKERS — fine' : 'Reviewer verdict';
-  return `<article class="verifier-report ${verifierClass(verifier)}" data-verifier-report="${pass}" data-verdict-kind="${verdictKind}">`
-    + `<header><strong>${name}</strong><span>${escapeHtml(verifierVerdict(verifier))}</span></header>`
-    + `<small>verdictSource: ${escapeHtml(source)} · Consistency: ${escapeHtml(consistency)}</small>`
-    + `<em>${escapeHtml(explanation)}</em>`
-    + (report === null || report === undefined
-      ? '<p class="muted">The verifier report is not available yet.</p>'
-      : `<details class="verifier-findings"><summary>${escapeHtml(reportLabel)}</summary><pre>${escapeHtml(report)}</pre>`
-        + (trace === null || trace === undefined ? ''
-          : `<details class="verifier-process-trace"><summary>Process trace</summary><pre>${escapeHtml(trace)}</pre></details>`)
-        + '</details>')
-    + '</article>';
+    + `<div class="transcript-verifier-seat ${reviewClass(review)}" data-verifier-seat="review">`
+    + `<strong>Review</strong><span>${escapeHtml(reviewValue(review))}</span></div></li>`;
 }
 
 function renderVerifierInspector(run) {
-  const state = consensus(run);
-  return `<div class="verifier-consensus ${state.kind}" data-verifier-consensus="${state.kind}">`
-    + `<strong>${state.text}</strong></div>`
-    + renderVerifierReport('correctness', run.verifiers.correctness)
-    + renderVerifierReport('intent', run.verifiers.intent);
+  const review = run.review;
+  if (review === null || review === undefined || review.reported !== true) {
+    return '<article class="verifier-report pending" data-verifier-report="review">'
+      + `<header><strong>Review report</strong><span>${escapeHtml(reviewValue(review))}</span></header></article>`;
+  }
+  const findings = review.findingsList ?? [];
+  const items = findings
+    .map((finding) => `<li><strong>${escapeHtml(finding.id ?? '?')}</strong> [${escapeHtml(finding.severity ?? 'unknown')}] ${escapeHtml(finding.description ?? '')}</li>`)
+    .join('');
+  return `<article class="verifier-report ${reviewClass(review)}" data-verifier-report="review">`
+    + `<header><strong>Review report</strong><span>${escapeHtml(reviewValue(review))}</span></header>`
+    + (findings.length === 0
+      ? '<p class="muted">The reviewer reported no findings.</p>'
+      : `<ul class="verifier-findings">${items}</ul>`)
+    + '</article>';
 }
 
 function renderTimeline(run) {
   if (run.timeline.length === 0) {
     return `<p class="empty">${escapeHtml(run.message ?? 'No events yet.')}</p>`;
   }
-  const renderedVerifierPasses = new Set();
+  let renderedReview = false;
   let renderedGate = false;
   const steps = [];
   for (const event of run.timeline) {
@@ -287,10 +244,10 @@ function renderTimeline(run) {
       }
       continue;
     }
-    if (event.stage === 'verify' && (event.pass === 'correctness' || event.pass === 'intent')) {
-      if (!renderedVerifierPasses.has(event.pass)) {
-        renderedVerifierPasses.add(event.pass);
-        steps.push(renderVerifierSeat(event.pass, run.verifiers[event.pass], event));
+    if (event.stage === 'verify' && event.pass === 'review') {
+      if (!renderedReview) {
+        renderedReview = true;
+        steps.push(renderReviewSeat(run.review, event));
       }
       continue;
     }
@@ -315,10 +272,8 @@ function renderTimeline(run) {
   if (!renderedGate && (run.gateCommands.length > 0 || run.gateResult !== 'pending')) {
     steps.push(renderGate(run, {}));
   }
-  for (const pass of ['correctness', 'intent']) {
-    if (run.verifiers[pass] !== null && !renderedVerifierPasses.has(pass)) {
-      steps.push(renderVerifierSeat(pass, run.verifiers[pass]));
-    }
+  if (!renderedReview && run.review !== null && run.review !== undefined) {
+    steps.push(renderReviewSeat(run.review));
   }
   return `<ol class="transcript-steps">${steps.join('')}</ol>`;
 }

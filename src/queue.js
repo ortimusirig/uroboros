@@ -150,22 +150,10 @@ function evaluateFacts(facts) {
     };
   }
 
-  const rejectedSeats = [
-    ['correctness', facts.correctnessVerdict],
-    ['intent', facts.intentVerdict],
-  ].filter(([, verdict]) => verdict !== 'NO_BLOCKERS');
-  if (rejectedSeats.length > 0) {
-    return {
-      action: 'stop',
-      reason: rejectedSeats.map(([seat, verdict]) => (
-        `${seat} seat reported ${verdict ?? 'UNVERIFIED'}`
-      )).join('; '),
-      outcome: facts.outcome,
-      questions: [],
-    };
-  }
-  // There is no gate verdict to re-check: landing is the seats' agreement,
-  // and the evidence trail travels in the facts for any reader who wants it.
+  // review-ready IS the seats' agreement: the debate converged with no
+  // accepted blocking finding under the arbiter's judgement, and the
+  // reviewer's report plus the evidence trail travel in the facts for any
+  // reader who wants them. Nothing here re-decides.
   return { action: 'land' };
 }
 
@@ -357,8 +345,6 @@ export async function runQueue({
             planConverged: false,
             planOutcome: planResult?.reason ?? 'unknown',
             implementationOutcome: null,
-            correctnessVerdict: null,
-            intentVerdict: null,
             tokens: planTokens,
             durationMs,
             landed: false,
@@ -395,8 +381,6 @@ export async function runQueue({
         name: unit.name,
         runId: launch?.runId ?? null,
         outcome: null,
-        correctnessVerdict: null,
-        intentVerdict: null,
         tokens: planTokens,
         durationMs,
         landed: false,
@@ -475,8 +459,7 @@ export async function runQueue({
       name: unit.name,
       runId: facts?.runId ?? launch?.runId ?? null,
       outcome: facts?.outcome ?? null,
-      correctnessVerdict: facts?.correctnessVerdict ?? null,
-      intentVerdict: facts?.intentVerdict ?? null,
+      findingsLastRound: (facts?.debate?.roundHistory?.at(-1)?.findings ?? []).length,
       tokens,
       durationMs,
       landed,

@@ -394,7 +394,7 @@ test('a final event truncated mid-write is ignored and does not crash the server
   try {
     dashboard = await startDashboard({ runDirectory: run.directory, port: 0, pollIntervalMs: 25 });
     const first = await page(dashboard);
-    assert.match(first, /class="transcript-gate pending"[\s\S]*Gate proof/);
+    assert.match(first, /class="transcript-gate pending"[\s\S]*Evidence/);
     assert.doesNotMatch(first, /HALF_RECORD/, 'partial JSON must never reach rendered output');
     const second = await page(dashboard);
     assert.doesNotMatch(second, /class="state error">Read error|HALF_RECORD/,
@@ -421,188 +421,70 @@ test('a missing not-yet-created run directory is a clear waiting state and is no
   }
 });
 
-test('dashboard shows both labelled verifier reports, provenance, and consistency', async () => {
-  const root = mkdtempSync(join(tmpdir(), 'ccc-dashboard-verdict-'));
-  const runId = 'run-verdict-source';
+test('the dashboard shows the single review report with its findings', () => {
+  const root = mkdtempSync(join(tmpdir(), 'ccc-dashboard-review-'));
+  const runId = 'run-review-report';
   const run = makeRun(root, runId, [
-    event(runId, 'verify', 'finish', {
-      pass: 'correctness', verdict: 'ISSUES', source: 'none', tokens: { inputTokens: 11 },
-    }),
-    event(runId, 'verify', 'finish', {
-      pass: 'intent', verdict: 'ISSUES', source: 'assistant', tokens: { outputTokens: 7 },
-    }),
+    event(runId, 'verify', 'finish', { pass: 'review', code: 0 }),
     event(runId, 'report', 'finish', { file: 'uro-runfacts.json' }),
   ]);
   writeFileSync(join(run.work, 'uro-runfacts.json'), JSON.stringify({
     runId,
-    verdict: 'ISSUES',
-    verdictSource: 'none',
-    verifierFindings: 'Correctness output retained without a terminal marker.',
-    verifierConsistency: { status: 'consistent' },
-    intentVerdict: 'ISSUES',
-    intentVerdictSource: 'assistant',
-    intentVerifierFindings: 'Intent review found the requested failure path missing.',
-    intentVerifierConsistency: { status: 'disagreement' },
-    iterations: [{
-      lastMessage: 'Kept the local diff intact so the human can inspect every changed line.',
-      verifier: {
-        verdict: 'ISSUES', verdictSource: 'none',
-        verdictConsistency: { status: 'consistent' },
-      },
-      intentVerifier: {
-        verdict: 'ISSUES', verdictSource: 'assistant',
-        verdictConsistency: { status: 'disagreement' },
-      },
-    }],
+    debate: {
+      roundsRun: 1,
+      stopReason: 'converged',
+      roundHistory: [{
+        round: 1,
+        findingIds: ['F1', 'F2'],
+        blockingFindingIds: ['F1'],
+        suggestionFindingIds: ['F2'],
+        findings: [
+          { id: 'F1', severity: 'blocking', category: 'correctness',
+            description: 'The <guard> drops & the error.' },
+          { id: 'F2', severity: 'suggestion', category: 'intent',
+            description: 'One requested assertion is missing.' },
+        ],
+      }],
+    },
+    iterations: [{ lastMessage: 'Kept the diff intact.' }],
   }));
-  let dashboard;
   try {
-    dashboard = await startDashboard({ runDirectory: run.directory, port: 0 });
-    const html = await page(dashboard);
-    assert.match(html, /data-verdict-kind="fail-safe"[\s\S]*verdictSource: none[\s\S]*ISSUES is a fail-safe, not a reviewer finding/);
-    assert.match(html, /data-verdict-kind="reviewer"[\s\S]*verdictSource: assistant[\s\S]*Reviewer reported ISSUES/);
-    assert.match(html, /data-verifier-consensus="disagreement"[\s\S]*Seats disagree/,
-      'a fail-safe placeholder and an authoritative verdict are not seat agreement');
-    assert.match(html, /Correctness pass retained output \(not authoritative reviewer findings\)[\s\S]*Correctness output retained without a terminal marker/,
-      'the correctness pass must be labelled and include its retained text');
-    assert.match(html, /Intent pass findings[\s\S]*Intent review found the requested failure path missing/,
-      'the intent pass must be labelled and include its findings');
-    const correctnessBlock = verifierBlock(html, 'correctness');
-    const correctnessReportAt = correctnessBlock.indexOf('<details class="verifier-findings">');
-    assert.notEqual(correctnessReportAt, -1, 'the fail-safe report must be present and tucked');
-    const correctnessVerdictRow = correctnessBlock.slice(0, correctnessReportAt);
-    const correctnessReport = correctnessBlock.slice(correctnessReportAt);
-    assert.match(correctnessVerdictRow, /No verdict — unknown/);
-    assert.match(correctnessVerdictRow, /Recorded fail-safe value: ISSUES/);
-    assert.match(correctnessVerdictRow, /verdictSource: none/);
-    assert.match(correctnessVerdictRow, /Consistency: consistent/);
-    assert.match(correctnessVerdictRow, /ISSUES is a fail-safe, not a reviewer finding/);
-    assert.match(correctnessReport,
-      /^<details class="verifier-findings"><summary>Correctness pass retained output \(not authoritative reviewer findings\)<\/summary>/);
-    assert.match(correctnessReport,
-      /<pre>Correctness output retained without a terminal marker[.]<\/pre>/,
-      'positive control: the collapsed fail-safe report must retain its body');
-
-    const intentBlock = verifierBlock(html, 'intent');
-    const intentReportAt = intentBlock.indexOf('<details class="verifier-findings">');
-    assert.notEqual(intentReportAt, -1, 'the ordinary report must be present and tucked');
-    const intentVerdictRow = intentBlock.slice(0, intentReportAt);
-    const intentReport = intentBlock.slice(intentReportAt);
-    assert.match(intentVerdictRow, /<span>ISSUES<\/span>/);
-    assert.match(intentVerdictRow, /verdictSource: assistant/);
-    assert.match(intentVerdictRow, /Consistency: disagreement/);
-    assert.match(intentVerdictRow, /Reviewer reported ISSUES — a real problem/);
-    assert.match(intentReport,
-      /^<details class="verifier-findings"><summary>Intent pass findings<\/summary>/);
-    assert.match(intentReport, /<pre>Intent review found the requested failure path missing[.]<\/pre>/,
-      'positive control: the collapsed ordinary report must retain its body');
-    for (const report of [correctnessReport, intentReport]) {
-      assert.doesNotMatch(report, /^<details class="verifier-findings"[^>]*\sopen(?:\s|>)/,
-        'verifier reports must be collapsed by default');
-    }
-    assert.doesNotMatch(html, /<details class="verifier-process-trace">/,
-      'findings-only reports have no distinct process trace to add');
-    assert.match(html, /Correctness pass[\s\S]*Consistency: consistent/);
-    assert.match(html, /Intent pass[\s\S]*Consistency: disagreement/);
-    assert.equal((html.match(/>Open in VS Code<\/a>/g) ?? []).length, 0,
-      'a run without a diff must keep the plain message and build no per-file links');
-    assert.doesNotMatch(html, /Open the worktree in VS Code/);
+    const html = renderDashboardPage(buildDashboardSnapshot({ runDirectory: run.directory }));
+    const review = verifierBlock(html, 'review');
+    assert.match(review, /Review report/);
+    assert.match(review, /1 blocking/);
+    assert.match(review, /<strong>F1<\/strong> \[blocking\]/);
+    assert.match(review, /The &lt;guard&gt; drops &amp; the error\./,
+      'finding text must be escaped, never raw HTML');
+    assert.match(review, /<strong>F2<\/strong> \[suggestion\] One requested assertion is missing\./);
+    assert.doesNotMatch(html, /data-verifier-report="correctness"|data-verifier-report="intent"/,
+      'the two-seat verdict inspector is gone');
+    assert.doesNotMatch(html, /Seats disagree|Seats agree/,
+      'single-seat review has no consensus chip');
   } finally {
-    await dashboard?.close();
     rmSync(root, { recursive: true, force: true });
   }
 });
 
-test('dedicated correctness facts remain separate from the merged run verdict', () => {
-  const root = mkdtempSync(join(tmpdir(), 'ccc-dashboard-correctness-facts-'));
-  const runId = 'run-correctness-facts';
+test('a review that reported nothing renders honestly as pending or missing', () => {
+  const root = mkdtempSync(join(tmpdir(), 'ccc-dashboard-review-missing-'));
+  const runId = 'run-review-missing';
   const run = makeRun(root, runId, [
+    event(runId, 'verify', 'finish', { pass: 'review', code: 0 }),
     event(runId, 'report', 'finish', { file: 'uro-runfacts.json' }),
   ]);
   writeFileSync(join(run.work, 'uro-runfacts.json'), JSON.stringify({
     runId,
-    verdict: 'ISSUES',
-    verdictSource: 'merged',
-    correctnessVerdict: 'NO_BLOCKERS',
-    correctnessVerdictSource: 'assistant',
-    verifierFindings: 'The implementation is correct.',
-    intentVerdict: 'ISSUES',
-    intentVerdictSource: 'assistant',
-    intentVerifierFindings: 'The implementation misses the requested behavior.',
+    outcome: 'verifier-failed',
+    debate: { roundsRun: 1, stopReason: 'unreviewed', roundHistory: [] },
     iterations: [{}],
   }));
   try {
     const html = renderDashboardPage(buildDashboardSnapshot({ runDirectory: run.directory }));
-    const correctness = verifierBlock(html, 'correctness');
-    const intent = verifierBlock(html, 'intent');
-    assert.match(correctness, /<span>NO_BLOCKERS<\/span>/);
-    assert.match(correctness, /verdictSource: assistant/);
-    assert.match(intent, /<span>ISSUES<\/span>/);
-    assert.match(html, /data-verifier-consensus="disagreement"[\s\S]*Seats disagree/);
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-});
-
-test('verifier reports are collapsed and retain distinct nested process traces', () => {
-  const root = mkdtempSync(join(tmpdir(), 'ccc-dashboard-verifier-plans-'));
-  const runId = 'run-verifier-plans';
-  const run = makeRun(root, runId, [
-    event(runId, 'verify', 'finish', {
-      pass: 'correctness', verdict: 'NO_BLOCKERS', source: 'assistant',
-    }),
-    event(runId, 'verify', 'finish', {
-      pass: 'intent', verdict: 'ISSUES', source: 'none',
-    }),
-    event(runId, 'report', 'finish', { file: 'uro-runfacts.json' }),
-  ]);
-  const correctnessPlan = '## Correctness\nSpecific <check> passed & stayed covered.\n\n## Verdict\nNO_BLOCKERS';
-  const correctnessFindings = 'I will inspect CHANGES.diff before reviewing correctness.';
-  const intentPlan = '## Intent\nA specific requirement was not met.\n\n## Verdict\nISSUES';
-  const intentFindings = 'I will read TASK.md and narrate each intent-review step.';
-  writeFileSync(join(run.work, 'uro-runfacts.json'), JSON.stringify({
-    runId,
-    verdict: 'NO_BLOCKERS',
-    verdictSource: 'assistant',
-    verifierPlan: correctnessPlan,
-    verifierFindings: correctnessFindings,
-    intentVerdict: 'ISSUES',
-    intentVerdictSource: 'none',
-    intentVerifierPlan: intentPlan,
-    intentVerifierFindings: intentFindings,
-  }));
-  try {
-    const [digested] = buildDashboardSnapshot({ runDirectory: run.directory }).runs;
-    assert.equal(digested.verifiers.correctness.plan, correctnessPlan);
-    assert.equal(digested.verifiers.intent.plan, intentPlan);
-    const html = renderTranscriptDetail(digested);
-    const verifierOpenings = [...html.matchAll(
-      /<article class="verifier-report [^"]+" data-verifier-report="(correctness|intent)"/g,
-    )].map((match) => match[1]);
-    assert.deepEqual(verifierOpenings, [
-      'correctness',
-      'intent',
-    ], 'the stable verifier anchors must belong to two distinct verifier elements');
-    const correctnessBlock = '<details class="verifier-findings"><summary>Correctness pass report</summary>'
-      + '<pre>## Correctness\nSpecific &lt;check&gt; passed &amp; stayed covered.\n\n## Verdict\nNO_BLOCKERS</pre>'
-      + '<details class="verifier-process-trace"><summary>Process trace</summary>'
-      + `<pre>${correctnessFindings}</pre></details></details>`;
-    assert.ok(html.includes(correctnessBlock),
-      'ordinary rendering must tuck the report around its distinguishable process trace');
-
-    const intentBlock = '<details class="verifier-findings">'
-      + '<summary>Intent pass retained report (not authoritative reviewer findings)</summary>'
-      + `<pre>${intentPlan}</pre>`
-      + '<details class="verifier-process-trace"><summary>Process trace</summary>'
-      + `<pre>${intentFindings}</pre></details></details>`;
-    assert.ok(html.includes(intentBlock),
-      'fail-safe rendering must tuck the report around its distinguishable process trace');
-    assert.equal((html.match(/<details class="verifier-findings">/g) ?? []).length, 2);
-    assert.doesNotMatch(html, /<details class="verifier-findings"[^>]*\sopen(?:\s|>)/,
-      'both verifier reports must be collapsed by default');
-    assert.equal((html.match(/<details class="verifier-process-trace">/g) ?? []).length, 2);
-    assert.doesNotMatch(html, /<details class="verifier-process-trace"[^>]*\sopen(?:\s|>)/,
-      'both process traces must be collapsed by default');
+    const review = verifierBlock(html, 'review');
+    assert.match(review, /No report/);
+    assert.doesNotMatch(review, /NO_BLOCKERS|ISSUES/,
+      'no verdict language survives anywhere in the review block');
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

@@ -24,7 +24,6 @@ import {
   parseVerdictDetail,
   runVerifier,
   FINDINGS_LIMIT,
-  INTENT_PROMPT,
   PLAN_LIMIT,
   REVIEW_PROMPT,
   runReviewPass,
@@ -146,9 +145,10 @@ test('runVerifier plan artifacts are capped separately from findings', async () 
   assert.match(r.findings, /a bug on line 4/);
 });
 
-test('intent-pass plan artifacts use the same cap', async () => {
+test('an explicit prompt uses the same plan-artifact cap', async () => {
   const r = await runVerifier({ cwd: process.cwd(), bin: process.execPath,
-    prompt: INTENT_PROMPT, extraArgv: [fakeAgent, 'long-plan'] });
+    prompt: 'judge the diff and end with exactly NO_BLOCKERS or exactly ISSUES',
+    extraArgv: [fakeAgent, 'long-plan'] });
   assert.ok(r.plan.length <= PLAN_LIMIT);
   assert.match(r.findings, /a bug on line 4/);
 });
@@ -165,19 +165,20 @@ test('assertUsablePrompt accepts a usable prompt', () => {
   assert.doesNotThrow(() => assertUsablePrompt('review the diff'));
 });
 
-test('both prompts are usable skill pointers with self-sufficient verdict contracts', () => {
-  for (const prompt of [DEFAULT_PROMPT, INTENT_PROMPT]) {
-    assert.doesNotThrow(() => assertUsablePrompt(prompt));
-    assert.match(prompt, /^\/uro-verify\b/, 'the prompt must explicitly select the shipped skill');
-    assert.match(prompt, /final line exactly NO_BLOCKERS or exactly ISSUES/,
-      'the prompt must retain the verdict contract if skill loading fails');
-    assert.doesNotMatch(prompt, /["\r\n]/);
-  }
+test('the shipped prompts are usable skill pointers', () => {
+  assert.doesNotThrow(() => assertUsablePrompt(DEFAULT_PROMPT));
+  assert.match(DEFAULT_PROMPT, /^\/uro-verify\b/, 'the prompt must explicitly select the shipped skill');
+  assert.match(DEFAULT_PROMPT, /final line exactly NO_BLOCKERS or exactly ISSUES/,
+    'the transport prompt must retain its verdict contract if skill loading fails');
+  assert.doesNotMatch(DEFAULT_PROMPT, /["\r\n]/);
   assert.match(DEFAULT_PROMPT, /Read CHANGES[.]diff/);
-  assert.match(DEFAULT_PROMPT, /correctness and blocking bugs/);
-  assert.match(INTENT_PROMPT, /Read TASK[.]md and CHANGES[.]diff/);
-  assert.match(INTENT_PROMPT, /fully implements every TASK[.]md requirement/);
-  assert.match(INTENT_PROMPT, /assertions detect broken behavior/);
+  // The holistic review prompt covers correctness AND intent in one report.
+  assert.doesNotThrow(() => assertUsablePrompt(REVIEW_PROMPT));
+  assert.match(REVIEW_PROMPT, /^\/uro-review\b/);
+  assert.match(REVIEW_PROMPT, /correctness and blocking bugs/);
+  assert.match(REVIEW_PROMPT, /fully implements every TASK[.]md requirement/);
+  assert.match(REVIEW_PROMPT, /no findings is still a report/);
+  assert.doesNotMatch(REVIEW_PROMPT, /["\r\n]/);
 });
 
 // Asserting VERIFIER_PLUGIN_DIR equals repoRoot/cursor-plugin proves nothing while the
@@ -204,9 +205,9 @@ test('the plugin path is resolved from the module, not the working directory', a
   }
 });
 
-test('correctness and intent launches load the plugin and remain read-only', async () => {
+test('verifier launches load the plugin and remain read-only', async () => {
 
-  for (const [pass, prompt] of [['correctness', DEFAULT_PROMPT], ['intent', INTENT_PROMPT]]) {
+  for (const [pass, prompt] of [['plan', DEFAULT_PROMPT], ['review', REVIEW_PROMPT]]) {
     const events = [];
     await runVerifier({
       cwd: fixturesDir,
@@ -268,8 +269,8 @@ test('assertNoForbiddenFlags throws on a write flag', () => {
   }
 });
 
-test('runVerifier rejects forbidden flags for correctness and intent launches', async () => {
-  for (const prompt of [DEFAULT_PROMPT, INTENT_PROMPT]) {
+test('runVerifier rejects forbidden flags whatever the prompt', async () => {
+  for (const prompt of [DEFAULT_PROMPT, REVIEW_PROMPT]) {
     await assert.rejects(
       () => runVerifier({ cwd: process.cwd(), prompt, extraArgv: ['--approve-mcps'] }),
       /forbidden verifier flag/,
@@ -306,10 +307,10 @@ test('review launch is write-capable while both verdict launches remain read-onl
     ['--sandbox', 'enabled']);
   assert.match(REVIEW_PROMPT, /^\/uro-review\b/);
 
-  for (const prompt of [DEFAULT_PROMPT, INTENT_PROMPT]) {
+  for (const prompt of [DEFAULT_PROMPT, REVIEW_PROMPT]) {
     const verdictArgs = buildCursorArgs({ prompt, superpowersDir: null });
     assert.equal(verdictArgs[verdictArgs.indexOf('--mode') + 1], 'plan',
-      'correctness and intent must retain read-only plan mode');
+      'verifier launches must retain read-only plan mode');
   }
 });
 

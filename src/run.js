@@ -11,12 +11,9 @@ import {
 import { createEvidenceWriter } from './evidence.js';
 import { buildReviewerTestCommands, runGate as realGate } from './gate.js';
 import {
-  annotateVerifierConsistency,
-  DEFAULT_PROMPT,
   DEFAULT_VERIFIER_MODEL,
-  INTENT_PROMPT,
+  REVIEW_PROMPT,
   runReviewPass as realReviewPass,
-  runVerifier as realVerifier,
 } from './verifier.js';
 import { buildRunFacts, writeReport } from './report.js';
 import { spawnCapture } from './spawn.js';
@@ -57,7 +54,7 @@ import {
   PIVOT_FRESH,
   shouldPivot,
 } from './debate.js';
-import { detectReview, parseReview, REVIEW_DIR } from './review.js';
+import { detectReview, REVIEW_DIR } from './review.js';
 import { buildFixPlan, validateFindings } from './fix-plan.js';
 import {
   ARBITER_UNVERIFIED,
@@ -108,18 +105,12 @@ export function resolveDebateRounds(env = process.env, override) {
   return value;
 }
 
-function collectReviewFindings(dir, ...verifierResults) {
+function collectReviewFindings(dir) {
   const candidates = [];
   const detected = detectReview({ dir });
   if (detected.reviewed) candidates.push(...detected.findings);
-  for (const result of verifierResults) {
-    for (const content of [result?.findings, result?.plan]) {
-      const parsed = parseReview(content);
-      if (parsed) candidates.push(...parsed);
-    }
-  }
 
-  // Finding ids are the ledger identity. If two seats use the same id, retain a
+  // Finding ids are the ledger identity. If the report repeats an id, retain a
   // blocking version over a suggestion so a real blocker cannot be hidden by order.
   const byId = new Map();
   for (const finding of candidates) {
@@ -254,26 +245,6 @@ async function preservePartialExecutorWork(dir, baseRef = 'HEAD', createDiff = d
   return diff;
 }
 
-export function mergeVerifierVerdicts(correctnessVerdict, intentVerdict) {
-  if (correctnessVerdict === 'NO_BLOCKERS' && intentVerdict === 'NO_BLOCKERS') {
-    return 'NO_BLOCKERS';
-  }
-  if ((correctnessVerdict === 'UNVERIFIED' && intentVerdict !== 'ISSUES')
-    || (intentVerdict === 'UNVERIFIED' && correctnessVerdict !== 'ISSUES')) {
-    return 'UNVERIFIED';
-  }
-  return 'ISSUES';
-}
-
-export function reviewOutcomeFor(correctness, intent) {
-  if (correctness.timedOut || intent.timedOut) return 'timed-out';
-  if (correctness.launchFailed || intent.launchFailed
-    || correctness.verdict === 'UNVERIFIED' || intent.verdict === 'UNVERIFIED') {
-    return 'verifier-failed';
-  }
-  return 'review-ready';
-}
-
 function planWithGateFailure(plan, gateResult) {
   const failed = gateResult.results.find((result) => result.code !== 0);
   if (!failed) {
@@ -395,16 +366,8 @@ export async function run(opts) {
   // Hermetic guard, same pattern as the arbiter and reviewer seats: a test that
   // injects the executor but not the verifier must never launch the real CLI.
   // Reviews running on a red gate made that reachable for the first time.
-  const runVerifier = adapters.runVerifier
-    ?? (adapters.runExecutor === undefined ? realVerifier : null);
-  const invokeVerdictSeat = (options) => (runVerifier === null
-    ? {
-      verdict: 'UNVERIFIED', launchFailed: true, verdictSource: 'none',
-      usage: EMPTY_USAGE, stderr: 'verifier seat not injected in a hermetic run',
-    }
-    : runVerifier(options));
   const runReview = adapters.runReview
-    ?? (adapters.runVerifier === undefined ? realReviewPass : null);
+    ?? (adapters.runExecutor === undefined ? realReviewPass : null);
   const runMutation = adapters.runMutation ?? realMutation;
   const isolateRun = adapters.isolate ?? isolate;
   const createDiff = adapters.diffText ?? diffText;
@@ -456,7 +419,7 @@ export async function run(opts) {
   const commands = Array.isArray(gate) ? gate : JSON.parse(readFileSync(gate, 'utf8'));
   const stageTimeouts = resolveStageTimeouts(opts.env ?? process.env, opts);
   const probeVerifier = adapters.probeVerifier
-    ?? (adapters.runVerifier === undefined ? probeVerifierLiveness : null);
+    ?? (adapters.runExecutor === undefined ? probeVerifierLiveness : null);
   if (!verifierProbeCompleted && probeVerifier) {
     const probe = await probeVerifier({ bin: verifierBin });
     if (!probe?.ok) throw new Error(`preflight failed: ${probe?.reason
@@ -598,7 +561,6 @@ export async function run(opts) {
   const iterations = [];
   let activeBranch = iso.branch;
   let freshPivotCount = 0;
-  let verdict = null;
   // The pessimistic default is a crashed executor: nothing else has happened
   // yet. There is no gate verdict to default to any more.
   let outcome = 'executor-failed';
@@ -991,8 +953,6 @@ export async function run(opts) {
         ? { usageConsistency: executorResult.usageConsistency } : {}),
     },
     gate: iterationGate,
-    verifier: null,
-    intentVerifier: null,
   });
   let iter = makeIteration(n, exec, gateResult, executorTimedOut);
 
@@ -1049,7 +1009,7 @@ export async function run(opts) {
       }
       iterations.push(iter);
     } else {
-      // When a command exited non-zero the verdict seats are told so, in one
+      // When a command exited non-zero the reviewer is told so, in one
       // argv-safe line, and asked to judge whether the exit indicts the change
       // or the command itself. Evidence in front of the seats, never a rule.
       const gateNote = () => {
@@ -1094,6 +1054,7 @@ export async function run(opts) {
                 cwd: iso.dir,
                 bin: verifierBin,
                 model: verifierModel,
+                prompt: REVIEW_PROMPT + gateNote(),
                 superpowersDir: cursorSuperpowersDir,
                 env: runEnvironment,
                 timeoutMs: stageTimeouts.verifier,
@@ -1130,66 +1091,7 @@ export async function run(opts) {
           }
         }
         iter.reviewer = reviewer;
-        const v = annotateVerifierConsistency(observeUsage(await invokeVerdictSeat({
-          cwd: iso.dir, bin: verifierBin, model: verifierModel, prompt: DEFAULT_PROMPT + gateNote(),
-          superpowersDir: cursorSuperpowersDir,
-          env: runEnvironment,
-          timeoutMs: stageTimeouts.verifier,
-          reporter: eventReporter, runId, pass: 'correctness',
-          onLiveness: () => watchdog?.touch('verify'),
-          judgeLiveness: judgeLiveness ?? undefined,
-          onLivenessDecision: (decision) => {
-            livenessChecks?.push({ iteration: n, pass: 'correctness', ...decision });
-          },
-          livenessThresholdMs: executorThresholds.thresholdMs,
-          progressThresholdMs: executorThresholds.progressThresholdMs,
-        }), { seat: 'verifier', pass: 'correctness', iteration: n }));
-        const intentVerifier = annotateVerifierConsistency(observeUsage(await invokeVerdictSeat({
-          cwd: iso.dir, bin: verifierBin, model: verifierModel, prompt: INTENT_PROMPT + gateNote(),
-          superpowersDir: cursorSuperpowersDir,
-          env: runEnvironment,
-          timeoutMs: stageTimeouts.verifier,
-          reporter: eventReporter, runId, pass: 'intent',
-          onLiveness: () => watchdog?.touch('verify'),
-          judgeLiveness: judgeLiveness ?? undefined,
-          onLivenessDecision: (decision) => {
-            livenessChecks?.push({ iteration: n, pass: 'intent', ...decision });
-          },
-          livenessThresholdMs: executorThresholds.thresholdMs,
-          progressThresholdMs: executorThresholds.progressThresholdMs,
-        }), { seat: 'verifier', pass: 'intent', iteration: n }));
-        const recordVerifierTimeout = (result, pass) => {
-          if (!result.timedOut) return;
-          timeoutEvents.push({
-            stage: 'verifier', pass, iteration: n,
-            timeoutMs: result.timeoutReason?.timeoutMs
-              ?? result.timeoutMs ?? stageTimeouts.verifier,
-            ...(result.timeoutReason?.kind ? { reason: result.timeoutReason.kind } : {}),
-            ...(Number.isFinite(result.timeoutReason?.gapMs)
-              ? { gapMs: result.timeoutReason.gapMs } : {}),
-            ...(result.timeoutReason?.lastEvent
-              ? { lastEvent: result.timeoutReason.lastEvent } : {}),
-            ...(result.timeoutReason?.setting
-              ? { setting: result.timeoutReason.setting } : {}),
-            ...(typeof result.timeoutReason?.reasoning === 'string'
-              ? { reasoning: result.timeoutReason.reasoning } : {}),
-            ...(typeof result.timeoutReason?.judged === 'boolean'
-              ? { judged: result.timeoutReason.judged } : {}),
-            ...(result.timeoutReason?.unjudged ? { unjudged: true } : {}),
-          });
-        };
-        recordVerifierTimeout(v, 'correctness');
-        recordVerifierTimeout(intentVerifier, 'intent');
-        verifierUsage = addUsage(verifierUsage, v.usage);
-        verifierUsage = addUsage(verifierUsage, intentVerifier.usage);
-        iter.verifier = v;
-        iter.intentVerifier = intentVerifier;
-        verdict = mergeVerifierVerdicts(v.verdict, intentVerifier.verdict);
-        reportEvent(eventReporter, runId, 'verify', 'verdict', {
-          verdict, source: 'merged',
-        });
-
-        const findings = collectReviewFindings(iso.dir, v, intentVerifier);
+        const findings = collectReviewFindings(iso.dir);
         const blockingFindings = findings.filter((finding) => finding.severity === 'blocking');
         const suggestionFindings = findings.filter((finding) => finding.severity === 'suggestion');
         const findingIds = findings.map((finding) => finding.id);
@@ -1200,7 +1102,6 @@ export async function run(opts) {
           blockingFindingIds,
           suggestionFindingIds: suggestionFindings.map((finding) => finding.id),
           findings: findings.map((finding) => ({ ...finding })),
-          verdict,
         };
         debateRoundHistory.push(roundRecord);
         reportEvent(eventReporter, runId, 'debate', 'round', {
@@ -1208,24 +1109,18 @@ export async function run(opts) {
           findingIds,
           blockingFindingIds,
           suggestionFindingIds: suggestionFindings.map((finding) => finding.id),
-          verdict,
         });
         iterations.push(iter);
 
-        const reviewOutcome = reviewer.timedOut
-          ? 'timed-out'
-          : reviewer.launchFailed
-            ? 'verifier-failed'
-            : reviewOutcomeFor(v, intentVerifier);
-        if (reviewOutcome !== 'review-ready') {
-          outcome = reviewOutcome;
+        const reviewMissing = runReview !== null && !reviewer.launchFailed
+          && !reviewer.timedOut && !detectReview({ dir: iso.dir }).reviewed;
+        if (reviewer.timedOut || reviewer.launchFailed || reviewMissing) {
+          outcome = reviewer.timedOut ? 'timed-out' : 'verifier-failed';
           debateStopReason = reviewer.timedOut
             ? 'review-timed-out'
             : reviewer.launchFailed
               ? 'review-failed'
-              : v.verdict === 'UNVERIFIED' || intentVerifier.verdict === 'UNVERIFIED'
-                ? 'unverified'
-                : reviewOutcome;
+              : 'unreviewed';
           break;
         }
 
@@ -1601,23 +1496,6 @@ export async function run(opts) {
     }
   }
 
-  const lastVerifier = iterations.findLast((iteration) => iteration.verifier)?.verifier;
-  const verifierFindings = lastVerifier?.findings ?? null;
-  const correctnessVerdict = lastVerifier?.verdict ?? null;
-  const correctnessVerdictSource = lastVerifier?.verdictSource ?? null;
-  const verdictSource = lastVerifier?.verdictSource ?? null;
-  const verifierPlan = lastVerifier?.plan ?? null;
-  const verifierEvidence = lastVerifier?.verdictEvidence ?? null;
-  const verifierConsistency = lastVerifier?.verdictConsistency ?? null;
-  const lastIntentVerifier = iterations.findLast(
-    (iteration) => iteration.intentVerifier,
-  )?.intentVerifier;
-  const intentVerifierFindings = lastIntentVerifier?.findings ?? null;
-  const intentVerdict = lastIntentVerifier?.verdict ?? null;
-  const intentVerdictSource = lastIntentVerifier?.verdictSource ?? null;
-  const intentVerifierPlan = lastIntentVerifier?.plan ?? null;
-  const intentVerifierEvidence = lastIntentVerifier?.verdictEvidence ?? null;
-  const intentVerifierConsistency = lastIntentVerifier?.verdictConsistency ?? null;
   const tokens = {
     executor: executorUsage,
     verifier: verifierUsage,
@@ -1716,11 +1594,7 @@ export async function run(opts) {
     target, targetPath: resolve(target),
     dir: iso.dir, isRepo: iso.isRepo,
     baseRef: iso.baseRef, baseCommit: iso.baseCommit, branch: activeBranch,
-    iterations, verdict, verdictSource,
-    correctnessVerdict, correctnessVerdictSource, verifierFindings,
-    verifierPlan, verifierEvidence, verifierConsistency,
-    intentVerifierFindings, intentVerdict, intentVerdictSource,
-    intentVerifierPlan, intentVerifierEvidence, intentVerifierConsistency,
+    iterations,
     evidence: evidence.records(),
     tokens, usageConsistency, outcome, debate,
     ...(noOpReason === undefined ? {} : { noOpReason }),

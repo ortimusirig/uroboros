@@ -62,9 +62,6 @@ function adapters(scratchRoot, runId, diff = 'diff --git a/a.txt b/a.txt\n') {
       exitCode: 0,
     }),
     runGate: async () => ({ passed: true, results: [] }),
-    runVerifier: async () => ({
-      verdict: 'NO_BLOCKERS', verdictSource: 'result', launchFailed: false,
-    }),
   };
 }
 
@@ -115,8 +112,8 @@ test('run archives its complete record to the default root and preserves its jou
     assert.equal(index.runId, runId);
     assert.equal(index.outcome, facts.outcome);
     assert.equal(index.evidenceNonZero, (facts.evidence ?? []).filter((entry) => entry.code !== 0).length);
-    assert.equal(index.correctnessVerdict, facts.correctnessVerdict);
-    assert.equal(index.intentVerdict, facts.intentVerdict);
+    assert.equal(index.findingsLastRound,
+      (facts.debate?.roundHistory?.at(-1)?.findings ?? []).length);
     assert.ok(Number.isFinite(index.durationMs) && index.durationMs >= 0);
 
     const journal = generateRunJournal(join(facts.dir, 'uro-runfacts.json'));
@@ -181,8 +178,8 @@ test('run records an artifact-root failure without changing its outcome', async 
       adapters: adapters(scratchRoot, runId),
     });
     assert.equal(facts.outcome, 'review-ready');
-    assert.equal(facts.correctnessVerdict, 'NO_BLOCKERS');
-    assert.equal(facts.intentVerdict, 'NO_BLOCKERS');
+    assert.equal(Object.hasOwn(facts, 'correctnessVerdict'), false,
+      'the verdict surface stays gone even on artifact failure');
     assert.equal(facts.artifacts.status, 'failed');
     assert.equal(exitCodeFor(facts.outcome), 0,
       'best-effort artifact failure must not change the process exit mapping');

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { run } from '../src/run.js';
-import { DEFAULT_PROMPT, INTENT_PROMPT } from '../src/verifier.js';
+
 
 const SUPERPOWERS = {
   seats: {
@@ -32,19 +32,13 @@ function fixture() {
 }
 
 function verifierSequence(rounds) {
-  let correctnessCalls = 0;
-  return async ({ prompt }) => {
-    if (prompt === INTENT_PROMPT) {
-      return { verdict: 'NO_BLOCKERS', launchFailed: false, timedOut: false };
-    }
-    assert.equal(prompt, DEFAULT_PROMPT);
-    const findings = rounds[correctnessCalls++] ?? '';
-    return {
-      verdict: findings ? 'ISSUES' : 'NO_BLOCKERS',
-      findings,
-      launchFailed: false,
-      timedOut: false,
-    };
+  let round = 0;
+  return async ({ cwd }) => {
+    const findings = rounds[round++] ?? '';
+    mkdirSync(join(cwd, '__uro_review'), { recursive: true });
+    writeFileSync(join(cwd, '__uro_review', 'REVIEW.md'),
+      findings === '' ? 'Reviewed. No findings this round.\n' : findings);
+    return { launchFailed: false, timedOut: false };
   };
 }
 
@@ -86,7 +80,9 @@ test('all findings overruled converges without another executor pass', async () 
   try {
     const options = baseOptions(item, {
       adapters: {
-        runVerifier: verifierSequence([blocking]),
+        captureWorktreeSnapshot: async ({ cwd }) => ({ cwd }),
+        restoreWorktreeSnapshot: async () => ({ restoredPaths: [] }),
+        runReview: verifierSequence([blocking]),
         runArbiter: async ({ request }) => request.type === 'finding'
           ? {
               verdict: 'invalid',
@@ -115,7 +111,9 @@ test('valid and unavailable judgements preserve findings and drive or retain fix
       const options = baseOptions(item, {
         debateRounds: available ? undefined : 1,
         adapters: {
-          runVerifier: verifierSequence(available ? [blocking, ''] : [blocking]),
+          captureWorktreeSnapshot: async ({ cwd }) => ({ cwd }),
+        restoreWorktreeSnapshot: async () => ({ restoredPaths: [] }),
+        runReview: verifierSequence(available ? [blocking, ''] : [blocking]),
           ...(available ? { runArbiter: async () => ({ verdict: 'valid' }) } : {}),
         },
       });
@@ -137,7 +135,9 @@ test('an uncapped debate runs past two rounds and a judged amend can converge', 
   try {
     const options = baseOptions(item, {
       adapters: {
-        runVerifier: verifierSequence([blocking, blocking, blocking, '']),
+        captureWorktreeSnapshot: async ({ cwd }) => ({ cwd }),
+        restoreWorktreeSnapshot: async () => ({ restoredPaths: [] }),
+        runReview: verifierSequence([blocking, blocking, blocking, '']),
         runArbiter: async ({ request }) => request.type === 'pivot'
           ? { decision: 'amend', reason: 'the latest remedy is promising' }
           : { verdict: 'valid' },
@@ -156,7 +156,9 @@ test('unavailable pivot arbitration records fallback as unjudged and the ladder 
   try {
     const options = baseOptions(item, {
       adapters: {
-        runVerifier: verifierSequence([
+        captureWorktreeSnapshot: async ({ cwd }) => ({ cwd }),
+        restoreWorktreeSnapshot: async () => ({ restoredPaths: [] }),
+        runReview: verifierSequence([
           blocking, blocking, blocking, blocking, blocking,
         ]),
         createFreshPivotBranch: async ({ baseCommit, branch }) => ({
@@ -199,7 +201,7 @@ test('the token budget is checked before dispatching a debate round', async () =
             reasoningOutputTokens: 0, cacheWriteTokens: 0,
           },
         }),
-        runVerifier: async () => { throw new Error('budget must stop before review'); },
+        runReview: async () => { throw new Error('budget must stop before review'); },
       },
     });
     const facts = await run(options);
@@ -234,7 +236,9 @@ test('autonomous challenges use arbiter merits and unavailable arbitration needs
             try { unlinkSync(join(item.work, 'DECISION.md')); } catch { /* harness normally removes it */ }
             return { changedFiles: ['done.txt'], lastMessage: 'done', exitCode: 0 };
           },
-          runVerifier: verifierSequence(['']),
+          captureWorktreeSnapshot: async ({ cwd }) => ({ cwd }),
+        restoreWorktreeSnapshot: async () => ({ restoredPaths: [] }),
+        runReview: verifierSequence(['']),
           ...(available ? { runArbiter: async () => ({ answer: 'B', reason: 'B fits the plan' }) } : {}),
         },
       });

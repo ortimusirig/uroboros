@@ -13,8 +13,6 @@ import {
   HARNESS_ARTIFACTS,
   run as executeRun,
   diffText,
-  mergeVerifierVerdicts,
-  reviewOutcomeFor,
   resolveDebateRounds,
 } from '../src/run.js';
 import { VERIFIED_SUPERPOWERS, withVerifiedSuperpowers } from '../fixtures/verified-superpowers.mjs';
@@ -22,10 +20,9 @@ import { PIVOT_CONCLUDE, PIVOT_FRESH } from '../src/debate.js';
 import { EMPTY_USAGE } from '../src/usage.js';
 import { DEFAULT_ARBITER_MODEL } from '../src/arbiter.js';
 import {
-  DEFAULT_PROMPT,
   DEFAULT_VERIFIER_MODEL,
-  INTENT_PROMPT,
   parseVerdictDetail,
+  REVIEW_PROMPT,
 } from '../src/verifier.js';
 import { spawnCapture } from '../src/spawn.js';
 import { exitCodeFor } from '../src/exit.js';
@@ -80,39 +77,36 @@ Options: halt, follow the isolated-worktree recommendation
 Recommendation: follow the isolated-worktree recommendation
 `;
 
-test('correctness and intent findings are separately lifted while verdict is merged', async () => {
+test('one holistic review report carries correctness and intent findings into the record', async () => {
   const scr = scratch();
-  const verifierCalls = [];
+  const reviewCalls = [];
   const facts = await run({
     task: 'do the task', target: makeTarget(), gate: [], gateRetries: 2,
     scratchRoot: scr, runId: 'f1',
     adapters: {
       runExecutor: writingExecutor,
       runGate: async () => ({ passed: true, results: [] }),
-      runVerifier: async (opts) => {
-        verifierCalls.push(opts);
-        return opts.prompt === INTENT_PROMPT
-          ? { verdict: 'ISSUES', launchFailed: false,
-              findings: 'The shared-scope requirement was dropped.', verdictSource: 'assistant' }
-          : { verdict: 'NO_BLOCKERS', launchFailed: false,
-              findings: 'The implementation is internally correct.', verdictSource: 'result' };
-      },
+      runReview: reviewerForRounds([
+        `${suggestionReview('F1')}\n## F2\nSeverity: suggestion\nCategory: intent\nDescription: The shared-scope requirement was dropped.\n`,
+      ], reviewCalls),
     },
   });
-  assert.equal(facts.verdict, 'ISSUES');
-  assert.equal(facts.correctnessVerdict, 'NO_BLOCKERS');
-  assert.equal(facts.correctnessVerdictSource, 'result');
-  assert.equal(facts.verifierFindings, 'The implementation is internally correct.');
-  assert.equal(facts.verdictSource, 'result');
-  assert.equal(facts.verifierPlan, null);
-  assert.equal(facts.intentVerifierFindings, 'The shared-scope requirement was dropped.');
-  assert.equal(facts.intentVerdict, 'ISSUES');
-  assert.equal(facts.intentVerdictSource, 'assistant');
-  assert.equal(facts.intentVerifierPlan, null);
+  assert.equal(facts.outcome, 'review-ready');
+  const round = facts.debate.roundHistory[0];
+  assert.deepEqual(round.findingIds, ['F1', 'F2']);
+  assert.equal(round.findings[1].category, 'intent');
+  assert.equal(round.findings[1].description, 'The shared-scope requirement was dropped.');
+  // The two-seat verdict surface is gone from the facts entirely.
+  for (const gone of ['verdict', 'correctnessVerdict', 'intentVerdict',
+    'verifierFindings', 'intentVerifierFindings']) {
+    assert.equal(Object.hasOwn(facts, gone), false, `${gone} must not exist`);
+  }
   assert.equal(facts.baseRef, 'HEAD');
   assert.match(facts.baseCommit, /^[0-9a-f]{40,64}$/);
   assert.equal(facts.branch, 'uro/f1');
-  assert.deepEqual(verifierCalls.map((call) => call.prompt), [DEFAULT_PROMPT, INTENT_PROMPT]);
+  assert.equal(reviewCalls.length, 1, 'one seat, one report');
+  assert.equal(reviewCalls[0].prompt, REVIEW_PROMPT,
+    'a clean evidence trail appends nothing to the review prompt');
   rmSync(scr, { recursive: true, force: true });
 });
 
@@ -128,10 +122,10 @@ test('debate fix rounds accumulate usage and model overrides reach both agents a
     { inputTokens: 20, cachedInputTokens: 10, outputTokens: 3,
       reasoningOutputTokens: 2, cacheWriteTokens: 1 },
   ];
-  const correctnessUsage = { inputTokens: 7, cachedInputTokens: 4, outputTokens: 6,
-    reasoningOutputTokens: 0, cacheWriteTokens: 2 };
-  const intentUsage = { inputTokens: 11, cachedInputTokens: 5, outputTokens: 8,
-    reasoningOutputTokens: 0, cacheWriteTokens: 3 };
+  const roundOneUsage = { inputTokens: 18, cachedInputTokens: 9, outputTokens: 14,
+    reasoningOutputTokens: 0, cacheWriteTokens: 5 };
+  const roundTwoUsage = { inputTokens: 18, cachedInputTokens: 9, outputTokens: 14,
+    reasoningOutputTokens: 0, cacheWriteTokens: 5 };
   const cliOpts = parseArgs(['run', '--task', 'do the task', '--target', makeTarget(),
     '--gate', 'unused-gate.json', '--gate-retries', '1',
     '--executor-model', 'executor-override', '--executor-effort', 'medium',
@@ -147,21 +141,15 @@ test('debate fix rounds accumulate usage and model overrides reach both agents a
           usage: executorUsages[executorCall++] };
       },
       runGate: async () => { gateCall++; return { passed: true, results: [] }; },
-      // Round one's correctness pass files a blocking finding to force a fix
-      // round; round two records the same ISSUES-with-plan shape but nothing
-      // blocking, so the debate converges with those retained verdicts.
-      runVerifier: (() => {
-        let correctnessCall = 0;
+      // Round one's report files a blocking finding to force a fix round;
+      // round two's report is clean, so the debate converges.
+      runReview: (() => {
+        const reviewer = reviewerForRounds([blockingReview(), null], verifierCalls);
+        let round = 0;
         return async (opts) => {
-          verifierCalls.push(opts);
-          if (opts.prompt.startsWith(INTENT_PROMPT)) {
-            return { verdict: 'NO_BLOCKERS', launchFailed: false, findings: 'Intent is covered.',
-              verdictSource: 'result', plan: '# Intent review\n\nNO_BLOCKERS', usage: intentUsage };
-          }
-          correctnessCall++;
-          return { verdict: 'ISSUES', launchFailed: false,
-            findings: correctnessCall === 1 ? blockingReview() : 'Found it.',
-            verdictSource: 'plan', plan: '# Review\n\nISSUES', usage: correctnessUsage };
+          const result = await reviewer(opts);
+          round++;
+          return { ...result, usage: round === 1 ? roundOneUsage : roundTwoUsage };
         };
       })(),
     },
@@ -171,10 +159,10 @@ test('debate fix rounds accumulate usage and model overrides reach both agents a
     assert.equal(call.model, 'executor-override');
     assert.equal(call.effort, 'medium');
   }
-  assert.equal(verifierCalls.length, 4, 'two rounds, two passes each');
+  assert.equal(verifierCalls.length, 2, 'two rounds, one reviewer each');
   for (const call of verifierCalls) assert.equal(call.model, 'verifier-override');
   assert.deepEqual(verifierCalls.map((call) => call.prompt),
-    [DEFAULT_PROMPT, INTENT_PROMPT, DEFAULT_PROMPT, INTENT_PROMPT]);
+    [REVIEW_PROMPT, REVIEW_PROMPT]);
   assert.deepEqual(facts.model, {
     executor: 'executor-override', executorEffort: 'medium', verifier: 'verifier-override',
     arbiter: DEFAULT_ARBITER_MODEL,
@@ -190,70 +178,16 @@ test('debate fix rounds accumulate usage and model overrides reach both agents a
     total: { inputTokens: 66, cachedInputTokens: 33, outputTokens: 33,
       reasoningOutputTokens: 3, cacheWriteTokens: 11 },
   });
-  assert.equal(facts.verdictSource, 'plan');
-  assert.equal(facts.correctnessVerdict, 'ISSUES');
-  assert.equal(facts.correctnessVerdictSource, 'plan');
-  assert.equal(facts.verifierPlan, '# Review\n\nISSUES');
-  assert.equal(facts.intentVerifierFindings, 'Intent is covered.');
-  assert.equal(facts.intentVerdict, 'NO_BLOCKERS');
-  assert.equal(facts.intentVerdictSource, 'result');
-  assert.equal(facts.intentVerifierPlan, '# Intent review\n\nNO_BLOCKERS');
+  assert.equal(facts.debate.roundsRun, 2);
+  assert.deepEqual(facts.debate.findingsPerRound, [['F1'], []]);
+  assert.equal(Object.hasOwn(facts, 'verdictSource'), false);
   assert.equal(Object.hasOwn(facts, 'gateFailure'), false);
   rmSync(scr, { recursive: true, force: true });
 });
 
-test('a retained-evidence disagreement is reported without failing a completed run', async () => {
-  const scr = scratch();
-  const target = makeTarget();
-  try {
-    const contradictory = parseVerdictDetail(JSON.stringify({
-      type: 'result', subtype: 'success', is_error: false,
-      result: 'A blocking defect remains.\n\nISSUES',
-    }));
-    const clean = parseVerdictDetail(JSON.stringify({
-      type: 'result', subtype: 'success', is_error: false,
-      result: 'The intent is satisfied.\n\nNO_BLOCKERS',
-    }));
-    const facts = await run({
-      task: 'do the task', target, gate: [], gateRetries: 0,
-      scratchRoot: scr, runId: 'verdict-disagreement',
-      adapters: {
-        runExecutor: writingExecutor,
-        runGate: async () => ({ passed: true, results: [] }),
-        runVerifier: async ({ prompt }) => prompt === INTENT_PROMPT
-          ? {
-              verdict: clean.verdict,
-              verdictSource: clean.source,
-              verdictEvidence: clean.evidence,
-              launchFailed: false,
-            }
-          : {
-              // Simulate a harness bookkeeping defect: the recorded value does
-              // not match the exact retained text, but verification completed.
-              verdict: 'NO_BLOCKERS',
-              verdictSource: contradictory.source,
-              verdictEvidence: contradictory.evidence,
-              launchFailed: false,
-            },
-      },
-    });
-
-    assert.equal(facts.outcome, 'review-ready', 'bookkeeping must not fail the run');
-    assert.equal(facts.verifierConsistency.status, 'disagreement');
-    assert.equal(facts.verifierConsistency.recordedVerdict, 'NO_BLOCKERS');
-    assert.equal(facts.verifierConsistency.rederivedVerdict, 'ISSUES');
-    const persisted = JSON.parse(readFileSync(join(facts.dir, 'uro-runfacts.json'), 'utf8'));
-    assert.equal(persisted.verifierConsistency.status, 'disagreement');
-    assert.equal(persisted.iterations[0].verifier.verdictConsistency.status, 'disagreement');
-    const report = readFileSync(join(facts.dir, 'uro-report.md'), 'utf8');
-    assert.match(report, /bookkeeping disagreement/i);
-    assert.match(report, /recorded NO_BLOCKERS\/result; re-derived ISSUES\/result/i);
-  } finally {
-    rmSync(scr, { recursive: true, force: true });
-    rmSync(target, { recursive: true, force: true });
-  }
-});
-
+// The retained-evidence verdict-consistency surface died with the verdict
+// passes; checkVerdictConsistency remains covered in verifier.test.js where
+// the transport lives.
 test('a token invariant violation is reported without failing a completed run', async () => {
   const scr = scratch();
   const target = makeTarget();
@@ -318,20 +252,16 @@ test('omitted model flags travel through the CLI path to both agents and run-fac
         return writingExecutor(opts);
       },
       runGate: async () => ({ passed: true, results: [] }),
-      runVerifier: async (opts) => {
-        verifierCalls.push(opts);
-        return { verdict: 'NO_BLOCKERS', launchFailed: false };
-      },
+      runReview: reviewerForRounds([null], verifierCalls),
     },
   });
 
   assert.equal(executorCalls[0].model, DEFAULT_EXECUTOR_MODEL);
   assert.equal(executorCalls[0].effort, DEFAULT_EXECUTOR_EFFORT);
   assert.equal(Object.hasOwn(executorCalls[0], 'superpowersDir'), false);
-  assert.deepEqual(verifierCalls.map((call) => call.model),
-    [DEFAULT_VERIFIER_MODEL, DEFAULT_VERIFIER_MODEL]);
+  assert.deepEqual(verifierCalls.map((call) => call.model), [DEFAULT_VERIFIER_MODEL]);
   assert.deepEqual(verifierCalls.map((call) => call.superpowersDir),
-    [VERIFIED_SUPERPOWERS.seats.cursor.path, VERIFIED_SUPERPOWERS.seats.cursor.path]);
+    [VERIFIED_SUPERPOWERS.seats.cursor.path]);
   assert.deepEqual(facts.model, {
     executor: DEFAULT_EXECUTOR_MODEL,
     executorEffort: DEFAULT_EXECUTOR_EFFORT,
@@ -343,7 +273,7 @@ test('omitted model flags travel through the CLI path to both agents and run-fac
   rmSync(scr, { recursive: true, force: true });
 });
 
-test('TASK.md is written before execution, excluded from the diff, and both verifiers launch', async () => {
+test('TASK.md is written before execution, excluded from the diff, and the reviewer launches', async () => {
   let launches = 0;
   const scr = scratch();
   const plan = 'Implement the exact requested behavior.\nDo not narrow shared scope.\n';
@@ -363,12 +293,15 @@ test('TASK.md is written before execution, excluded from the diff, and both veri
         return writingExecutor({ cwd });
       },
       runGate: async () => ({ passed: true, results: [] }),
-      runVerifier: async () => { launches++; return { verdict: 'NO_BLOCKERS', launchFailed: false }; },
+      runReview: (() => {
+        const reviewer = reviewerForRounds([null]);
+        return async (opts) => { launches++; return reviewer(opts); };
+      })(),
     },
   });
   assert.equal(facts.outcome, 'review-ready');
-  assert.equal(launches, 2);
-  assert.ok(existsSync(join(facts.dir, 'CHANGES.diff')), 'CHANGES.diff handed to verifier');
+  assert.equal(launches, 1);
+  assert.ok(existsSync(join(facts.dir, 'CHANGES.diff')), 'CHANGES.diff handed to the reviewer');
   const diff = readFileSync(join(facts.dir, 'CHANGES.diff'), 'utf8');
   assert.match(diff, /new[.]txt/);
   assert.doesNotMatch(diff, /TASK[.]md/);
@@ -394,7 +327,7 @@ test('run reads an existing .txt task file instead of executing its path string'
         return noopExecutor();
       },
       runGate: async () => ({ passed: true, results: [] }),
-      runVerifier: async () => { throw new Error('no-op must not launch a verifier'); },
+      runReview: async () => { throw new Error('no-op must not launch a reviewer'); },
     },
   });
   assert.equal(facts.outcome, 'no-op');
@@ -424,10 +357,7 @@ test('the first call is verbatim and a fix round carries the failing evidence', 
         ? { passed: false, results: [failure] }
         : { passed: true, results: [] },
       // The fix round is driven by a finding; the failing command travels with it.
-      runVerifier: (() => {
-        const verify = verifierForRounds([blockingReview()]);
-        return async (options) => verify(options);
-      })(),
+      runReview: reviewerForRounds([blockingReview(), null]),
     },
   });
 
@@ -472,10 +402,7 @@ test('each fix round receives only the immediately preceding failing evidence', 
       },
       runGate: async () => gateResults.shift(),
       // Two rounds of findings drive two fix rounds; the third review is clean.
-      runVerifier: (() => {
-        const verify = verifierForRounds([blockingReview('F1'), blockingReview('F2'), null]);
-        return async (options) => verify(options);
-      })(),
+      runReview: reviewerForRounds([blockingReview('F1'), blockingReview('F2'), null]),
     },
   });
 
@@ -516,45 +443,38 @@ test('a green first gate never augments the executor prompt', async () => {
   rmSync(scr, { recursive: true, force: true });
 });
 
-test('correctness-pass launch failure yields verifier-failed and intent still runs', async () => {
+test('a reviewer launch failure yields verifier-failed', async () => {
   const scr = scratch();
-  const verifier = { verdict: 'ISSUES', exitCode: 1, launchFailed: true, stderr: 'launch failed' };
-  const intentVerifier = { verdict: 'NO_BLOCKERS', exitCode: 0, launchFailed: false };
-  let calls = 0;
   const facts = await run({
     task: 'do the task', target: makeTarget(), gate: [], gateRetries: 2,
     scratchRoot: scr, runId: 'vf1',
     adapters: {
       runExecutor: writingExecutor,
       runGate: async () => ({ passed: true, results: [] }),
-      runVerifier: async () => calls++ === 0 ? verifier : intentVerifier,
+      runReview: async () => { throw new Error('reviewer CLI would not start'); },
     },
   });
   assert.equal(facts.outcome, 'verifier-failed');
-  assert.deepEqual(facts.iterations[0].verifier, verifier);
-  assert.deepEqual(facts.iterations[0].intentVerifier, intentVerifier);
-  assert.equal(calls, 2, 'intent audit must still run after a correctness launch failure');
+  assert.equal(facts.debate.stopReason, 'review-failed');
+  assert.match(facts.iterations[0].reviewer.error, /reviewer CLI would not start/);
   rmSync(scr, { recursive: true, force: true });
 });
 
-test('intent-pass launch failure yields verifier-failed', async () => {
+test('a reviewer that runs but writes no report yields verifier-failed', async () => {
+  // Silence is not consent in execution either: a seat that launched and
+  // produced no REVIEW.md did not review, and the run says so.
   const scr = scratch();
-  const verifier = { verdict: 'NO_BLOCKERS', exitCode: 0, launchFailed: false };
-  const intentVerifier = { verdict: 'ISSUES', exitCode: 1, launchFailed: true,
-    stderr: 'intent launch failed' };
-  let calls = 0;
   const facts = await run({
     task: 'do the task', target: makeTarget(), gate: [], gateRetries: 2,
     scratchRoot: scr, runId: 'vf2',
     adapters: {
       runExecutor: writingExecutor,
       runGate: async () => ({ passed: true, results: [] }),
-      runVerifier: async () => calls++ === 0 ? verifier : intentVerifier,
+      runReview: async () => ({ launchFailed: false, timedOut: false }),
     },
   });
   assert.equal(facts.outcome, 'verifier-failed');
-  assert.deepEqual(facts.iterations[0].verifier, verifier);
-  assert.deepEqual(facts.iterations[0].intentVerifier, intentVerifier);
+  assert.equal(facts.debate.stopReason, 'unreviewed');
   rmSync(scr, { recursive: true, force: true });
 });
 
@@ -567,7 +487,7 @@ test('empty diff → verifier is NOT launched (no-op)', async () => {
     adapters: {
       runExecutor: noopExecutor,
       runGate: async () => ({ passed: true, results: [] }),
-      runVerifier: async () => { launches++; return { verdict: 'NO_BLOCKERS' }; },
+      runReview: async () => { launches++; return { launchFailed: false, timedOut: false }; },
     },
   });
   assert.equal(launches, 0, 'no diff means nothing to review');
@@ -579,28 +499,9 @@ test('empty diff → verifier is NOT launched (no-op)', async () => {
   rmSync(scr, { recursive: true, force: true });
 });
 
-test('an UNVERIFIED seat prevents a review-ready outcome', async () => {
-  const scr = scratch();
-  const facts = await run({
-    task: 'do the task', target: makeTarget(), gate: [], gateRetries: 0,
-    scratchRoot: scr, runId: 'unverified-verdict',
-    adapters: {
-      runExecutor: writingExecutor,
-      runGate: async () => ({ passed: true, results: [] }),
-      runVerifier: async ({ prompt }) => prompt === INTENT_PROMPT
-        ? { verdict: 'NO_BLOCKERS', launchFailed: false, verdictSource: 'result' }
-        : { verdict: 'UNVERIFIED', launchFailed: false, verdictSource: 'none', findings: '' },
-    },
-  });
-
-  assert.equal(facts.verdict, 'UNVERIFIED');
-  assert.equal(facts.correctnessVerdict, 'UNVERIFIED');
-  assert.equal(facts.correctnessVerdictSource, 'none');
-  assert.equal(facts.outcome, 'verifier-failed');
-  assert.notEqual(facts.outcome, 'review-ready');
-  rmSync(scr, { recursive: true, force: true });
-});
-
+// The UNVERIFIED marker died with the verdict passes. A seat that cannot
+// review now surfaces as a launch failure, a timeout, or a missing report —
+// all covered above.
 test('a failing verifier preflight probe stops before executor dispatch', async () => {
   let executorCalled = false;
   const target = makeTarget();
@@ -643,7 +544,7 @@ test('a passing verifier preflight probe leaves executor dispatch unchanged', as
         return { changedFiles: [], lastMessage: 'nothing to do' };
       },
       runGate: async () => ({ passed: true, results: [] }),
-      runVerifier: async () => { throw new Error('no-op must not verify'); },
+      runReview: async () => { throw new Error('no-op must not verify'); },
     },
   });
 
@@ -670,9 +571,9 @@ test('a sentinel-only executor challenge needs a decision in manual mode', async
         gateCalls++;
         return { passed: true, results: [] };
       },
-      runVerifier: async () => {
+      runReview: async () => {
         verifierCalls++;
-        throw new Error('verifier must not launch for a challenge');
+        throw new Error('reviewer must not launch for a challenge');
       },
     },
   });
@@ -700,7 +601,7 @@ test('a clean executor run is unchanged in every mode', async () => {
       adapters: {
         runExecutor: async () => ({ changedFiles: [], lastMessage: 'nothing', exitCode: 0 }),
         runGate: async () => ({ passed: true, results: [] }),
-        runVerifier: async () => { throw new Error('verifier must not launch for no-op'); },
+        runReview: async () => { throw new Error('verifier must not launch for no-op'); },
       },
     });
     assert.equal(facts.outcome, 'no-op');
@@ -730,16 +631,16 @@ test('a sentinel plus substantive files follows the normal gate and verifier pat
         gateCalls++;
         return { passed: true, results: [] };
       },
-      runVerifier: async () => {
-        verifierCalls++;
-        return { verdict: 'NO_BLOCKERS', launchFailed: false };
-      },
+      runReview: (() => {
+        const reviewer = reviewerForRounds([null]);
+        return async (opts) => { verifierCalls++; return reviewer(opts); };
+      })(),
     },
   });
 
   assert.equal(facts.outcome, 'review-ready');
   assert.equal(gateCalls, 1);
-  assert.equal(verifierCalls, 2);
+  assert.equal(verifierCalls, 1);
   assert.equal(facts.decision, undefined);
   rmSync(scr, { recursive: true, force: true });
 });
@@ -813,7 +714,7 @@ test('an authority answer is rejected while operator-presence evidence is presen
         return { changedFiles: ['DECISION.md'], lastMessage: 'need authority', exitCode: 0 };
       },
       runGate: async () => { throw new Error('gate must not run'); },
-      runVerifier: async () => { throw new Error('verifier must not run'); },
+      runReview: async () => { throw new Error('verifier must not run'); },
     },
   });
 
@@ -897,7 +798,7 @@ test('challenge-round exhaustion halts instead of starting another executor', as
         return { changedFiles: ['DECISION.md'], lastMessage: 'challenge again', exitCode: 0 };
       },
       runGate: async () => { throw new Error('gate must not run'); },
-      runVerifier: async () => { throw new Error('verifier must not run'); },
+      runReview: async () => { throw new Error('verifier must not run'); },
     },
   });
 
@@ -922,7 +823,7 @@ test('a resolver returning no answers halts without rerunning the executor', asy
         return { changedFiles: ['DECISION.md'], lastMessage: 'need a decision', exitCode: 0 };
       },
       runGate: async () => { throw new Error('gate must not run'); },
-      runVerifier: async () => { throw new Error('verifier must not run'); },
+      runReview: async () => { throw new Error('verifier must not run'); },
     },
   });
 
@@ -957,9 +858,9 @@ test('non-zero executor exit with an empty diff is executor-failed', async () =>
         changedFiles: [], lastMessage: 'executor aborted before making changes', exitCode: 1,
       }),
       runGate: async () => ({ passed: true, results: [] }),
-      runVerifier: async () => {
+      runReview: async () => {
         verifierCalls++;
-        throw new Error('an empty diff must not launch a verifier');
+        throw new Error('an empty diff must not launch a reviewer');
       },
     },
   });
@@ -978,7 +879,7 @@ test('zero executor exit with an empty diff remains a successful no-op', async (
     adapters: {
       runExecutor: async () => ({ changedFiles: [], lastMessage: 'nothing to do', exitCode: 0 }),
       runGate: async () => ({ passed: true, results: [] }),
-      runVerifier: async () => { throw new Error('a no-op must not launch a verifier'); },
+      runReview: async () => { throw new Error('a no-op must not launch a verifier'); },
     },
   });
   assert.equal(facts.outcome, 'no-op');
@@ -999,7 +900,7 @@ test('an approval-request message names the advisory no-op reason without changi
         exitCode: 0,
       }),
       runGate: async () => ({ passed: true, results: [] }),
-      runVerifier: async () => { throw new Error('a no-op must not launch a verifier'); },
+      runReview: async () => { throw new Error('a no-op must not launch a verifier'); },
     },
   });
 
@@ -1026,7 +927,7 @@ test('unrelated executor prose does not label an empty successful pass as approv
           exitCode: 0,
         }),
         runGate: async () => ({ passed: true, results: [] }),
-        runVerifier: async () => { throw new Error('a no-op must not launch a verifier'); },
+        runReview: async () => { throw new Error('a no-op must not launch a verifier'); },
       },
     });
 
@@ -1040,8 +941,8 @@ test('unrelated executor prose does not label an empty successful pass as approv
 
 test('a non-zero exit is evidence in front of the seats, never a verdict', async () => {
   // "No green, no red." The command ran once, its exit code and output are on
-  // the record, and the verdict seats are told in one argv-safe line and asked
-  // to judge. With both seats satisfied the run converges — nothing anywhere
+  // the record, and the reviewer is told in one argv-safe line and asked to
+  // judge. With the reviewer satisfied the run converges — nothing anywhere
   // branches on the exit code, and no gateStatus or gateFailure field exists.
   let gateCalls = 0;
   const prompts = [];
@@ -1062,15 +963,15 @@ test('a non-zero exit is evidence in front of the seats, never a verdict', async
           outputTail: '[stdout]\nfailed assertion\n[stderr]\nstack trace',
         }] };
       },
-      runVerifier: async ({ prompt }) => {
-        prompts.push(prompt);
-        return { verdict: 'NO_BLOCKERS' };
-      },
+      runReview: (() => {
+        const reviewer = reviewerForRounds([null]);
+        return async (opts) => { prompts.push(opts.prompt); return reviewer(opts); };
+      })(),
     },
   });
   assert.equal(facts.outcome, 'review-ready',
-    'seats satisfied means converged; an exit code cannot veto them');
-  assert.equal(prompts.length, 2, 'both verdict seats review, whatever the exit');
+    'the reviewer satisfied means converged; an exit code cannot veto it');
+  assert.equal(prompts.length, 1, 'the reviewer reviews, whatever the exit');
   for (const prompt of prompts) {
     assert.match(prompt, /EVIDENCE: node exited 1/);
     assert.match(prompt, /indicts the change or the command itself/);
@@ -1094,7 +995,7 @@ test('a timed-out executor stops the run, is recorded, and maps to a non-zero pr
       runExecutor: async () => ({ changedFiles: [], lastMessage: 'partial work',
         timedOut: true, timeoutMs: 25, exitCode: -1 }),
       runGate: async () => { gateCalls++; return { passed: true, results: [] }; },
-      runVerifier: async () => { verifierCalls++; return { verdict: 'NO_BLOCKERS' }; },
+      runReview: async () => { verifierCalls++; return { launchFailed: false, timedOut: false }; },
     },
   });
   assert.equal(facts.outcome, 'timed-out');
@@ -1135,7 +1036,7 @@ test('a timed-out executor commits partial work and writes an artifact-free diff
         };
       },
       runGate: async () => { throw new Error('timed-out executor must not run the gate'); },
-      runVerifier: async () => { throw new Error('timed-out executor must not verify'); },
+      runReview: async () => { throw new Error('timed-out executor must not verify'); },
     },
   });
 
@@ -1179,7 +1080,7 @@ test('a failed partial-work commit is non-fatal and cannot suppress the timeout 
           } };
       },
       runGate: async () => { throw new Error('timed-out executor must not run the gate'); },
-      runVerifier: async () => { throw new Error('timed-out executor must not verify'); },
+      runReview: async () => { throw new Error('timed-out executor must not verify'); },
     },
   });
 
@@ -1193,30 +1094,23 @@ test('a failed partial-work commit is non-fatal and cannot suppress the timeout 
   rmSync(scr, { recursive: true, force: true });
 });
 
-test('a timed-out verifier cannot produce a successful outcome', async () => {
+test('a timed-out reviewer cannot produce a successful outcome', async () => {
   const scr = scratch();
-  let calls = 0;
   const facts = await run({
     task: 'Implement the requested timeout behavior.', target: makeTarget(), gate: [],
     gateRetries: 0, scratchRoot: scr, runId: 'verifier-timeout',
     adapters: {
       runExecutor: writingExecutor,
       runGate: async () => ({ passed: true, results: [] }),
-      runVerifier: async () => ++calls === 1
-        ? { verdict: 'UNVERIFIED', launchFailed: true, timedOut: true, timeoutMs: null,
-            timeoutReason: { kind: 'liveness', timeoutMs: 40, gapMs: 40,
-              lastEvent: { stage: 'verify', type: 'assistant' },
-              setting: 'URO_STALL_THRESHOLD_MS' } }
-        : { verdict: 'NO_BLOCKERS', launchFailed: false, timedOut: false },
+      runReview: async () => ({ launchFailed: false, timedOut: true,
+        timeoutReason: { timeoutMs: 40 } }),
     },
   });
   assert.equal(facts.outcome, 'timed-out');
+  assert.equal(facts.debate.stopReason, 'review-timed-out');
   assert.notEqual(exitCodeFor(facts.outcome), 0);
   assert.deepEqual(facts.timeoutEvents, [
-    { stage: 'verifier', pass: 'correctness', iteration: 1, timeoutMs: 40,
-      reason: 'liveness', gapMs: 40,
-      lastEvent: { stage: 'verify', type: 'assistant' },
-      setting: 'URO_STALL_THRESHOLD_MS' },
+    { stage: 'verifier', pass: 'review', iteration: 1, timeoutMs: 40 },
   ]);
   rmSync(scr, { recursive: true, force: true });
 });
@@ -1233,7 +1127,7 @@ test('a timed-out gate command is distinguishable in run facts and the report', 
         bin: 'node', args: ['--test'], code: -1, timedOut: true, timeoutMs: 60,
         outputTail: '[stdout]\npartial test output\n[stderr]\n',
       }] }),
-      runVerifier: async () => { verifierCalls++; return { verdict: 'NO_BLOCKERS' }; },
+      runReview: async () => { verifierCalls++; return { launchFailed: false, timedOut: false }; },
     },
   });
   assert.equal(facts.outcome, 'timed-out');
@@ -1316,27 +1210,9 @@ test('diffText succeeds when gitignore lists every harness artifact', async () =
   rmSync(d, { recursive: true, force: true });
 });
 
-test('mergeVerifierVerdicts is fail-safe across both passes', () => {
-  assert.equal(mergeVerifierVerdicts('NO_BLOCKERS', 'NO_BLOCKERS'), 'NO_BLOCKERS');
-  assert.equal(mergeVerifierVerdicts('NO_BLOCKERS', 'ISSUES'), 'ISSUES');
-  assert.equal(mergeVerifierVerdicts('ISSUES', 'NO_BLOCKERS'), 'ISSUES');
-  assert.equal(mergeVerifierVerdicts('NO_BLOCKERS', 'UNVERIFIED'), 'UNVERIFIED');
-  assert.equal(mergeVerifierVerdicts('UNVERIFIED', 'NO_BLOCKERS'), 'UNVERIFIED');
-  assert.equal(mergeVerifierVerdicts('ISSUES', 'UNVERIFIED'), 'ISSUES');
-});
-
-test('review outcome rejects UNVERIFIED seats as verifier failures', () => {
-  const clean = { verdict: 'NO_BLOCKERS', launchFailed: false, timedOut: false };
-  const issues = { verdict: 'ISSUES', launchFailed: false, timedOut: false };
-  const unverified = { verdict: 'UNVERIFIED', launchFailed: false, timedOut: false };
-
-  assert.equal(reviewOutcomeFor(clean, clean), 'review-ready');
-  assert.equal(reviewOutcomeFor(issues, clean), 'review-ready',
-    'a parsed ISSUES verdict remains a completed review');
-  assert.equal(reviewOutcomeFor(unverified, clean), 'verifier-failed');
-  assert.equal(reviewOutcomeFor(clean, unverified), 'verifier-failed');
-});
-
+// mergeVerifierVerdicts and reviewOutcomeFor died with the verdict passes:
+// there is one review report now, and seat availability is measured by launch,
+// timeout, and report presence — covered by the reviewer-failure tests above.
 const blockingReview = (id = 'F1') => `
 ## ${id}
 Severity: blocking
@@ -1352,17 +1228,15 @@ Category: maintainability
 Description: ${id} would make the implementation easier to maintain.
 `;
 
-function verifierForRounds(correctnessFindings) {
-  let correctnessRound = 0;
-  return async ({ prompt }) => {
-    // The evidence note may be appended to either prompt; match by prefix.
-    if (prompt.startsWith(INTENT_PROMPT)) {
-      return { verdict: 'NO_BLOCKERS', launchFailed: false, findings: 'Intent is covered.' };
-    }
-    const findings = correctnessFindings[correctnessRound++] ?? null;
-    return findings === null
-      ? { verdict: 'NO_BLOCKERS', launchFailed: false, findings: 'No blockers.' }
-      : { verdict: 'ISSUES', launchFailed: false, findings };
+function reviewerForRounds(reports, calls = null) {
+  let round = 0;
+  return async (opts) => {
+    calls?.push(opts);
+    const report = reports[round++] ?? null;
+    mkdirSync(join(opts.cwd, '__uro_review'), { recursive: true });
+    writeFileSync(join(opts.cwd, '__uro_review', 'REVIEW.md'),
+      report === null ? 'Reviewed. No findings this round.\n' : report);
+    return { launchFailed: false, timedOut: false };
   };
 }
 
@@ -1379,7 +1253,7 @@ test('debate regression control converges after one clean review round', async (
       adapters: {
         runExecutor: async (opts) => { executorCalls++; return writingExecutor(opts); },
         runGate: async () => { gateCalls++; return { passed: true, results: [] }; },
-        runVerifier: verifierForRounds([null]),
+        runReview: reviewerForRounds([null]),
       },
     });
 
@@ -1413,7 +1287,7 @@ test('one blocking finding is fixed by the executor and converges in round two',
           return writingExecutor(opts);
         },
         runGate: async () => { gateCalls++; return { passed: true, results: [] }; },
-        runVerifier: verifierForRounds([blockingReview(), null]),
+        runReview: reviewerForRounds([blockingReview(), null]),
       },
     });
 
@@ -1445,7 +1319,7 @@ test('a finding persistent across three rounds detects circling and retries an a
           return writingExecutor(opts);
         },
         runGate: async () => ({ passed: true, results: [] }),
-        runVerifier: verifierForRounds([
+        runReview: reviewerForRounds([
           blockingReview(), blockingReview(), blockingReview(), null,
         ]),
       },
@@ -1481,7 +1355,7 @@ test('circling on the final round suppresses an amend that cannot run', async ()
       adapters: {
         runExecutor: writingExecutor,
         runGate: async () => ({ passed: true, results: [] }),
-        runVerifier: verifierForRounds([blockingReview(), blockingReview(), blockingReview()]),
+        runReview: reviewerForRounds([blockingReview(), blockingReview(), blockingReview()]),
       },
     });
 
@@ -1510,7 +1384,7 @@ test('the fresh pivot still acts when circling is detected on the final round', 
         ...freshPlanningAdapters,
         runExecutor: writingExecutor,
         runGate: async () => ({ passed: true, results: [] }),
-        runVerifier: verifierForRounds([
+        runReview: reviewerForRounds([
           blockingReview(), blockingReview(), blockingReview(), blockingReview(),
         ]),
         shouldPivot: (pivotCount) => pivotCount === 0 ? PIVOT_FRESH : PIVOT_CONCLUDE,
@@ -1547,7 +1421,7 @@ test('a fresh pivot replans and continued circling concludes with the complete l
         ...freshPlanningAdapters,
         runExecutor: writingExecutor,
         runGate: async () => ({ passed: true, results: [] }),
-        runVerifier: verifierForRounds([
+        runReview: reviewerForRounds([
           blockingReview(), blockingReview(), blockingReview(), blockingReview(),
           blockingReview(),
         ]),
@@ -1583,7 +1457,7 @@ test('the conclude pivot stops without reporting success', async () => {
       adapters: {
         runExecutor: writingExecutor,
         runGate: async () => ({ passed: true, results: [] }),
-        runVerifier: verifierForRounds([blockingReview(), blockingReview(), blockingReview()]),
+        runReview: reviewerForRounds([blockingReview(), blockingReview(), blockingReview()]),
         shouldPivot: () => PIVOT_CONCLUDE,
       },
     });
@@ -1611,7 +1485,7 @@ test('URO_DEBATE_ROUNDS exhaustion stops honestly with unresolved findings', asy
       adapters: {
         runExecutor: writingExecutor,
         runGate: async () => ({ passed: true, results: [] }),
-        runVerifier: verifierForRounds([blockingReview()]),
+        runReview: reviewerForRounds([blockingReview()]),
       },
     });
 
@@ -1627,9 +1501,8 @@ test('URO_DEBATE_ROUNDS exhaustion stops honestly with unresolved findings', asy
 });
 
 test('a non-zero fix-round exit keeps the debate alive, and the seats decide', async () => {
-  // Previously a red fix-round gate ended the run before anyone reviewed the
-  // fix. Now the next review round sees the red gate and judges it; the run
-  // still ends gate-failed because clean verdicts cannot land over red.
+  // A red fix-round exit is evidence in front of round 2's reviewer; nothing
+  // ends the run for it.
   const scr = scratch();
   try {
     let gateCall = 0;
@@ -1643,14 +1516,11 @@ test('a non-zero fix-round exit keeps the debate alive, and the seats decide', a
           ? { passed: true, results: [] }
           : { passed: false, results: [{ bin: 'node', args: ['--test'], code: 7,
               outputTail: 'review regression failed' }] },
-        // One closure for the whole run — rebuilding it per call re-served the
-        // blocking finding every round, a latent fixture bug the old
-        // review-skip behaviour never exposed.
-        runVerifier: (() => {
-          const verify = verifierForRounds([blockingReview()]);
+        runReview: (() => {
+          const reviewer = reviewerForRounds([blockingReview(), null]);
           return async (options) => {
             verifierCalls++;
-            return verify(options);
+            return reviewer(options);
           };
         })(),
       },
@@ -1659,7 +1529,7 @@ test('a non-zero fix-round exit keeps the debate alive, and the seats decide', a
     // The exit-7 command is evidence in front of round 2's seats; they judged
     // it not worth blocking on, so the run converges. Nothing branched on it.
     assert.equal(facts.outcome, 'review-ready');
-    assert.equal(verifierCalls, 4,
+    assert.equal(verifierCalls, 2,
       'a non-zero fix-round exit must NOT prevent the next review round');
     assert.equal(facts.debate.roundsRun, 2);
     assert.equal(Object.hasOwn(facts, 'gateFailure'), false);
@@ -1668,29 +1538,8 @@ test('a non-zero fix-round exit keeps the debate alive, and the seats decide', a
   }
 });
 
-test('UNVERIFIED is recorded as a round but never converges the debate', async () => {
-  const scr = scratch();
-  try {
-    const facts = await run({
-      task: 'do the task', target: makeTarget(), gate: [], gateRetries: 0,
-      scratchRoot: scr, runId: 'debate-unverified',
-      adapters: {
-        runExecutor: writingExecutor,
-        runGate: async () => ({ passed: true, results: [] }),
-        runVerifier: async ({ prompt }) => prompt === INTENT_PROMPT
-          ? { verdict: 'NO_BLOCKERS', launchFailed: false }
-          : { verdict: 'UNVERIFIED', launchFailed: false },
-      },
-    });
-
-    assert.equal(facts.outcome, 'verifier-failed');
-    assert.equal(facts.debate.roundsRun, 1);
-    assert.equal(facts.debate.stopReason, 'unverified');
-  } finally {
-    rmSync(scr, { recursive: true, force: true });
-  }
-});
-
+// The UNVERIFIED round died with the verdict marker: a reviewer that
+// cannot produce a report now stops the run as unreviewed, proved above.
 test('suggestions alone converge without another executor or gate round', async () => {
   const scr = scratch();
   try {
@@ -1702,7 +1551,7 @@ test('suggestions alone converge without another executor or gate round', async 
       adapters: {
         runExecutor: async (opts) => { executorCalls++; return writingExecutor(opts); },
         runGate: async () => { gateCalls++; return { passed: true, results: [] }; },
-        runVerifier: verifierForRounds([suggestionReview()]),
+        runReview: reviewerForRounds([suggestionReview()]),
       },
     });
 
@@ -1742,7 +1591,7 @@ test('circling triggers Claude to read the change itself, and its view reaches e
           return writingExecutor(options);
         },
         runGate: async () => ({ passed: true, results: [] }),
-        runVerifier: verifierForRounds([
+        runReview: reviewerForRounds([
           blockingReview(), blockingReview(), blockingReview(), null,
         ]),
         runArbiter: async ({ request }) => {

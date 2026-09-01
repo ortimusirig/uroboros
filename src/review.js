@@ -68,8 +68,12 @@ export function detectReview({ dir }) {
   const reviewDirectory = join(dir, REVIEW_DIR);
   const reviewPath = join(reviewDirectory, 'REVIEW.md');
   if (!existsSync(reviewPath) || !statSync(reviewPath).isFile()) return { reviewed: false };
-  const findings = parseReview(readFileSync(reviewPath, 'utf8'));
-  if (findings === null) return { reviewed: false };
+  const content = readFileSync(reviewPath, 'utf8');
+  // A blank file says nothing — measured emptiness, not a report. Any written
+  // content IS the report; sections are structure for the debate, not proof
+  // of life, so a prose-only "no findings" review counts with zero findings.
+  if (content.trim() === '') return { reviewed: false };
+  const findings = parseReview(content) ?? [];
   const testFiles = findTestFiles(join(reviewDirectory, 'tests'))
     .map((path) => `${REVIEW_DIR}/tests/${path}`);
   return { reviewed: true, findings, testFiles };

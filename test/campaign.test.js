@@ -703,7 +703,7 @@ test('campaign and concurrent unit events carry complete, correctly scoped ident
   }
 });
 
-test('planner events retain candidate perspectives, both reviews, synthesis choice, and reasoning', async () => {
+test('planner events retain candidate perspectives, the review, synthesis choice, and reasoning', async () => {
   const events = [];
   let plannerInput;
   const result = await runCampaign({
@@ -718,13 +718,18 @@ test('planner events retain candidate perspectives, both reviews, synthesis choi
     runUnit: async ({ runId }) => ({
       ...successFacts(runId),
       outcome: 'review-ready',
-      gateStatus: 'passed',
-      verdict: 'NO_BLOCKERS',
-      verdictSource: 'result',
-      verifierFindings: `${runId} correctness reasoning`,
-      intentVerdict: 'NO_BLOCKERS',
-      intentVerdictSource: 'assistant',
-      intentVerifierFindings: `${runId} intent reasoning`,
+      debate: {
+        roundsRun: 1,
+        stopReason: 'converged',
+        roundHistory: [{
+          round: 1,
+          findingIds: ['F1'],
+          blockingFindingIds: [],
+          suggestionFindingIds: ['F1'],
+          findings: [{ id: 'F1', severity: 'suggestion', category: 'correctness',
+            description: `${runId} review reasoning` }],
+        }],
+      },
     }),
     plannerSynthesis: async (input) => {
       plannerInput = input;
@@ -745,19 +750,11 @@ test('planner events retain candidate perspectives, both reviews, synthesis choi
   assert.deepEqual(plannerInput.reviews.map((review) => ({
     unitId: review.unitId,
     complete: review.complete,
-    correctness: review.correctness.findings,
-    intent: review.intent.findings,
+    findings: review.review.findings,
+    blocking: review.review.blocking,
   })), [
-    {
-      unitId: 'candidate-minimal', complete: true,
-      correctness: 'candidate-minimal correctness reasoning',
-      intent: 'candidate-minimal intent reasoning',
-    },
-    {
-      unitId: 'candidate-refactor', complete: true,
-      correctness: 'candidate-refactor correctness reasoning',
-      intent: 'candidate-refactor intent reasoning',
-    },
+    { unitId: 'candidate-minimal', complete: true, findings: 1, blocking: 0 },
+    { unitId: 'candidate-refactor', complete: true, findings: 1, blocking: 0 },
   ]);
   const synthesis = events.find((event) => event.type === 'synthesis');
   assert.equal(synthesis.decision, 'synthesize-both');
@@ -775,23 +772,22 @@ test('a missing required review is explicit planner input rather than silent abs
     tasks: [{ task: 'candidate', unitId: 'missing-correctness', perspective: 'risk-first' }],
     target: 'unused-by-adapter', gate: [], concurrency: 1, tokenBudget: 1000,
     reporter: (event) => events.push(event),
+    // A verifier-failed run has no review report at all — the reviewer never
+    // produced one, and the planner is told so explicitly.
     runUnit: async ({ runId }) => ({
       ...successFacts(runId),
       outcome: 'verifier-failed',
-      gateStatus: 'passed',
-      verdict: null,
-      intentVerdict: 'NO_BLOCKERS',
-      intentVerifierFindings: 'intent completed',
+      debate: { roundsRun: 1, stopReason: 'unreviewed', roundHistory: [] },
     }),
     plannerSynthesis: (input) => {
       reviews = input.reviews;
       return { decision: 'stop', reasoning: 'Correctness review is missing.' };
     },
   });
-  assert.deepEqual(reviews[0].missing, ['correctness']);
+  assert.deepEqual(reviews[0].missing, ['review']);
   assert.equal(reviews[0].complete, false);
   const event = events.find((candidate) => candidate.type === 'review_received');
-  assert.deepEqual(event.missing, ['correctness']);
+  assert.deepEqual(event.missing, ['review']);
   assert.equal(event.complete, false);
 });
 

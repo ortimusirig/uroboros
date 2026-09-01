@@ -4,7 +4,6 @@ import {
   DEFAULT_DASHBOARD_FILTER,
   dashboardFilterCounts,
   filterDashboardRuns,
-  verifierSeatsDisagree,
 } from './dashboard-filters.js';
 
 const COLUMNS = [
@@ -70,35 +69,18 @@ function outcomeTone(outcome) {
   return 'pending';
 }
 
-function verifierVerdict(verifier) {
-  if (verifier === null || verifier === undefined) return 'Pending';
-  if (verifier.verdictSource === 'none') return 'No verdict — unknown';
-  return oneLine(verifier.verdict) || 'Unknown';
+function reviewValue(review) {
+  if (review === null || review === undefined) return 'Pending';
+  if (review.reported !== true) return review.timedOut ? 'Timed out' : 'No report';
+  if (review.blocking > 0) return `${review.blocking} blocking`;
+  if (review.findings > 0) return `${review.findings} finding(s)`;
+  return 'No findings';
 }
 
-function verifierTone(verifier) {
-  if (verifier === null || verifier === undefined) return 'pending';
-  if (verifier.verdictSource === 'none') return 'unknown';
-  if (verifier.verdict === 'NO_BLOCKERS') return 'clean';
-  if (verifier.verdict === 'ISSUES') return 'issues';
-  return 'pending';
-}
-
-function verifierConsensus(verifiers = {}) {
-  const correctness = verifiers.correctness;
-  const intent = verifiers.intent;
-  if (correctness?.verdict == null || intent?.verdict == null) {
-    return { kind: 'pending', label: 'Seats pending' };
-  }
-  const correctnessUnavailable = correctness.verdictSource === 'none';
-  const intentUnavailable = intent.verdictSource === 'none';
-  if (correctnessUnavailable && intentUnavailable) {
-    return { kind: 'pending', label: 'Seats unavailable' };
-  }
-  if (verifierSeatsDisagree(verifiers)) {
-    return { kind: 'disagreement', label: 'Seats disagree' };
-  }
-  return { kind: 'agreement', label: 'Seats agree' };
+function reviewTone(review) {
+  if (review === null || review === undefined) return 'pending';
+  if (review.reported !== true) return 'unknown';
+  return review.blocking > 0 ? 'issues' : 'clean';
 }
 
 function elapsed(startTs, endTs) {
@@ -130,29 +112,22 @@ function renderCard(run) {
   const title = oneLine(run.title);
   const outcome = oneLine(run.outcome) || 'running';
   const tone = outcomeTone(run.outcome);
-  const consensus = verifierConsensus(run.verifiers);
   const identity = title
     ? `<strong>${escapeHtml(title)}</strong><code title="${escapeHtml(runId)}">${escapeHtml(shortRunId(runId))}</code>`
     : `<strong><code title="${escapeHtml(runId)}">${escapeHtml(shortRunId(runId))}</code></strong>`;
   const gateResult = oneLine(run.gateResult) || 'pending';
-  const gateTone = gateResult === 'passed' ? 'passed'
-    : gateResult === 'failed' ? 'failed' : 'pending';
   const rounds = Number.isSafeInteger(run.debateRoundCount) && run.debateRoundCount > 0
     ? renderMetric('rounds', 'Rounds', run.debateRoundCount) : '';
   const tokenTotal = typeof run.tokenTotal === 'number' && Number.isFinite(run.tokenTotal)
     ? Math.max(0, Math.floor(run.tokenTotal)) : 0;
-  return `<article class="board-card ${tone}" data-run-id="${escapeHtml(runId)}" data-verifier-consensus="${consensus.kind}">`
+  return `<article class="board-card ${tone}" data-run-id="${escapeHtml(runId)}">`
     + `<button type="button" class="board-card-select" data-board-run="${escapeHtml(runId)}">`
     + `<span class="board-card-identity">${identity}</span>`
     + `<span class="board-outcome ${tone}">${escapeHtml(outcome)}</span>`
-    + `<strong class="board-consensus ${consensus.kind}">${consensus.label}</strong>`
     + '<span class="board-metrics">'
-    + renderMetric('gate', 'Gate', gateResult, { tone: gateTone })
-    + renderMetric('correctness', 'Correctness', verifierVerdict(run.verifiers?.correctness), {
-      tone: verifierTone(run.verifiers?.correctness), verifierSeat: 'correctness',
-    })
-    + renderMetric('intent', 'Intent', verifierVerdict(run.verifiers?.intent), {
-      tone: verifierTone(run.verifiers?.intent), verifierSeat: 'intent',
+    + renderMetric('evidence', 'Evidence', gateResult)
+    + renderMetric('review', 'Review', reviewValue(run.review), {
+      tone: reviewTone(run.review), verifierSeat: 'review',
     })
     + rounds
     + renderMetric('elapsed', 'Elapsed', elapsed(run.startTs, run.endTs))

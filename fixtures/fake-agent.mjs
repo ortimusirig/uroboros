@@ -2,6 +2,9 @@
 // Emits the real cursor-agent --output-format stream-json shape: a nested
 // assistant message (message.content is an array of {type:"text"} parts)
 // followed by a final result event.
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+
 const mode = process.argv[2] ?? 'dirty';
 
 // argv[2] === 'quota-death' reproduces the observed Cursor failure: one
@@ -32,6 +35,15 @@ const verdict = mode === 'clean' ? 'NO_BLOCKERS' : 'ISSUES';
 const review = mode === 'clean'
   ? `No blocking problems found.\n\n${verdict}`
   : `There is a bug on line 4.\n\n${verdict}`;
+
+// A real Cursor review writes its report into the worktree. Only a worktree
+// has TASK.md at its root, so transport tests running elsewhere stay pure.
+if (existsSync('TASK.md')) {
+  mkdirSync('__uro_review', { recursive: true });
+  writeFileSync(join('__uro_review', 'REVIEW.md'), mode === 'clean'
+    ? 'Reviewed TASK.md and CHANGES.diff. No findings.\n'
+    : '## F1\nSeverity: suggestion\nCategory: correctness\nDescription: There is a bug on line 4.\n');
+}
 const plan = mode === 'long-plan'
   ? `${'x'.repeat(9000)}\n\nISSUES`
   : `Retained review details.\n\n${verdict}`;

@@ -17,20 +17,6 @@ export function buildRunFacts({
   baseCommit = null,
   branch,
   iterations,
-  verdict,
-  verdictSource = null,
-  correctnessVerdict = null,
-  correctnessVerdictSource = null,
-  verifierFindings,
-  verifierPlan = null,
-  verifierEvidence = null,
-  verifierConsistency = null,
-  intentVerifierFindings,
-  intentVerdict = null,
-  intentVerdictSource = null,
-  intentVerifierPlan = null,
-  intentVerifierEvidence = null,
-  intentVerifierConsistency = null,
   evidence = [],
   tokens = {},
   usageConsistency = null,
@@ -77,20 +63,7 @@ export function buildRunFacts({
       },
     },
     timeoutEvents: Array.isArray(timeoutEvents) ? timeoutEvents : [],
-    iterations, verdict,
-    verdictSource: verdictSource ?? null,
-    correctnessVerdict: correctnessVerdict ?? null,
-    correctnessVerdictSource: correctnessVerdictSource ?? null,
-    verifierFindings: verifierFindings ?? null,
-    verifierPlan: verifierPlan ?? null,
-    verifierEvidence: verifierEvidence ?? null,
-    verifierConsistency: verifierConsistency ?? null,
-    intentVerifierFindings: intentVerifierFindings ?? null,
-    intentVerdict: intentVerdict ?? null,
-    intentVerdictSource: intentVerdictSource ?? null,
-    intentVerifierPlan: intentVerifierPlan ?? null,
-    intentVerifierEvidence: intentVerifierEvidence ?? null,
-    intentVerifierConsistency: intentVerifierConsistency ?? null,
+    iterations,
     evidence,
     tokens: {
       executor: addUsage(EMPTY_USAGE, tokens?.executor),
@@ -190,9 +163,6 @@ export function buildReportMarkdown(facts, {
   const configuredTimeouts = facts.limits?.timeoutsMs;
   const usageDisagreements = (facts.usageConsistency?.checks ?? [])
     .filter((check) => check.status === 'disagreement');
-  const correctnessUnverified = facts.correctnessVerdict === 'UNVERIFIED'
-    || (facts.correctnessVerdict === null && facts.verdict === 'UNVERIFIED');
-  const intentUnverified = facts.intentVerdict === 'UNVERIFIED';
   const assumedDecision = facts.assumedDecision
     ?? (facts.decision?.escalation === 'operator-absent' ? facts.decision : null);
   const presence = assumedDecision?.presenceEvidence ?? {};
@@ -231,10 +201,6 @@ export function buildReportMarkdown(facts, {
     `- **Outcome:** ${facts.outcome}`,
     ...(facts.noOpReason === undefined ? [] : [`- **No-op reason:** ${facts.noOpReason}`]),
     `- **Evidence:** ${(facts.evidence ?? []).length} command run(s); non-zero exits: ${(facts.evidence ?? []).filter((entry) => entry.code !== 0).length}`,
-    `- **Verdict:** ${facts.verdict ?? 'n/a'} (source: ${facts.verdictSource ?? 'n/a'})`,
-    `- **Intent verdict:** ${facts.intentVerdict ?? 'n/a'} (source: ${facts.intentVerdictSource ?? 'n/a'})`,
-    `- **Verdict evidence consistency:** ${facts.verifierConsistency?.status ?? 'n/a'}`,
-    `- **Intent evidence consistency:** ${facts.intentVerifierConsistency?.status ?? 'n/a'}`,
     `- **Token accounting consistency:** ${facts.usageConsistency?.status ?? 'n/a'}`,
     `- **Base ref:** ${facts.baseRef}`,
     `- **Base commit:** ${facts.baseCommit}`,
@@ -279,35 +245,6 @@ export function buildReportMarkdown(facts, {
           `- **Restarts used:** stall ${facts.retryCounts?.stall ?? 0}/${facts.limits.stall.restartLimit}`,
         ]
       : []),
-    ...(correctnessUnverified
-      ? [``, `Correctness verifier produced no readable verdict; the review did not run for this seat.`]
-      : facts.verdictSource === 'none'
-        ? [``, `Correctness verifier: no verdict marker was found; ISSUES is the fail-safe default.`]
-      : []),
-    ...(intentUnverified
-      ? [``, `Intent verifier produced no readable verdict; the review did not run for this seat.`]
-      : facts.intentVerdictSource === 'none'
-        ? [``, `Intent verifier: no verdict marker was found; ISSUES is the fail-safe default.`]
-      : []),
-    ...(facts.verifierConsistency?.status === 'disagreement'
-      ? [
-          ``,
-          `Correctness verifier bookkeeping disagreement: recorded `
-            + `${facts.verifierConsistency.recordedVerdict}/${facts.verifierConsistency.recordedSource}; `
-            + `re-derived ${facts.verifierConsistency.rederivedVerdict}/`
-            + `${facts.verifierConsistency.rederivedSource} from retained evidence.`,
-        ]
-      : []),
-    ...(facts.intentVerifierConsistency?.status === 'disagreement'
-      ? [
-          ``,
-          `Intent verifier bookkeeping disagreement: recorded `
-            + `${facts.intentVerifierConsistency.recordedVerdict}/`
-            + `${facts.intentVerifierConsistency.recordedSource}; re-derived `
-            + `${facts.intentVerifierConsistency.rederivedVerdict}/`
-            + `${facts.intentVerifierConsistency.rederivedSource} from retained evidence.`,
-        ]
-      : []),
     ...(usageDisagreements.length > 0
       ? [
           ``,
@@ -319,12 +256,6 @@ export function buildReportMarkdown(facts, {
                 + `cached input ${check.cachedInputTokens}`;
             }).join('; ') + `.`,
         ]
-      : []),
-    ...(facts.verifierEvidence?.inputTruncated
-      ? [``, `Correctness verifier evidence was truncated before judgment; the retained text is the complete judged input.`]
-      : []),
-    ...(facts.intentVerifierEvidence?.inputTruncated
-      ? [``, `Intent verifier evidence was truncated before judgment; the retained text is the complete judged input.`]
       : []),
     ...(facts.noOpReason === 'approval-requested'
       ? [
@@ -339,18 +270,11 @@ export function buildReportMarkdown(facts, {
     ``,
     `## Why / reasoning`,
     last.lastMessage ?? '(no executor message)',
-    ...(facts.verifierPlan !== null
-      ? [``, `## Verifier plan artifact`, facts.verifierPlan || '(empty plan artifact)']
-      : []),
     ``,
-    `## Verifier findings`,
-    facts.verifierFindings || '(none recorded)',
-    ...(facts.intentVerifierPlan !== null
-      ? [``, `## Intent verifier plan artifact`, facts.intentVerifierPlan || '(empty plan artifact)']
-      : []),
-    ``,
-    `## Intent verifier findings`,
-    facts.intentVerifierFindings || '(none recorded)',
+    `## Review findings (last round)`,
+    (facts.debate?.roundHistory?.at(-1)?.findings ?? [])
+      .map((finding) => `- ${finding.id} [${finding.severity}] ${finding.description ?? ''}`.trimEnd())
+      .join('\n') || '(none recorded)',
   ];
   const nonZeroEvidence = (facts.evidence ?? []).filter((entry) => entry.code !== 0);
   if (nonZeroEvidence.length > 0) {

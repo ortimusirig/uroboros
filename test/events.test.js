@@ -30,7 +30,7 @@ import { runGate as realGate } from '../src/gate.js';
 import { run as executeRun } from '../src/run.js';
 import { runPlan as executePlan } from '../src/plan.js';
 import { generateRunJournal } from '../src/run-journal.js';
-import { runVerifier as realVerifier } from '../src/verifier.js';
+import { runReviewPass as realReviewPass } from '../src/verifier.js';
 import { VERIFIED_SUPERPOWERS, withVerifiedSuperpowers } from '../fixtures/verified-superpowers.mjs';
 
 const run = (options) => executeRun(withVerifiedSuperpowers(options));
@@ -216,6 +216,7 @@ test('every debate event pair round-trips and is retained in events.jsonl', () =
     const debatePairs = EVENT_PAIRS.filter((pair) => pair.startsWith('debate/'));
     assert.deepEqual(debatePairs.sort(), [
       'debate/circling', 'debate/converged', 'debate/independent_review', 'debate/pivot', 'debate/resist', 'debate/round',
+      'debate/stalled',
     ]);
     for (const pair of debatePairs) {
       const [, type] = pair.split('/');
@@ -258,7 +259,7 @@ test('every plan event pair round-trips through the declared vocabulary', () => 
   const pairs = EVENT_PAIRS.filter((pair) => pair.startsWith('plan/')).sort();
   assert.deepEqual(pairs, [
     'plan/agreement', 'plan/converged', 'plan/finish', 'plan/proposal',
-    'plan/review', 'plan/round', 'plan/start', 'plan/storm',
+    'plan/review', 'plan/round', 'plan/stalled', 'plan/start', 'plan/storm',
   ]);
   for (const pair of pairs) {
     const [, type] = pair.split('/');
@@ -310,7 +311,7 @@ test('every liveness event pair round-trips through the declared vocabulary', ()
     }));
   }
   assert.deepEqual(EVENT_PAIRS.filter((pair) => pair.startsWith('liveness/')).sort(), [
-    'liveness/asked', 'liveness/stuck', 'liveness/working',
+    'liveness/asked', 'liveness/stalled', 'liveness/stuck', 'liveness/working',
   ]);
 });
 
@@ -327,7 +328,7 @@ test('stage transitions and executor file changes reach the reporter in order', 
           ...opts, bin: process.execPath, extraArgv: [fakeWriter],
         }),
         runGate: realGate,
-        runVerifier: (opts) => realVerifier({
+        runReview: (opts) => realReviewPass({
           ...opts, bin: process.execPath, extraArgv: [fakeAgent, 'clean'],
         }),
       },
@@ -344,11 +345,8 @@ test('stage transitions and executor file changes reach the reporter in order', 
       'gate/finish',
       'diff/start',
       'diff/finish',
-      'verify/start:correctness',
-      'verify/finish:correctness',
-      'verify/start:intent',
-      'verify/finish:intent',
-      'verify/verdict',
+      'verify/start:review',
+      'verify/finish:review',
       'debate/round',
       'debate/converged',
       'report/start',
@@ -569,7 +567,7 @@ test('fully exercised runs have exact pair equality with both event vocabularies
             ...opts, bin: process.execPath, extraArgv: [fakeWriter],
           }),
           runGate: realGate,
-          runVerifier: (opts) => realVerifier({
+          runReview: (opts) => realReviewPass({
             ...opts, bin: process.execPath, extraArgv: [fakeAgent, 'clean'],
           }),
         },
@@ -680,21 +678,17 @@ test('fully exercised runs have exact pair equality with both event vocabularies
       },
     });
 
+    const stalledFamily = Object.fromEntries(EVENT_PAIRS
+      .filter((pair) => pair.endsWith('/stalled'))
+      .map((pair) => [pair,
+        'Requires deliberate silence in that stage; the stage-agnostic watchdog contract is proved in stall-watchdog.test.js.']));
     const deliberatelyUncovered = Object.freeze({
-      // A real isolation stall requires withholding Git completion past the watchdog threshold.
-      'isolate/stalled': 'Covered by the watchdog fault-injection suite, not this healthy run.',
-      // A merge stall requires a deliberately hung Git merge operation.
-      'merge/stalled': 'Covered by the generic watchdog contract; no merge process is hung here.',
-      // The healthy executor emits progress, so silence is tested in executor-watchdog.test.js.
-      'executor/stalled': 'Requires deliberate executor silence longer than the threshold.',
+      // Silence reports exist for EVERY stage because the watchdog arms for
+      // whatever stage last emitted (the debate/stalled crash regression);
+      // none of them can fire in a healthy conformance run.
+      ...stalledFamily,
       // The healthy conformance run finishes before its first deadline needs an extension.
       'executor/extended': 'Requires a healthy executor to outlive its configured deadline.',
-      // Hanging a gate command changes this conformance run into a timeout scenario.
-      'gate/stalled': 'Requires a deliberately hung gate process.',
-      // Diff production uses Git and is not deliberately hung in this healthy run.
-      'diff/stalled': 'Requires a deliberately hung diff process.',
-      // Both verifier passes complete; their stall path has separate supervision coverage.
-      'verify/stalled': 'Requires a deliberately silent verifier process.',
       // Scope violations are exercised with injected file mutation in review-protection.test.js.
       'verify/scope_violation': 'Requires a reviewer to write outside its dedicated artifact directory.',
       // The healthy executor follows the review-file restriction in this conformance run.
@@ -708,13 +702,13 @@ test('fully exercised runs have exact pair equality with both event vocabularies
       'debate/circling': 'Requires unresolved blockers across three consecutive review rounds.',
       // A pivot is only selected after the debate has been detected as circling.
       'debate/pivot': 'Requires a circling debate before a pivot strategy can be selected.',
-      // Report writes are synchronous, so the event loop cannot observe a mid-write timer gap.
-      'report/stalled': 'Unreachable during synchronous report writes.',
       // Retries now start only from a stall restart, which needs deliberate
       // executor silence; the payload is proved in the stall retry test above.
       'executor/retry': 'Requires a stalled executor restart; payload proved by the stall retry test.',
     });
-    assert.equal(Object.keys(deliberatelyUncovered).length, 15,
+    assert.equal(Object.keys(stalledFamily).length, EVENT_STAGES.length,
+      'every stage must carry a silence pair — the watchdog arms for any of them');
+    assert.equal(Object.keys(deliberatelyUncovered).length, Object.keys(stalledFamily).length + 8,
       'the deliberately-uncovered ratchet must not grow without an explicit test change');
     assert.ok(Object.values(deliberatelyUncovered).every((reason) => reason.length >= 24),
       'every allowlisted pair must carry a substantive reason');
@@ -783,5 +777,19 @@ test('fully exercised runs have exact pair equality with both event vocabularies
     if (planTarget) rmSync(planTarget, { recursive: true, force: true });
     rmSync(tgt, { recursive: true, force: true });
     rmSync(scr, { recursive: true, force: true });
+  }
+});
+
+test('every stage can construct its silence report — the debate/stalled crash regression', () => {
+  // The watchdog arms for whatever stage last emitted. A stage whose stalled
+  // pair is missing turns the silence report into a timer-borne crash, which
+  // is exactly how a live run died. The completion is structural; this pins it.
+  for (const stage of EVENT_STAGES) {
+    assert.doesNotThrow(() => createEvent({
+      runId: `stalled-${stage}`,
+      stage,
+      type: 'stalled',
+      fields: { gapMs: 1000, thresholdMs: 500 },
+    }), `${stage}/stalled must be constructible`);
   }
 });

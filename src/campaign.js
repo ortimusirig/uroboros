@@ -95,25 +95,17 @@ function candidateFailureReason(entry) {
     return `${command || 'command'} ${failedEvidence.timedOut ? 'timed out' : `exited with code ${failedEvidence.code}`}`;
   }
   if (facts.outcome === 'verifier-failed') {
-    return 'one or both verifier passes did not produce usable verdict evidence';
+    return 'the reviewer seat produced no usable review report';
   }
   return facts.outcome ?? 'internal-error';
 }
 
-function candidateVerdict(facts, pass) {
-  const intent = pass === 'intent';
-  const consistency = intent
-    ? facts?.intentVerifierConsistency?.status ?? null
-    : facts?.verifierConsistency?.status ?? null;
+function candidateReview(facts) {
+  const lastRound = facts?.debate?.roundHistory?.at(-1) ?? null;
   return {
-    verdict: intent
-      ? facts?.intentVerdict ?? null
-      : facts?.correctnessVerdict ?? facts?.verdict ?? null,
-    source: intent
-      ? facts?.intentVerdictSource ?? null
-      : facts?.correctnessVerdictSource ?? facts?.verdictSource ?? null,
-    consistency,
-    selfConsistent: consistency === null ? null : consistency === 'consistent',
+    reported: lastRound !== null,
+    findings: (lastRound?.findings ?? []).length,
+    blocking: (lastRound?.blockingFindingIds ?? []).length,
   };
 }
 
@@ -125,25 +117,9 @@ function observedCandidateTestCount(facts) {
 
 function plannerReview(entry) {
   const facts = entry.facts;
-  const correctness = facts === null ? null : {
-    verdict: facts?.correctnessVerdict ?? facts?.verdict ?? null,
-    source: facts?.correctnessVerdictSource ?? facts?.verdictSource ?? null,
-    findings: facts?.verifierFindings ?? null,
-    consistency: facts?.verifierConsistency?.status ?? null,
-  };
-  const intent = facts === null ? null : {
-    verdict: facts?.intentVerdict ?? null,
-    source: facts?.intentVerdictSource ?? null,
-    findings: facts?.intentVerifierFindings ?? null,
-    consistency: facts?.intentVerifierConsistency?.status ?? null,
-  };
+  const review = facts === null ? null : candidateReview(facts);
   const reviewExpected = facts?.outcome !== 'no-op';
-  const missing = reviewExpected
-    ? [
-        ...(correctness?.verdict ? [] : ['correctness']),
-        ...(intent?.verdict ? [] : ['intent']),
-      ]
-    : [];
+  const missing = reviewExpected && review?.reported !== true ? ['review'] : [];
   return {
     unitId: entry.unitId,
     unitKind: entry.unitKind,
@@ -152,8 +128,7 @@ function plannerReview(entry) {
     expected: reviewExpected,
     complete: missing.length === 0,
     missing,
-    correctness,
-    intent,
+    review,
   };
 }
 
@@ -684,11 +659,7 @@ async function runCampaignRound(options) {
           lifecycle(unit.unitId, 'unit', 'finish', {
             index: unit.index,
             outcome: facts?.outcome ?? 'unknown',
-            correctnessVerdict: facts?.correctnessVerdict ?? null,
-            correctnessVerdictSource: facts?.correctnessVerdictSource ?? null,
-            intentVerdict: facts?.intentVerdict ?? null,
-            intentVerdictSource: facts?.intentVerdictSource ?? null,
-            mergedVerdict: facts?.verdict ?? null,
+            review: candidateReview(facts),
             branch: facts?.branch ?? null,
             baseRef: facts?.baseRef ?? null,
             consumedTokens,
@@ -701,11 +672,7 @@ async function runCampaignRound(options) {
           lifecycle(unit.unitId, 'unit', 'finish', {
             index: unit.index,
             outcome: 'internal-error',
-            correctnessVerdict: null,
-            correctnessVerdictSource: null,
-            intentVerdict: null,
-            intentVerdictSource: null,
-            mergedVerdict: null,
+            review: null,
             branch: null,
             baseRef: null,
             error: entry.error.message,
@@ -720,8 +687,7 @@ async function runCampaignRound(options) {
               expected: review.expected,
               complete: review.complete,
               missing: review.missing,
-              correctness: review.correctness,
-              intent: review.intent,
+              review: review.review,
               ...(unit.perspective === undefined ? {} : { perspective: unit.perspective }),
               ...(candidateSet ? { alternative: true } : {}),
             }, identity);
@@ -813,12 +779,7 @@ async function runCampaignRound(options) {
     statement: 'These candidates are alternatives for one goal. No selection has been made; a planner must choose or synthesize from the evidence.',
     candidates: entries.map((entry) => {
       const facts = entry.facts;
-      const correctness = candidateVerdict(facts, 'correctness');
-      const intent = candidateVerdict(facts, 'intent');
-      const consistencyValues = [correctness.selfConsistent, intent.selfConsistent];
-      const evidenceSelfConsistent = consistencyValues.includes(false)
-        ? false
-        : consistencyValues.every((value) => value === true) ? true : null;
+      const review = candidateReview(facts);
       let testCount = candidateTestCounts.get(entry.index) ?? null;
       if (testCount === null && facts?.testCounts && typeof facts.testCounts === 'object') {
         testCount = {
@@ -852,8 +813,7 @@ async function runCampaignRound(options) {
         outcome: candidateOutcome,
         successful,
         reason: successful ? null : candidateFailureReason(entry),
-        verdicts: { correctness, intent },
-        evidenceSelfConsistent,
+        review,
         diffPath: proposedDiffPath !== null && existsSync(proposedDiffPath)
           ? proposedDiffPath
           : null,

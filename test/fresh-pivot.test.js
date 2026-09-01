@@ -11,7 +11,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { PIVOT_CONCLUDE, PIVOT_FRESH } from '../src/debate.js';
 import { createFreshPivotBranch, run } from '../src/run.js';
-import { INTENT_PROMPT } from '../src/verifier.js';
+
 
 const TEST_SUPERPOWERS = {
   seats: {

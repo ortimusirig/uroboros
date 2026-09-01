@@ -248,12 +248,14 @@ test('three approved units land in order and the summary reports all three', asy
   }
 });
 
-test('a correctness ISSUES verdict stops before applying that unit or starting a later one', async () => {
+test('stray verdict-era fields are inert at landing', async () => {
+  // The verdict fields died in the review collapse: a run that converged IS
+  // the seats' agreement, and no leftover field re-decides it at landing.
   const fixture = makeFixture();
   try {
     const runtime = fakeRuntime([
       reviewReady('run-1'),
-      reviewReady('run-2', { correctnessVerdict: 'ISSUES' }),
+      reviewReady('run-2', { correctnessVerdict: 'ISSUES', intentVerdict: 'UNVERIFIED' }),
       reviewReady('run-3'),
     ]);
 
@@ -263,37 +265,10 @@ test('a correctness ISSUES verdict stops before applying that unit or starting a
       dependencies: runtime.dependencies,
     });
 
-    assert.equal(runtime.launches.length, 2);
-    assert.deepEqual(runtime.landings.map(({ unit }) => unit.name), ['unit-1']);
-    assert.match(result.stop.reason, /correctness seat reported ISSUES/);
-    const log = readLog(fixture.logPath);
-    assert.equal(log.length, 2);
-    assert.equal(log[1].landed, false);
-    assert.equal(log[1].stoppedOn, true);
-    assert.match(result.summary, /Stopped on unit-2: correctness seat reported ISSUES/);
-  } finally {
-    fixture.cleanup();
-  }
-});
-
-test('an UNVERIFIED intent seat is never treated as approval', async () => {
-  const fixture = makeFixture();
-  try {
-    const runtime = fakeRuntime([
-      reviewReady('run-1'),
-      reviewReady('run-2', { intentVerdict: 'UNVERIFIED' }),
-      reviewReady('run-3'),
-    ]);
-
-    const result = await runQueue({
-      file: fixture.file,
-      target: fixture.target,
-      dependencies: runtime.dependencies,
-    });
-
-    assert.equal(runtime.launches.length, 2);
-    assert.equal(runtime.landings.length, 1);
-    assert.match(result.stop.reason, /intent seat reported UNVERIFIED/);
+    assert.equal(runtime.launches.length, 3);
+    assert.deepEqual(runtime.landings.map(({ unit }) => unit.name),
+      ['unit-1', 'unit-2', 'unit-3']);
+    assert.equal(result.stop, null);
   } finally {
     fixture.cleanup();
   }
@@ -627,7 +602,7 @@ test('queue-log gains exactly one JSON line for every attempted unit', async () 
   try {
     const runtime = fakeRuntime([
       reviewReady('run-1'),
-      reviewReady('run-2', { correctnessVerdict: 'ISSUES' }),
+      reviewReady('run-2', { outcome: 'verifier-failed' }),
       reviewReady('run-3'),
     ]);
 

@@ -35,7 +35,7 @@ function run(runId, overrides = {}) {
     timeline: [],
     gateCommands: [],
     gateResult: 'pending',
-    verifiers: { correctness: null, intent: null },
+    review: null,
     debateRoundCount: 0,
     startTs: '2026-08-28T12:00:00.000Z',
     endTs: '2026-08-28T12:00:05.000Z',
@@ -88,49 +88,31 @@ test('dashboard has exactly Transcript and Board tabs with Transcript selected b
   assert.match(html, /data-dashboard-panel="board"[^>]* hidden/);
 });
 
-test('the default board shows only active, human-stopped, and verifier-disagreement runs', () => {
+test('the default board shows only active and human-stopped runs', () => {
   const runs = [
     run('running'),
     run('decision', { state: 'finished', outcome: 'needs-decision' }),
-    run('disagreement', {
-      state: 'finished',
-      outcome: 'review-ready',
-      verifiers: {
-        correctness: { verdict: 'NO_BLOCKERS' },
-        intent: { verdict: 'ISSUES' },
-      },
-    }),
     run('clean-review', {
       state: 'finished',
       outcome: 'review-ready',
-      verifiers: {
-        correctness: { verdict: 'NO_BLOCKERS' },
-        intent: { verdict: 'NO_BLOCKERS' },
-      },
+      review: { reported: true, findings: 0, blocking: 0 },
     }),
     run('no-change', { state: 'finished', outcome: 'no-op' }),
   ];
 
   assert.deepEqual(cardRunIds(renderDashboardBoard(snapshot(...runs))), [
-    'running', 'decision', 'disagreement',
+    'running', 'decision',
   ]);
 });
 
-test('two unavailable verifier seats remain pending rather than becoming a disagreement', () => {
-  const item = run('both-unavailable', {
+test('a pending review renders as pending, never as a verdict', () => {
+  const item = run('review-pending', {
     state: 'finished',
     outcome: 'review-ready',
-    verifiers: {
-      correctness: { verdict: 'UNVERIFIED', verdictSource: 'none' },
-      intent: { verdict: 'NO_RESULT', verdictSource: 'none' },
-    },
+    review: null,
   });
-
-  assert.deepEqual(cardRunIds(renderDashboardBoard(snapshot(item))), []);
-  assert.match(
-    renderDashboardBoard(snapshot(item), 'all'),
-    /data-run-id="both-unavailable" data-verifier-consensus="pending"/,
-  );
+  const html = renderDashboardBoard(snapshot(item), 'all');
+  assert.match(html, /data-verifier-seat="review"[^>]*>Pending<\/span>/);
 });
 
 test('every human-stop outcome enters the attention filter', () => {
@@ -184,10 +166,7 @@ test('every filter reports its match count and renders exactly that many cards',
     run('clean-review', {
       state: 'finished',
       outcome: 'review-ready',
-      verifiers: {
-        correctness: { verdict: 'NO_BLOCKERS' },
-        intent: { verdict: 'NO_BLOCKERS' },
-      },
+      review: { reported: true, findings: 0, blocking: 0 },
     }),
     run('no-change', {
       state: 'finished', outcome: 'no-op', startTs: '2026-08-27T12:00:00.000Z',
@@ -231,21 +210,13 @@ test('the initial run picker lists the same attention-filtered set as the board'
   const fixture = snapshot(
     run('running'),
     run('decision', { state: 'finished', outcome: 'needs-decision' }),
-    run('disagreement', {
-      state: 'finished',
-      outcome: 'review-ready',
-      verifiers: {
-        correctness: { verdict: 'NO_BLOCKERS' },
-        intent: { verdict: 'ISSUES' },
-      },
-    }),
     run('clean-review', { state: 'finished', outcome: 'review-ready' }),
     run('no-change', { state: 'finished', outcome: 'no-op' }),
   );
 
   assert.deepEqual(
     pickerRunIds(renderDashboardPage(fixture)).toSorted(),
-    ['decision', 'disagreement', 'running'],
+    ['decision', 'running'],
   );
 });
 
@@ -253,10 +224,7 @@ test('an initially selected run remains in the picker when the filter would excl
   const fixture = snapshot(run('selected-clean-run', {
     state: 'finished',
     outcome: 'review-ready',
-    verifiers: {
-      correctness: { verdict: 'NO_BLOCKERS' },
-      intent: { verdict: 'NO_BLOCKERS' },
-    },
+    review: { reported: true, findings: 0, blocking: 0 },
   }));
   const html = renderDashboardPage(fixture);
 
@@ -551,25 +519,21 @@ test('empty columns keep their heading, count, and honest empty note', () => {
   assert.match(failed, /<p class="board-empty">No failed runs[.]<\/p>/);
 });
 
-test('a board card shows outcome, gate, both verifier seats, rounds, elapsed time, and tokens', () => {
+test('a board card shows outcome, evidence, the review, rounds, elapsed time, and tokens', () => {
   const html = renderDashboardBoard(snapshot(run('run-card-details', {
     title: 'Implement the board',
     outcome: 'review-ready',
     state: 'finished',
-    gateResult: 'passed',
-    verifiers: {
-      correctness: { verdict: 'NO_BLOCKERS', verdictSource: 'assistant' },
-      intent: { verdict: 'ISSUES', verdictSource: 'assistant' },
-    },
+    gateResult: 'evidence clean',
+    review: { reported: true, findings: 2, blocking: 1 },
     debateRoundCount: 3,
     startTs: '2026-08-28T12:00:00.000Z',
     endTs: '2026-08-28T12:02:05.000Z',
     tokenTotal: 12345,
-  })));
+  })), 'all');
   assert.match(html, /class="board-outcome passed"[^>]*>review-ready<\/span>/);
-  assert.match(html, /data-board-metric="gate"[^>]*>[\s\S]*class="result passed">passed<\/span>/);
-  assert.match(html, /data-verifier-seat="correctness"[^>]*>NO_BLOCKERS<\/span>/);
-  assert.match(html, /data-verifier-seat="intent"[^>]*>ISSUES<\/span>/);
+  assert.match(html, /data-board-metric="evidence"[^>]*>[\s\S]*>evidence clean<\/span>/);
+  assert.match(html, /data-verifier-seat="review"[^>]*>1 blocking<\/span>/);
   assert.match(html, /data-board-metric="rounds"[^>]*>[\s\S]*>3<\/span>/);
   assert.match(html, /data-board-metric="elapsed"[^>]*>[\s\S]*>2m 5s<\/span>/);
   assert.match(html, /data-board-metric="tokens"[^>]*>[\s\S]*>12,345<\/span>/);
@@ -577,29 +541,21 @@ test('a board card shows outcome, gate, both verifier seats, rounds, elapsed tim
     'the whole-card button must contain phrasing content only');
 });
 
-test('verifier disagreement has a distinct visible treatment from agreement', () => {
-  const disagreeing = run('disagreeing', {
+test('a blocking review has a distinct visible treatment from a clean one', () => {
+  const blockingRun = run('blocking-review', {
     outcome: 'review-ready',
-    verifiers: {
-      correctness: { verdict: 'NO_BLOCKERS' },
-      intent: { verdict: 'ISSUES' },
-    },
+    review: { reported: true, findings: 2, blocking: 2 },
   });
-  const agreeing = run('agreeing', {
+  const cleanRun = run('clean-review-tone', {
     outcome: 'review-ready',
-    verifiers: {
-      correctness: { verdict: 'NO_BLOCKERS' },
-      intent: { verdict: 'NO_BLOCKERS' },
-    },
+    review: { reported: true, findings: 0, blocking: 0 },
   });
-  const html = renderDashboardBoard(snapshot(disagreeing, agreeing));
-  const disagreement = html.match(/<article[^>]+data-run-id="disagreeing"[\s\S]*?<\/article>/)?.[0] ?? '';
-  const agreement = html.match(/<article[^>]+data-run-id="agreeing"[\s\S]*?<\/article>/)?.[0] ?? '';
-  assert.match(disagreement, /data-verifier-consensus="disagreement"/);
-  assert.match(disagreement, />Seats disagree<\/strong>/);
-  assert.match(agreement, /data-verifier-consensus="agreement"/);
-  assert.match(agreement, />Seats agree<\/strong>/);
-  assert.notEqual(disagreement, agreement);
+  const html = renderDashboardBoard(snapshot(blockingRun, cleanRun), 'all');
+  const blockingCard = html.match(/<article[^>]+data-run-id="blocking-review"[\s\S]*?<\/article>/)?.[0] ?? '';
+  const cleanCard = html.match(/<article[^>]+data-run-id="clean-review-tone"[\s\S]*?<\/article>/)?.[0] ?? '';
+  assert.match(blockingCard, /class="result issues"[^>]*>2 blocking<\/span>/);
+  assert.match(cleanCard, /class="result clean"[^>]*>No findings<\/span>/);
+  assert.notEqual(blockingCard, cleanCard);
 });
 
 test('cards are newest first within a column', () => {
@@ -664,19 +620,16 @@ test('board rendering matches its golden file and is byte-identical for an ident
     title: 'Golden board',
     outcome: 'review-ready',
     state: 'finished',
-    gateResult: 'passed',
-    verifiers: {
-      correctness: { verdict: 'NO_BLOCKERS' },
-      intent: { verdict: 'ISSUES' },
-    },
+    gateResult: 'evidence clean',
+    review: { reported: true, findings: 1, blocking: 0 },
     debateRoundCount: 2,
     startTs: '2026-08-28T12:00:00.000Z',
     endTs: '2026-08-28T12:01:05.000Z',
     lastEventTs: '2026-08-28T12:01:05.000Z',
     tokenTotal: 1234,
   }));
-  const first = renderDashboardBoard(fixture);
-  const second = renderDashboardBoard(fixture);
+  const first = renderDashboardBoard(fixture, 'all');
+  const second = renderDashboardBoard(fixture, 'all');
   const golden = readFileSync(new URL('./golden/dashboard-board.html', import.meta.url), 'utf8');
   assert.equal(first, golden);
   assert.equal(second, first);

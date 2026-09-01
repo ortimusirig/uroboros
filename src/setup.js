@@ -272,7 +272,7 @@ export async function runSetup({
 
   write(`Setup complete: isolated worktree ${facts.dir}\n`);
   write(`Evidence: ${(facts.evidence ?? []).length} command run(s), ${(facts.evidence ?? []).filter((entry) => entry.code !== 0).length} non-zero\n`);
-  write(`Verifier verdict: ${facts.verdict ?? 'n/a'}\n`);
+  write(`Review findings (last round): ${(facts.debate?.roundHistory?.at(-1)?.findings ?? []).length}\n`);
   write(`Diff files: ${changedFiles.join(', ')}\n`);
   return { ok: true, status: 'complete', outcomes, facts, demoDirectory };
 }

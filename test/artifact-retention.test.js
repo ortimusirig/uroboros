@@ -41,8 +41,16 @@ function facts(runId = '2026-08-29T01-02-03-004Z-artifact-test') {
     iterations: [],
     outcome: 'review-ready',
     evidenceNonZero: 0,
-    correctnessVerdict: 'NO_BLOCKERS',
-    intentVerdict: 'ISSUES',
+    debate: {
+      roundsRun: 1,
+      stopReason: 'converged',
+      roundHistory: [{
+        round: 1, findingIds: ['F1'], blockingFindingIds: [],
+        suggestionFindingIds: ['F1'],
+        findings: [{ id: 'F1', severity: 'suggestion', category: 'intent',
+          description: 'retained for the index count' }],
+      }],
+    },
     tokens: { total: { inputTokens: 17, outputTokens: 9 } },
   };
 }
@@ -100,8 +108,7 @@ test('a completed record copies every produced artifact and appends the exact in
       durationMs: 2006,
       outcome: 'review-ready',
       evidenceNonZero: 0,
-      correctnessVerdict: 'NO_BLOCKERS',
-      intentVerdict: 'ISSUES',
+      findingsLastRound: 1,
       inputTokens: 17,
       outputTokens: 9,
     });
@@ -152,8 +159,7 @@ test('an unusable artifact root records failure without changing the run result'
   const runFacts = facts('2026-08-29T03-00-00-000Z-blocked');
   const invariant = {
     outcome: runFacts.outcome,
-    correctnessVerdict: runFacts.correctnessVerdict,
-    intentVerdict: runFacts.intentVerdict,
+    findings: runFacts.debate.roundHistory.at(-1).findings.length,
   };
   try {
     writeProducedArtifacts(worktree);
@@ -172,8 +178,7 @@ test('an unusable artifact root records failure without changing the run result'
     assert.equal(runFacts.artifacts.status, 'failed');
     assert.deepEqual({
       outcome: runFacts.outcome,
-        correctnessVerdict: runFacts.correctnessVerdict,
-      intentVerdict: runFacts.intentVerdict,
+      findings: runFacts.debate.roundHistory.at(-1).findings.length,
     }, invariant);
     const persisted = JSON.parse(readFileSync(join(worktree, 'uro-runfacts.json'), 'utf8'));
     assert.equal(persisted.artifacts.status, 'failed',

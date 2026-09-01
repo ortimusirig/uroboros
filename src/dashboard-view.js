@@ -55,7 +55,7 @@ function emptyRun(directory, overrides = {}) {
     currentType: null,
     lastEventTs: null,
     timeline: [],
-    verifiers: { correctness: null, intent: null },
+    review: null,
     gateCommands: [],
     gateResult: 'pending',
     outcome: null,
@@ -86,44 +86,17 @@ function consistencyStatus(value) {
   return value?.status ?? null;
 }
 
-function enrichVerifiersFromFacts(verifiers, facts) {
-  if (facts === null) return verifiers;
-  const iteration = Array.isArray(facts.iterations) ? facts.iterations.at(-1) : null;
-  const completed = {
-    correctness: {
-      verdict: iteration?.verifier?.verdict
-        ?? facts.correctnessVerdict
-        ?? facts.verdict
-        ?? null,
-      verdictSource: iteration?.verifier?.verdictSource
-        ?? facts.correctnessVerdictSource
-        ?? facts.verdictSource
-        ?? null,
-      verdictConsistency: consistencyStatus(iteration?.verifier?.verdictConsistency)
-        ?? consistencyStatus(facts.verifierConsistency),
-      plan: facts.verifierPlan ?? iteration?.verifier?.plan ?? null,
-      findings: facts.verifierFindings ?? iteration?.verifier?.findings ?? null,
-    },
-    intent: {
-      verdict: iteration?.intentVerifier?.verdict ?? facts.intentVerdict ?? null,
-      verdictSource: iteration?.intentVerifier?.verdictSource
-        ?? facts.intentVerdictSource
-        ?? null,
-      verdictConsistency: consistencyStatus(iteration?.intentVerifier?.verdictConsistency)
-        ?? consistencyStatus(facts.intentVerifierConsistency),
-      plan: facts.intentVerifierPlan ?? iteration?.intentVerifier?.plan ?? null,
-      findings: facts.intentVerifierFindings ?? iteration?.intentVerifier?.findings ?? null,
-    },
+function enrichReviewFromFacts(review, facts) {
+  if (facts === null) return review;
+  const lastRound = facts.debate?.roundHistory?.at(-1) ?? null;
+  if (lastRound === null) return review;
+  return {
+    ...(review ?? {}),
+    reported: true,
+    findings: (lastRound.findings ?? []).length,
+    blocking: (lastRound.blockingFindingIds ?? []).length,
+    findingsList: (lastRound.findings ?? []).map((finding) => ({ ...finding })),
   };
-  for (const pass of ['correctness', 'intent']) {
-    if (verifiers[pass] !== null || completed[pass].verdict !== null
-      || completed[pass].plan !== null || completed[pass].findings !== null) {
-      completed[pass] = { ...(verifiers[pass] ?? {}), ...completed[pass] };
-    } else {
-      completed[pass] = null;
-    }
-  }
-  return completed;
 }
 
 function readDiffPreview(worktreeDirectory, maxBytes = MAX_RENDERED_DIFF_BYTES) {
@@ -280,7 +253,7 @@ function digestRunDirectory(runDirectory) {
   }
 
   const events = stream.events.filter((event) => event?.runId === stream.runId);
-  const verifiers = { correctness: null, intent: null };
+  let review = null;
   const gateCommands = [];
   let eventUsage = EMPTY_USAGE;
   let eventDebateRoundCount = 0;
@@ -291,14 +264,9 @@ function digestRunDirectory(runDirectory) {
     if (event.stage === 'debate' && Number.isSafeInteger(event.debateRound)) {
       eventDebateRoundCount = Math.max(eventDebateRoundCount, event.debateRound);
     }
-    if (event.stage === 'verify' && event.type === 'finish'
-      && (event.pass === 'correctness' || event.pass === 'intent')) {
-      verifiers[event.pass] = {
-        verdict: event.verdict ?? null,
-        verdictSource: event.source ?? event.verdictSource ?? null,
-        verdictConsistency: consistencyStatus(event.verdictConsistency),
-        plan: null,
-        findings: null,
+    if (event.stage === 'verify' && event.type === 'finish' && event.pass === 'review') {
+      review = {
+        reported: false,
         code: event.code ?? null,
         timedOut: event.timedOut === true,
         ts: event.ts ?? null,
@@ -314,14 +282,10 @@ function digestRunDirectory(runDirectory) {
         ts: event.ts ?? null,
       });
     }
-    if (event.stage === 'gate' && event.type === 'finish') {
-      gateResult = event.verdict === 'passed' ? 'passed'
-        : event.verdict === 'failed' ? 'failed' : gateResult;
-    }
   }
 
   const facts = readRunFacts(stream.eventsPath);
-  const completedVerifiers = enrichVerifiersFromFacts(verifiers, facts);
+  const completedReview = enrichReviewFromFacts(review, facts);
   const recordedTokenUsage = facts?.tokens?.total;
   const tokenUsage = recordedTokenUsage !== null && typeof recordedTokenUsage === 'object'
     && !Array.isArray(recordedTokenUsage)
@@ -333,7 +297,7 @@ function digestRunDirectory(runDirectory) {
   if (gateResult === 'pending' && gateCommands.some((command) => (
     command.timedOut || (command.code !== null && command.code !== 0)
   ))) {
-    gateResult = 'failed';
+    gateResult = 'non-zero evidence';
   }
   const lastEvent = events.at(-1) ?? null;
   const finished = events.some((event) => event.stage === 'report' && event.type === 'finish');
@@ -391,7 +355,7 @@ function digestRunDirectory(runDirectory) {
       askedBy: typeof event.askedBy === 'string' ? event.askedBy : null,
       answeredBy: typeof event.answeredBy === 'string' ? event.answeredBy : null,
     })),
-    verifiers: completedVerifiers,
+    review: completedReview,
     gateCommands,
     gateResult,
     outcome: typeof facts?.outcome === 'string' ? facts.outcome : null,

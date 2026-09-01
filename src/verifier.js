@@ -47,8 +47,7 @@ function assertReviewHasNoMode(args) {
 }
 
 export const DEFAULT_PROMPT = '/uro-verify Read CHANGES.diff and judge the change for correctness and blocking bugs; make the final line exactly NO_BLOCKERS or exactly ISSUES.';
-export const INTENT_PROMPT = '/uro-verify Read TASK.md and CHANGES.diff and judge whether the diff fully implements every TASK.md requirement and whether new or changed assertions detect broken behavior; make the final line exactly NO_BLOCKERS or exactly ISSUES.';
-export const REVIEW_PROMPT = '/uro-review Review TASK.md and CHANGES.diff, then write __uro_review/REVIEW.md and every referenced executable test under __uro_review/tests/; write nothing outside __uro_review/.';
+export const REVIEW_PROMPT = '/uro-review Review TASK.md and CHANGES.diff in one report: correctness and blocking bugs, AND whether the diff fully implements every TASK.md requirement — an unmet requirement is a finding like any other. Write every finding to __uro_review/REVIEW.md with a severity, and every referenced executable test under __uro_review/tests/; write nothing outside __uro_review/. A review with no findings is still a report — write REVIEW.md saying so.';
 
 export function assertUsablePrompt(prompt) {
   if (prompt.includes('"')) throw new Error('verifier prompt must not contain a double quote');

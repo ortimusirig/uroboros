@@ -49,13 +49,22 @@ const fixtureFacts = {
     lastMessage: 'Kept the loop unchanged.\nAdded the offline journal only.',
     gate: { passed: true, results: [] },
   }],
-  verdict: 'ISSUES',
-  verdictSource: 'assistant',
-  verifierFindings: correctnessFindings,
-  verifierPlan: '# Correctness plan\n\nInspect the cache behavior.',
-  intentVerifierFindings: intentFindings,
-  intentVerdict: 'NO_BLOCKERS',
-  intentVerdictSource: 'result',
+  debate: {
+    roundsRun: 1,
+    stopReason: 'converged',
+    roundHistory: [{
+      round: 1,
+      findingIds: ['F1', 'F2'],
+      blockingFindingIds: ['F1'],
+      suggestionFindingIds: ['F2'],
+      findings: [
+        { id: 'F1', severity: 'blocking', category: 'correctness',
+          description: correctnessFindings },
+        { id: 'F2', severity: 'suggestion', category: 'intent',
+          description: intentFindings },
+      ],
+    }],
+  },
   intentVerifierPlan: '# Intent plan\n\nCompare every requirement.',
   evidence: [{
     source: 'command',
@@ -140,16 +149,18 @@ test('frontmatter parses with every required property and Bases-compatible types
   const note = buildRunJournalNote(fixtureFacts, fixtureEvents);
   const { parsed } = parseFrontmatter(note);
   const required = [
-    'runId', 'date', 'outcome', 'evidenceNonZero', 'verdict', 'intentVerdict',
-    'verdictSource', 'tokensTotal', 'branch', 'filesChanged',
+    'runId', 'date', 'outcome', 'evidenceNonZero', 'findingsLastRound',
+    'tokensTotal', 'branch', 'filesChanged',
   ];
   assert.deepEqual(Object.keys(parsed), required);
   assert.equal(typeof parsed.runId, 'string');
   assert.ok(parsed.date instanceof Date);
   assert.equal(parsed.date.toISOString(), '2026-08-14T00:00:00.000Z');
-  for (const key of ['outcome', 'verdict', 'intentVerdict', 'verdictSource', 'branch']) {
+  for (const key of ['outcome', 'branch']) {
     assert.equal(typeof parsed[key], 'string', `${key} must remain a string`);
   }
+  assert.equal(typeof parsed.findingsLastRound, 'number');
+  assert.equal(parsed.findingsLastRound, 2);
   assert.equal(typeof parsed.tokensTotal, 'number');
   assert.equal(parsed.tokensTotal, 124, 'cached and reasoning subsets must not be double-counted');
   assert.ok(Array.isArray(parsed.filesChanged));
@@ -195,14 +206,15 @@ test('the journal note carries no recorded event content', () => {
   assert.ok(!note.includes('sensitive output'));
 });
 
-test('non-zero evidence is conditional and both verifier passes remain distinguishable', () => {
+test('non-zero evidence is conditional and every finding stays distinguishable', () => {
   const withGate = buildRunJournalNote(fixtureFacts, fixtureEvents);
   assert.match(withGate, /## Evidence — commands that exited non-zero/);
   assert.match(withGate, /node --test test\/cache[.]test[.]js/);
   assert.match(withGate, /expected fresh cache/);
   assert.match(withGate, /__uro_evidence\/round-1-01[.]out[.]txt/);
-  assert.match(withGate, /## Verifier findings\nCorrectness:/);
-  assert.match(withGate, /## Intent verifier findings\nIntent:/);
+  assert.match(withGate, /## Review findings \(last round\)/);
+  assert.match(withGate, /F1 \[blocking\] Correctness:/);
+  assert.match(withGate, /F2 \[suggestion\] Intent:/);
   assert.notEqual(correctnessFindings, intentFindings, 'positive control: pass fixtures must differ');
   assert.ok(withGate.indexOf(correctnessFindings) < withGate.indexOf(intentFindings));
 

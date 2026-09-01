@@ -88,34 +88,15 @@ function compactTitle(task, runId) {
   return plain.length <= 120 ? plain : `${plain.slice(0, 117).trimEnd()}...`;
 }
 
-function verifierPasses(facts) {
-  const iteration = Array.isArray(facts.iterations) ? facts.iterations.at(-1) : null;
-  return [
-    {
-      id: 'correctness',
-      label: 'Correctness',
-      verdict: iteration?.verifier?.verdict ?? facts.verdict ?? 'n/a',
-      source: iteration?.verifier?.verdictSource ?? facts.verdictSource ?? 'n/a',
-      consistency: iteration?.verifier?.verdictConsistency?.status
-        ?? facts.verifierConsistency?.status
-        ?? 'not recorded',
-      findings: facts.verifierFindings ?? iteration?.verifier?.findings ?? '(none recorded)',
-      artifact: facts.verifierPlan ?? iteration?.verifier?.plan ?? null,
-    },
-    {
-      id: 'intent',
-      label: 'Intent',
-      verdict: iteration?.intentVerifier?.verdict ?? facts.intentVerdict ?? 'n/a',
-      source: iteration?.intentVerifier?.verdictSource ?? facts.intentVerdictSource ?? 'n/a',
-      consistency: iteration?.intentVerifier?.verdictConsistency?.status
-        ?? facts.intentVerifierConsistency?.status
-        ?? 'not recorded',
-      findings: facts.intentVerifierFindings
-        ?? iteration?.intentVerifier?.findings
-        ?? '(none recorded)',
-      artifact: facts.intentVerifierPlan ?? iteration?.intentVerifier?.plan ?? null,
-    },
-  ];
+function reviewReport(facts) {
+  const lastRound = facts.debate?.roundHistory?.at(-1) ?? null;
+  return {
+    id: 'review',
+    label: 'Review',
+    reported: lastRound !== null,
+    blocking: (lastRound?.blockingFindingIds ?? []).length,
+    findings: (lastRound?.findings ?? []).map((finding) => ({ ...finding })),
+  };
 }
 
 function usageLine(usage) {
@@ -127,7 +108,7 @@ function usageLine(usage) {
 export function buildPullRequestContent({ facts, task }) {
   const iteration = Array.isArray(facts.iterations) ? facts.iterations.at(-1) : null;
   const rationale = iteration?.lastMessage ?? '(no executor rationale recorded)';
-  const passes = verifierPasses(facts);
+  const review = reviewReport(facts);
   const body = [
     '## Executor rationale',
     '',
@@ -137,19 +118,14 @@ export function buildPullRequestContent({ facts, task }) {
     '',
     `- Outcome: ${facts.outcome}`,
     `- Evidence: ${(facts.evidence ?? []).length} command run(s), ${(facts.evidence ?? []).filter((entry) => entry.code !== 0).length} non-zero`,
-    ...passes.map((pass) => (
-      `- ${pass.label} verdict: ${pass.verdict} (source: ${pass.source})`
-        + (pass.source === 'none'
-          ? ' — fail-safe because no verdict marker was found; not a reviewer finding'
-          : '')
-    )),
+    `- Review findings (last round): ${review.findings.length} (${review.blocking} blocking)`,
     `- Executor tokens: ${usageLine(facts.tokens?.executor)}`,
     `- Verifier tokens: ${usageLine(facts.tokens?.verifier)}`,
     `- Total tokens: ${usageLine(facts.tokens?.total)}`,
     '',
     `CCC run: ${facts.runId}`,
   ].join('\n');
-  return { title: compactTitle(task, facts.runId), body, passes };
+  return { title: compactTitle(task, facts.runId), body, review };
 }
 
 function reviewMarker(runId, passId) {
@@ -157,30 +133,20 @@ function reviewMarker(runId, passId) {
   return `<!-- ccc-verifier-review:${digest} pass:${passId} -->`;
 }
 
-export function buildReviewBody({ facts, pass }) {
-  const failSafe = pass.source === 'none';
+export function buildReviewBody({ facts, review }) {
   return [
-    reviewMarker(facts.runId, pass.id),
-    `## CCC verifier pass: ${pass.label}`,
+    reviewMarker(facts.runId, review.id),
+    '## CCC review report',
     '',
-    `Verdict: ${pass.verdict} (source: ${pass.source})`,
-    `Consistency: ${pass.consistency}`,
-    ...(failSafe ? [
-      '',
-      'Fail-safe: no verdict marker was found. ISSUES is the fail-safe default, not a reviewer finding.',
-    ] : []),
+    `Findings (last round): ${review.findings.length} (${review.blocking} blocking)`,
     '',
-    failSafe
-      ? '### Retained verifier output (not authoritative reviewer findings)'
-      : '### Reviewer findings',
+    '### Reviewer findings',
     '',
-    pass.findings,
-    ...(pass.artifact === null ? [] : [
-      '',
-      '### Verifier artifact',
-      '',
-      pass.artifact,
-    ]),
+    review.findings.length === 0
+      ? '(none recorded)'
+      : review.findings
+        .map((finding) => `- ${finding.id ?? '?'} [${finding.severity ?? 'unknown'}] ${finding.description ?? ''}`.trimEnd())
+        .join('\n'),
   ].join('\n');
 }
 
@@ -404,7 +370,7 @@ async function ensurePullRequest({
 }
 
 async function ensureVerifierComments({
-  runCommand, ghBin, env, repository, facts, passes, pull,
+  runCommand, ghBin, env, repository, facts, review, pull,
 }) {
   const viewed = await gh(runCommand, ghBin, env, [
     'pr', 'view', String(pull.number), '--repo', repository, '--json', 'comments',
@@ -412,13 +378,12 @@ async function ensureVerifierComments({
   const response = parseJsonResult(viewed, 'Pull-request comment lookup');
   const comments = Array.isArray(response?.comments) ? response.comments : [];
   const bodies = comments.map((comment) => comment?.body).filter((body) => typeof body === 'string');
-  for (const pass of passes) {
-    const marker = reviewMarker(facts.runId, pass.id);
-    if (bodies.some((body) => body.includes(marker))) continue;
+  const marker = reviewMarker(facts.runId, review.id);
+  if (!bodies.some((body) => body.includes(marker))) {
     await gh(runCommand, ghBin, env, [
       'pr', 'comment', String(pull.number), '--repo', repository,
       '--body-file', '-',
-    ], `${pass.label} verifier comment`, buildReviewBody({ facts, pass }));
+    ], `${review.label} review comment`, buildReviewBody({ facts, review }));
   }
 }
 
@@ -462,8 +427,8 @@ export async function publishRunToGitHub({
 
   const completed = readCompletedRun(runDirectory);
   const content = buildPullRequestContent({ facts: completed.facts, task: completed.task });
-  if (content.passes.some((pass) => pass.verdict === 'n/a' || pass.source === 'n/a')) {
-    throw new Error('completed run does not contain both verifier verdicts and sources');
+  if (content.review.reported !== true) {
+    throw new Error('completed run does not contain a review report to publish');
   }
   const guard = adapters.guardPublish ?? guardPublish;
   const guardResult = await guard({
@@ -519,7 +484,7 @@ export async function publishRunToGitHub({
     env,
     repository: remote.repository,
     facts: completed.facts,
-    passes: content.passes,
+    review: content.review,
     pull,
   });
   const notePath = writeGitHubNote(completed.directory, {

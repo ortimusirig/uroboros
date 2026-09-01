@@ -150,7 +150,7 @@ test('gate is one full-width band containing every command and exit code', () =>
     assert.equal((html.match(/<section class="transcript-gate/g) ?? []).length, 1);
     const gate = html.slice(html.indexOf('<section class="transcript-gate'),
       html.indexOf('</section>', html.indexOf('<section class="transcript-gate')));
-    assert.match(gate, /Gate proof/);
+    assert.match(gate, /Evidence/);
     assert.match(gate, /node --test test\/a[.]test[.]js[\s\S]*exit 0/);
     assert.match(gate, /npm run lint[\s\S]*exit 2/);
     assert.doesNotMatch(gate, /class="transcript-row/,
@@ -160,29 +160,18 @@ test('gate is one full-width band containing every command and exit code', () =>
   }
 });
 
-test('verifier seats are separate and visibly mark disagreement', () => {
+test('the review seat renders once from the live event stream', () => {
   const root = mkdtempSync(join(tmpdir(), 'uro-dashboard-transcript-verifiers-'));
   const runId = '2026-08-28T12-00-00-000Z-verifiers';
   makeRun(root, runId, [
-    event(runId, 'verify', 'finish', {
-      pass: 'correctness', verdict: 'NO_BLOCKERS', source: 'assistant',
-    }),
-    event(runId, 'verify', 'finish', {
-      pass: 'intent', verdict: 'ISSUES', source: 'assistant',
-    }, 1),
+    event(runId, 'verify', 'finish', { pass: 'review', code: 0 }),
   ]);
   try {
     const html = renderDashboardContent(buildDashboardSnapshot({ scratchRoot: root }));
-    assert.equal((html.match(/class="transcript-verifier-seat/g) ?? []).length, 2);
-    assert.match(html, /data-verifier-seat="correctness"[\s\S]*NO_BLOCKERS/);
-    assert.match(html, /data-verifier-seat="intent"[\s\S]*ISSUES/);
-    assert.match(html, /data-verifier-consensus="disagreement"[\s\S]*Seats disagree/);
-
-    const snapshot = buildDashboardSnapshot({ scratchRoot: root });
-    snapshot.runs[0].verifiers.intent.verdict = 'NO_BLOCKERS';
-    const agreement = renderDashboardContent(snapshot);
-    assert.match(agreement, /data-verifier-consensus="agreement"[\s\S]*Seats agree/);
-    assert.doesNotMatch(agreement, /Seats disagree/);
+    assert.equal((html.match(/class="transcript-verifier-seat/g) ?? []).length, 1);
+    assert.match(html, /data-verifier-seat="review"/);
+    assert.doesNotMatch(html, /Seats disagree|Seats agree/,
+      'single-seat review has no consensus chip');
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -411,7 +400,7 @@ test('transcript rendering matches the checked-in golden file byte for byte', ()
         textTruncated: false, file: null, questions: [], answers: [], author: null,
         askedBy: null, answeredBy: null,
       }],
-      verifiers: { correctness: null, intent: null },
+      review: null,
       gateCommands: [],
       gateResult: 'pending',
       diff: {

@@ -703,9 +703,13 @@ test('an opted-in passing run records mutation survivors without changing its ou
           return { passed: true, results: [] };
         },
         diffText: async () => 'diff --git a/src/change.js b/src/change.js\n+changed();\n',
-        runVerifier: async () => {
-          order.push('verifier');
-          return { verdict: 'NO_BLOCKERS', launchFailed: false };
+        captureWorktreeSnapshot: async ({ cwd }) => ({ cwd }),
+        restoreWorktreeSnapshot: async () => ({ restoredPaths: [] }),
+        runReview: async ({ cwd }) => {
+          order.push('reviewer');
+          mkdirSync(join(cwd, '__uro_review'), { recursive: true });
+          writeFileSync(join(cwd, '__uro_review', 'REVIEW.md'), 'Reviewed. No findings.\n');
+          return { launchFailed: false, timedOut: false };
         },
         runMutation: async () => {
           order.push('mutation');
@@ -713,7 +717,7 @@ test('an opted-in passing run records mutation survivors without changing its ou
         },
       },
     });
-    assert.deepEqual(order, ['executor', 'gate', 'verifier', 'verifier', 'mutation']);
+    assert.deepEqual(order, ['executor', 'gate', 'reviewer', 'mutation']);
     assert.equal(facts.outcome, 'review-ready');
     assert.equal(facts.mutation, mutation);
     assert.match(readFileSync(join(isolated, 'uro-report.md'), 'utf8'), /Mutation survivors:\*\* 1/);
@@ -902,7 +906,8 @@ test('all mutate event pairs round-trip through createEvent', () => {
   assert.ok(EVENT_TYPES.includes('unit'));
   assert.ok(EVENT_TYPES.includes('survivor'));
   const pairs = EVENT_PAIRS.filter((pair) => pair.startsWith('mutate/')).sort();
-  assert.deepEqual(pairs, ['mutate/finish', 'mutate/start', 'mutate/survivor', 'mutate/unit']);
+  assert.deepEqual(pairs,
+    ['mutate/finish', 'mutate/stalled', 'mutate/start', 'mutate/survivor', 'mutate/unit']);
   for (const pair of pairs) {
     const [, type] = pair.split('/');
     assert.doesNotThrow(() => createEvent({ runId: `mutate-${type}`, stage: 'mutate', type }));

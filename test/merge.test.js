@@ -78,7 +78,7 @@ function fanInTasks(prefix = 'fanin') {
   ];
 }
 
-test('a clean fan-in merge contains both distinctive parent changes and runs both verifiers', async () => {
+test('a clean fan-in merge contains both distinctive parent changes and is reviewed', async () => {
   const dirs = makeDirectories('clean-fanin');
   writeFileSync(join(dirs.target, 'tests-baseline.test.js'), 'test("baseline", () => {});\n');
   const countTests = {
@@ -136,9 +136,11 @@ test('a clean fan-in merge contains both distinctive parent changes and runs bot
             return { changedFiles: [], lastMessage: `completed ${runId}`, usage: {}, exitCode: 0 };
           },
           runGate,
-          runVerifier: async ({ pass }) => {
+          runReview: async ({ cwd, pass }) => {
             verifierPasses.push(pass);
-            return cleanVerifier();
+            mkdirSync(join(cwd, '__uro_review'), { recursive: true });
+            writeFileSync(join(cwd, '__uro_review', 'REVIEW.md'), 'Reviewed. No findings.\n');
+            return { launchFailed: false, timedOut: false };
           },
         },
       },
@@ -161,7 +163,8 @@ test('a clean fan-in merge contains both distinctive parent changes and runs bot
       'the target folder must remain untouched');
     assert.equal(existsSync(join(dirs.target, 'right-only.txt')), false,
       'the target folder must remain untouched');
-    assert.deepEqual(verifierPasses.slice(-2), ['correctness', 'intent']);
+    assert.deepEqual(verifierPasses.slice(-1), ['review'],
+      'the merged worktree gets one holistic review');
     assert.deepEqual(merge.facts.merge.parentOrder, ['clean-left', 'clean-right'],
       'graph declaration order, not dependsOn array order, selects the merge parent order');
     assert.equal(merge.facts.merge.testCounts.source, 'gate-output');

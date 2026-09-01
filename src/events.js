@@ -28,7 +28,6 @@ export const EVENT_TYPES = Object.freeze([
   'item_completed',
   'gate_command',
   'retry',
-  'verdict',
   'stalled',
   'extended',
   'not_dispatched',
@@ -70,7 +69,7 @@ export const UNIT_KINDS = Object.freeze(['candidate', 'node', 'merge']);
 // This is the declared (stage, type) vocabulary. Keeping pairs explicit prevents the
 // stage and type allowlists from accidentally implying nonsensical combinations such as
 // campaign/file_change. The conformance ratchet compares exercised emissions to this list.
-export const EVENT_PAIRS = Object.freeze([
+const LISTED_EVENT_PAIRS = [
   'campaign/start',
   'campaign/finish',
   'round/start',
@@ -113,7 +112,6 @@ export const EVENT_PAIRS = Object.freeze([
   'liveness/stuck',
   'verify/start',
   'verify/finish',
-  'verify/verdict',
   'verify/stalled',
   'verify/scope_violation',
   'debate/round',
@@ -147,6 +145,18 @@ export const EVENT_PAIRS = Object.freeze([
   'pivot/candidate',
   'pivot/selected',
   'pivot/exhausted',
+];
+
+// The stall watchdog arms for whatever stage last emitted an event, so a
+// silence report must be constructible for EVERY stage. A missing pair here
+// turned the report itself into a throw inside a timer and killed a live run
+// (the debate/stalled crash) — the completion below makes that structurally
+// impossible for any stage added later.
+export const EVENT_PAIRS = Object.freeze([
+  ...LISTED_EVENT_PAIRS,
+  ...EVENT_STAGES
+    .map((stage) => `${stage}/stalled`)
+    .filter((pair) => !LISTED_EVENT_PAIRS.includes(pair)),
 ]);
 
 // The aggregate stream is intentionally smaller than a unit stream: the orchestrator is
@@ -442,8 +452,7 @@ export function detailFor(event) {
       return `restored out-of-scope writes paths=${oneLine(event.paths?.join(','))}`;
     }
     const pass = event.pass ? ` pass=${oneLine(event.pass)}` : '';
-    const verdict = event.verdict ? ` verdict=${oneLine(event.verdict)}` : '';
-    return `${event.type === 'start' ? 'started' : 'finished'}${pass}${verdict}`;
+    return `${event.type === 'start' ? 'started' : 'finished'}${pass}`;
   }
   if (event.stage === 'executor' && event.type === 'scope_violation') {
     return `restored protected review files paths=${oneLine(event.paths?.join(','))}`;
@@ -484,8 +493,8 @@ export function detailFor(event) {
     if (event.type === 'review_received') {
       return `reviews unit=${oneLine(event.unitId)} complete=${oneLine(event.complete)}`
         + (event.perspective ? ` perspective=${oneLine(event.perspective)}` : '')
-        + ` correctness=${oneLine(event.correctness?.verdict)}`
-        + ` intent=${oneLine(event.intent?.verdict)}`;
+        + ` findings=${oneLine(event.review?.findings)}`
+        + ` blocking=${oneLine(event.review?.blocking)}`;
     }
     return `synthesis=${oneLine(event.decision)} reasoning=${oneLine(event.reasoning)}`;
   }

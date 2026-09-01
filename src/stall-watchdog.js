@@ -99,18 +99,25 @@ export function createGapWatchdog({
         return;
       }
       state.timer = null;
-      const stalled = createEvent({
-        runId,
-        stage,
-        type: 'stalled',
-        fields: {
-          gapMs,
-          thresholdMs,
-          lastEvent: state.lastEvent,
-          setting: 'URO_STALL_THRESHOLD_MS',
-        },
-        now: () => new Date(clockValue(now)),
-      });
+      let stalled;
+      try {
+        stalled = createEvent({
+          runId,
+          stage,
+          type: 'stalled',
+          fields: {
+            gapMs,
+            thresholdMs,
+            lastEvent: state.lastEvent,
+            setting: 'URO_STALL_THRESHOLD_MS',
+          },
+          now: () => new Date(clockValue(now)),
+        });
+      } catch {
+        // A silence report that cannot be constructed must never escape a
+        // timer and kill the run it was meant to observe.
+        return;
+      }
       stalls.push(stalled);
       deliver(stalled);
       try {
@@ -212,20 +219,25 @@ export function createProgressWatchdog({
         return;
       }
       current.timer = null;
-      deliver(createEvent({
-        runId,
-        stage,
-        type: 'stalled',
-        fields: {
-          tier: 'progress',
-          gapMs,
-          thresholdMs,
-          lastEvent: current.lastEvent,
-          setting: 'URO_PROGRESS_THRESHOLD_MS',
-          ...(pass === undefined ? {} : { pass }),
-        },
-        now: () => new Date(clockValue(now)),
-      }));
+      try {
+        deliver(createEvent({
+          runId,
+          stage,
+          type: 'stalled',
+          fields: {
+            tier: 'progress',
+            gapMs,
+            thresholdMs,
+            lastEvent: current.lastEvent,
+            setting: 'URO_PROGRESS_THRESHOLD_MS',
+            ...(pass === undefined ? {} : { pass }),
+          },
+          now: () => new Date(clockValue(now)),
+        }));
+      } catch {
+        // Same containment as the event watchdog: reporting a stall must
+        // never be the thing that ends the run.
+      }
     }, delayMs);
   };
 

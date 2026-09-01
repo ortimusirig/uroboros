@@ -153,9 +153,7 @@ function frontmatterFor(facts, touchedFiles) {
     `date: ${dateFor(facts)}`,
     `outcome: ${yamlScalar(facts.outcome)}`,
     `evidenceNonZero: ${yamlScalar((facts.evidence ?? []).filter((entry) => entry.code !== 0).length)}`,
-    `verdict: ${yamlScalar(facts.verdict)}`,
-    `intentVerdict: ${yamlScalar(facts.intentVerdict)}`,
-    `verdictSource: ${yamlScalar(facts.verdictSource)}`,
+    `findingsLastRound: ${yamlScalar((facts.debate?.roundHistory?.at(-1)?.findings ?? []).length)}`,
     `tokensTotal: ${totalTokens(facts)}`,
     `branch: ${yamlScalar(facts.branch)}`,
   ];

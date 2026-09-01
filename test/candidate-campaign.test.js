@@ -130,14 +130,14 @@ test('Mode A candidates overlap from one repository and base while retaining dis
               ? 10
               : candidateCount.get(runId),
           }),
-          runVerifier: async ({ pass }) => ({
-            verdict: 'NO_BLOCKERS',
-            verdictSource: pass === 'correctness' ? 'result' : 'assistant',
-            verdictConsistency: { status: 'consistent' },
-            findings: `${pass} review`,
-            launchFailed: false,
-            usage: usage(2, 1),
-          }),
+          captureWorktreeSnapshot: async ({ cwd }) => ({ cwd }),
+          restoreWorktreeSnapshot: async () => ({ restoredPaths: [] }),
+          runReview: async ({ cwd }) => {
+            mkdirSync(join(cwd, '__uro_review'), { recursive: true });
+            writeFileSync(join(cwd, '__uro_review', 'REVIEW.md'),
+              'Reviewed. No findings.\n');
+            return { launchFailed: false, timedOut: false, usage: usage(2, 1) };
+          },
         },
       },
     });
@@ -183,28 +183,18 @@ test('Mode A candidates overlap from one repository and base while retaining dis
     const reviews = events.filter((event) => event.type === 'review_received');
     assert.equal(reviews.length, 3);
     assert.ok(reviews.every((event) => event.alternative === true && event.perspective));
-    assert.ok(reviews.every((event) => event.correctness.verdict === 'NO_BLOCKERS'));
-    assert.ok(reviews.every((event) => event.intent.verdict === 'NO_BLOCKERS'));
+    assert.ok(reviews.every((event) => event.review.reported === true));
+    assert.ok(reviews.every((event) => event.review.blocking === 0));
 
     assert.deepEqual(result.alternatives.candidates.map((candidate) => ({
       perspective: candidate.perspective,
-      correctness: candidate.verdicts.correctness.source,
-      intent: candidate.verdicts.intent.source,
-      consistent: candidate.evidenceSelfConsistent,
+      reported: candidate.review.reported,
+      blocking: candidate.review.blocking,
       delta: candidate.testCountDelta,
     })), [
-      {
-        perspective: 'minimal-change', correctness: 'result', intent: 'assistant',
-        consistent: true, delta: 1,
-      },
-      {
-        perspective: 'refactor-first', correctness: 'result', intent: 'assistant',
-        consistent: true, delta: 2,
-      },
-      {
-        perspective: 'test-first', correctness: 'result', intent: 'assistant',
-        consistent: true, delta: 3,
-      },
+      { perspective: 'minimal-change', reported: true, blocking: 0, delta: 1 },
+      { perspective: 'refactor-first', reported: true, blocking: 0, delta: 2 },
+      { perspective: 'test-first', reported: true, blocking: 0, delta: 3 },
     ]);
     assert.ok(result.alternatives.candidates.every((candidate) => candidate.diffPath));
     assert.ok(result.alternatives.candidates.every((candidate) => candidate.branch));
@@ -332,7 +322,8 @@ test('a failed alternative remains useful evidence while successful candidates c
   assert.equal(failed.outcome, 'executor-failed');
   assert.equal(failed.successful, false);
   assert.match(failed.reason, /node --test exited with code 1/i);
-  assert.equal(failed.verdicts.correctness.verdict, null);
+  assert.equal(failed.review.reported, false,
+    'a run that never converged has no review report to weigh');
   assert.equal(result.alternatives.candidates[0].status, 'succeeded');
   assert.ok(events.some((event) => (
     event.type === 'review_received'

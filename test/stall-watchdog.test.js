@@ -158,3 +158,39 @@ test('progress silence reports the last action while raw bytes keep liveness fro
     liveness.dispose();
   }
 });
+
+test('a debate-stage silence is reported, not fatal — the R5 crash regression', () => {
+  // Observed in production: the watchdog armed for stage "debate", the pair
+  // was undeclared, and createEvent threw inside a timer — killing the run it
+  // was supervising. Silence in ANY stage must now be reportable.
+  const clock = fakeClock();
+  const events = [];
+  const watchdog = createGapWatchdog({
+    reporter: (item) => events.push(item), runId: 'gap-run', thresholdMs: 100,
+    now: clock.now, setTimer: clock.setTimer, clearTimer: clock.clearTimer,
+  });
+  watchdog.reporter(createEvent({
+    runId: 'gap-run', stage: 'debate', type: 'round',
+    fields: { debateRound: 2 }, now: () => new Date(clock.now()),
+  }));
+  assert.doesNotThrow(() => clock.advance(150));
+  const stalled = events.find((item) => item.type === 'stalled');
+  assert.equal(stalled.stage, 'debate');
+  assert.equal(stalled.gapMs >= 100, true);
+});
+
+test('an unconstructible silence report is contained instead of escaping the timer', () => {
+  // Raw reporter payloads are not guaranteed to have vocabulary stages. If the
+  // report cannot be constructed, the watchdog swallows it — a stall report
+  // must never be the thing that ends the run.
+  const clock = fakeClock();
+  const events = [];
+  const watchdog = createGapWatchdog({
+    reporter: (item) => events.push(item), runId: 'gap-run', thresholdMs: 100,
+    now: clock.now, setTimer: clock.setTimer, clearTimer: clock.clearTimer,
+  });
+  watchdog.reporter({ runId: 'gap-run', stage: 'not-a-vocabulary-stage', type: 'start' });
+  assert.doesNotThrow(() => clock.advance(150));
+  assert.equal(events.some((item) => item.type === 'stalled'), false,
+    'the unreportable stall is dropped, never thrown');
+});

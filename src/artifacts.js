@@ -107,8 +107,7 @@ function indexEntry(facts, dir, startedAt, endedAt) {
     durationMs: Math.max(0, end.getTime() - start.getTime()),
     outcome: facts.outcome ?? null,
     evidenceNonZero: (facts.evidence ?? []).filter((entry) => entry.code !== 0).length,
-    correctnessVerdict: facts.correctnessVerdict ?? null,
-    intentVerdict: facts.intentVerdict ?? null,
+    findingsLastRound: (facts.debate?.roundHistory?.at(-1)?.findings ?? []).length,
     inputTokens: tokenCount(facts.tokens?.total?.inputTokens),
     outputTokens: tokenCount(facts.tokens?.total?.outputTokens),
   };

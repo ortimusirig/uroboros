@@ -15,20 +15,9 @@ const HUMAN_STOP_OUTCOMES = new Set([
   'conflicting-intent',
 ]);
 
-export function verifierSeatsDisagree(verifiers = {}) {
-  const correctness = verifiers.correctness;
-  const intent = verifiers.intent;
-  if (correctness?.verdict == null || intent?.verdict == null) return false;
-  const correctnessUnavailable = correctness.verdictSource === 'none';
-  const intentUnavailable = intent.verdictSource === 'none';
-  if (correctnessUnavailable && intentUnavailable) return false;
-  return correctnessUnavailable !== intentUnavailable || correctness.verdict !== intent.verdict;
-}
-
 export function runNeedsAttention(run) {
   return runIsActive(run)
-    || HUMAN_STOP_OUTCOMES.has(run?.outcome)
-    || (run?.state === 'finished' && verifierSeatsDisagree(run.verifiers));
+    || HUMAN_STOP_OUTCOMES.has(run?.outcome);
 }
 
 export function runIsActive(run) {

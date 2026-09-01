@@ -13,7 +13,7 @@ const facts = buildRunFacts({
   runId: 'r1', target: 'C:/proj', dir: 'C:/ccc/w', isRepo: false, branch: 'ccc/r1',
   iterations: [{ n: 1, changedFiles: ['a.py'], lastMessage: 'did it',
     gate: { passed: true, results: [] }, verifier: { verdict: 'NO_BLOCKERS' } }],
-  gateStatus: 'passed', verdict: 'NO_BLOCKERS', outcome: 'review-ready',
+  outcome: 'review-ready',
   gateRetries: 2,
 });
 
@@ -195,45 +195,50 @@ test('run facts and markdown explain the debate history and stop reason', () => 
   assert.match(md, /Debate stopped:\*\* rounds-exhausted/);
 });
 
-test('verifier findings reach both the facts and the markdown report', () => {
+test('review findings reach both the facts and the markdown report', () => {
   const withFindings = buildRunFacts({
     runId: 'r2', target: 'C:/proj', dir: 'C:/ccc/w', isRepo: false, branch: 'ccc/r2',
     iterations: [{ n: 1, changedFiles: ['a.py'], lastMessage: 'did it',
-      gate: { passed: true, results: [] },
-      verifier: { verdict: 'ISSUES', findings: 'Line 4 drops the error.' } }],
-    gateStatus: 'passed', verdict: 'ISSUES',
-    verifierFindings: 'Line 4 drops the error.',
-    intentVerifierFindings: 'The task required shared scope.',
-    intentVerdict: 'ISSUES', intentVerdictSource: 'assistant',
-    intentVerifierPlan: '# Intent audit\n\nISSUES',
+      gate: { passed: true, results: [] } }],
+    debate: {
+      roundsRun: 1,
+      stopReason: 'converged',
+      roundHistory: [{
+        round: 1,
+        findingIds: ['F1', 'F2'],
+        blockingFindingIds: ['F1'],
+        suggestionFindingIds: ['F2'],
+        findings: [
+          { id: 'F1', severity: 'blocking', category: 'correctness',
+            description: 'Line 4 drops the error.' },
+          { id: 'F2', severity: 'suggestion', category: 'intent',
+            description: 'The task required shared scope.' },
+        ],
+      }],
+    },
     outcome: 'review-ready', gateRetries: 2,
   });
-  assert.equal(withFindings.verifierFindings, 'Line 4 drops the error.');
-  assert.equal(withFindings.intentVerifierFindings, 'The task required shared scope.');
-  assert.equal(withFindings.intentVerdict, 'ISSUES');
-  assert.equal(withFindings.intentVerdictSource, 'assistant');
-  assert.equal(withFindings.intentVerifierPlan, '# Intent audit\n\nISSUES');
+  assert.equal(withFindings.debate.roundHistory[0].findings.length, 2);
+  // The verdict-era fields never come back, even when a caller passes them.
+  assert.equal(Object.hasOwn(withFindings, 'verifierFindings'), false);
+  assert.equal(Object.hasOwn(withFindings, 'intentVerdict'), false);
 
   const d = mkdtempSync(join(tmpdir(), 'rep2-'));
   const { mdPath } = writeReport({ dir: d, facts: withFindings });
   const md = readFileSync(mdPath, 'utf8');
-  assert.match(md, /## Verifier findings/);
-  assert.match(md, /Line 4 drops the error/);
-  assert.match(md, /## Intent verifier findings/);
-  assert.match(md, /The task required shared scope/);
-  assert.match(md, /## Intent verifier plan artifact/);
+  assert.match(md, /## Review findings \(last round\)/);
+  assert.match(md, /F1 \[blocking\] Line 4 drops the error/);
+  assert.match(md, /F2 \[suggestion\] The task required shared scope/);
 });
 
-test('facts carry an explicit null when no findings were recorded', () => {
-  assert.equal(facts.verifierFindings, null);
-  assert.equal(facts.verdictSource, null);
-  assert.equal(facts.correctnessVerdict, null);
-  assert.equal(facts.correctnessVerdictSource, null);
-  assert.equal(facts.verifierPlan, null);
-  assert.equal(facts.intentVerifierFindings, null);
-  assert.equal(facts.intentVerdict, null);
-  assert.equal(facts.intentVerdictSource, null);
-  assert.equal(facts.intentVerifierPlan, null);
+test('facts carry no verdict-era fields at all', () => {
+  for (const gone of ['verdict', 'verdictSource', 'correctnessVerdict',
+    'correctnessVerdictSource', 'verifierFindings', 'verifierPlan',
+    'verifierEvidence', 'verifierConsistency', 'intentVerifierFindings',
+    'intentVerdict', 'intentVerdictSource', 'intentVerifierPlan',
+    'intentVerifierEvidence', 'intentVerifierConsistency', 'gateStatus']) {
+    assert.equal(Object.hasOwn(facts, gone), false, `${gone} must not exist`);
+  }
   assert.deepEqual(facts.evidence, []);
   assert.deepEqual(facts.tokens, {
     executor: EMPTY_USAGE,
@@ -243,17 +248,11 @@ test('facts carry an explicit null when no findings were recorded', () => {
   });
 });
 
-test('writeReport emits retained diagnostics, verdict provenance, fail-safe wording, and tokens', () => {
+test('writeReport emits retained evidence diagnostics and tokens', () => {
   const diagnosticFacts = buildRunFacts({
     runId: 'diag', target: 'C:/proj', dir: 'C:/ccc/w', isRepo: false, branch: 'ccc/diag',
     iterations: [{ n: 1, changedFiles: ['broken.js'], lastMessage: 'attempted fix',
       gate: { passed: false, results: [] }, verifier: null }],
-    gateStatus: 'failed', verdict: 'ISSUES', verdictSource: 'none',
-    verifierFindings: 'Verifier preamble only.',
-    verifierPlan: '# Diff review\n\nThe assertion misses the defect.\n\nISSUES',
-    intentVerifierFindings: 'Intent verifier preamble only.',
-    intentVerdict: 'ISSUES', intentVerdictSource: 'none',
-    intentVerifierPlan: '# Intent review\n\nShared scope was omitted.\n\nISSUES',
     evidence: [{
       source: 'command', bin: 'node', args: ['--test'], code: 1, timedOut: false,
       round: 1, excerpt: '[stdout]\nFAIL specific assertion\n[stderr]\nstack detail',
@@ -273,22 +272,8 @@ test('writeReport emits retained diagnostics, verdict provenance, fail-safe word
   const d = mkdtempSync(join(tmpdir(), 'rep-diag-'));
   const { mdPath } = writeReport({ dir: d, facts: diagnosticFacts });
   const md = readFileSync(mdPath, 'utf8');
-  assert.match(md, /\*\*Verdict:\*\* ISSUES \(source: none\)/);
-  assert.match(md, /no verdict marker was found/i);
-  assert.match(md, /ISSUES is the fail-safe default/i);
-  assert.match(md, /Correctness verifier: no verdict marker was found/i);
-  assert.match(md, /Intent verifier: no verdict marker was found/i);
-  assert.match(md, /## Verifier plan artifact/);
-  assert.match(md, /The assertion misses the defect/);
-  assert.ok(md.indexOf('## Verifier plan artifact') < md.indexOf('## Verifier findings'),
-    'the correctness verdict artifact must lead its reasoning stream');
-  assert.match(md, /## Intent verifier findings/);
-  assert.match(md, /Intent verifier preamble only/);
-  assert.match(md, /## Intent verifier plan artifact/);
-  assert.match(md, /Shared scope was omitted/);
-  assert.ok(md.indexOf('## Intent verifier plan artifact')
-    < md.indexOf('## Intent verifier findings'),
-  'the intent verdict artifact must lead its reasoning stream');
+  // No verdict lines of any kind — the evidence section carries the record.
+  assert.doesNotMatch(md, /Verdict/i);
   assert.match(md, /## Evidence — commands that exited non-zero/);
   assert.match(md, /node --test/);
   assert.match(md, /Exit code:\*\* 1/);
@@ -311,25 +296,23 @@ test('writeReport omits optional plan and gate sections when facts contain null'
   assert.match(md, /## Tokens/);
 });
 
-test('writeReport names every seat that produced no readable verdict', () => {
-  const unverifiedFacts = buildRunFacts({
-    runId: 'unverified', target: 'C:/proj', dir: 'C:/ccc/w', isRepo: false,
-    branch: 'ccc/unverified', iterations: [], gateStatus: 'passed',
-    verdict: 'UNVERIFIED', verdictSource: 'none',
-    correctnessVerdict: 'UNVERIFIED', correctnessVerdictSource: 'none',
-    intentVerdict: 'UNVERIFIED', intentVerdictSource: 'none',
+test('a run whose reviewer never reported still writes an honest report', () => {
+  const unreviewedFacts = buildRunFacts({
+    runId: 'unreviewed', target: 'C:/proj', dir: 'C:/ccc/w', isRepo: false,
+    branch: 'ccc/unreviewed', iterations: [],
+    debate: { roundsRun: 1, stopReason: 'unreviewed', roundHistory: [] },
     outcome: 'verifier-failed', gateRetries: 0,
   });
-  const d = mkdtempSync(join(tmpdir(), 'rep-unverified-'));
-  const { jsonPath, mdPath } = writeReport({ dir: d, facts: unverifiedFacts });
+  const d = mkdtempSync(join(tmpdir(), 'rep-unreviewed-'));
+  const { jsonPath, mdPath } = writeReport({ dir: d, facts: unreviewedFacts });
   const persisted = JSON.parse(readFileSync(jsonPath, 'utf8'));
   const md = readFileSync(mdPath, 'utf8');
 
   assert.equal(persisted.outcome, 'verifier-failed');
-  assert.equal(persisted.verdict, 'UNVERIFIED');
-  assert.match(md, /Correctness verifier produced no readable verdict; the review did not run/i);
-  assert.match(md, /Intent verifier produced no readable verdict; the review did not run/i);
-  assert.doesNotMatch(md, /UNVERIFIED is .*finding/i);
+  assert.equal(persisted.debate.stopReason, 'unreviewed');
+  assert.match(md, /Debate stopped:\*\* unreviewed/);
+  assert.match(md, /## Review findings \(last round\)/);
+  assert.match(md, /\(none recorded\)/);
 });
 
 test('configured timeouts and timeout events reach facts and markdown', () => {

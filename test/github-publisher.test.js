@@ -43,30 +43,19 @@ function factsFixture(baseCommit) {
       n: 1,
       changedFiles: ['change.txt'],
       lastMessage: 'Added the guarded widget path because the old path dropped failures.',
-      verifier: {
-        verdict: 'ISSUES',
-        verdictSource: 'none',
-        findings: 'Correctness preamble without a terminal marker.',
-        verdictConsistency: { status: 'consistent' },
-      },
-      intentVerifier: {
-        verdict: 'NO_BLOCKERS',
-        verdictSource: 'result',
-        findings: 'The task is covered.',
-        verdictConsistency: { status: 'consistent' },
-      },
     }],
-    gateStatus: 'passed',
-    verdict: 'ISSUES',
-    verdictSource: 'none',
-    verifierFindings: 'Correctness preamble without a terminal marker.',
-    verifierConsistency: { status: 'consistent' },
-    verifierPlan: '# Correctness audit\n\nNo terminal marker was emitted.',
-    intentVerifierFindings: 'The task is covered.',
-    intentVerdict: 'NO_BLOCKERS',
-    intentVerdictSource: 'result',
-    intentVerifierConsistency: { status: 'consistent' },
-    intentVerifierPlan: '# Intent audit\n\nNO_BLOCKERS',
+    debate: {
+      roundsRun: 1,
+      stopReason: 'converged',
+      roundHistory: [{
+        round: 1,
+        findingIds: ['F1'],
+        blockingFindingIds: [],
+        suggestionFindingIds: ['F1'],
+        findings: [{ id: 'F1', severity: 'suggestion', category: 'intent',
+          description: 'The task is covered; consider one more assertion.' }],
+      }],
+    },
     tokens: {
       executor: {
         inputTokens: 11, cachedInputTokens: 2, outputTokens: 3,
@@ -324,7 +313,7 @@ test('GitHub publish preconditions have distinct actionable failures', async (t)
   );
 });
 
-test('publishing creates one PR, posts two distinguishable pass comments, and reuses it', async (t) => {
+test('publishing creates one PR, posts one review comment, and reuses it', async (t) => {
   const fixture = await createRunFixture();
   const fake = fakeGhEnvironment(fixture.root);
   t.after(() => rmSync(fixture.root, { recursive: true, force: true }));
@@ -339,23 +328,18 @@ test('publishing creates one PR, posts two distinguishable pass comments, and re
   assert.equal(first.existing, false);
   const firstState = JSON.parse(readFileSync(fake.statePath, 'utf8'));
   assert.equal(firstState.createCount, 1);
-  assert.equal(firstState.comments.length, 2);
+  assert.equal(firstState.comments.length, 1, 'one holistic review, one comment');
   assert.match(firstState.pull.title, /guarded widget publishing/i);
   assert.match(firstState.pull.body, /Executor rationale[\s\S]*old path dropped failures/);
   assert.match(firstState.pull.body, /Outcome: review-ready/);
   assert.match(firstState.pull.body, /Evidence: 0 command run[(]s[)], 0 non-zero/);
-  assert.match(firstState.pull.body, /Correctness verdict: ISSUES \(source: none\)/);
-  assert.match(firstState.pull.body, /fail-safe because no verdict marker.*not a reviewer finding/i);
-  assert.match(firstState.pull.body, /Intent verdict: NO_BLOCKERS \(source: result\)/);
+  assert.match(firstState.pull.body, /Review findings \(last round\): 1 \(0 blocking\)/);
+  assert.doesNotMatch(firstState.pull.body, /verdict/i);
   assert.match(firstState.pull.body, /Total tokens: input 28/);
-  const correctness = firstState.comments.find((body) => /pass: Correctness/.test(body));
-  const intent = firstState.comments.find((body) => /pass: Intent/.test(body));
-  assert.ok(correctness, 'correctness must be its own attributable comment');
-  assert.ok(intent, 'intent must be its own attributable comment');
-  assert.match(correctness, /source: none[\s\S]*fail-safe default, not a reviewer finding/i);
-  assert.match(correctness, /not authoritative reviewer findings/);
-  assert.match(intent, /^### Reviewer findings$/m);
-  assert.match(intent, /The task is covered/);
+  const review = firstState.comments[0];
+  assert.match(review, /## CCC review report/);
+  assert.match(review, /^### Reviewer findings$/m);
+  assert.match(review, /F1 \[suggestion\] The task is covered/);
 
   const note = JSON.parse(readFileSync(join(fixture.runDirectory, 'uro-github.json'), 'utf8'));
   assert.equal(note.url, first.url);
@@ -372,7 +356,7 @@ test('publishing creates one PR, posts two distinguishable pass comments, and re
   const secondState = JSON.parse(readFileSync(fake.statePath, 'utf8'));
   assert.equal(secondState.createCount, 1, 'an open branch PR must never be duplicated');
   assert.equal(secondState.editCount, 1, 'the existing open PR should be updated');
-  assert.equal(secondState.comments.length, 2, 'each verifier pass should be commented once');
+  assert.equal(secondState.comments.length, 1, 'the review should be commented exactly once');
 });
 
 test('a failed publish command exits non-zero cleanly and preserves all run contents', async (t) => {
