@@ -14,33 +14,34 @@ import { randomUUID } from 'node:crypto';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import {
-  DebateLedger,
-  detectCircling,
-  PIVOT_AMEND,
-  PIVOT_CONCLUDE,
-  PIVOT_FRESH,
-  shouldPivot,
-} from './debate.js';
-
-import {
   ARBITER_UNVERIFIED,
   buildArbiterPrompt,
   DEFAULT_ARBITER_MODEL,
-  parseAgreementJudgement,
-  parseCapabilityJudgement,
-  parsePivotJudgement,
   runArbiter,
 } from './arbiter.js';
+import {
+  CONVERSATION_DNA,
+  parseSeatReview,
+  RepairableArtifactError,
+  runConversation,
+} from './conversation.js';
 import { reportEvent } from './events.js';
 import { runExecutor } from './executor.js';
 
 import { resolveStageTimeouts } from './timeouts.js';
 import { runVerifier } from './verifier.js';
-import { addUsage, EMPTY_USAGE } from './usage.js';
 import {
   applySuperpowersRequirement,
   verifySuperpowersSeats,
 } from './superpowers.js';
+
+// The seat-review format belongs to the conversation, not to the planner; it is
+// re-exported here so plan-tier callers keep a single import site.
+export { parseSeatReview };
+
+// Cursor takes its prompt on argv, where a newline is not a line break, so the
+// standing law travels flattened into those single-line prompts.
+const ONE_LINE_CONVERSATION_DNA = CONVERSATION_DNA.replace(/\n/g, ' ');
 
 export const DEFAULT_PLAN_CANDIDATES = 3;
 export const MAX_PLAN_CANDIDATES = 5;
@@ -170,6 +171,8 @@ function draftingPrompt({
   failedPlan,
 }) {
   return [
+    CONVERSATION_DNA,
+    '',
     '# Plan drafting seat',
     '',
     'Work only as a planner. Explore the target for real evidence, but do not modify any file.',
@@ -225,6 +228,8 @@ async function productionDraft(request) {
 
 function selectionPrompt({ candidates, ledger, failedPlan }) {
   return [
+    CONVERSATION_DNA,
+    '',
     '# STORM plan selection seat',
     '',
     'Select one viable plan using judgement. Do not score or rank the candidates.',
@@ -280,12 +285,13 @@ function oneLineArtifact(text) {
     .trim();
 }
 
-// Structured seat responses. The format is prompt discipline, not protocol: the
-// parser extracts what matches and carries severities VERBATIM. Nothing anywhere
-// validates a severity, filters by one, or branches on one — they are input to
-// the arbiter's judgement and nothing else.
+// The response format is prompt discipline, not protocol: the parser extracts
+// what matches and carries severities VERBATIM (see parseSeatReview in
+// conversation.js). Nothing anywhere validates a severity, filters by one, or
+// branches on one — they are input to the arbiter's judgement and nothing else.
 function reviewSeatPrompt({ seat, goal, plan, gate, round }) {
   return [
+    ONE_LINE_CONVERSATION_DNA,
     `# ${seat} plan review seat`,
     'You receive the raw goal and a proposed implementation plan. Judge independently whether the plan achieves the goal; explore the target repository for real evidence.',
     `GOAL ${oneLineArtifact(goal)}`,
@@ -299,25 +305,6 @@ function reviewSeatPrompt({ seat, goal, plan, gate, round }) {
     'Then zero or more question lines formatted: Q<id>: question.',
     'AGREE: yes means you are satisfied the plan achieves the goal and you could work from it as written.',
   ].join(' ');
-}
-
-function parseSeatReview(text) {
-  const source = String(text ?? '');
-  const agreeMatches = [...source.matchAll(/(?:^|\n|\s)AGREE:\s*(yes|no)\b/gi)];
-  const agree = agreeMatches.length > 0
-    ? agreeMatches.at(-1)[1].toLowerCase() === 'yes'
-    : null;
-  const suggestions = [...source.matchAll(/(?:^|\n)\s*(S[\w-]+)\s+([^\s:]{1,12}):\s*(.+?)(?=\n|$)/g)]
-    .map((match) => ({ id: match[1], severity: match[2], text: match[3].trim() }));
-  const questions = [...source.matchAll(/(?:^|\n)\s*(Q[\w-]+):\s*(.+?)(?=\n|$)/g)]
-    .map((match) => ({ id: match[1], text: match[2].trim() }));
-  return {
-    agree: agree === true,
-    readable: agree !== null,
-    suggestions,
-    questions,
-    content: source,
-  };
 }
 
 // Cursor's CLI takes its prompt on argv and cannot read stdin, so a prompt
@@ -348,6 +335,7 @@ async function productionCursorDraft({
     ...(failedPlan ? { 'FAILED_PLAN.md': `${failedPlan}\n` } : {}),
   }, async (workspace) => {
     const prompt = [
+      ONE_LINE_CONVERSATION_DNA,
       '# Cursor plan drafting seat',
       'You are one of three seats drafting independently from the same raw goal. Draft from your own reading of the repository.',
       `Read the goal from ${oneLineArtifact(join(workspace, 'GOAL.md'))} and draft an implementation plan and its evidence commands (gate.json) for it. The harness runs those commands once per round and records their output as evidence for the seats; no exit code passes or fails the change.`,
@@ -374,6 +362,7 @@ async function productionCursorReview({
     'PROPOSED_GATE.json': `${JSON.stringify(gate, null, 2)}\n`,
   }, async (workspace) => {
     const prompt = [
+      ONE_LINE_CONVERSATION_DNA,
       '# Cursor plan review seat',
       `Read the raw goal from ${oneLineArtifact(join(workspace, 'GOAL.md'))} and the proposed plan from ${oneLineArtifact(join(workspace, 'PROPOSAL.md'))} with its evidence commands ${oneLineArtifact(join(workspace, 'PROPOSED_GATE.json'))}.`,
       'Judge independently whether the plan achieves the goal; explore the target repository for real evidence.',
@@ -412,12 +401,6 @@ async function productionCodexReview({
     return { agree: false, readable: false, suggestions: [], questions: [], content: '', unavailable: true, usage: result.usage };
   }
   return { ...parseSeatReview(result.lastMessage), usage: result.usage };
-}
-
-function capabilityPrompt({ seat, plan, remedyOnly = false, previousAnswer }) {
-  return buildArbiterPrompt({
-    type: 'capability', seat, plan, remedyOnly, previousAnswer,
-  }).replace('# Claude arbiter seat', `# ${seat} capability seat`);
 }
 
 async function productionCapability({
@@ -477,85 +460,6 @@ async function productionCapability({
   });
 }
 
-async function capabilityVetoes({
-  plan,
-  checkCapability,
-  context,
-  reporter,
-  runId,
-  planRound,
-}) {
-  if (typeof checkCapability !== 'function') return [];
-  const vetoes = [];
-  for (const seat of ['executor', 'reviewer', 'arbiter']) {
-    const firstPrompt = capabilityPrompt({ seat, plan });
-    const first = await checkCapability({ ...context, seat, plan, prompt: firstPrompt });
-    let judgement = parseCapabilityJudgement(first);
-    if (judgement.verdict !== 'answered' || judgement.capable !== false) continue;
-    const answers = [first];
-    if (!judgement.complete) {
-      const prompt = capabilityPrompt({
-        seat, plan, remedyOnly: true, previousAnswer: first,
-      });
-      const second = await checkCapability({
-        ...context,
-        seat,
-        plan,
-        prompt,
-        remedyOnly: true,
-        previousAnswer: first,
-      });
-      answers.push(second);
-      const supplement = parseCapabilityJudgement(second);
-      if (supplement.verdict === 'answered' && supplement.capable === false) {
-        judgement = {
-          ...judgement,
-          what: supplement.what || judgement.what,
-          why: supplement.why || judgement.why,
-          alternative: supplement.alternative || judgement.alternative,
-        };
-        judgement.complete = Boolean(judgement.what && judgement.why && judgement.alternative);
-      } else {
-        const alternative = typeof second === 'string'
-          ? second.trim()
-          : typeof second?.alternative === 'string' ? second.alternative.trim()
-            : typeof second?.answer === 'string' ? second.answer.trim() : '';
-        if (alternative) {
-          judgement = { ...judgement, alternative, complete: Boolean(judgement.what && judgement.why) };
-        }
-      }
-    }
-    const veto = { seat, ...judgement, answers };
-    vetoes.push(veto);
-    reportEvent(reporter, runId, 'capability', 'vetoed', {
-      planRound,
-      seat,
-      what: veto.what,
-      why: veto.why,
-      alternative: veto.alternative,
-      complete: veto.complete,
-      answers,
-    });
-  }
-  return vetoes;
-}
-
-function vetoFeedback(vetoes) {
-  return [
-    '# Capability veto remedies',
-    '',
-    'The previous draft cannot proceed. Redraft it around each seat-authoritative remedy.',
-    '',
-    ...vetoes.flatMap((veto) => [
-      `## ${veto.seat}`,
-      `Cannot do: ${veto.what}`,
-      `Limitation: ${veto.why}`,
-      `Use instead: ${veto.alternative || 'No complete alternative was supplied; find a compatible mechanism.'}`,
-      '',
-    ]),
-  ].join('\n');
-}
-
 function normalizeDraft(value) {
   if (value && typeof value === 'object' && typeof value.plan === 'string') {
     let gate = value.gate;
@@ -563,6 +467,21 @@ function normalizeDraft(value) {
     return { ...value, plan: value.plan.endsWith('\n') ? value.plan : `${value.plan}\n`, gate };
   }
   return parseDraftArtifact(value);
+}
+
+// A proposal that ARRIVED but does not parse — missing tags, unreadable
+// gate.json — is a repairable artifact: the parse error goes back to the
+// proposing seat verbatim and it answers next round. An EMPTY answer is not a
+// malformed artifact but a seat that never spoke, and that stays terminal.
+function parsePlanProposal(value) {
+  const empty = value === null || value === undefined
+    || (typeof value === 'string' && value.trim() === '');
+  if (empty) throw new Error('the proposing seat returned no artifact');
+  try {
+    return normalizeDraft(value);
+  } catch (error) {
+    throw new RepairableArtifactError(error.message, { cause: error });
+  }
 }
 
 function candidateFailure(error) {
@@ -782,12 +701,15 @@ export async function runPlan({
     : null;
   const request = validatePlanRequest({ goal, target, out, baseDirectory });
   reportEvent(reporter, runId, 'plan', 'start', {
+    tier: 'plan',
     target: request.target, out: request.out, rounds, candidates, pivotCandidates,
     goalSource: request.goalSource,
   });
   if (dryRun) {
     const result = { runId, dryRun: true, converged: false, rounds: 0, target: request.target, out: request.out };
-    reportEvent(reporter, runId, 'plan', 'finish', { dryRun: true, converged: false, rounds: 0 });
+    reportEvent(reporter, runId, 'plan', 'finish', {
+      tier: 'plan', dryRun: true, converged: false, rounds: 0,
+    });
     return result;
   }
 
@@ -802,17 +724,10 @@ export async function runPlan({
   const checkCapability = adapters.checkCapability
     ?? adapters.capabilityCheck
     ?? (hermetic || adapters.review !== undefined ? null : productionCapability);
-  const ledger = new DebateLedger();
-  // Every seat call adds its usage here, so a plan that never converges still
-  // reports what it spent. The taxi meter runs whether or not you arrive.
-  let usageTotal = EMPTY_USAGE;
-  const tallyUsage = (value) => { if (value?.usage) usageTotal = addUsage(usageTotal, value.usage); return value; };
-  let pivotCount = 0;
-  const pivotHistory = [];
-  const capabilityHistory = [];
-  const stormHistory = [];
-  const roundHistory = [];
 
+  // Claude's seat. Every judgement type routes through here, so the standing law
+  // reaches the proposing and agreement prompts exactly as it reaches the
+  // drafting and review seats. Usage is tallied by the engine, once per call.
   const arbitrate = async (arbiterRequest) => {
     if (typeof runArbiterSeat !== 'function') {
       return { verdict: ARBITER_UNVERIFIED, unavailable: true };
@@ -826,7 +741,7 @@ export async function runPlan({
       result = await runArbiterSeat({
         cwd: request.target,
         request: arbiterRequest,
-        prompt: buildArbiterPrompt(arbiterRequest),
+        prompt: `${CONVERSATION_DNA}\n\n${buildArbiterPrompt(arbiterRequest)}`,
         model: arbiterModel,
         timeoutMs: arbiterTimeout,
         runId,
@@ -840,342 +755,117 @@ export async function runPlan({
       verdict: result?.verdict ?? (result ? 'ANSWERED' : ARBITER_UNVERIFIED),
       judgement: arbiterRequest.type,
     });
-    return tallyUsage(result);
-  };
-
-  const finish = (reason, round, extra = {}) => {
-    const converged = reason === 'converged';
-    const result = {
-      runId,
-      dryRun: false,
-      converged,
-      reason,
-      rounds: round,
-      target: request.target,
-      out: request.out,
-      storm: stormHistory,
-      roundHistory,
-      capabilityVetoes: capabilityHistory,
-      pivotHistory,
-      tokens: { total: { ...usageTotal } },
-      ...extra,
-    };
-    reportEvent(reporter, runId, 'plan', 'finish', {
-      converged, reason, rounds: round,
-      ...(extra.pivot === undefined ? {} : { pivot: extra.pivot }),
-    });
     return result;
   };
 
-  const failureMessage = (error) => (error instanceof Error ? error.message : String(error));
+  // The capability seats are launched by this tier, so the tier — not the
+  // engine — carries their models, timeouts and directories.
+  const capabilityContext = {
+    target: request.target,
+    plannerModel,
+    verifierModel,
+    arbiterModel,
+    executorTimeout,
+    verifierTimeout,
+    arbiterTimeout,
+    runId,
+    env,
+    home,
+    superpowersDir: cursorSuperpowersDir,
+  };
 
-  // All three seats draft independently from the SAME raw goal - never from a
-  // paraphrase, so their takes stay uncorrelated.
-  const stormOnce = async ({ round, feedback, failedPlan }) => {
-    const attempts = await Promise.all([
-      (async () => {
-        try {
-          const input = draftingPrompt({
+  const result = await runConversation({
+    runId,
+    reporter,
+    rounds,
+    tier: 'plan',
+    seats: {
+      draftCodex,
+      draftCursor,
+      reviewCodex,
+      reviewCursor,
+      arbitrate,
+      checkCapability: typeof checkCapability === 'function'
+        ? (seatRequest) => checkCapability({ ...capabilityContext, ...seatRequest })
+        : null,
+    },
+    strategy: {
+      draftRequest: ({ round, feedback, failedPlan }) => ({
+        codexInput: {
+          input: draftingPrompt({
             goal: request.goal, round, previousPlan: '', feedback, pivot: '', failedPlan,
-          });
-          const artifact = normalizeDraft(await draftCodex({
-            input, goal: request.goal, target: request.target, out: request.out, round,
-            plannerModel, sandbox: 'read-only', timeoutMs: executorTimeout, runId, env,
-          }));
-          tallyUsage(artifact);
-          return { seat: 'codex', ...artifact };
-        } catch (error) { return { seat: 'codex', error: failureMessage(error) }; }
-      })(),
-      (async () => {
-        if (typeof draftCursor !== 'function') return { seat: 'cursor', error: 'cursor drafting seat unavailable' };
-        try {
-          const artifact = normalizeDraft(await draftCursor({
-            goal: request.goal, target: request.target, round, verifierModel,
-            timeoutMs: verifierTimeout, runId, env, home,
-            superpowersDir: cursorSuperpowersDir, feedback, failedPlan,
-          }));
-          tallyUsage(artifact);
-          return { seat: 'cursor', ...artifact };
-        } catch (error) { return { seat: 'cursor', error: failureMessage(error) }; }
-      })(),
-      (async () => {
-        const response = await arbitrate({
-          type: 'draft', goal: request.goal, feedback, failedPlan,
-        });
-        if (!response || response.verdict === ARBITER_UNVERIFIED
-          || response.launchFailed || response.timedOut) {
-          return { seat: 'claude', error: 'claude drafting seat unavailable' };
-        }
-        try {
-          const text = typeof response === 'string' ? response : response.answer ?? response;
-          return { seat: 'claude', ...normalizeDraft(text) };
-        } catch (error) { return { seat: 'claude', error: failureMessage(error) }; }
-      })(),
-    ]);
-    reportEvent(reporter, runId, 'plan', 'storm', {
-      planRound: round,
-      drafts: attempts.map(({ seat, error }) => ({ seat, ok: !error, ...(error ? { error } : {}) })),
-    });
-    stormHistory.push({
-      round,
-      drafts: attempts.map(({ seat, error }) => ({ seat, ok: !error, ...(error ? { error } : {}) })),
-    });
-    return attempts;
-  };
-
-  const normalizeSeatReview = (value) => {
-    if (typeof value === 'string') return parseSeatReview(value);
-    if (value && typeof value === 'object' && typeof value.agree === 'boolean') {
-      return {
-        readable: true,
-        suggestions: [],
-        questions: [],
-        content: '',
-        ...value,
-      };
-    }
-    return parseSeatReview(String(value?.content ?? ''));
-  };
-
-  const unavailableReview = () => ({
-    agree: false, readable: false, suggestions: [], questions: [], content: '', unavailable: true,
-  });
-
-  const reviewBoth = async ({ round, proposal, gate }) => {
-    const [codex, cursor] = await Promise.all([
-      (async () => {
-        if (typeof reviewCodex !== 'function') return unavailableReview();
-        try {
-          return normalizeSeatReview(tallyUsage(await reviewCodex({
-            goal: request.goal, plan: proposal, gate, round,
-            target: request.target, plannerModel, timeoutMs: executorTimeout, runId, env,
-          })));
-        } catch { return unavailableReview(); }
-      })(),
-      (async () => {
-        if (typeof reviewCursor !== 'function') return unavailableReview();
-        try {
-          return normalizeSeatReview(tallyUsage(await reviewCursor({
-            goal: request.goal, plan: proposal, gate, round,
-            target: request.target, verifierModel, timeoutMs: verifierTimeout,
-            env, home, superpowersDir: cursorSuperpowersDir,
-          })));
-        } catch { return unavailableReview(); }
-      })(),
-    ]);
-    for (const [seat, review] of [['codex', codex], ['cursor', cursor]]) {
-      reportEvent(reporter, runId, 'plan', 'review', {
-        planRound: round,
-        seat,
-        agree: review.agree === true,
-        readable: review.readable !== false,
-        suggestionIds: review.suggestions.map((item) => item.id),
-        questionCount: review.questions.length,
-        ...(review.unavailable ? { unavailable: true } : {}),
-      });
-    }
-    return { codex, cursor };
-  };
-
-  let stormDrafts = null;
-  let reStorm = true;
-  let feedback = '';
-  let failedPlan = '';
-  let previousProposal = '';
-  let openQuestions = [];
-  let round = 0;
-
-  for (round = 1; rounds === undefined || round <= rounds; round++) {
-    if (reStorm) {
-      stormDrafts = await stormOnce({ round, feedback, failedPlan });
-      reStorm = false;
-      if (stormDrafts.every((attempt) => attempt.error)) {
-        // Nothing was drafted, so there is nothing to talk about. This is
-        // inability, not a mechanical verdict on any plan.
-        return finish('storm-exhausted', round);
-      }
-    }
-
-    const proposeResponse = await arbitrate({
-      type: 'propose',
-      goal: request.goal,
-      drafts: stormDrafts.filter((attempt) => !attempt.error)
-        .map(({ seat, plan, gate }) => ({ seat, plan, gate })),
-      feedback,
-      questions: openQuestions,
-      previousProposal,
-    });
-    let proposal = null;
-    if (proposeResponse && proposeResponse.verdict !== ARBITER_UNVERIFIED
-      && !proposeResponse.launchFailed && !proposeResponse.timedOut) {
-      try {
-        const text = typeof proposeResponse === 'string'
-          ? proposeResponse
-          : proposeResponse.answer ?? proposeResponse;
-        proposal = normalizeDraft(text);
-      } catch { proposal = null; }
-    }
-    reportEvent(reporter, runId, 'plan', 'proposal', {
-      planRound: round, ok: proposal !== null,
-    });
-    if (proposal === null) {
-      // The collating seat did not produce a proposal. A seat that did not run
-      // cannot be substituted by a rule, so the round cannot proceed.
-      return finish('arbiter-unavailable', round);
-    }
-    previousProposal = proposal.plan;
-
-    const reviews = await reviewBoth({ round, proposal: proposal.plan, gate: proposal.gate });
-    openQuestions = [
-      ...reviews.codex.questions.map((question) => ({ seat: 'codex', ...question })),
-      ...reviews.cursor.questions.map((question) => ({ seat: 'cursor', ...question })),
-    ];
-
-    const agreementResponse = await arbitrate({
-      type: 'agreement',
-      goal: request.goal,
-      proposal: proposal.plan,
-      gate: proposal.gate,
-      reviews: {
-        codex: {
-          agree: reviews.codex.agree,
-          suggestions: reviews.codex.suggestions,
-          questions: reviews.codex.questions,
-          content: reviews.codex.content,
-        },
-        cursor: {
-          agree: reviews.cursor.agree,
-          suggestions: reviews.cursor.suggestions,
-          questions: reviews.cursor.questions,
-          content: reviews.cursor.content,
-        },
-      },
-    });
-    const agreement = parseAgreementJudgement(agreementResponse);
-    reportEvent(reporter, runId, 'plan', 'agreement', {
-      planRound: round,
-      converged: agreement.verdict === 'answered' && agreement.converged === true,
-      unjudged: agreement.verdict !== 'answered',
-      ...(agreement.reason ? { reason: agreement.reason } : {}),
-    });
-
-    // Convergence is three seats actually agreeing. Silence, an unreadable
-    // response, or an absent seat is not agreement; an overruled objection does
-    // not exist here at all - Claude persuades through feedback, never outvotes.
-    const seatsAgree = reviews.codex.agree === true && reviews.cursor.agree === true;
-    const converged = seatsAgree
-      && agreement.verdict === 'answered'
-      && agreement.converged === true;
-
-    const suggestionIds = [
-      ...reviews.codex.suggestions.map((item) => `codex-${item.id}`),
-      ...reviews.cursor.suggestions.map((item) => `cursor-${item.id}`),
-    ];
-    ledger.record(round, suggestionIds);
-    roundHistory.push({
-      round,
-      reviews: {
-        codex: {
-          agree: reviews.codex.agree,
-          readable: reviews.codex.readable !== false,
-          suggestions: reviews.codex.suggestions,
-          questions: reviews.codex.questions,
-          ...(reviews.codex.unavailable ? { unavailable: true } : {}),
-        },
-        cursor: {
-          agree: reviews.cursor.agree,
-          readable: reviews.cursor.readable !== false,
-          suggestions: reviews.cursor.suggestions,
-          questions: reviews.cursor.questions,
-          ...(reviews.cursor.unavailable ? { unavailable: true } : {}),
-        },
-      },
-      agreement,
-      converged,
-    });
-    reportEvent(reporter, runId, 'plan', 'round', {
-      planRound: round,
-      suggestionIds,
-      codexAgrees: reviews.codex.agree === true,
-      cursorAgrees: reviews.cursor.agree === true,
-      converged,
-    });
-
-    if (converged) {
-      const vetoes = await capabilityVetoes({
-        plan: proposal.plan,
-        checkCapability,
-        context: {
+          }),
+          goal: request.goal,
           target: request.target,
+          out: request.out,
+          round,
           plannerModel,
+          sandbox: 'read-only',
+          timeoutMs: executorTimeout,
+          runId,
+          env,
+        },
+        cursorRequest: {
+          goal: request.goal,
+          target: request.target,
+          round,
           verifierModel,
-          arbiterModel,
-          executorTimeout,
-          verifierTimeout,
-          arbiterTimeout,
+          timeoutMs: verifierTimeout,
           runId,
           env,
           home,
           superpowersDir: cursorSuperpowersDir,
+          feedback,
+          failedPlan,
         },
-        reporter,
-        runId,
-        planRound: round,
-      });
-      if (vetoes.length > 0) {
-        capabilityHistory.push({ round, vetoes });
-        feedback = vetoFeedback(vetoes);
-        continue;
-      }
-      const paths = writeArtifacts(request.out, proposal.plan, proposal.gate);
-      reportEvent(reporter, runId, 'plan', 'converged', {
-        planRound: round,
-        suggestions: suggestionIds.length,
-      });
-      return finish('converged', round, paths);
-    }
-
-    // Claude's feedback leads; the seats' own words follow verbatim so the next
-    // proposal answers them rather than a summary of them.
-    feedback = [
-      agreement.feedback || '',
-      ...['codex', 'cursor'].flatMap((seat) => reviews[seat].suggestions.map(
-        (item) => `${seat} ${item.id} ${item.severity}: ${item.text}`,
-      )),
-    ].filter(Boolean).join('\n');
-
-    if (detectCircling(ledger)) {
-      const pivotJudgement = parsePivotJudgement(await arbitrate({
-        type: 'pivot',
-        ledger: Array.from({ length: ledger.currentRound }, (_, index) => ({
-          round: index + 1, findingIds: ledger.round(index + 1),
-        })),
-        recurringFindings: suggestionIds.filter((id) => ledger.stuckFindings().has(id)),
-        attempted: pivotHistory,
-        plan: proposal.plan,
-      }));
-      const unjudged = pivotJudgement.verdict !== 'answered';
-      const decision = unjudged ? shouldPivot(pivotCount) : pivotJudgement.decision;
-      pivotCount++;
-      pivotHistory.push({
-        decision,
-        unjudged,
-        ...(pivotJudgement.reason ? { reason: pivotJudgement.reason } : {}),
-      });
-      if (decision === PIVOT_CONCLUDE) {
-        return finish('pivot-conclude', round, { pivot: PIVOT_CONCLUDE });
-      }
-      if (decision === PIVOT_FRESH) {
-        reStorm = true;
-        failedPlan = proposal.plan;
-        previousProposal = '';
-        openQuestions = [];
-        feedback = '';
-      } else {
-        feedback = `${feedback}\nAmend the approach specifically to break the recurring suggestions.`;
-      }
-    }
-  }
-
-  return finish('rounds-exhausted', round - 1);
+        claudeRequest: {
+          type: 'draft', goal: request.goal, feedback, failedPlan,
+        },
+      }),
+      parseDraft: normalizeDraft,
+      parseProposal: parsePlanProposal,
+      proposeRequest: ({ drafts, feedback, questions, previousProposal }) => ({
+        type: 'propose',
+        goal: request.goal,
+        drafts: drafts.map(({ seat, plan, gate }) => ({ seat, plan, gate })),
+        feedback,
+        questions,
+        previousProposal,
+      }),
+      reviewRequests: ({ round, proposal }) => ({
+        codex: {
+          goal: request.goal, plan: proposal.plan, gate: proposal.gate, round,
+          target: request.target, plannerModel, timeoutMs: executorTimeout, runId, env,
+        },
+        cursor: {
+          goal: request.goal, plan: proposal.plan, gate: proposal.gate, round,
+          target: request.target, verifierModel, timeoutMs: verifierTimeout,
+          env, home, superpowersDir: cursorSuperpowersDir,
+        },
+      }),
+      agreementRequest: ({ proposal, reviews }) => ({
+        type: 'agreement',
+        goal: request.goal,
+        proposal: proposal.plan,
+        gate: proposal.gate,
+        reviews: {
+          codex: {
+            agree: reviews.codex.agree,
+            suggestions: reviews.codex.suggestions,
+            questions: reviews.codex.questions,
+            content: reviews.codex.content,
+          },
+          cursor: {
+            agree: reviews.cursor.agree,
+            suggestions: reviews.cursor.suggestions,
+            questions: reviews.cursor.questions,
+            content: reviews.cursor.content,
+          },
+        },
+      }),
+      capabilityPlanText: (proposal) => proposal.plan,
+      writeConverged: (proposal) => writeArtifacts(request.out, proposal.plan, proposal.gate),
+    },
+  });
+  return { ...result, dryRun: false, target: request.target, out: request.out };
 }
