@@ -133,23 +133,20 @@ test('runVerifier reports findings on the path where the verifier ran', async ()
   });
 });
 
-test('runVerifier findings are capped', async () => {
-  const r = await runVerifier({ cwd: process.cwd(), bin: process.execPath, extraArgv: [fakeAgent] });
-  assert.ok(r.findings.length <= FINDINGS_LIMIT);
-});
+// The findings head-cap is gone: planning judges structured lines at the END
+// of this text, and an excerpt is not judged input. The long-review test at
+// the bottom of this file pins the full-retention contract.
 
-test('runVerifier plan artifacts are capped separately from findings', async () => {
+test('a long plan artifact keeps its whole text while its verdict evidence stays bounded', async () => {
+  // The plan text feeds parseDraftArtifact, which needs whole PLAN_MD and
+  // GATE_JSON tags wherever they sit; only the verdict-consistency copy is
+  // bounded (tail-retained, marked truncated).
   const r = await runVerifier({ cwd: process.cwd(), bin: process.execPath,
     extraArgv: [fakeAgent, 'long-plan'] });
-  assert.ok(r.plan.length <= PLAN_LIMIT);
-  assert.match(r.findings, /a bug on line 4/);
-});
-
-test('an explicit prompt uses the same plan-artifact cap', async () => {
-  const r = await runVerifier({ cwd: process.cwd(), bin: process.execPath,
-    prompt: 'judge the diff and end with exactly NO_BLOCKERS or exactly ISSUES',
-    extraArgv: [fakeAgent, 'long-plan'] });
-  assert.ok(r.plan.length <= PLAN_LIMIT);
+  assert.ok(r.plan.length > PLAN_LIMIT, 'the judged plan text is complete');
+  assert.ok(r.verdictEvidence.candidates.plan.text.length <= PLAN_LIMIT,
+    'the verdict evidence copy stays bounded');
+  assert.equal(r.verdictEvidence.candidates.plan.truncated, true);
   assert.match(r.findings, /a bug on line 4/);
 });
 
@@ -830,4 +827,15 @@ test('the reviewer sandbox flag is used only where Cursor supports it', () => {
         .concat(platform === 'win32' ? ['--plugin-dir'] : ['--sandbox']));
     assert.equal(args.includes('--mode'), false, 'the review pass must stay writable');
   }
+});
+
+test('a long review keeps its whole text for the judged parse — no head-slice', async () => {
+  // Planning reads AGREE and S/Q lines from the END of the findings text; a
+  // 4000-character head-slice silently discarded them in live runs.
+  const r = await runVerifier({ cwd: process.cwd(), bin: process.execPath,
+    prompt: 'review the proposal and end with exactly NO_BLOCKERS or exactly ISSUES',
+    extraArgv: [fakeAgent, 'long-review'] });
+  assert.ok(r.findings.length > 8000, 'the full text is retained');
+  assert.match(r.findings, /S1 P0: the tail suggestion survives/);
+  assert.match(r.findings, /AGREE: no/);
 });

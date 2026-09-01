@@ -250,11 +250,16 @@ function collectVerdictEvidence(streamText) {
   // Deliberate choice: keep the existing useful name + overview + plan artifact,
   // but compose and bound it exactly once and judge that same retained string.
   // This makes every displayed plan byte-identical to the plan verdict input.
+  const composedPlan = composePlanArtifact(artifact);
   const result = retainVerdictText(resultText, FINDINGS_LIMIT);
   const assistant = retainVerdictText(lastAssistant, FINDINGS_LIMIT);
-  const plan = retainVerdictText(composePlanArtifact(artifact), PLAN_LIMIT);
+  const plan = retainVerdictText(composedPlan, PLAN_LIMIT);
   return {
     version: 1,
+    // The verdict-consistency system judges the BOUNDED candidates above; the
+    // raw strings exist for downstream parses (planning artifacts, seat
+    // reviews) whose structured lines a slice would silently eat.
+    raw: { result: resultText, assistant: lastAssistant, plan: composedPlan },
     candidates: {
       result: { present: resultSeen, usable: resultUsable, ...result },
       assistant: {
@@ -366,17 +371,21 @@ export function parseVerdictDetail(streamText) {
   };
   const { result, assistant, plan } = evidence.candidates;
   // Preserve the legacy findings selection independently of the explicit judged
-  // text. For plan verdicts, findings remain the result/assistant preamble.
+  // text — but from the RAW stream, never the bounded evidence copies: the
+  // callers of text/planText parse structured lines (AGREE, S/Q items,
+  // PLAN_MD/GATE_JSON tags) anywhere in the response, and a slice silently ate
+  // them past the cap. The bounded candidates above stay the verdict input.
+  const raw = baseEvidence.raw ?? { result: result.text, assistant: assistant.text, plan: plan.text };
   const text = derived.source === 'result'
-    ? result.text
+    ? raw.result
     : derived.source === 'assistant'
-      ? assistant.text
-      : result.present ? result.text : assistant.text;
+      ? raw.assistant
+      : result.present ? raw.result : raw.assistant;
   return {
     verdict: derived.verdict,
     text,
     source: derived.source,
-    planText: plan.text,
+    planText: raw.plan,
     evidence,
   };
 }
@@ -675,7 +684,12 @@ export async function runVerifier({
         timedOut: r.timedOut,
         timeoutMs: r.timeoutMs,
         ...(r.timeoutReason ? { timeoutReason: r.timeoutReason } : {}),
-        findings: text.trim().slice(0, FINDINGS_LIMIT),
+        // The full text, never an excerpt: planning parses structured lines
+        // (AGREE, S/Q items, artifact tags) from the END of this field, and a
+        // head-slice silently ate everything after 4000 characters — the
+        // judged input must be complete. Excerpting belongs at persistence
+        // sites, none of which retain this field any more.
+        findings: text.trim(),
         verdictSource: source,
         plan: evidence.candidates.plan.present ? planText : null,
         verdictEvidence: evidence,

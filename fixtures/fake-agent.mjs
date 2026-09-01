@@ -32,9 +32,12 @@ if (mode === 'verdict-then-fail') {
 }
 
 const verdict = mode === 'clean' ? 'NO_BLOCKERS' : 'ISSUES';
-const review = mode === 'clean'
-  ? `No blocking problems found.\n\n${verdict}`
-  : `There is a bug on line 4.\n\n${verdict}`;
+const review = mode === 'long-review'
+  // A review long enough that any head-slice would eat its structured tail.
+  ? `${'x'.repeat(9000)}\nS1 P0: the tail suggestion survives\nAGREE: no\n\n${verdict}`
+  : mode === 'clean'
+    ? `No blocking problems found.\n\n${verdict}`
+    : `There is a bug on line 4.\n\n${verdict}`;
 
 // A real Cursor review writes its report into the worktree. Only a worktree
 // has TASK.md at its root, so transport tests running elsewhere stay pure.
