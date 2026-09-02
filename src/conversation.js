@@ -49,13 +49,17 @@ export class RepairableArtifactError extends Error {
 // the arbiter's judgement and nothing else.
 export function parseSeatReview(text) {
   const source = String(text ?? '');
-  // Cursor writes markdown, so **AGREE: no** must read as a stance, not as
-  // silence — the second dogfood run lost all three rounds of Cursor stances
-  // to emphasis marks. Stripping *_` for stance detection only is tolerance
-  // in READING, never in meaning: nothing but an explicit AGREE: yes|no
-  // parses, silence stays non-consent, and the last stated stance wins.
+  // Dogfood runs 2 and 3 (terminal records, F10/F11): cursor-agent glues its
+  // narration and its answer into one string with no separator, so the stance
+  // arrives as "...injecting a size probe:AGREE: no" — mid-string, behind a
+  // colon. The boundary therefore accepts any non-alphanumeric character (the
+  // letter before AGREE in DISAGREE still refuses), emphasis marks are
+  // stripped first, and the lookahead keeps the contract's own "AGREE: yes
+  // means ..." echo from reading as a stance. Tolerance lives in READING,
+  // never in meaning: only an explicit AGREE: yes|no parses, silence stays
+  // non-consent, and the last stated stance wins.
   const stanceSource = source.replace(/[*_`]/g, '');
-  const agreeMatches = [...stanceSource.matchAll(/(?:^|\n|\s)AGREE\s*:\s*(yes|no)\b/gi)];
+  const agreeMatches = [...stanceSource.matchAll(/(?:^|[^A-Za-z0-9])AGREE\s*:\s*(yes|no)\b(?!\s+means\b)/gi)];
   const agree = agreeMatches.length > 0
     ? agreeMatches.at(-1)[1].toLowerCase() === 'yes'
     : null;

@@ -225,7 +225,11 @@ function collectVerdictEvidence(streamText) {
   let resultText = '';
   let resultSeen = false;
   let resultUsable = false;
-  let lastAssistant = '';
+  // Every assistant text part is retained, newline-joined — keeping only the
+  // last part ate the head of multi-part reviews (the stance lived in an
+  // early part; dogfood run 2). A consecutive exact-duplicate part is a
+  // streamed resend of the same text, not new speech, and is not repeated.
+  const assistantParts = [];
   let assistantSeen = false;
   for (const line of streamText.split('\n')) {
     const s = line.trim();
@@ -236,7 +240,7 @@ function collectVerdictEvidence(streamText) {
       for (const part of item.message.content) {
         if (part && part.type === 'text' && typeof part.text === 'string') {
           assistantSeen = true;
-          lastAssistant = part.text;
+          if (assistantParts.at(-1) !== part.text) assistantParts.push(part.text);
         }
       }
     } else if (item.type === 'result') {
@@ -246,6 +250,7 @@ function collectVerdictEvidence(streamText) {
     }
   }
 
+  const lastAssistant = assistantParts.join('\n');
   const artifact = extractPlanArtifact(streamText);
   // Deliberate choice: keep the existing useful name + overview + plan artifact,
   // but compose and bound it exactly once and judge that same retained string.

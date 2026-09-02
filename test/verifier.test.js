@@ -829,6 +829,22 @@ test('the reviewer sandbox flag is used only where Cursor supports it', () => {
   }
 });
 
+test('every assistant part is retained — no last-part-wins head loss', () => {
+  // Dogfood run 2: the stance lived in an early assistant part and only the
+  // last part survived assembly, so three rounds of votes were never seen.
+  // A consecutive identical part is a streamed resend and is kept once.
+  const part = (text) => JSON.stringify({
+    type: 'assistant', message: { content: [{ type: 'text', text }] },
+  });
+  const stream = [
+    part('AGREE: no\nS1 P0: head part'),
+    part('AGREE: no\nS1 P0: head part'),
+    part('S2 P1: tail part'),
+  ].join('\n');
+  const detail = parseVerdictDetail(stream);
+  assert.equal(detail.text, 'AGREE: no\nS1 P0: head part\nS2 P1: tail part');
+});
+
 test('a long review keeps its whole text for the judged parse — no head-slice', async () => {
   // Planning reads AGREE and S/Q lines from the END of the findings text; a
   // 4000-character head-slice silently discarded them in live runs.

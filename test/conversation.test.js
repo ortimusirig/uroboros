@@ -191,6 +191,23 @@ test('a markdown-emphasized stance is a stance; prose is still silence', () => {
   assert.equal(parseSeatReview('I broadly agree with these tasks').readable, false,
     'prose agreement is not a stance');
   assert.equal(parseSeatReview('').readable, false);
+
+  // Verbatim from dogfood run 3's terminal record: cursor-agent glues its
+  // narration to its answer with no separator, leaving the stance behind a
+  // colon mid-string. Three rounds of real stances were read as silence.
+  const glued = parseSeatReview(
+    'Checking the live row template one more time:AGREE: no\nS3 P0: define the omission metric precisely',
+  );
+  assert.equal(glued.readable, true, 'a stance glued behind narration is still a stance');
+  assert.equal(glued.agree, false);
+  assert.equal(glued.suggestions[0].id, 'S3');
+  assert.equal(parseSeatReview('DISAGREE: yes').readable, false,
+    'DISAGREE must never read as AGREE');
+  const echoed = parseSeatReview(
+    'AGREE: no\nRecall the contract: AGREE: yes means you are satisfied these tasks achieve the goal.',
+  );
+  assert.equal(echoed.agree, false,
+    'the contract\'s own "AGREE: yes means" echo is not a stance');
 });
 
 test('an unreadable stance carries its raw text into the round history', async () => {
