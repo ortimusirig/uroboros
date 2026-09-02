@@ -26,15 +26,14 @@ const HARNESS_GIT_EXCLUDE_MARKER = '# uroboros harness artifacts';
 const HARNESS_GIT_EXCLUDE_BLOCK = `\n${HARNESS_GIT_EXCLUDE_MARKER} — not the seat's work\n`
   + 'TASK.md\nevents.jsonl\nCHANGES.diff\n__uro_review/\n';
 
-// Path-algebra containment check (resolve() + string compare, no realpath — mirrors
-// artifacts.js's containsPath/normalizedPath, kept local to avoid a new cross-module
-// dependency for a few lines). Used only to gate excludeHarnessArtifacts below.
+// Containment check via canonicalPath (realpath-based, defined below) rather than a plain
+// resolve(): a symlinked scratch root must still be recognized as containing its own
+// resolved exclude path, or the hiding UX silently disappears for a tree the harness
+// legitimately owns. Any throw here (a path that does not yet exist, a race, ...)
+// propagates to excludeHarnessArtifacts's own try/catch and is treated as fail-closed — no
+// write happens rather than guessing. Used only to gate excludeHarnessArtifacts below.
 function isPathUnderRoot(candidate, root) {
-  const fold = (value) => {
-    const resolved = resolve(value);
-    return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
-  };
-  const fromRoot = relative(fold(root), fold(candidate));
+  const fromRoot = relative(canonicalPath(root), canonicalPath(candidate));
   return fromRoot === '' || (!fromRoot.startsWith('..') && !isAbsolute(fromRoot));
 }
 
@@ -85,12 +84,15 @@ async function git(cwd, ...args) {
 // writes when the resolved exclude path already lives under this run's own scratch root:
 // a standalone copy's fresh `.git` always qualifies (it lives in scratch and is never
 // shared with anything); a linked worktree only qualifies when its repository was itself
-// created fresh in scratch. Everywhere else this is a no-op — merge.js's stageMergeChanges
-// no longer depends on it for correctness, so skipping only forgoes hiding
-// TASK.md/events.jsonl from `git status` in that one tree. The marker check keeps repeated
-// isolate() calls against one owned repository from growing the shared file without bound.
-// A failure here is a `git status` UX nicety, not a run precondition, so it must not fail
-// the isolation.
+// created fresh in scratch. The skip applies to EVERY target that is already a git
+// repository — that is the normal case (queue/batch against a real project, this repo
+// dogfooding itself), not an edge case: hiding TASK.md/events.jsonl from `git status`
+// exists only inside a tree whose .git the harness itself created under scratch, because
+// providing it anywhere else would mutate a repository the harness does not own.
+// merge.js's stageMergeChanges does not depend on this file for correctness either way.
+// The marker check keeps repeated isolate() calls against one owned repository from
+// growing the shared file without bound. A failure here is a `git status` UX nicety, not a
+// run precondition, so it must not fail the isolation.
 async function excludeHarnessArtifacts(dir, scratchRoot) {
   try {
     const excludePath = (await git(dir, 'rev-parse', '--git-path', 'info/exclude')).trim();
