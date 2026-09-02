@@ -94,6 +94,17 @@ test('exporting detailFor preserves the exact heartbeat summary phrasing', () =>
   );
 });
 
+test('a verifier launch retry is constructible and prints its reason', () => {
+  assert.doesNotThrow(() => createEvent({
+    runId: 'retry-pair', stage: 'verify', type: 'retry',
+    fields: { pass: 'plan', reason: 'ActionRequiredError: usage limit' },
+  }));
+  assert.match(
+    detailFor({ stage: 'verify', type: 'retry', pass: 'plan', reason: 'ActionRequiredError: usage limit' }),
+    /retrying launch pass=plan reason=ActionRequiredError: usage limit/,
+  );
+});
+
 test('plan events render seats, failures, and verdicts in the one-line summary', () => {
   // The 2026-09-02 dogfood run: a seat failed every call for 33 minutes and the
   // printed stream never said so. The payloads carried the truth; the printer
@@ -784,6 +795,10 @@ test('fully exercised runs have exact pair equality with both event vocabularies
         fields: { candidateId: 'candidate-1', perspective: 'boundary redesign' },
       })
     ));
+    const verifyRetryEvents = [createEvent({
+      runId: 'conformance-verify-retry', stage: 'verify', type: 'retry',
+      fields: { pass: 'plan', reason: 'ActionRequiredError: usage limit' },
+    })];
     const allEvents = [
       ...campaignEvents,
       ...unitEvents,
@@ -794,6 +809,7 @@ test('fully exercised runs have exact pair equality with both event vocabularies
       ...mutationEvents,
       ...arbiterEvents,
       ...pivotEvents,
+      ...verifyRetryEvents,
     ];
     assert.doesNotThrow(() => assertEventConformance(allEvents, {
       allowUnemitted: Object.keys(deliberatelyUncovered),

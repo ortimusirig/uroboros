@@ -512,7 +512,25 @@ export async function runReviewPass({
   return review;
 }
 
-export async function runVerifier({
+// One declared retry absorbs a transient launch refusal — the seat process
+// dying before it produced anything judgeable (a rate-limit blip, a spawn
+// hiccup). A timeout is spent time and is never retried, and one is the whole
+// bound: it lives in the determinism-and-caps audit table. The retry
+// re-LAUNCHES; nothing about any answer is reinterpreted. The event carries
+// the first attempt's stderr so the cause ("You've hit your usage limit")
+// reaches the operator instead of dying unread — dogfood runs 4 and 6 showed
+// a bare "failed to launch" while the explanation sat in stderr.
+export async function runVerifier(options) {
+  const first = await runVerifierAttempt(options);
+  if (!first.launchFailed || first.timedOut) return first;
+  reportEvent(options.reporter, options.runId, 'verify', 'retry', {
+    pass: options.pass,
+    reason: String(first.stderr ?? '').trim().slice(0, 200) || 'launch failed with no stderr',
+  });
+  return runVerifierAttempt(options);
+}
+
+async function runVerifierAttempt({
   cwd,
   bin = 'agent',
   prompt = DEFAULT_PROMPT,

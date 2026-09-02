@@ -829,6 +829,48 @@ test('the reviewer sandbox flag is used only where Cursor supports it', () => {
   }
 });
 
+test('a launch failure retries exactly once, loudly, with its stderr as the reason', async () => {
+  // Dogfood runs 4 and 6: cursor-agent died at launch (quota) and the stream
+  // showed a bare failure while the explanation sat unread in stderr. One
+  // bounded re-launch absorbs the transient class; the event carries the why.
+  const marker = join(mkdtempSync(join(tmpdir(), 'uro-flaky-')), 'marker');
+  const events = [];
+  try {
+    const r = await runVerifier({
+      cwd: process.cwd(),
+      bin: process.execPath,
+      extraArgv: [fakeAgent, 'flaky-launch'],
+      env: { ...process.env, FLAKY_MARKER: marker },
+      reporter: (event) => events.push(event),
+      runId: 'flaky-retry',
+      prompt: 'review the change and end with exactly NO_BLOCKERS or exactly ISSUES',
+    });
+    assert.equal(r.launchFailed, false, 'the second launch must succeed');
+    assert.match(r.findings, /No blocking problems found/);
+    const retry = events.find((event) => event.stage === 'verify' && event.type === 'retry');
+    assert.ok(retry, 'the retry must be announced as an event');
+    assert.match(retry.reason, /usage limit/);
+  } finally {
+    rmSync(join(marker, '..'), { recursive: true, force: true });
+  }
+});
+
+test('a timeout is spent time and is never retried', async () => {
+  const events = [];
+  const r = await runVerifier({
+    cwd: process.cwd(),
+    bin: process.execPath,
+    extraArgv: [fakeAgent, 'hang'],
+    timeoutMs: 400,
+    reporter: (event) => events.push(event),
+    runId: 'timeout-no-retry',
+    prompt: 'review and end with exactly NO_BLOCKERS or exactly ISSUES',
+  });
+  assert.equal(r.timedOut, true);
+  assert.equal(events.some((event) => event.stage === 'verify' && event.type === 'retry'), false,
+    'a timed-out attempt must never relaunch');
+});
+
 test('every assistant part is retained — no last-part-wins head loss', () => {
   // Dogfood run 2: the stance lived in an early assistant part and only the
   // last part survived assembly, so three rounds of votes were never seen.

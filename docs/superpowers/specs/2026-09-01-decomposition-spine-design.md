@@ -307,6 +307,7 @@ it. Uroboros never generates or edits a constitution.
 | Circling window (3 rounds) | measured trigger | Starts a judgement (pivot), never renders one |
 | Acceptance/landing "no readable boolean" | fail-closed reading | Absence of consent is never consent; stops, never passes |
 | Stage liveness | measured, judged | Silence is judged alive-or-stuck; extensions judged; no flat deadline |
+| Verifier launch retry | bounded transport retry | Exactly one re-launch when the seat process died before producing anything judgeable; never after a timeout; announced as a `verify/retry` event carrying the stderr reason; it re-launches only — no answer is ever reinterpreted |
 | `rounds`, `max-runs`, `token-budget` | operator's own caps | Set by the owner, forecast declared, run-in-flight always finishes |
 | `MINIMUM_MAP_BUDGET` rejection | derived validation | Below it no honest self-declaration fits; derived from the map's own smallest renders, never guessed |
 | Repo-map fallback ladder (incl. no-survey path) | input ration | Every return path measured against the actual budget, success and failure alike; nothing assumed to fit |

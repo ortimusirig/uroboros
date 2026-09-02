@@ -682,7 +682,7 @@ async function productionGoalCursorDraft({
     target, verifierModel, timeoutMs, env, home, superpowersDir,
   });
   if (result.launchFailed || result.timedOut) {
-    throw new Error(`cursor draft seat ${result.timedOut ? 'timed out' : 'failed to launch'}`);
+    throw new Error(`cursor draft seat ${result.timedOut ? 'timed out' : 'failed to launch'}${result.stderr ? `: ${String(result.stderr).trim().slice(0, 200)}` : ''}`);
   }
   return { text: `${result.findings ?? ''}\n${result.plan ?? ''}`, usage: result.usage };
 }
@@ -1170,7 +1170,7 @@ async function productionProjectCursorDraft({
     target, verifierModel, timeoutMs, env, home, superpowersDir,
   });
   if (result.launchFailed || result.timedOut) {
-    throw new Error(`cursor draft seat ${result.timedOut ? 'timed out' : 'failed to launch'}`);
+    throw new Error(`cursor draft seat ${result.timedOut ? 'timed out' : 'failed to launch'}${result.stderr ? `: ${String(result.stderr).trim().slice(0, 200)}` : ''}`);
   }
   return { text: `${result.findings ?? ''}\n${result.plan ?? ''}`, usage: result.usage };
 }

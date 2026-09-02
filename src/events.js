@@ -114,6 +114,7 @@ const LISTED_EVENT_PAIRS = [
   'verify/finish',
   'verify/stalled',
   'verify/scope_violation',
+  'verify/retry',
   'debate/round',
   'debate/resist',
   'debate/converged',
@@ -499,6 +500,10 @@ export function detailFor(event) {
   if (event.stage === 'verify') {
     if (event.type === 'scope_violation') {
       return `restored out-of-scope writes paths=${oneLine(event.paths?.join(','))}`;
+    }
+    if (event.type === 'retry') {
+      return `retrying launch${event.pass ? ` pass=${oneLine(event.pass)}` : ''}`
+        + ` reason=${oneLine(event.reason)}`;
     }
     const pass = event.pass ? ` pass=${oneLine(event.pass)}` : '';
     return `${event.type === 'start' ? 'started' : 'finished'}${pass}`;
