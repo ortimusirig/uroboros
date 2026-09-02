@@ -440,9 +440,46 @@ test('a seat that worked at all has no outage row', async () => {
 
 (Adapt: reviewCursor throwing is caught by `reviewBoth` into `unavailableReview()` — the outage detection must gather failure texts from storm draft errors AND from review-call exceptions; if the engine currently swallows the review exception message, capture it into the unavailable row as `error` while implementing — that error field stays out of events and feeds only the outage summary, keeping scope tight.)
 
-- [ ] **Step 2: Implement** in the finish path: scan `stormHistory` draft errors and collected review failure messages for the cap signature `/ActionRequiredError|usage limit|Free plans/i`; when EVERY cursor interaction failed and ≥1 matches, attach `seatOutages: { cursor: <last matching message> }` to the result object beside `converged`/`reason`. Never attach on partial failure (a seat that answered once is not capped).
-- [ ] **Step 3: Docs** — one sentence in `docs/usage.md` near the decompose section and one in `skills/uroboros/SKILL.md`: `Before a long program, run loop doctor --deep — plain doctor checks sign-in, only --deep exercises real seat launches and surfaces an account cap; a capped seat otherwise appears as unavailable reviews and a run that cannot converge.` Run the docs conformance tests and update pins if SKILL.md text is byte-pinned.
-- [ ] **Step 4: Full suite green; commit** — `feat(conversation): capped seats are named in the terminal record; doctor --deep is the pre-program check`.
+- [ ] **Step 2: Implement the classifier** — export from `src/conversation.js` (or a small shared home if cleaner, e.g. `src/verifier.js`):
+
+```js
+// Two different outages wear the same ActionRequiredError coat. A CONFIG
+// refusal is deterministic and caller-fixable — name the flag. A QUOTA
+// exhaustion needs the account renewed. Peer-observed verbatim texts:
+//   "Named models unavailable Free plans can only use Auto"  -> config
+//   "You've hit your usage limit"                            -> quota
+export function classifySeatOutage(message) {
+  const text = String(message ?? '');
+  if (/Named models unavailable|Free plans can only use Auto/i.test(text)) {
+    return { kind: 'config-refusal', remedy: 'free Cursor plans accept only auto — rerun with --verifier-model auto' };
+  }
+  if (/usage limit|out of usage/i.test(text)) {
+    return { kind: 'quota-exhausted', remedy: 'the Cursor account is out of usage — renew the plan or wait for the quota cycle' };
+  }
+  if (/ActionRequiredError/i.test(text)) return { kind: 'account-action', remedy: 'the Cursor account needs attention — run loop doctor --deep' };
+  return null;
+}
+```
+
+- [ ] **Step 3: Early loud stop on a deterministic refusal** — in the storm path of `src/conversation.js`: when the FIRST cursor interaction of the conversation fails and `classifySeatOutage(error)` returns `kind: 'config-refusal'`, end the conversation immediately via the finish path with `reason: 'verifier-unlaunchable'` and the remedy in the result (`seatOutages` attached as below) — a deterministic refusal repeats identically every call, so continuing burns Codex and Claude rounds toward a convergence that is impossible from the first second (peer-observed: a full 25-minute round with the reviewer dead). A transient or quota failure does NOT early-stop (a quota might reset mid-run is not a thing we bet on either way — quota keeps today's proceed-as-unavailable behavior, the terminal summary still names it). Failing test first:
+
+```js
+test('a deterministic config refusal stops the run at storm, naming the flag', async () => {
+  const { seats, strategy } = seatsFor({ proposals: ['GOOD'] });
+  seats.draftCursor = async () => {
+    throw new Error('cursor draft seat failed to launch: ActionRequiredError: Named models unavailable Free plans can only use Auto. Switch to Auto or upgrade plans to continue.');
+  };
+  const result = await runConversation({ runId: 'conv-config-refusal', tier: 'goal', seats, strategy, rounds: 3 });
+  assert.equal(result.converged, false);
+  assert.equal(result.reason, 'verifier-unlaunchable');
+  assert.match(result.seatOutages.cursor.remedy, /--verifier-model auto/);
+});
+```
+
+- [ ] **Step 4: Terminal outage summary** — in the finish path: scan `stormHistory` draft errors and collected review failure messages with `classifySeatOutage`; when EVERY cursor interaction failed and ≥1 classifies, attach `seatOutages: { cursor: { kind, remedy, message: <last matching text> } }`. Never attach on partial failure (a seat that answered once is not capped). Update the Step-1 tests to the `{ kind, remedy, message }` shape (`assert.match(result.seatOutages.cursor.message, /usage limit/)`).
+- [ ] **Step 5: Doctor deep-probe alignment** — read `src/doctor-checks.js` (grep `deep` / the cursor probe): the probe MUST request the same `DEFAULT_VERIFIER_MODEL` the runs use (a probe with no model rides the account default and stays green while every run refuses — peer-verified on this exact machine). If it does not pass the model, fix it to; add/extend the doctor test pinning that the deep cursor probe's argv includes `DEFAULT_VERIFIER_MODEL`.
+- [ ] **Step 6: Docs** — one sentence in `docs/usage.md` near the decompose section and one in `skills/uroboros/SKILL.md`: `Before a long program, run loop doctor --deep — plain doctor checks sign-in, only --deep exercises a real seat launch with the run's default model; on a free Cursor plan pass --verifier-model auto or the reviewer seat refuses every named-model launch.` Run the docs conformance tests and update pins if SKILL.md text is byte-pinned. Add `verifier-unlaunchable` beside the other terminal reasons wherever docs enumerate them.
+- [ ] **Step 7: Full suite green; commit** — `feat(conversation): seat outages are classified with remedies; a deterministic refusal stops the run at storm`.
 
 ---
 
