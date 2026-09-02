@@ -7,7 +7,7 @@
 current working directory. Paths in the list are resolved relative to the queue file. A goal
 unit runs `loop plan` first and starts implementation only after the plan debate converges.
 This `goal` unit kind still works but is legacy: prefer `loop decompose --goal` to convert
-a goal spec into task units directly, then queue those.
+a goal spec into task units directly, then queue those. On large repositories, use `loop decompose --goal` instead of goal units: the measured record on a ~1,700-file tree is 0-for-7 for goal-sized runs and 5-for-6 landed for decomposed task units.
 Run `loop queue --file queue.json --dry-run` before an unattended session to validate every
 input and goal output path without launching an agent.
 
