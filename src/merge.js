@@ -6,6 +6,7 @@ import {
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { HARNESS_ARTIFACTS } from './artifacts.js';
+import { isHarnessArtifact } from './review-protection.js';
 import { spawnCapture } from './spawn.js';
 import { countTestPaths } from './merge-test-count.js';
 
@@ -107,9 +108,17 @@ async function unmergedPaths(cwd) {
 }
 
 async function stageMergeChanges(cwd) {
+  // The isolated worktree's git exclude file already covers TASK.md/events.jsonl/
+  // CHANGES.diff/__uro_review/ (see isolation.js), so `git add -A` skips them on its own.
+  // Naming an already-gitignored path via :(exclude) too makes git treat it as an explicitly
+  // requested add and refuse with "paths are ignored" (exit non-zero) instead of the silent
+  // skip a bare `-A .` gives it — so only pathspec-exclude the harness artifacts gitignore
+  // does not also cover.
+  const pathspecExcludes = HARNESS_ARTIFACTS
+    .filter((name) => !isHarnessArtifact(name))
+    .map((name) => `:(exclude)${name}`);
   const add = await spawnCapture('git', [
-    '-C', cwd, 'add', '-A', '--', '.',
-    ...HARNESS_ARTIFACTS.map((name) => `:(exclude)${name}`),
+    '-C', cwd, 'add', '-A', '--', '.', ...pathspecExcludes,
   ]);
   if (add.code !== 0) throw new Error(`cannot stage merge resolution: ${add.stderr.trim()}`);
 }

@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import {
+  appendFileSync,
   cpSync,
   existsSync,
   mkdirSync,
@@ -10,12 +11,20 @@ import {
   rmSync,
   statSync,
 } from 'node:fs';
-import { join, relative, resolve, sep } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { reportEvent } from './events.js';
 import { spawnCapture } from './spawn.js';
 import { physicalRunIdFor } from './run-id.js';
 
 const repositoryLocks = new Map();
+
+// Mirrors review-protection.js's HARNESS_ARTIFACT_PATTERNS: the same names the harness
+// writes into a worktree it does not own the git history of. `git status` inside the
+// isolated worktree must never list them as untracked — the executor seat has no way to
+// tell they are the harness's own writes rather than stray output it forgot to add.
+const HARNESS_GIT_EXCLUDE_MARKER = '# uroboros harness artifacts';
+const HARNESS_GIT_EXCLUDE_BLOCK = `\n${HARNESS_GIT_EXCLUDE_MARKER} — not the seat's work\n`
+  + 'TASK.md\nevents.jsonl\nCHANGES.diff\n__uro_review/\n';
 
 export function defaultBranchName(runId) {
   return `uro/${runId}`;
@@ -53,6 +62,24 @@ async function git(cwd, ...args) {
   const r = await spawnCapture('git', ['-C', cwd, ...args]);
   if (r.code !== 0) throw new Error(`git ${args.join(' ')} failed: ${r.stderr.trim()}`);
   return r.stdout;
+}
+
+// info/exclude is per-repository, not per-tree: for a linked worktree, `git --git-path`
+// resolves it to the shared common .git dir, so this also protects the main checkout and
+// any sibling worktree of the same repository. The marker check keeps repeated isolate()
+// calls against one repository from growing the shared file without bound. A failure here
+// is a `git status` UX nicety, not a run precondition, so it must not fail the isolation.
+async function excludeHarnessArtifacts(dir) {
+  try {
+    const excludePath = (await git(dir, 'rev-parse', '--git-path', 'info/exclude')).trim();
+    const resolvedExclude = isAbsolute(excludePath) ? excludePath : join(dir, excludePath);
+    const existing = existsSync(resolvedExclude) ? readFileSync(resolvedExclude, 'utf8') : '';
+    if (existing.includes(HARNESS_GIT_EXCLUDE_MARKER)) return;
+    mkdirSync(dirname(resolvedExclude), { recursive: true });
+    appendFileSync(resolvedExclude, HARNESS_GIT_EXCLUDE_BLOCK);
+  } catch {
+    // Best effort: see comment above.
+  }
 }
 
 function canonicalPath(path) {
@@ -370,6 +397,10 @@ export async function isolate({
       branch,
       baseRef,
     });
+    // Same repository lock as addWorktree: info/exclude is shared repo state (see
+    // excludeHarnessArtifacts above), and concurrent isolations of one repository must not
+    // race a read-then-append of it.
+    await withRepositoryLock(targetRepository.lockKey, () => excludeHarnessArtifacts(dir));
     const source = resolvedCampaignBase?.source ?? 'git-worktree';
     const isRepo = resolvedCampaignBase?.isRepo ?? true;
     reportEvent(reporter, runId, 'isolate', 'finish', {
@@ -393,6 +424,9 @@ export async function isolate({
   mkdirSync(dir, { recursive: true });
   cpSync(target, dir, { recursive: true });
   await git(dir, 'init', '-b', branch);
+  // This dir is a brand-new standalone repository, wholly owned by this run, so no
+  // repository lock is needed here (unlike the linked-worktree branch above).
+  await excludeHarnessArtifacts(dir);
   await git(dir, 'add', '-A');
   await git(dir, '-c', 'user.email=ccc@local', '-c', 'user.name=ccc', 'commit', '-m', 'baseline');
   const baseCommit = (await git(dir, 'rev-parse', 'HEAD')).trim();

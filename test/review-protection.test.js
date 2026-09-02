@@ -1,6 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import {
+  appendFileSync,
   chmodSync,
   existsSync,
   mkdirSync,
@@ -18,6 +20,10 @@ import {
   restoreReviewSnapshot,
   runProtectedOperation,
 } from '../src/review-protection.js';
+import {
+  captureWorktreeSnapshot,
+  restoreWorktreeSnapshot,
+} from '../src/worktree-snapshot.js';
 
 function filesIn(root) {
   const files = new Map();
@@ -220,6 +226,67 @@ test('executor mode-only changes to reviewer tests are restored and reported', a
     assert.equal(statSync(proof).mode & 0o777, originalMode);
     assert.deepEqual(protectedRun.restoredPaths, ['__uro_review/tests/proof.test.js']);
     assert.deepEqual(events[0].paths, ['__uro_review/tests/proof.test.js']);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+function git(cwd, args) {
+  return spawnSync('git', ['-C', cwd, ...args], { encoding: 'utf8' });
+}
+
+test('harness artifacts are invisible to the reviewer scope check', async (t) => {
+  // The harness itself appends to events.jsonl (its own run log) while the reviewer
+  // subprocess is in flight — that write must never be attributed to the reviewer and
+  // rolled back; the peer session watched exactly that happen twice in live runs. This
+  // exercises runProtectedOperation's real default (git-based) snapshot machinery, the
+  // same path run.js uses for the reviewer's 'verify' stage, not the fs-diff test
+  // doubles above. A genuinely out-of-scope reviewer write must still be restored.
+  const cwd = mkdtempSync(join(tmpdir(), 'uro-harness-scope-'));
+  try {
+    const initialized = git(cwd, ['init', '--quiet']);
+    if (initialized.error?.code === 'EPERM') {
+      t.skip('sandbox does not permit child-process Git integration tests');
+      return;
+    }
+    assert.equal(initialized.status, 0, initialized.stderr);
+    assert.equal(git(cwd, ['config', 'user.email', 'uro@example.invalid']).status, 0);
+    assert.equal(git(cwd, ['config', 'user.name', 'Uro Test']).status, 0);
+    writeFileSync(join(cwd, 'implementation.js'), 'original\n');
+    // events.jsonl exists but is deliberately never `git add`ed — the harness keeps its
+    // run log out of the index for the whole run (see run.js's diffText/fresh-pivot clean).
+    writeFileSync(join(cwd, 'events.jsonl'), '{"seed":true}\n');
+    assert.equal(git(cwd, ['add', 'implementation.js']).status, 0);
+    assert.equal(git(cwd, ['commit', '--quiet', '-m', 'fixture']).status, 0);
+
+    const events = [];
+    const protectedRun = await runProtectedOperation({
+      cwd,
+      scope: 'outside',
+      prefix: '__uro_review',
+      stage: 'verify',
+      role: 'reviewer',
+      runId: 'scope-harness',
+      reporter: (event) => events.push(event),
+      captureSnapshot: captureWorktreeSnapshot,
+      restoreSnapshot: restoreWorktreeSnapshot,
+      operation: async () => {
+        appendFileSync(join(cwd, 'events.jsonl'), '{"appended":true}\n');
+        mkdirSync(join(cwd, '__uro_review'), { recursive: true });
+        writeFileSync(join(cwd, '__uro_review', 'REVIEW.md'), 'findings\n');
+        writeFileSync(join(cwd, 'stray.txt'), 'out of scope\n');
+        return { timedOut: false };
+      },
+    });
+
+    assert.deepEqual(protectedRun.restoredPaths, ['stray.txt'], 'only the stray write is restored');
+    assert.equal(existsSync(join(cwd, 'stray.txt')), false);
+    assert.match(readFileSync(join(cwd, 'events.jsonl'), 'utf8'), /appended/,
+      'the run log keeps its mid-run append');
+    assert.equal(readFileSync(join(cwd, '__uro_review', 'REVIEW.md'), 'utf8'), 'findings\n');
+    const violation = events.find((event) => event.type === 'scope_violation');
+    assert.ok(violation, 'a genuine out-of-scope write is still reported');
+    assert.deepEqual(violation.paths, ['stray.txt']);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }

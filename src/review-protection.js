@@ -24,6 +24,18 @@ export class WorktreeRestorationError extends Error {
   }
 }
 
+// The harness writes these into the worktree itself (append-only run log, the task
+// brief, the diff handoff, the reviewer's sanctioned report area). They are never a
+// seat's scope violation, and restoring the run log rewrites history mid-run — the
+// peer session watched it happen twice in live runs.
+export const HARNESS_ARTIFACT_PATTERNS = Object.freeze([
+  /^events\.jsonl$/, /^TASK\.md$/, /^CHANGES\.diff$/, /^__uro_review(\/|\\|$)/,
+]);
+export function isHarnessArtifact(relativePath) {
+  const normalized = String(relativePath).replace(/\\/g, '/');
+  return HARNESS_ARTIFACT_PATTERNS.some((pattern) => pattern.test(normalized));
+}
+
 function reviewFiles(cwd, prefix) {
   const root = resolve(cwd, prefix);
   const fromCwd = relative(resolve(cwd), root);

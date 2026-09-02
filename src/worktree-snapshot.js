@@ -10,6 +10,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join, relative, sep } from 'node:path';
 import { spawnCapture } from './spawn.js';
+import { isHarnessArtifact } from './review-protection.js';
 
 function splitNull(value) {
   return String(value ?? '').split('\0').filter(Boolean);
@@ -109,8 +110,16 @@ export async function restoreWorktreeSnapshot({
     ...snapshot.directoryModes.keys(),
     ...current.directoryModes.keys(),
   ])].filter((path) => snapshot.directoryModes.get(path) !== current.directoryModes.get(path));
-  const gitRestoredPaths = selectedPaths([...worktreeChanged, ...indexChanged], scope, prefix);
-  const restoredDirectories = selectedPaths(directoryChanged, scope, prefix);
+  // Harness artifacts (the run log, task file, diff handoff, reviewer report area) are
+  // excluded here, where reporting and the actual worktree revert (removePaths/existingPaths
+  // below) both originate, so the harness's own mid-run writes are never rolled back alongside
+  // a seat's real violations. indexChanged still feeds resetPaths below unfiltered: staged
+  // metadata for a harness artifact must still be unstaged, matching diffText()'s own
+  // unconditional post-add reset of the same paths — only the reported/reverted set changes.
+  const gitRestoredPaths = selectedPaths([...worktreeChanged, ...indexChanged], scope, prefix)
+    .filter((path) => !isHarnessArtifact(path));
+  const restoredDirectories = selectedPaths(directoryChanged, scope, prefix)
+    .filter((path) => !isHarnessArtifact(path));
   const restoredPaths = [...new Set([...gitRestoredPaths, ...restoredDirectories])].sort();
   // The reviewer may keep files inside its allowed directory, but it may not keep Git
   // metadata changes there. Restoring every changed index path keeps harness artifacts

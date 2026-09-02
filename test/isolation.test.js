@@ -100,6 +100,27 @@ test('isolate on a git repo creates a worktree and leaves the source untouched',
   rmSync(scratch, { recursive: true, force: true });
 });
 
+test('harness files are git-invisible inside the isolated worktree', async () => {
+  // The run writes TASK.md and appends events.jsonl straight into iso.dir mid-run. The
+  // executor seat reads `git status` to see its own progress and has no way to tell those
+  // two files are the harness's own writes rather than stray output it forgot to add.
+  const src = await makeRepo();
+  const scratch = makeScratch();
+  let iso;
+  try {
+    iso = await isolate({ target: src, runId: 'git-invisible', scratchRoot: scratch });
+    writeFileSync(join(iso.dir, 'TASK.md'), 'do the thing\n');
+    writeFileSync(join(iso.dir, 'events.jsonl'), '{"seed":true}\n');
+    const status = await gitOk(iso.dir, 'status', '--porcelain');
+    assert.doesNotMatch(status, /TASK\.md/);
+    assert.doesNotMatch(status, /events\.jsonl/);
+  } finally {
+    await iso?.cleanup();
+    rmSync(src, { recursive: true, force: true });
+    rmSync(scratch, { recursive: true, force: true });
+  }
+});
+
 test('a generated branch uses the uro/ prefix', () => {
   const branch = defaultBranchName('2026-08-20T00-00-00-000Z-abcdef12');
   assert.equal(branch, 'uro/2026-08-20T00-00-00-000Z-abcdef12');
