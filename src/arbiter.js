@@ -124,6 +124,17 @@ export function buildArbiterPrompt(request = {}) {
       `EVIDENCE ${compact(request.evidence ?? [])}`,
     ].join('\n\n');
   }
+  if (request.type === 'acceptance') {
+    return [...common,
+      'Every task for this goal has landed. Read the goal spec and the aggregate diff of everything that landed YOURSELF, first-hand: is the project in a working state that now delivers this goal\'s capability?',
+      'Approve when you are satisfied the working tree now delivers the goal; refuse when you are not, and say exactly why. Severities in your findings are your own words; nothing mechanical acts on them.',
+      'Schema: {"approved":true|false,"reasoning":"what you verified first-hand","findings":[{"id":"A1","severity":"P0","text":"..."}]}.',
+      `GOAL_SPEC ${String(request.goalSpec ?? '')}`,
+      ...(request.constitution ? [`CONSTITUTION ${String(request.constitution)}`] : []),
+      `AGGREGATE_DIFF ${String(request.diff ?? '')}`,
+      `QUEUE_LOG ${compact(request.queueLog ?? [])}`,
+    ].join('\n\n');
+  }
   if (request.type === 'pivot') {
     return [...common,
       'Choose how to respond to deterministic evidence that the debate is circling.',
@@ -308,6 +319,12 @@ export function parseLandingJudgement(response) {
     findings,
   };
 }
+
+// The acceptance judgement shares the landing parser's contract deliberately
+// (approved boolean required else UNVERIFIED; findings carried verbatim) —
+// nothing in parseLandingJudgement's output is landing-specific, so this is a
+// re-export rather than a duplicate implementation.
+export const parseAcceptanceJudgement = parseLandingJudgement;
 
 export function parseAgreementJudgement(response) {
   const value = directOrAnswer(response);

@@ -4,6 +4,7 @@ import { EventEmitter } from 'node:events';
 import {
   buildArbiterPrompt,
   buildClaudeArgs,
+  parseAcceptanceJudgement,
   parseArbiterStream,
   parseCapabilityJudgement,
   parseDecisionJudgement,
@@ -186,4 +187,20 @@ test('the landing prompt puts the task, diff, closed findings, and evidence in f
   assert.match(prompt, /closed nit/);
   assert.match(prompt, /EVIDENCE \[/);
   assert.match(prompt, /boom/);
+});
+
+test('the acceptance prompt asks the working-state question with spec, diff, and log in front of Claude', () => {
+  const prompt = buildArbiterPrompt({ type: 'acceptance', goalSpec: 'G1 spec text',
+    constitution: 'law text', diff: 'diff --git a/x b/x', queueLog: [{ name: 'T1', landed: true }] });
+  assert.match(prompt, /working state that now delivers/);
+  assert.match(prompt, /"approved":true\|false/);
+  assert.match(prompt, /GOAL_SPEC G1 spec text/);
+  assert.match(prompt, /CONSTITUTION law text/);
+  assert.match(prompt, /AGGREGATE_DIFF diff --git a\/x b\/x/);
+  assert.match(prompt, /QUEUE_LOG \[/);
+});
+test('acceptance parsing: silence is never consent', () => {
+  assert.equal(parseAcceptanceJudgement({ answer: 'ship it' }).verdict, 'UNVERIFIED');
+  assert.deepEqual(parseAcceptanceJudgement({ approved: false, reasoning: 'G1 capability absent' }),
+    { verdict: 'answered', approved: false, reasoning: 'G1 capability absent', findings: [] });
 });
