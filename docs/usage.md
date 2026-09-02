@@ -39,6 +39,7 @@ still treated as dirty. Keep the queue definition tracked or outside the target 
 node bin/loop.js run --task <plan-file-or-prose> --target <folder> --gate <gate.json> [--gate-retries M] [--pivot-candidates N] [--executor-model MODEL] [--executor-effort EFFORT] [--verifier-model MODEL] [--arbiter-model MODEL] [--arbiter-timeout MS] [--artifact-root DIRECTORY] [--mutate] [--port PORT] [--open] [--no-dashboard] [--quiet]
 node bin/loop.js mutate --target <folder> [--base REF] [--tests COMMAND] [--dry-run]
 node bin/loop.js plan --goal <prose-or-file> --target <folder> --out <folder> [--rounds N] [--candidates N] [--pivot-candidates N] [--planner-model MODEL] [--verifier-model MODEL] [--arbiter-model MODEL] [--dry-run]
+node bin/loop.js decompose (--goal <spec.md> | --project <file-or-prose> --out <dir>) --target <folder> [--rounds N] [--map-budget CHARS] [--planner-model MODEL] [--verifier-model MODEL] [--arbiter-model MODEL]
 node bin/loop.js queue --file <queue.json> [--mode <manual|autonomous>] [--max-runs N] [--token-budget TOKENS] [--dry-run]
 node bin/loop.js batch --task <plan-1> --task <plan-2> --target <folder> --gate <gate.json> [--gate-retries M] [--pivot-candidates N] [--executor-model MODEL] [--executor-effort EFFORT] [--verifier-model MODEL] [--arbiter-model MODEL] [--arbiter-timeout MS] [--artifact-root DIRECTORY] [--concurrency N] [--token-budget TOKENS] [--rounds N] [--round N ...] [--unit-kind KIND] [--unit-id ID ...] [--perspective NAME ...] [--depends-on CHILD=PARENT ...] [--port PORT] [--open] [--no-dashboard] [--quiet]
 node bin/loop.js batch --campaign <campaign.json> [--arbiter-timeout MS] [--artifact-root DIRECTORY] [--port PORT] [--open] [--no-dashboard] [--quiet]
@@ -54,9 +55,9 @@ node bin/loop.js help
 ```
 
 The corresponding plugin commands are `/uroboros:run`, `/uroboros:mutate`, `/uroboros:plan`,
-`/uroboros:queue`, `/uroboros:batch`, `/uroboros:status`, `/uroboros:dashboard`,
-`/uroboros:publish`, `/uroboros:prune`, `/uroboros:doctor`, `/uroboros:setup`,
-`/uroboros:init`, and `/uroboros:help`. Install them with
+`/uroboros:decompose`, `/uroboros:queue`, `/uroboros:batch`, `/uroboros:status`,
+`/uroboros:dashboard`, `/uroboros:publish`, `/uroboros:prune`, `/uroboros:doctor`,
+`/uroboros:setup`, `/uroboros:init`, and `/uroboros:help`. Install them with
 `/plugin marketplace add <absolute-clone-path>` and `/plugin install uroboros@uroboros`.
 
 `loop plan` runs a three-way STORM read-only against the target: Codex, Cursor and Claude
@@ -67,6 +68,16 @@ Initial planning generates three distinct-perspective candidates and selects amo
 that drafted successfully; no mechanical gate judges a plan, the seats do. Use `--candidates 1` for the previous single-draft behavior. A FRESH
 pivot uses the same process with the debate ledger and defaults to three candidates; configure
 that count with `--pivot-candidates` (1–5).
+
+`loop decompose` runs the same three-seat debate one level up or down the decomposition
+spine. `--goal <spec.md> --target <folder>` debates one goal spec directly into the
+loop-ready task units (`plan.md`/`gate.json` pairs plus a `queue.json`) it converges to,
+written beside the goal spec under a `tasks/` directory — this mode is live. `--project
+<file-or-prose> --out <dir> --target <folder>` is parsed today but not yet implemented; it
+currently exits nonzero with a message naming the next increment. In both modes, `--map-budget`
+bounds the characters spent on the repo map handed to the seats (default 12000), and every
+task's `gate.json` commands are recorded evidence only: the harness runs them once per round
+and no exit code passes or fails the change.
 
 `--help` and `-h` remain aliases for `help`.
 

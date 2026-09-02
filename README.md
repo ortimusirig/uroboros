@@ -176,12 +176,13 @@ board opens on runs that need attention (still running, stopped somewhere a pers
 decide, or finished with the two verifier seats disagreeing) rather than on everything, with
 Active, Today and All beside it.
 
-After plugin installation, these are the thirteen namespaced slash commands:
+After plugin installation, these are the fourteen namespaced slash commands:
 
 ```text
 /uroboros:run
 /uroboros:mutate
 /uroboros:plan
+/uroboros:decompose
 /uroboros:queue
 /uroboros:batch
 /uroboros:status
@@ -206,6 +207,7 @@ usable plan before spending tokens.
 node bin/loop.js run --task plan.md --target . --gate gate.json
 node bin/loop.js mutate --target . --base HEAD   # which added lines does no test depend on?
 node bin/loop.js plan --goal "Add the requested behavior" --target . --out campaign/generated/example
+node bin/loop.js decompose --goal goals/G1-demo/spec.md --target .
 ```
 
 For the full command surface, every flag, campaign shapes, outcomes, and configuration, see

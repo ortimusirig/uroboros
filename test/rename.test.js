@@ -272,6 +272,7 @@ test('commands documented in docs/usage.md are accepted by the real parser', () 
     ['run', ['run', '--task', 'write docs', '--target', '.', '--gate', 'gate.json']],
     ['mutate', ['mutate', '--target', '.']],
     ['plan', ['plan', '--goal', 'write docs', '--target', '.', '--out', 'generated']],
+    ['decompose', ['decompose', '--goal', 'write docs', '--target', '.']],
     ['queue', ['queue', '--file', 'queue.json']],
     ['batch', ['batch', '--task', 'write docs', '--target', '.', '--gate', 'gate.json']],
     ['status', ['status', 'run-directory']],

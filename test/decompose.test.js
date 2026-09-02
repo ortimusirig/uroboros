@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { parseTaggedPair, runDecomposeGoal, topologicalOrder } from '../src/decompose.js';
 import { RepairableArtifactError } from '../src/conversation.js';
 import { VERIFIED_SUPERPOWERS } from '../fixtures/verified-superpowers.mjs';
+import { parseArgs } from '../src/args.js';
 
 function goalFixture() {
   const root = mkdtempSync(join(tmpdir(), 'decomp-'));
@@ -191,4 +192,15 @@ test('a task depending on itself is named honestly, not "T1 and undefined depend
     () => topologicalOrder([{ id: 'T1', name: 'T1-solo', dependsOn: ['T1'], gate: [] }]),
     (error) => error instanceof RepairableArtifactError && /depends on itself/.test(error.message),
   );
+});
+
+test('decompose args: goal mode', () => {
+  const opts = parseArgs(['decompose', '--goal', 'g/spec.md', '--target', '.', '--map-budget', '5000']);
+  assert.deepEqual({ command: opts.command, mode: opts.mode, goal: opts.goal, mapBudget: opts.mapBudget },
+    { command: 'decompose', mode: 'goal', goal: 'g/spec.md', mapBudget: 5000 });
+});
+test('decompose args: exactly one of --goal/--project', () => {
+  assert.throws(() => parseArgs(['decompose', '--target', '.']), /--goal or --project/);
+  assert.throws(() => parseArgs(['decompose', '--goal', 'a', '--project', 'b', '--target', '.']), /--goal or --project/);
+  assert.throws(() => parseArgs(['decompose', '--goal', 'a', '--target', '.', '--out', 'o']), /--out/);
 });

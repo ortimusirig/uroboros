@@ -287,6 +287,50 @@ export function parseArgs(argv) {
       dryRun: values['dry-run'] === true,
     };
   }
+  if (command === 'decompose') {
+    const { values } = nodeParseArgs({
+      args: argv.slice(1),
+      options: {
+        goal: { type: 'string' },
+        project: { type: 'string' },
+        target: { type: 'string' },
+        out: { type: 'string' },
+        rounds: { type: 'string' },
+        'map-budget': { type: 'string' },
+        'planner-model': { type: 'string' },
+        'verifier-model': { type: 'string' },
+        'arbiter-model': { type: 'string' },
+      },
+      allowPositionals: false,
+      strict: true,
+    });
+    const hasGoal = values.goal !== undefined;
+    const hasProject = values.project !== undefined;
+    if (hasGoal === hasProject) {
+      throw new Error('decompose requires exactly one of --goal or --project');
+    }
+    if (!values.target) throw new Error('missing required option: --target');
+    if (hasGoal && values.out !== undefined) {
+      throw new Error('--out is not allowed with --goal; a goal decomposes beside its own spec');
+    }
+    if (hasProject && values.out === undefined) {
+      throw new Error('missing required option: --out (required with --project)');
+    }
+    return {
+      command,
+      mode: hasGoal ? 'goal' : 'project',
+      ...(hasGoal ? { goal: values.goal } : { project: values.project }),
+      target: values.target,
+      ...(values.out === undefined ? {} : { out: values.out }),
+      mapBudget: strictInt(values['map-budget'], 12000, 1, Number.MAX_SAFE_INTEGER),
+      ...(values.rounds === undefined ? {} : {
+        rounds: strictInt(values.rounds, undefined, 1, Number.MAX_SAFE_INTEGER),
+      }),
+      ...(values['planner-model'] === undefined ? {} : { plannerModel: values['planner-model'] }),
+      ...(values['verifier-model'] === undefined ? {} : { verifierModel: values['verifier-model'] }),
+      ...(values['arbiter-model'] === undefined ? {} : { arbiterModel: values['arbiter-model'] }),
+    };
+  }
   if (command === 'mutate') {
     const { values } = nodeParseArgs({
       args: argv.slice(1),

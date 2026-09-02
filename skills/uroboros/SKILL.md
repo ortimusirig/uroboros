@@ -163,12 +163,13 @@ hazard is reuse of a unit id in the flat scratch root.
 
 Install the plugin from a clone by running `node install.mjs`, then paste the two exact Claude
 Code commands it prints: `/plugin marketplace add <absolute-clone-path>` followed by
-`/plugin install uroboros@uroboros`. The plugin registers these thirteen namespaced slash
+`/plugin install uroboros@uroboros`. The plugin registers these fourteen namespaced slash
 commands while the direct Node CLI remains available:
 
 - `/uroboros:run`
 - `/uroboros:mutate`
 - `/uroboros:plan`
+- `/uroboros:decompose`
 - `/uroboros:queue`
 - `/uroboros:batch`
 - `/uroboros:status`
@@ -190,6 +191,7 @@ The direct CLI surface is:
     node bin/loop.js run ...
     node bin/loop.js mutate ...
     node bin/loop.js plan ...
+    node bin/loop.js decompose ...
     node bin/loop.js queue ...
     node bin/loop.js batch ...
     node bin/loop.js status ...
@@ -217,6 +219,15 @@ it beside the unchanged gate and verifier verdicts.
 To debate a goal into a mechanically checked plan and gate without modifying the target:
 
     node bin/loop.js plan --goal <prose-or-file> --target <folder> --out <folder> [--rounds N] [--planner-model MODEL] [--verifier-model MODEL] [--arbiter-model MODEL] [--dry-run]
+
+To debate one goal into the loop-ready task units it converges to, or a project into the goals
+that make it up:
+
+    node bin/loop.js decompose (--goal <spec.md> | --project <file-or-prose> --out <dir>) --target <folder> [--rounds N] [--map-budget CHARS] [--planner-model MODEL] [--verifier-model MODEL] [--arbiter-model MODEL]
+
+`--project` is parsed but not yet implemented; it currently exits nonzero. In both modes, each
+task's `gate.json` commands are recorded evidence only: the harness runs them once per round and
+no exit code passes or fails the change.
 
 For an ordered queue whose approved units should land in the current clean Git worktree:
 
