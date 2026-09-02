@@ -956,3 +956,60 @@ test('acceptance waits for the whole queue file: a stop short of the last unit n
     assert.equal(result.stop.kind, 'final-review');
   } finally { fixture.cleanup(); }
 });
+
+test('an empty queue file never triggers a vacuous goal acceptance', async () => {
+  // units.every(...) over an empty array is vacuously true: without a
+  // guard, an empty queue.json plus --accept-goal would ask Claude to close
+  // the goal on the strength of nothing this invocation ran.
+  const directory = mkdtempSync(join(process.cwd(), '.ccc-test-empty-queue-'));
+  const target = join(directory, 'target');
+  mkdirSync(target);
+  const file = join(directory, 'queue.json');
+  writeFileSync(file, '[]');
+  const logPath = join(directory, 'queue-log.jsonl');
+  writeFileSync(logPath, `${JSON.stringify({ name: 'unrelated', landed: true })}\n`);
+  try {
+    const runtime = fakeRuntime([]);
+    const result = await runQueue({
+      file,
+      target,
+      acceptGoalSpec: 'G1/spec.md',
+      dependencies: runtime.dependencies,
+    });
+    assert.equal(runtime.acceptances.length, 0,
+      'nothing landed under this queue file; there is nothing to accept');
+    assert.equal(result.stop, null);
+    assert.doesNotMatch(result.summary, /Goal accepted/);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('an unreadable queue log stops a requested acceptance instead of skipping it silently', async () => {
+  const fixture = makeFixture(1);
+  try {
+    const runtime = fakeRuntime([reviewReady('run-1')]);
+    const readError = Object.assign(
+      new Error('EISDIR: illegal operation on a directory, read'),
+      { code: 'EISDIR' },
+    );
+    const result = await runQueue({
+      file: fixture.file,
+      target: fixture.target,
+      acceptGoalSpec: 'G1/spec.md',
+      dependencies: {
+        ...runtime.dependencies,
+        readQueueLog: () => { throw readError; },
+      },
+    });
+    assert.equal(runtime.acceptances.length, 0,
+      'completeness cannot be confirmed without reading the log, so acceptance never runs');
+    assert.equal(result.stop.kind, 'goal-acceptance');
+    assert.match(result.stop.reason, /never achieved unseen/);
+    assert.match(result.stop.reason, /EISDIR/);
+    // The unit itself landed; an unreadable log at the acceptance step must
+    // not be confused with the landing having failed.
+    assert.equal(runtime.landings.length, 1);
+    assert.equal(readLog(fixture.logPath)[0].landed, true);
+  } finally { fixture.cleanup(); }
+});

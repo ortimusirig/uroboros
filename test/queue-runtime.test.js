@@ -482,11 +482,20 @@ test('judgeGoalAcceptance hands Claude the spec, constitution, aggregate diff, a
     });
 
     // The base is the PARENT of the EARLIEST landed commit, so a goal finished
-    // across several invocations still gets its complete aggregate diff.
-    assert.deepEqual(calls, [{
-      bin: 'git',
-      args: ['-C', resolve(workspace.target), 'diff', 'aaaa111^..HEAD'],
-    }]);
+    // across several invocations still gets its complete aggregate diff. The
+    // parent is probed first so a root-commit base is diffed from the
+    // empty tree instead of failing (Minor 1); this fixture's base has a
+    // parent, so the probe succeeds and the diff still runs from `base^`.
+    assert.deepEqual(calls, [
+      {
+        bin: 'git',
+        args: ['-C', resolve(workspace.target), 'rev-parse', '--verify', '--quiet', 'aaaa111^'],
+      },
+      {
+        bin: 'git',
+        args: ['-C', resolve(workspace.target), 'diff', 'aaaa111^..HEAD'],
+      },
+    ]);
     assert.equal(requests.length, 1);
     assert.equal(requests[0].type, 'acceptance');
     assert.match(requests[0].goalSpec, /Deliver the capability/);
@@ -548,5 +557,89 @@ test('goal acceptance refuses to judge a goal with no landed commit trail', asyn
     assert.match(judgement.reasoning, /no landed commit/i);
     assert.equal(arbiterCalls, 0, 'there is nothing first-hand to read, so nothing is asked');
     assert.equal(gitCalls, 0);
+  } finally { workspace.cleanup(); }
+});
+
+test('goal acceptance refuses to judge a goal with a partial commit trail', async () => {
+  // One landed row carries its commit; a second landed row (a pre-upgrade log
+  // line, or a race) does not. Judging anyway would diff only the recorded
+  // commit and silently omit the unrecorded unit's work from what Claude reads.
+  const workspace = goalWorkspace();
+  try {
+    writeFileSync(workspace.logPath, `${[
+      JSON.stringify({ name: 'unit-1', landed: true, commit: 'aaaa111' }),
+      JSON.stringify({ name: 'unit-2', landed: true }),
+    ].join('\n')}\n`);
+    let arbiterCalls = 0;
+    let gitCalls = 0;
+    const judgement = await judgeGoalAcceptance(workspace, {
+      runCommand: async () => { gitCalls++; return { code: 0, stdout: '', stderr: '' }; },
+      arbiter: async () => { arbiterCalls++; return { approved: true, reasoning: 'sure' }; },
+    });
+    assert.equal(judgement.approved, null);
+    assert.match(judgement.reasoning, /partial trail|no recorded commit/);
+    assert.match(judgement.reasoning, /unit-2/);
+    assert.equal(arbiterCalls, 0, 'a partial trail is refused before asking Claude anything');
+    assert.equal(gitCalls, 0, 'a partial trail is refused before reading any diff');
+    assert.deepEqual(judgement.findings, []);
+    assert.deepEqual(judgement.usage, EMPTY_USAGE);
+  } finally { workspace.cleanup(); }
+});
+
+test('goal acceptance judges a goal whose base is the repository root commit', async () => {
+  const workspace = goalWorkspace();
+  try {
+    const root = workspace.target;
+    mkdirSync(root, { recursive: true });
+    const git = (...args) => execFileSync('git', ['-C', root, ...args], {
+      stdio: 'pipe', encoding: 'utf8',
+    });
+    git('init', '-q');
+    git('config', 'user.email', 'queue-runtime@example.test');
+    git('config', 'user.name', 'uro queue test');
+    writeFileSync(join(root, 'capability.txt'), 'the delivered capability\n');
+    git('add', '--', 'capability.txt');
+    git('commit', '-qm', 'queue: land unit-1 (run-1)');
+    const rootCommit = git('rev-parse', 'HEAD').trim();
+
+    writeFileSync(workspace.logPath,
+      `${JSON.stringify({ name: 'unit-1', landed: true, commit: rootCommit })}\n`);
+
+    const requests = [];
+    // No injected runCommand: this exercises the real Git probe-and-diff path
+    // against a repo whose FIRST commit is the landed one.
+    const judgement = await judgeGoalAcceptance(workspace, {
+      arbiter: async ({ request }) => {
+        requests.push(request);
+        return { approved: true, reasoning: 'the root commit delivers the goal' };
+      },
+    });
+
+    assert.equal(requests.length, 1,
+      'a goal whose landed unit is the repository root commit must still be judged');
+    assert.match(requests[0].diff, /capability\.txt/);
+    assert.match(requests[0].diff, /the delivered capability/);
+    assert.equal(judgement.approved, true);
+  } finally { workspace.cleanup(); }
+});
+
+test('goal acceptance returns approved:null instead of throwing when the aggregate diff cannot be read', async () => {
+  const workspace = goalWorkspace();
+  try {
+    writeFileSync(workspace.logPath,
+      `${JSON.stringify({ name: 'unit-1', landed: true, commit: 'aaaa111' })}\n`);
+    let arbiterCalls = 0;
+    const judgement = await judgeGoalAcceptance(workspace, {
+      runCommand: async (bin, args) => (args.includes('rev-parse')
+        ? { code: 0, stdout: '', stderr: '' }
+        : { code: 128, stdout: '', stderr: 'fatal: bad revision' }),
+      arbiter: async () => { arbiterCalls++; return { approved: true, reasoning: 'sure' }; },
+    });
+    assert.equal(judgement.approved, null);
+    assert.match(judgement.reasoning, /cannot read the aggregate diff for the goal/);
+    assert.match(judgement.reasoning, /bad revision/);
+    assert.equal(arbiterCalls, 0, 'an unreadable diff is never handed to the arbiter');
+    assert.deepEqual(judgement.findings, []);
+    assert.deepEqual(judgement.usage, EMPTY_USAGE);
   } finally { workspace.cleanup(); }
 });

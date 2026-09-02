@@ -140,12 +140,17 @@ function addTokens(total, next) {
 // Acceptance asks the log, not this invocation's counters: a goal split across
 // several queue runs (stop, resume, finish) is complete when every unit of the
 // queue file carries a landed row, whichever invocation landed it.
-function everyUnitLanded(units, logPath) {
+//
+// A read failure is not the same fact as an incomplete trail: incomplete
+// means a mid-goal stop, which is normal and silently skips acceptance; an
+// unreadable log means completeness can never be confirmed, which the caller
+// must treat as a stop, since the operator explicitly asked for acceptance.
+function everyUnitLanded(units, logPath, readQueueLog = readFileSync) {
   let text;
   try {
-    text = readFileSync(logPath, 'utf8');
-  } catch {
-    return false;
+    text = readQueueLog(logPath, 'utf8');
+  } catch (error) {
+    return { complete: false, unreadable: error?.message ?? String(error) };
   }
   const landed = new Set();
   for (const line of text.split(/\r?\n/)) {
@@ -154,7 +159,7 @@ function everyUnitLanded(units, logPath) {
     try { row = JSON.parse(line); } catch { continue; }
     if (isRecord(row) && row.landed === true && typeof row.name === 'string') landed.add(row.name);
   }
-  return units.every((unit) => landed.has(unit.name));
+  return { complete: units.every((unit) => landed.has(unit.name)) };
 }
 
 function questionsFrom(facts, assumed = false) {
@@ -318,6 +323,7 @@ export async function runQueue({
   const landDiff = dependencies.landDiff ?? missingDependency('landDiff');
   const judgeLanding = dependencies.judgeLanding ?? missingDependency('judgeLanding');
   const acceptGoal = dependencies.acceptGoal ?? missingDependency('acceptGoal');
+  const readQueueLog = dependencies.readQueueLog ?? readFileSync;
   const appendLog = dependencies.appendLog ?? appendQueueLog;
   const now = dependencies.now ?? (() => Date.now());
 
@@ -580,50 +586,65 @@ export async function runQueue({
   }
 
   // Claude closes the goal, not the queue. Acceptance runs only when the
-  // operator asked for it, nothing stopped, and the log shows every unit of
-  // this queue file landed — a goal is never achieved unseen, and a partly
-  // landed goal has nothing to accept. Landed commits are never rolled back:
-  // a refusal is information for the operator, exactly like a landing refusal.
+  // operator asked for it, nothing stopped, the queue file names at least one
+  // unit, and the log shows every one of them landed — a goal is never
+  // achieved unseen, and a partly landed (or empty) goal has nothing to
+  // accept. Landed commits are never rolled back: a refusal is information
+  // for the operator, exactly like a landing refusal.
   let goalAcceptance = null;
-  if (acceptGoalSpec !== undefined && stop === null
-    && everyUnitLanded(queue.units, queue.logPath)) {
-    let acceptance;
-    try {
-      acceptance = await acceptGoal({
-        goalSpecPath: resolve(acceptGoalSpec),
-        target: resolve(target),
-        logPath: queue.logPath,
-      }) ?? { approved: null, reasoning: 'goal acceptance returned nothing' };
-    } catch (error) {
-      acceptance = { approved: null, reasoning: error?.message ?? String(error) };
-    }
-    // The taxi meter runs whether or not you arrive: the acceptance judgement
-    // spends real tokens on every path, approved or refused or unavailable.
-    const acceptanceTokens = usageTokens(acceptance.usage);
-    totalTokens = addTokens(totalTokens, acceptanceTokens);
-    goalAcceptance = {
-      approved: typeof acceptance.approved === 'boolean' ? acceptance.approved : null,
-      reasoning: acceptance.reasoning ?? '',
-      ...(Array.isArray(acceptance.findings) && acceptance.findings.length > 0
-        ? { findings: acceptance.findings }
-        : {}),
-    };
-    if (goalAcceptance.approved !== true) {
+  if (acceptGoalSpec !== undefined && stop === null && queue.units.length > 0) {
+    const landedState = everyUnitLanded(queue.units, queue.logPath, readQueueLog);
+    if (landedState.unreadable !== undefined) {
+      // Unreadable is not the same as incomplete: an incomplete trail is a
+      // normal mid-goal stop that silently skips acceptance, but the operator
+      // asked for the goal to be closed, and completeness can never be
+      // confirmed from a log that cannot be read — that is a stop, not silence.
       stop = {
         kind: 'goal-acceptance',
-        reason: goalAcceptance.approved === false
-          ? `Claude refused the goal: ${goalAcceptance.reasoning || '(no reasoning recorded)'}`
-          : "Claude's goal acceptance was unavailable — a goal is never achieved "
-            + `unseen: ${goalAcceptance.reasoning || '(no detail)'}`,
+        reason: 'cannot read queue-log.jsonl to verify the goal is complete — a goal is '
+          + `never achieved unseen: ${landedState.unreadable}`,
         outcome: null,
         questions: [],
       };
+    } else if (landedState.complete) {
+      let acceptance;
+      try {
+        acceptance = await acceptGoal({
+          goalSpecPath: resolve(acceptGoalSpec),
+          target: resolve(target),
+          logPath: queue.logPath,
+        }) ?? { approved: null, reasoning: 'goal acceptance returned nothing' };
+      } catch (error) {
+        acceptance = { approved: null, reasoning: error?.message ?? String(error) };
+      }
+      // The taxi meter runs whether or not you arrive: the acceptance judgement
+      // spends real tokens on every path, approved or refused or unavailable.
+      const acceptanceTokens = usageTokens(acceptance.usage);
+      totalTokens = addTokens(totalTokens, acceptanceTokens);
+      goalAcceptance = {
+        approved: typeof acceptance.approved === 'boolean' ? acceptance.approved : null,
+        reasoning: acceptance.reasoning ?? '',
+        ...(Array.isArray(acceptance.findings) && acceptance.findings.length > 0
+          ? { findings: acceptance.findings }
+          : {}),
+      };
+      if (goalAcceptance.approved !== true) {
+        stop = {
+          kind: 'goal-acceptance',
+          reason: goalAcceptance.approved === false
+            ? `Claude refused the goal: ${goalAcceptance.reasoning || '(no reasoning recorded)'}`
+            : "Claude's goal acceptance was unavailable — a goal is never achieved "
+              + `unseen: ${goalAcceptance.reasoning || '(no detail)'}`,
+          outcome: null,
+          questions: [],
+        };
+      }
+      appendLog(queue.logPath, {
+        goalAcceptance,
+        tokens: acceptanceTokens,
+        ...(stop === null ? {} : { stopReason: stop.reason }),
+      });
     }
-    appendLog(queue.logPath, {
-      goalAcceptance,
-      tokens: acceptanceTokens,
-      ...(stop === null ? {} : { stopReason: stop.reason }),
-    });
   }
 
   const remaining = queue.units.length - attemptedCount;

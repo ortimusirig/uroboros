@@ -12,6 +12,10 @@ import { parseAcceptanceJudgement, parseLandingJudgement, runArbiter } from './a
 import { EMPTY_USAGE } from './usage.js';
 
 const GIT_TIMEOUT_MS = 30_000;
+// Git's well-known empty-tree object hash — valid in any repository without
+// needing to exist as a stored object — used as the acceptance diff's base
+// when the earliest landed commit is the repository root and so has no `^`.
+const EMPTY_TREE_SHA = '4b825dc642cb6eb9a060e54bf8d69288fbee4904';
 const DEFAULT_LOOP_PATH = fileURLToPath(new URL('../bin/loop.js', import.meta.url));
 
 function launchEnvironment(env) {
@@ -376,8 +380,10 @@ function readQueueLogRows(logPath) {
 // constitution when the project has one, and the aggregate diff of everything
 // that landed, first-hand, and judges whether the project now delivers the
 // goal. The base is the PARENT of the earliest landed commit in the log, so a
-// goal finished across several queue invocations is still judged whole. An
-// unreachable or unreadable judgement returns approved: null; the queue treats
+// goal finished across several queue invocations is still judged whole. A
+// landed row with no recorded commit would silently narrow that diff, so the
+// trail is refused rather than judged partial. An unreachable or unreadable
+// judgement — Claude's or Git's — returns approved: null; the queue treats
 // anything but an explicit yes as a stop.
 export async function judgeGoalAcceptance({ goalSpecPath, target, logPath }, {
   arbiter = runArbiter,
@@ -389,6 +395,21 @@ export async function judgeGoalAcceptance({ goalSpecPath, target, logPath }, {
   };
   const resolvedTarget = resolve(target);
   const queueLog = readQueueLogRows(logPath);
+  // Any landed row without a usable commit would be silently missing from the
+  // diff below — queue.js's own completeness check counts it landed, so a
+  // partial trail must refuse to be judged rather than approve on a diff that
+  // quietly omits that unit's work.
+  const unrecordedLanding = queueLog.find((row) => row.landed === true
+    && (typeof row.commit !== 'string' || row.commit === ''));
+  if (unrecordedLanding !== undefined) {
+    return {
+      approved: null,
+      reasoning: `landed unit "${unrecordedLanding.name}" has no recorded commit — the `
+        + 'aggregate diff would omit its work; refusing to judge a partial trail',
+      findings: [],
+      usage: EMPTY_USAGE,
+    };
+  }
   const base = queueLog.find((row) => row.landed === true
     && typeof row.commit === 'string' && row.commit !== '')?.commit;
   if (base === undefined) {
@@ -399,9 +420,35 @@ export async function judgeGoalAcceptance({ goalSpecPath, target, logPath }, {
       usage: EMPTY_USAGE,
     };
   }
-  const aggregate = await gitCommand(runCommand, [
-    '-C', resolvedTarget, 'diff', `${base}^..HEAD`,
-  ], {}, 'cannot read the aggregate diff for the goal');
+  let aggregate;
+  try {
+    // `<base>^` has nothing to name when base is the repository's root
+    // commit. Probe first so a goal whose earliest landed commit IS the
+    // repo's first commit is still judged, diffed from Git's empty-tree
+    // sentinel instead of failing outright.
+    const parentProbe = await runCommand('git', [
+      '-C', resolvedTarget, 'rev-parse', '--verify', '--quiet', `${base}^`,
+    ], { timeoutMs: GIT_TIMEOUT_MS });
+    const diffBase = parentProbe.code === 0 ? `${base}^` : EMPTY_TREE_SHA;
+    const diffResult = await runCommand('git', [
+      '-C', resolvedTarget, 'diff', `${diffBase}..HEAD`,
+    ], { timeoutMs: GIT_TIMEOUT_MS });
+    if (diffResult.code !== 0) {
+      throw new Error(messageFrom(diffResult, `git exited ${diffResult.code}`));
+    }
+    aggregate = diffResult;
+  } catch (error) {
+    // The doc above promises approved: null for anything unreachable or
+    // unreadable — Git failing to produce the diff is no more consent than
+    // the arbiter being unreachable is.
+    return {
+      approved: null,
+      reasoning: `cannot read the aggregate diff for the goal: `
+        + `${error instanceof Error ? error.message : String(error)}`,
+      findings: [],
+      usage: EMPTY_USAGE,
+    };
+  }
 
   const request = {
     type: 'acceptance',
