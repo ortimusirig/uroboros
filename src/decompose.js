@@ -33,6 +33,9 @@ import {
   buildArbiterPrompt,
   DEFAULT_ARBITER_MODEL,
   runArbiter,
+  SEAT_STATE_LAW,
+  seatReviewBlock,
+  seatReviewContext,
 } from './arbiter.js';
 import {
   CONVERSATION_DNA,
@@ -564,11 +567,12 @@ function goalAgreementPrompt({
     "You are the final arbiter of this goal's decomposition. Two seats have reviewed it against the goal specification; their responses are below, verbatim, severities included. No severity blocks by rule — weigh everything by judgement.",
     `The tier-2 incremental law, verbatim: "${TIER2_INCREMENTAL_LAW}".`,
     'Converge only when these tasks genuinely achieve THIS goal, each task is a self-contained increment of it, and both seats have said AGREE: yes. If either seat disagrees, or you are not satisfied, do not converge; say what must change.',
+    SEAT_STATE_LAW,
     'Schema: {"converged":true,"reason":"brief merits"} or {"converged":false,"reason":"...","feedback":"exact corrections for the next proposal"}.',
     goalContext({ goalSpec, constitution, repoMap }),
     `TASKS ${proposal}`,
-    `CODEX_REVIEW ${JSON.stringify(reviews?.codex ?? null, null, 2)}`,
-    `CURSOR_REVIEW ${JSON.stringify(reviews?.cursor ?? null, null, 2)}`,
+    seatReviewBlock('CODEX_REVIEW', reviews?.codex),
+    seatReviewBlock('CURSOR_REVIEW', reviews?.cursor),
   ].join('\n\n');
 }
 
@@ -977,18 +981,8 @@ export async function runDecomposeGoal({
         type: 'agreement',
         proposal: proposal.text,
         reviews: {
-          codex: {
-            agree: reviews.codex.agree,
-            suggestions: reviews.codex.suggestions,
-            questions: reviews.codex.questions,
-            content: reviews.codex.content,
-          },
-          cursor: {
-            agree: reviews.cursor.agree,
-            suggestions: reviews.cursor.suggestions,
-            questions: reviews.cursor.questions,
-            content: reviews.cursor.content,
-          },
+          codex: seatReviewContext(reviews.codex),
+          cursor: seatReviewContext(reviews.cursor),
         },
       }),
       capabilityPlanText: (proposal) => proposal.text,
@@ -1092,11 +1086,12 @@ function projectAgreementPrompt({
     "You are the final arbiter of this project's decomposition. Two seats have reviewed it against the project statement; their responses are below, verbatim, severities included. No severity blocks by rule — weigh everything by judgement.",
     `The tier-1 incremental law, verbatim: "${TIER1_INCREMENTAL_LAW}".`,
     'Converge only when these goals genuinely achieve THIS project, each goal is a self-contained increment of it ordered MVP-first, and both seats have said AGREE: yes. If either seat disagrees, or you are not satisfied, do not converge; say what must change.',
+    SEAT_STATE_LAW,
     'Schema: {"converged":true,"reason":"brief merits"} or {"converged":false,"reason":"...","feedback":"exact corrections for the next proposal"}.',
     projectContext({ project, constitution, repoMap }),
     `GOALS ${proposal}`,
-    `CODEX_REVIEW ${JSON.stringify(reviews?.codex ?? null, null, 2)}`,
-    `CURSOR_REVIEW ${JSON.stringify(reviews?.cursor ?? null, null, 2)}`,
+    seatReviewBlock('CODEX_REVIEW', reviews?.codex),
+    seatReviewBlock('CURSOR_REVIEW', reviews?.cursor),
   ].join('\n\n');
 }
 
@@ -1440,18 +1435,8 @@ export async function runDecomposeProject({
         type: 'agreement',
         proposal: proposal.text,
         reviews: {
-          codex: {
-            agree: reviews.codex.agree,
-            suggestions: reviews.codex.suggestions,
-            questions: reviews.codex.questions,
-            content: reviews.codex.content,
-          },
-          cursor: {
-            agree: reviews.cursor.agree,
-            suggestions: reviews.cursor.suggestions,
-            questions: reviews.cursor.questions,
-            content: reviews.cursor.content,
-          },
+          codex: seatReviewContext(reviews.codex),
+          cursor: seatReviewContext(reviews.cursor),
         },
       }),
       // Never null-checked by name — the engine only asks whether this

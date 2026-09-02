@@ -136,6 +136,33 @@ test('plan events render seats, failures, and verdicts in the one-line summary',
     }),
     'seat=codex disagree suggestions=S1,S2 questions=1 tier=goal round=2',
   );
+  // A stance that could not be READ is a measurement failure, not a judgement:
+  // printing it as `cursor=disagree` (63c788f) told the operator the seat
+  // objected when in truth nothing about the seat's stance was known.
+  assert.match(
+    detailFor({
+      stage: 'plan', type: 'round', tier: 'goal', planRound: 2,
+      codexState: 'disagree', cursorState: 'stance-unreadable',
+      codexAgrees: false, cursorAgrees: false, converged: false,
+    }),
+    /codex=disagree cursor=stance-unreadable/,
+  );
+  assert.match(
+    detailFor({
+      stage: 'plan', type: 'round', tier: 'goal', planRound: 3,
+      codexState: 'agree', cursorState: 'unavailable',
+      codexAgrees: true, cursorAgrees: false, converged: false,
+    }),
+    /codex=agree cursor=unavailable converged=false/,
+  );
+  // A journal line written before states existed still renders from its booleans.
+  assert.match(
+    detailFor({
+      stage: 'plan', type: 'round', tier: 'goal', planRound: 1,
+      codexAgrees: true, cursorAgrees: true, converged: true,
+    }),
+    /codex=agree cursor=agree converged=true/,
+  );
   assert.match(
     detailFor({ stage: 'plan', type: 'agreement', tier: 'goal', planRound: 3, converged: false, unjudged: false, reason: 'S1 stands' }),
     /not converged tier=goal round=3 reason=S1 stands/,

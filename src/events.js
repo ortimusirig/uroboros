@@ -469,7 +469,12 @@ export function detailFor(event) {
         + (event.reason ? ` reason=${oneLine(event.reason)}` : '');
     }
     if (event.type === 'round') {
-      return `codex=${event.codexAgrees ? 'agree' : 'disagree'} cursor=${event.cursorAgrees ? 'agree' : 'disagree'}`
+      // The seat STATE, never the boolean: `cursor=disagree` for a stance that
+      // could not be read (63c788f) printed a measurement failure as an
+      // objection. Journal lines written before states existed still render.
+      const stateOf = (state, agrees) => oneLine(state ?? (agrees ? 'agree' : 'disagree'));
+      return `codex=${stateOf(event.codexState, event.codexAgrees)}`
+        + ` cursor=${stateOf(event.cursorState, event.cursorAgrees)}`
         + ` converged=${oneLine(event.converged)}${tier}${round}`;
     }
     if (event.type === 'converged') {

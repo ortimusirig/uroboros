@@ -171,6 +171,70 @@ test('the standing law, the constitution, the repo map and the goal spec reach t
   } finally { fixture.cleanup(); }
 });
 
+test('the tier-2 agreement prompt names each seat state and quotes an unreadable answer raw', async () => {
+  // Every dogfood run's agreement prompt rendered the parsed review as JSON, so
+  // a stance that could not be READ arrived as `"agree": false` — a measurement
+  // failure dressed as a refusal on the merits. The judge must be told which it
+  // is, and for an unreadable stance must get the seat's own words to judge.
+  const fixture = goalFixture();
+  const unreadable = 'Reviewed the tasks and verified the cited seams. My user-facing answer is only the required block.';
+  let agreementPrompt = null;
+  const base = adaptersFor([proposalText(goodTasks, goodMd)]);
+  try {
+    const result = await runDecomposeGoal({
+      goalSpecPath: fixture.specPath, target: fixture.root, runId: 'd2-states', rounds: 1,
+      superpowers: VERIFIED_SUPERPOWERS,
+      adapters: {
+        ...base,
+        codexReview: async () => 'AGREE: no\nS1 P0: T2 is two tasks',
+        review: async () => unreadable,
+        runArbiter: async (args) => {
+          if (args.request?.type === 'agreement') agreementPrompt = args.prompt;
+          return base.runArbiter(args);
+        },
+      },
+    });
+    assert.equal(result.converged, false, 'an unreadable stance is never consent');
+    assert.ok(agreementPrompt, 'the agreement seat must actually have been invoked');
+    assert.match(agreementPrompt, /CODEX_REVIEW \(stance: disagree/);
+    assert.match(agreementPrompt, /CURSOR_REVIEW \(stance: stance-unreadable/);
+    assert.match(agreementPrompt, /S1 P0: T2 is two tasks|T2 is two tasks/,
+      'the readable seat still travels with its suggestions');
+    const cursorBlock = agreementPrompt.slice(agreementPrompt.indexOf('CURSOR_REVIEW'));
+    assert.ok(cursorBlock.includes(unreadable),
+      'the unreadable answer is quoted verbatim so the judge can read it itself');
+    assert.doesNotMatch(cursorBlock, /"agree"/,
+      'an unreadable stance must never be rendered as an agree boolean');
+    assert.doesNotMatch(cursorBlock, /stated AGREE: no/,
+      'a stance that could not be read was never stated');
+    assert.match(agreementPrompt, /stance-unreadable[\s\S]*never consent|never consent[\s\S]*stance-unreadable/,
+      'the prompt states what an unreadable stance means for convergence');
+  } finally { fixture.cleanup(); }
+});
+
+test('a seat that never ran is rendered unavailable to the agreement judge, not as disagreement', async () => {
+  const fixture = goalFixture();
+  let agreementPrompt = null;
+  const base = adaptersFor([proposalText(goodTasks, goodMd)]);
+  try {
+    await runDecomposeGoal({
+      goalSpecPath: fixture.specPath, target: fixture.root, runId: 'd2-unavailable', rounds: 1,
+      superpowers: VERIFIED_SUPERPOWERS,
+      adapters: {
+        ...base,
+        review: async () => { throw new Error('cursor review seat failed to launch'); },
+        runArbiter: async (args) => {
+          if (args.request?.type === 'agreement') agreementPrompt = args.prompt;
+          return base.runArbiter(args);
+        },
+      },
+    });
+    assert.match(agreementPrompt, /CURSOR_REVIEW \(stance: unavailable/);
+    const cursorBlock = agreementPrompt.slice(agreementPrompt.indexOf('CURSOR_REVIEW'));
+    assert.doesNotMatch(cursorBlock, /stated AGREE: no/);
+  } finally { fixture.cleanup(); }
+});
+
 test('a duplicate "## T<n>" section feeds back as a named contradiction, not a silent overwrite', () => {
   // Two "## T1:" headings: without the guard, the second body silently
   // replaces the first in the sections Map and id-set equality still passes
@@ -218,6 +282,29 @@ test('a converged project writes the manifest and per-goal specs verbatim, write
     assert.deepEqual(manifest.map((goal) => goal.id), ['G1', 'G2']);
     assert.match(readFileSync(join(out, 'goals', 'G1-mvp', 'spec.md'), 'utf8'),
       /Deliver the smallest true version\./);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('the tier-1 agreement prompt renders seat states the same way', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'decomp1-'));
+  let agreementPrompt = null;
+  const base = adaptersFor([goalProposal()]);
+  try {
+    await runDecomposeProject({
+      project: 'Build the demo product.', target: root, out: join(root, 'uro-project'),
+      runId: 'd1-states', rounds: 1, superpowers: VERIFIED_SUPERPOWERS,
+      adapters: {
+        ...base,
+        review: async () => 'I think these goals are fine',
+        runArbiter: async (args) => {
+          if (args.request?.type === 'agreement') agreementPrompt = args.prompt;
+          return base.runArbiter(args);
+        },
+      },
+    });
+    assert.match(agreementPrompt, /CURSOR_REVIEW \(stance: stance-unreadable/);
+    assert.match(agreementPrompt, /I think these goals are fine/);
+    assert.match(agreementPrompt, /CODEX_REVIEW \(stance: agree/);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 

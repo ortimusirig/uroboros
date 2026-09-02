@@ -79,6 +79,73 @@ function compact(value) {
   return JSON.stringify(value, null, 2);
 }
 
+/**
+ * Exactly what is known about one reviewing seat, in one of four states — never
+ * a boolean. `agree` and `disagree` are judgements the seat made; the other two
+ * are not judgements at all: `stance-unreadable` means the seat answered and no
+ * stance could be read in what it said, `unavailable` means the seat never ran.
+ * Collapsing either into `disagree` (as every prompt and the round line did
+ * until 63c788f) reports a measurement failure as an objection on the merits.
+ */
+export function seatStance(review) {
+  if (!review || typeof review !== 'object') return 'unavailable';
+  if (review.unavailable === true) return 'unavailable';
+  if (review.readable === false) return 'stance-unreadable';
+  return review.agree === true ? 'agree' : 'disagree';
+}
+
+// Read by every tier's agreement prompt, so a judge cannot be told one thing
+// about a plan's seats and another about a goal's.
+export const SEAT_STATE_LAW = [
+  'Each seat block below states that seat\'s STATE, which is one of exactly four:',
+  '- agree: the seat stated AGREE: yes.',
+  '- disagree: the seat stated AGREE: no.',
+  '- stance-unreadable: the seat answered, but no stance could be read in what it said. This is a MEASUREMENT failure, not a disagreement on the merits — the seat\'s raw answer is quoted in full beneath its block, and reading it is your job, not a parser\'s.',
+  '- unavailable: the seat never ran and said nothing at all.',
+  'Only an explicit agree is agreement: stance-unreadable and unavailable are never consent, and neither is a refusal you may attribute to the seat. When either one stands in the way of convergence, say so in your reason using its own name rather than calling that seat a disagreement.',
+].join('\n');
+
+/**
+ * The per-seat context every tier hands its agreement judge: the state first,
+ * then the structured findings, then the seat's own words. Shared so a plan's
+ * judge and a goal's judge are told the same kind of truth about their seats.
+ */
+export function seatReviewContext(review) {
+  return {
+    stance: seatStance(review),
+    agree: review?.agree === true,
+    suggestions: review?.suggestions ?? [],
+    questions: review?.questions ?? [],
+    content: review?.content ?? '',
+  };
+}
+
+/**
+ * One seat's review as the judge sees it: its state named, its structured
+ * findings intact, and — exactly when the stance could not be read — the seat's
+ * own answer verbatim and complete, because there the parsed fields represent
+ * nothing and the raw text is the only evidence of what was said.
+ */
+export function seatReviewBlock(label, review) {
+  const stance = review?.stance ?? seatStance(review);
+  if (stance === 'unavailable') {
+    return `${label} (stance: unavailable — this seat never ran and produced no review; its absence is not agreement and not a disagreement)`;
+  }
+  const findings = compact({
+    suggestions: review?.suggestions ?? [],
+    questions: review?.questions ?? [],
+  });
+  if (stance === 'stance-unreadable') {
+    return [
+      `${label} (stance: stance-unreadable — no AGREE line could be read in this seat's answer; judge the raw text yourself)`,
+      findings,
+      'RAW ANSWER, verbatim and complete — everything this seat said:',
+      String(review?.content ?? ''),
+    ].join('\n');
+  }
+  return `${label} (stance: ${stance} — this seat stated AGREE: ${stance === 'agree' ? 'yes' : 'no'})\n${findings}`;
+}
+
 export function buildArbiterPrompt(request = {}) {
   const common = [
     '# Claude arbiter seat',
@@ -190,12 +257,13 @@ export function buildArbiterPrompt(request = {}) {
     return [...common,
       'You are the final arbiter of plan convergence. Two seats have reviewed the proposal against the raw goal; their responses are below, verbatim, severities included. No severity blocks by rule — weigh everything by judgement.',
       'Converge only when the proposal genuinely achieves the goal and both seats have said AGREE: yes. If either seat disagrees, or you are not satisfied, do not converge; say what must change.',
+      SEAT_STATE_LAW,
       'Schema: {"converged":true,"reason":"brief merits"} or {"converged":false,"reason":"...","feedback":"exact corrections for the next proposal"}.',
       `GOAL ${String(request.goal ?? '')}`,
       `PROPOSAL ${String(request.proposal ?? '')}`,
       `GATE ${compact(request.gate ?? null)}`,
-      `CODEX_REVIEW ${compact(request.reviews?.codex ?? null)}`,
-      `CURSOR_REVIEW ${compact(request.reviews?.cursor ?? null)}`,
+      seatReviewBlock('CODEX_REVIEW', request.reviews?.codex),
+      seatReviewBlock('CURSOR_REVIEW', request.reviews?.cursor),
     ].join('\n\n');
   }
   if (request.type === 'capability') {

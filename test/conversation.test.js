@@ -221,6 +221,50 @@ test('an unlaunchable capability probe is skipped — never a crash, never a vet
   assert.deepEqual(result.capabilityVetoes, []);
 });
 
+test('the agreement judge is told a stance was unreadable, with the raw text', async () => {
+  // Every dogfood run's judge was told "Both seats say AGREE: no" when one seat's
+  // stance was in fact UNREADABLE. The request never carried the difference, so
+  // the judge could not weigh a measurement failure as anything but a refusal.
+  const { seats, strategy } = seatsFor({ proposals: ['GOOD'] });
+  seats.reviewCursor = async () => 'Looks great, ship it';
+  let seen;
+  strategy.agreementRequest = (ctx) => { seen = ctx; return { type: 'agreement' }; };
+  await runConversation({ runId: 'conv-agreement-context', tier: 'goal', seats, strategy, rounds: 1 });
+  assert.equal(seen.reviews.cursor.readable, false);
+  assert.match(seen.reviews.cursor.content, /Looks great/);
+  assert.equal(seen.reviews.codex.readable, true);
+});
+
+test('the round event carries each seat STATE, never a collapsed boolean', async () => {
+  // Peer-observed at 63c788f: an unreadable stance printed as `cursor=disagree`,
+  // collapsing a measurement failure into a judgement on the merits.
+  const { seats, strategy } = seatsFor({ proposals: ['GOOD'] });
+  seats.reviewCodex = async () => 'AGREE: no\nS1 P0: split it';
+  seats.reviewCursor = async () => 'Looks great, ship it';
+  const events = [];
+  await runConversation({
+    runId: 'conv-round-states', tier: 'goal', seats, strategy, rounds: 1,
+    reporter: (event) => events.push(event),
+  });
+  const roundEvent = events.find((event) => event.stage === 'plan' && event.type === 'round');
+  assert.equal(roundEvent.codexState, 'disagree');
+  assert.equal(roundEvent.cursorState, 'stance-unreadable');
+  assert.equal(roundEvent.cursorAgrees, false, 'the boolean stays for compatibility');
+
+  const absent = seatsFor({ proposals: ['GOOD'] });
+  absent.seats.reviewCursor = null;
+  const absentEvents = [];
+  await runConversation({
+    runId: 'conv-round-absent', tier: 'goal', seats: absent.seats, strategy: absent.strategy, rounds: 1,
+    reporter: (event) => absentEvents.push(event),
+  });
+  assert.equal(
+    absentEvents.find((event) => event.stage === 'plan' && event.type === 'round').cursorState,
+    'unavailable',
+    'a seat that never ran is absent, not a disagreement',
+  );
+});
+
 test('an unjudged agreement keeps the raw answer for diagnosis', async () => {
   // Dogfood run 3, round 3: the agreement came back ANSWERED-but-unparseable and
   // the answer was dropped on the floor, leaving nothing to diagnose. A parsed

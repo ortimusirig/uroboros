@@ -18,6 +18,7 @@ import {
   buildArbiterPrompt,
   DEFAULT_ARBITER_MODEL,
   runArbiter,
+  seatReviewContext,
 } from './arbiter.js';
 import {
   CONVERSATION_DNA,
@@ -876,18 +877,8 @@ export async function runPlan({
         proposal: proposal.plan,
         gate: proposal.gate,
         reviews: {
-          codex: {
-            agree: reviews.codex.agree,
-            suggestions: reviews.codex.suggestions,
-            questions: reviews.codex.questions,
-            content: reviews.codex.content,
-          },
-          cursor: {
-            agree: reviews.cursor.agree,
-            suggestions: reviews.cursor.suggestions,
-            questions: reviews.cursor.questions,
-            content: reviews.cursor.content,
-          },
+          codex: seatReviewContext(reviews.codex),
+          cursor: seatReviewContext(reviews.cursor),
         },
       }),
       capabilityPlanText: (proposal) => proposal.plan,

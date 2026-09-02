@@ -11,6 +11,7 @@ import {
   parseAgreementJudgement,
   parseCapabilityJudgement,
   parsePivotJudgement,
+  seatStance,
 } from './arbiter.js';
 import { reportEvent } from './events.js';
 import { addUsage, EMPTY_USAGE } from './usage.js';
@@ -494,6 +495,11 @@ export async function runConversation({
       suggestionIds,
       codexAgrees: reviews.codex.agree === true,
       cursorAgrees: reviews.cursor.agree === true,
+      // The booleans stay for compatibility with journals already on disk, but
+      // the STATE is the truth: a seat whose stance could not be read has not
+      // disagreed, and a seat that never ran has not spoken at all.
+      codexState: seatStance(reviews.codex),
+      cursorState: seatStance(reviews.cursor),
       converged,
     });
 
