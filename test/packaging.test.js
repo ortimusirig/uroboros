@@ -90,10 +90,12 @@ function assertPayloadIncludesEveryShippableTopLevelEntry() {
   // counted as shippable here.
   //
   // `campaign` holds plans and gates used to develop uroboros with uroboros; a plugin
-  // user installs the tool, not the workboard for building it. Field-findings notes are
+  // user installs the tool, not the workboard for building it; `uro-project` is the
+  // decompose-era workboard — goal specs and the constitution for the loop's own goals —
+  // and stays repository-only for the same reason. Field-findings notes are
   // working documents for the same reason. Both are deliberately repository-only, so
   // they are named here rather than added to PAYLOAD.
-  const repositoryOnly = new Set(['install.mjs', 'campaign', ...HARNESS_ARTIFACTS]);
+  const repositoryOnly = new Set(['install.mjs', 'campaign', 'uro-project', ...HARNESS_ARTIFACTS]);
   const workingDocument = (name) => /^FINDINGS-\d{4}-\d{2}-\d{2}-[\w-]+\.md$/.test(name);
   // Other test files create short-lived mkdtemp fixtures under os.tmpdir(). Constrained
   // runners can redirect that location into the checkout, and node --test runs those files

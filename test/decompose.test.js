@@ -7,6 +7,8 @@ import {
   parseTaggedPair, runDecomposeGoal, runDecomposeProject, topologicalOrder,
   validateDecomposeProjectRequest, writeTier1Artifacts,
 } from '../src/decompose.js';
+import { cursorSeatCall } from '../src/decompose.js';
+import { assertUsablePrompt } from '../src/verifier.js';
 import { RepairableArtifactError } from '../src/conversation.js';
 import { VERIFIED_SUPERPOWERS } from '../fixtures/verified-superpowers.mjs';
 import { parseArgs } from '../src/args.js';
@@ -409,4 +411,45 @@ test('decompose args: exactly one of --goal/--project', () => {
   assert.throws(() => parseArgs(['decompose', '--target', '.']), /--goal or --project/);
   assert.throws(() => parseArgs(['decompose', '--goal', 'a', '--project', 'b', '--target', '.']), /--goal or --project/);
   assert.throws(() => parseArgs(['decompose', '--goal', 'a', '--target', '.', '--out', 'o']), /--out/);
+});
+
+test('cursor seat instructions travel as a workspace file, never argv', async () => {
+  // The first dogfood decompose run (2026-09-02): every Cursor call was refused
+  // by assertUsablePrompt because the instructions carried double quotes on
+  // argv, and a three-seat debate silently ran with two. Instructions now ride
+  // INSTRUCTIONS.md in the seat workspace; argv carries only the pointer.
+  let body = null;
+  let argvPrompt = null;
+  const result = await cursorSeatCall({
+    files: { 'GOAL_SPEC.md': 'spec quoting "the law"\n' },
+    instructions: (workspace) => [
+      'obey the law verbatim: "no determinism anywhere a decision is made"',
+      'Return exactly <TASKS_JSON>[{"id":"T1"}]</TASKS_JSON>',
+      `Read the goal from ${join(workspace, 'GOAL_SPEC.md')}.`,
+    ],
+    target: '.',
+    verifierModel: 'test-model',
+    timeoutMs: 50,
+    verify: async ({ prompt }) => {
+      argvPrompt = prompt;
+      assertUsablePrompt(prompt);
+      const instructionsPath = prompt
+        .replace(/^Read /, '')
+        .replace(/ and obey it completely.*$/, '');
+      body = readFileSync(instructionsPath, 'utf8');
+      return { findings: 'seen', plan: '', usage: { inputTokens: 1 } };
+    },
+  });
+  assert.equal(result.findings, 'seen');
+  assert.doesNotMatch(argvPrompt, /"/);
+  assert.doesNotMatch(argvPrompt, /[\r\n]/);
+  assert.match(body, /"no determinism anywhere a decision is made"/);
+  assert.match(body, /\{"id":"T1"\}/);
+  assert.match(body, /GOAL_SPEC\.md/);
+});
+
+test('no decompose cursor call bypasses the guarded seam', () => {
+  const source = readFileSync(new URL('../src/decompose.js', import.meta.url), 'utf8');
+  assert.equal(source.includes('runVerifier({'), false,
+    'cursor prompts must go through cursorSeatCall, whose argv pointer satisfies assertUsablePrompt');
 });

@@ -49,7 +49,7 @@ import {
   verifySuperpowersSeats,
 } from './superpowers.js';
 import { resolveStageTimeouts } from './timeouts.js';
-import { runVerifier } from './verifier.js';
+import { assertUsablePrompt, runVerifier } from './verifier.js';
 
 // Cursor takes its prompt on argv, where a newline is not a line break, so the
 // standing law travels flattened into those single-line prompts — everything
@@ -629,18 +629,40 @@ async function productionGoalDraft(request) {
   return { text: String(result.lastMessage ?? ''), usage: result.usage };
 }
 
+// Cursor's argv prompt must satisfy assertUsablePrompt — one line, no double
+// quotes — because cursor-agent receives it on the Windows command line. Seat
+// instructions need both (JSON artifact examples, laws quoted verbatim), so
+// the full body travels as INSTRUCTIONS.md inside the seat workspace and argv
+// carries only the pointer. The 2026-09-02 dogfood decompose run showed what
+// happens otherwise: every Cursor call was refused before launch and a
+// three-seat debate silently ran with two.
+export async function cursorSeatCall({
+  files, instructions, target, verifierModel, timeoutMs, env, home, superpowersDir,
+  verify = runVerifier,
+}) {
+  return withSeatWorkspace(files, async (workspace) => {
+    writeFileSync(join(workspace, 'INSTRUCTIONS.md'), `${instructions(workspace).join('\n')}\n`);
+    const prompt = `Read ${join(workspace, 'INSTRUCTIONS.md')} and obey it completely; it is your entire seat instruction for this round.`;
+    assertUsablePrompt(prompt);
+    return verify({
+      cwd: target, prompt, model: verifierModel, timeoutMs, pass: 'plan', env, home, superpowersDir,
+    });
+  });
+}
+
 async function productionGoalCursorDraft({
   goalSpec, constitution, repoMap, target, round, verifierModel, timeoutMs,
   env, home, superpowersDir, feedback, failedTasks,
 }) {
-  return withSeatWorkspace({
-    'GOAL_SPEC.md': `${goalSpec}\n`,
-    'REPO_MAP.md': `${repoMap}\n`,
-    ...(constitution ? { 'CONSTITUTION.md': `${constitution}\n` } : {}),
-    ...(feedback ? { 'FEEDBACK.md': `${feedback}\n` } : {}),
-    ...(failedTasks ? { 'DISCARDED_TASKS.md': `${failedTasks}\n` } : {}),
-  }, async (workspace) => {
-    const prompt = [
+  const result = await cursorSeatCall({
+    files: {
+      'GOAL_SPEC.md': `${goalSpec}\n`,
+      'REPO_MAP.md': `${repoMap}\n`,
+      ...(constitution ? { 'CONSTITUTION.md': `${constitution}\n` } : {}),
+      ...(feedback ? { 'FEEDBACK.md': `${feedback}\n` } : {}),
+      ...(failedTasks ? { 'DISCARDED_TASKS.md': `${failedTasks}\n` } : {}),
+    },
+    instructions: (workspace) => [
       ONE_LINE_CONVERSATION_DNA,
       '# Cursor goal decomposition seat',
       'You are one of three seats decomposing the same goal independently. Draft from your own reading of the repository.',
@@ -656,12 +678,13 @@ async function productionGoalCursorDraft({
       GATE_IS_EVIDENCE,
       'Reply in plain chat text, not a plan tool artifact. If your client renders a plan tool anyway, ALSO print both tagged artifacts as chat text — the tags are the only thing read.',
       'Return exactly <TASKS_JSON>[{"id":"T1","name":"T1-<slug>","dependsOn":[],"gate":[{"bin":"...","args":["..."]}]}]</TASKS_JSON> then <TASKS_MD>## T1: <title> ...</TASKS_MD> and no prose outside them. Every id in TASKS_JSON needs exactly one matching "## T<n>:" section in TASKS_MD.',
-    ].join(' ');
-    const result = await runVerifier({
-      cwd: target, prompt, model: verifierModel, timeoutMs, pass: 'plan', env, home, superpowersDir,
-    });
-    return { text: `${result.findings ?? ''}\n${result.plan ?? ''}`, usage: result.usage };
+    ],
+    target, verifierModel, timeoutMs, env, home, superpowersDir,
   });
+  if (result.launchFailed || result.timedOut) {
+    throw new Error(`cursor draft seat ${result.timedOut ? 'timed out' : 'failed to launch'}`);
+  }
+  return { text: `${result.findings ?? ''}\n${result.plan ?? ''}`, usage: result.usage };
 }
 
 async function productionGoalCodexReview({
@@ -686,13 +709,14 @@ async function productionGoalCursorReview({
   goalSpec, constitution, repoMap, tasks, round, target, verifierModel, timeoutMs,
   env, home, superpowersDir,
 }) {
-  return withSeatWorkspace({
-    'GOAL_SPEC.md': `${goalSpec}\n`,
-    'REPO_MAP.md': `${repoMap}\n`,
-    'PROPOSED_TASKS.md': `${tasks}\n`,
-    ...(constitution ? { 'CONSTITUTION.md': `${constitution}\n` } : {}),
-  }, async (workspace) => {
-    const prompt = [
+  const result = await cursorSeatCall({
+    files: {
+      'GOAL_SPEC.md': `${goalSpec}\n`,
+      'REPO_MAP.md': `${repoMap}\n`,
+      'PROPOSED_TASKS.md': `${tasks}\n`,
+      ...(constitution ? { 'CONSTITUTION.md': `${constitution}\n` } : {}),
+    },
+    instructions: (workspace) => [
       ONE_LINE_CONVERSATION_DNA,
       '# Cursor goal decomposition review seat',
       `Read the goal specification from ${join(workspace, 'GOAL_SPEC.md')}, the proposed decomposition from ${join(workspace, 'PROPOSED_TASKS.md')}, and the repository survey from ${join(workspace, 'REPO_MAP.md')} (a ration, not a wall: read any file directly).`,
@@ -703,15 +727,13 @@ async function productionGoalCursorReview({
       `ROUND ${round}.`,
       'Respond in plain chat text,',
       ...reviewResponseContract(TIER2_AGREEMENT_MEANS),
-    ].join(' ');
-    const result = await runVerifier({
-      cwd: target, prompt, model: verifierModel, timeoutMs, pass: 'plan', env, home, superpowersDir,
-    });
-    if (result.launchFailed || result.timedOut) {
-      return { agree: false, readable: false, suggestions: [], questions: [], content: '', unavailable: true, usage: result.usage };
-    }
-    return { ...parseSeatReview(`${result.findings ?? ''}\n${result.plan ?? ''}`), usage: result.usage };
+    ],
+    target, verifierModel, timeoutMs, env, home, superpowersDir,
   });
+  if (result.launchFailed || result.timedOut) {
+    return { agree: false, readable: false, suggestions: [], questions: [], content: '', unavailable: true, usage: result.usage };
+  }
+  return { ...parseSeatReview(`${result.findings ?? ''}\n${result.plan ?? ''}`), usage: result.usage };
 }
 
 export function validateDecomposeGoalRequest({ goalSpecPath, target }) {
@@ -1121,14 +1143,15 @@ async function productionProjectCursorDraft({
   project, constitution, repoMap, target, round, verifierModel, timeoutMs,
   env, home, superpowersDir, feedback, failedGoals,
 }) {
-  return withSeatWorkspace({
-    'PROJECT.md': `${project}\n`,
-    'REPO_MAP.md': `${repoMap}\n`,
-    ...(constitution ? { 'CONSTITUTION.md': `${constitution}\n` } : {}),
-    ...(feedback ? { 'FEEDBACK.md': `${feedback}\n` } : {}),
-    ...(failedGoals ? { 'DISCARDED_GOALS.md': `${failedGoals}\n` } : {}),
-  }, async (workspace) => {
-    const prompt = [
+  const result = await cursorSeatCall({
+    files: {
+      'PROJECT.md': `${project}\n`,
+      'REPO_MAP.md': `${repoMap}\n`,
+      ...(constitution ? { 'CONSTITUTION.md': `${constitution}\n` } : {}),
+      ...(feedback ? { 'FEEDBACK.md': `${feedback}\n` } : {}),
+      ...(failedGoals ? { 'DISCARDED_GOALS.md': `${failedGoals}\n` } : {}),
+    },
+    instructions: (workspace) => [
       ONE_LINE_CONVERSATION_DNA,
       '# Cursor project decomposition seat',
       'You are one of three seats decomposing the same project independently. Draft from your own reading of the repository.',
@@ -1143,12 +1166,13 @@ async function productionProjectCursorDraft({
       'Every cited path and line must already exist in the target; verify each citation by reading before citing.',
       'Reply in plain chat text, not a plan tool artifact. If your client renders a plan tool anyway, ALSO print both tagged artifacts as chat text — the tags are the only thing read.',
       'Return exactly <GOALS_JSON>[{"id":"G1","slug":"<slug>","statement":"...","capability":"...","dependsOn":[],"rationale":"..."}]</GOALS_JSON> then <GOALS_MD>## G1: <title> ...</GOALS_MD> and no prose outside them. Every id in GOALS_JSON needs exactly one matching "## G<n>:" section in GOALS_MD.',
-    ].join(' ');
-    const result = await runVerifier({
-      cwd: target, prompt, model: verifierModel, timeoutMs, pass: 'plan', env, home, superpowersDir,
-    });
-    return { text: `${result.findings ?? ''}\n${result.plan ?? ''}`, usage: result.usage };
+    ],
+    target, verifierModel, timeoutMs, env, home, superpowersDir,
   });
+  if (result.launchFailed || result.timedOut) {
+    throw new Error(`cursor draft seat ${result.timedOut ? 'timed out' : 'failed to launch'}`);
+  }
+  return { text: `${result.findings ?? ''}\n${result.plan ?? ''}`, usage: result.usage };
 }
 
 async function productionProjectCodexReview({
@@ -1173,13 +1197,14 @@ async function productionProjectCursorReview({
   project, constitution, repoMap, goals, round, target, verifierModel, timeoutMs,
   env, home, superpowersDir,
 }) {
-  return withSeatWorkspace({
-    'PROJECT.md': `${project}\n`,
-    'REPO_MAP.md': `${repoMap}\n`,
-    'PROPOSED_GOALS.md': `${goals}\n`,
-    ...(constitution ? { 'CONSTITUTION.md': `${constitution}\n` } : {}),
-  }, async (workspace) => {
-    const prompt = [
+  const result = await cursorSeatCall({
+    files: {
+      'PROJECT.md': `${project}\n`,
+      'REPO_MAP.md': `${repoMap}\n`,
+      'PROPOSED_GOALS.md': `${goals}\n`,
+      ...(constitution ? { 'CONSTITUTION.md': `${constitution}\n` } : {}),
+    },
+    instructions: (workspace) => [
       ONE_LINE_CONVERSATION_DNA,
       '# Cursor project decomposition review seat',
       `Read the project statement from ${join(workspace, 'PROJECT.md')}, the proposed decomposition from ${join(workspace, 'PROPOSED_GOALS.md')}, and the repository survey from ${join(workspace, 'REPO_MAP.md')} (a ration, not a wall: read any file directly).`,
@@ -1190,15 +1215,13 @@ async function productionProjectCursorReview({
       `ROUND ${round}.`,
       'Respond in plain chat text,',
       ...reviewResponseContract(TIER1_AGREEMENT_MEANS),
-    ].join(' ');
-    const result = await runVerifier({
-      cwd: target, prompt, model: verifierModel, timeoutMs, pass: 'plan', env, home, superpowersDir,
-    });
-    if (result.launchFailed || result.timedOut) {
-      return { agree: false, readable: false, suggestions: [], questions: [], content: '', unavailable: true, usage: result.usage };
-    }
-    return { ...parseSeatReview(`${result.findings ?? ''}\n${result.plan ?? ''}`), usage: result.usage };
+    ],
+    target, verifierModel, timeoutMs, env, home, superpowersDir,
   });
+  if (result.launchFailed || result.timedOut) {
+    return { agree: false, readable: false, suggestions: [], questions: [], content: '', unavailable: true, usage: result.usage };
+  }
+  return { ...parseSeatReview(`${result.findings ?? ''}\n${result.plan ?? ''}`), usage: result.usage };
 }
 
 export function validateDecomposeProjectRequest({ project, target, out }) {

@@ -94,6 +94,47 @@ test('exporting detailFor preserves the exact heartbeat summary phrasing', () =>
   );
 });
 
+test('plan events render seats, failures, and verdicts in the one-line summary', () => {
+  // The 2026-09-02 dogfood run: a seat failed every call for 33 minutes and the
+  // printed stream never said so. The payloads carried the truth; the printer
+  // dropped it. These lines are the operator's only live view — pin them.
+  const storm = {
+    ts: 'T', runId: 'r', stage: 'plan', type: 'storm', tier: 'goal', planRound: 1,
+    drafts: [
+      { seat: 'codex', ok: true },
+      { seat: 'cursor', ok: false, error: 'verifier prompt must not contain a double quote' },
+      { seat: 'claude', ok: true },
+    ],
+  };
+  const stormLine = formatEventSummary(storm);
+  assert.match(stormLine, /codex:ok/);
+  assert.match(stormLine, /cursor:FAILED verifier prompt must not contain a double quote/);
+  assert.match(stormLine, /claude:ok/);
+
+  assert.equal(
+    detailFor({
+      stage: 'plan', type: 'review', tier: 'goal', planRound: 2, seat: 'cursor',
+      agree: false, readable: false, unavailable: true, suggestionIds: [], questionCount: 0,
+    }),
+    'seat=cursor UNAVAILABLE tier=goal round=2',
+  );
+  assert.equal(
+    detailFor({
+      stage: 'plan', type: 'review', tier: 'goal', planRound: 2, seat: 'codex',
+      agree: false, readable: true, suggestionIds: ['S1', 'S2'], questionCount: 1,
+    }),
+    'seat=codex disagree suggestions=S1,S2 questions=1 tier=goal round=2',
+  );
+  assert.match(
+    detailFor({ stage: 'plan', type: 'agreement', tier: 'goal', planRound: 3, converged: false, unjudged: false, reason: 'S1 stands' }),
+    /not converged tier=goal round=3 reason=S1 stands/,
+  );
+  assert.match(
+    detailFor({ stage: 'plan', type: 'finish', tier: 'goal', converged: false, reason: 'pivot-conclude', rounds: 3, pivot: 'conclude' }),
+    /NOT CONVERGED reason=pivot-conclude rounds=3 pivot=conclude/,
+  );
+});
+
 test('event construction validates declared pairs and campaign identity vocabulary', () => {
   assert.throws(() => createEvent({
     runId: 'bad-stage', stage: 'nonsense', type: 'start',

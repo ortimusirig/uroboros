@@ -434,6 +434,55 @@ export function detailFor(event) {
     return `${event.type} seat=${oneLine(event.seat)} gap=${oneLine(event.gapMs)}ms${interval}`
       + (event.reasoning ? ` reasoning=${oneLine(event.reasoning)}` : '');
   }
+  if (event.stage === 'plan') {
+    const round = event.planRound === undefined ? '' : ` round=${oneLine(event.planRound)}`;
+    const tier = event.tier === undefined ? '' : ` tier=${oneLine(event.tier)}`;
+    if (event.type === 'storm') {
+      const drafts = Array.isArray(event.drafts) ? event.drafts : [];
+      const seats = drafts
+        .map((draft) => (draft.ok
+          ? `${oneLine(draft.seat)}:ok`
+          : `${oneLine(draft.seat)}:FAILED ${oneLine(draft.error)}`))
+        .join(' ');
+      return `drafts${tier}${round} ${seats}`.trimEnd();
+    }
+    if (event.type === 'review') {
+      const state = event.unavailable === true
+        ? 'UNAVAILABLE'
+        : event.readable === false
+          ? 'unreadable'
+          : event.agree === true ? 'agree' : 'disagree';
+      const ids = Array.isArray(event.suggestionIds) && event.suggestionIds.length > 0
+        ? ` suggestions=${oneLine(event.suggestionIds.join(','))}`
+        : '';
+      const questions = event.questionCount
+        ? ` questions=${oneLine(event.questionCount)}`
+        : '';
+      return `seat=${oneLine(event.seat)} ${state}${ids}${questions}${tier}${round}`;
+    }
+    if (event.type === 'proposal') {
+      return `${event.ok ? 'composed' : 'FAILED'}${event.repair ? ` REPAIR ${oneLine(event.repair)}` : ''}${tier}${round}`;
+    }
+    if (event.type === 'agreement') {
+      return `${event.unjudged ? 'UNJUDGED' : event.converged ? 'converged' : 'not converged'}${tier}${round}`
+        + (event.reason ? ` reason=${oneLine(event.reason)}` : '');
+    }
+    if (event.type === 'round') {
+      return `codex=${event.codexAgrees ? 'agree' : 'disagree'} cursor=${event.cursorAgrees ? 'agree' : 'disagree'}`
+        + ` converged=${oneLine(event.converged)}${tier}${round}`;
+    }
+    if (event.type === 'converged') {
+      return `converged suggestions=${oneLine(event.suggestions)}${tier}${round}`;
+    }
+    if (event.type === 'finish') {
+      return `${event.converged ? 'converged' : 'NOT CONVERGED'} reason=${oneLine(event.reason)}`
+        + ` rounds=${oneLine(event.rounds)}${event.pivot ? ` pivot=${oneLine(event.pivot)}` : ''}${tier}`;
+    }
+    if (event.type === 'start') {
+      return `started${tier}${event.rounds !== undefined ? ` rounds=${oneLine(event.rounds)}` : ''}`
+        + (event.goalSpec ? ` goal=${oneLine(event.goalSpec)}` : '');
+    }
+  }
   if (event.stage === 'mutate') {
     if (event.type === 'start') {
       return `started base=${oneLine(event.base)} target=${oneLine(event.target)}`;
