@@ -99,7 +99,8 @@ loop queue --file <…/tasks/queue.json> --accept-goal <…/spec.md>      # exec
 
 - Tier 2 writes into the goal directory that contains the given `spec.md`
   (sibling `tasks/`). `--out` is invalid with `--goal`.
-- `--rounds`, `--candidates`, model flags, and timeouts mirror `loop plan`.
+- `--rounds`, model flags, and timeouts mirror `loop plan`. Decompose has no
+  `--candidates` flag of its own; `parseArgs` rejects it.
 - `--map-budget <chars>` bounds the repo-map ration (default 12000).
 - `--accept-goal` is explicit: without it, `loop queue` behaves exactly as
   today. No inference from file location.
@@ -186,11 +187,12 @@ When `loop queue --accept-goal <spec.md>` completes with **every unit landed**:
    finish) still gets its complete aggregate diff `git diff <base>..HEAD`.
    Acceptance runs when the log shows every unit of the queue file landed.
 2. Claude receives, first-hand: `spec.md`, `constitution.md` when present, the
-   aggregate diff, and the queue-log rows of this invocation — via a new
-   arbiter request type `acceptance` (prompt asks: is the project in a working
-   state that now delivers this goal's capability?). Reply schema
-   `{ approved: true|false, reasoning, findings[] }`, parsed like the landing
-   judgement: no readable boolean is never consent.
+   aggregate diff, and the full `queue-log.jsonl` trail — every row ever logged
+   under this queue file, not only this invocation's own rows (the safer
+   superset) — via a new arbiter request type `acceptance` (prompt asks: is
+   the project in a working state that now delivers this goal's capability?).
+   Reply schema `{ approved: true|false, reasoning, findings[] }`, parsed like
+   the landing judgement: no readable boolean is never consent.
 3. Approved → recorded in the queue summary and appended to `queue-log.jsonl`
    as `{ goalAcceptance: { approved, reasoning, findings } }`.
    Refused or unavailable → queue stop kind `goal-acceptance` with the

@@ -48,6 +48,15 @@ and its own log row. `--accept-goal` resolves relative to the current working di
 unlike the queue file's own `task`/`gate`/`goal`/`out` paths, which resolve relative to
 the queue file.
 
+A stopped goal resumes across invocations rather than restarting: trim the queue file
+down to the units that have not yet landed, then re-invoke `loop queue --accept-goal`.
+`queue-log.jsonl` already carries the landed rows and their commit SHAs, and the
+acceptance base spans every invocation, so a trimmed queue file never narrows what
+Claude reviews at the end. After a REFUSED acceptance specifically, append fix
+task-units to that same queue file (same log) and re-run. Re-running an untrimmed queue
+file re-executes units that already landed against a worktree where their diff is
+already applied, and typically fails with "applied diff touched no paths".
+
 ```
 node bin/loop.js run --task <plan-file-or-prose> --target <folder> --gate <gate.json> [--gate-retries M] [--pivot-candidates N] [--executor-model MODEL] [--executor-effort EFFORT] [--verifier-model MODEL] [--arbiter-model MODEL] [--arbiter-timeout MS] [--artifact-root DIRECTORY] [--mutate] [--port PORT] [--open] [--no-dashboard] [--quiet]
 node bin/loop.js mutate --target <folder> [--base REF] [--tests COMMAND] [--dry-run]
@@ -94,6 +103,10 @@ directly into the MVP-first, dependency-ordered goals that make it up, written u
 too, and emits no `gate.json` of its own; decompose each resulting goal with `--goal` to
 reach its task units. In both modes, `--map-budget` bounds the characters spent on the
 repo map handed to the seats (default 12000).
+
+A fresh `--out` written inside `--target` leaves its plan/gate/queue files untracked, so
+commit them (or keep `--out` outside the target) before `loop queue`, which requires a
+clean tree.
 
 `--help` and `-h` remain aliases for `help`.
 

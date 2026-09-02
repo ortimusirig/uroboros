@@ -232,10 +232,10 @@ that make it up:
     node bin/loop.js decompose (--goal <spec.md> | --project <file-or-prose> --out <dir>) --target <folder> [--rounds N] [--map-budget CHARS] [--planner-model MODEL] [--verifier-model MODEL] [--arbiter-model MODEL]
 
 `--project` debates a project into the MVP-first goals that make it up, written under
-`--out` as a `goals.json` manifest plus one `spec.md` per goal; it emits no `gate.json` of
-its own. Only `--goal` mode's task units carry a `gate.json`, and its commands are
-recorded evidence only: the harness runs them once per round and no exit code passes or
-fails the change.
+`--out` as a `goals/goals.json` manifest plus one `spec.md` per goal; it emits no
+`gate.json` of its own. Only `--goal` mode's task units carry a `gate.json`, and its
+commands are recorded evidence only: the harness runs them once per round and no exit
+code passes or fails the change.
 
 For an ordered queue whose approved units should land in the current clean Git worktree:
 
