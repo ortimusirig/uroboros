@@ -14,7 +14,7 @@ import { join } from 'node:path';
 import { runCampaign as executeCampaign } from '../src/campaign.js';
 import { exitCodeFor } from '../src/exit.js';
 import { runGate } from '../src/gate.js';
-import { MERGE_LEDGER_FILENAME, TEST_COUNT_FLOOR_BIN } from '../src/merge.js';
+import { MERGE_LEDGER_FILENAME, stageMergeChanges, TEST_COUNT_FLOOR_BIN } from '../src/merge.js';
 import { spawnCapture } from '../src/spawn.js';
 import { VERIFIED_SUPERPOWERS } from '../fixtures/verified-superpowers.mjs';
 
@@ -77,6 +77,44 @@ function fanInTasks(prefix = 'fanin') {
     },
   ];
 }
+
+test('stageMergeChanges omits harness artifacts from a merge commit while keeping real changes', async () => {
+  const repo = mkdtempSync(join(tmpdir(), 'stage-merge-'));
+  try {
+    await gitOk(repo, 'init', '-b', 'main');
+    writeFileSync(join(repo, 'real-work.txt'), 'baseline\n');
+    await gitOk(repo, 'add', '-A');
+    await gitOk(repo, '-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-m', 'baseline');
+
+    // Simulate the harness's own mid-run writes landing beside a legitimate executor
+    // change, exactly as they sit in an isolated worktree right before a merge commit —
+    // deliberately with NO git-exclude rule in play, so this proves stageMergeChanges is
+    // correct on its own rather than relying on isolation.js's best-effort ignore file.
+    writeFileSync(join(repo, 'TASK.md'), 'do the thing\n');
+    writeFileSync(join(repo, 'events.jsonl'), '{"seed":true}\n');
+    writeFileSync(join(repo, 'real-work.txt'), 'changed\n');
+
+    await stageMergeChanges(repo);
+
+    const staged = (await gitOk(repo, 'diff', '--cached', '--name-only')).split('\n').filter(Boolean);
+    assert.ok(!staged.includes('TASK.md'), 'TASK.md must never be staged for a merge commit');
+    assert.ok(!staged.includes('events.jsonl'), 'events.jsonl must never be staged for a merge commit');
+    assert.ok(staged.includes('real-work.txt'), 'a legitimate change must still be staged');
+
+    await gitOk(repo, '-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-m', 'merge resolution');
+    const committed = (await gitOk(repo, 'show', '--name-only', '--format=', 'HEAD'))
+      .split('\n').filter(Boolean);
+    assert.ok(!committed.includes('TASK.md'), 'TASK.md must not land in the merge commit');
+    assert.ok(!committed.includes('events.jsonl'), 'events.jsonl must not land in the merge commit');
+    assert.ok(committed.includes('real-work.txt'), 'the merge commit must include the real change');
+
+    const status = await gitOk(repo, 'status', '--porcelain');
+    assert.match(status, /TASK\.md/,
+      'stageMergeChanges only unstages harness artifacts, it does not hide them from status');
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
 
 test('a clean fan-in merge contains both distinctive parent changes and is reviewed', async () => {
   const dirs = makeDirectories('clean-fanin');

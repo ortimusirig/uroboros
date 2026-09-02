@@ -26,6 +26,18 @@ const HARNESS_GIT_EXCLUDE_MARKER = '# uroboros harness artifacts';
 const HARNESS_GIT_EXCLUDE_BLOCK = `\n${HARNESS_GIT_EXCLUDE_MARKER} — not the seat's work\n`
   + 'TASK.md\nevents.jsonl\nCHANGES.diff\n__uro_review/\n';
 
+// Path-algebra containment check (resolve() + string compare, no realpath — mirrors
+// artifacts.js's containsPath/normalizedPath, kept local to avoid a new cross-module
+// dependency for a few lines). Used only to gate excludeHarnessArtifacts below.
+function isPathUnderRoot(candidate, root) {
+  const fold = (value) => {
+    const resolved = resolve(value);
+    return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+  };
+  const fromRoot = relative(fold(root), fold(candidate));
+  return fromRoot === '' || (!fromRoot.startsWith('..') && !isAbsolute(fromRoot));
+}
+
 export function defaultBranchName(runId) {
   return `uro/${runId}`;
 }
@@ -65,14 +77,25 @@ async function git(cwd, ...args) {
 }
 
 // info/exclude is per-repository, not per-tree: for a linked worktree, `git --git-path`
-// resolves it to the shared common .git dir, so this also protects the main checkout and
-// any sibling worktree of the same repository. The marker check keeps repeated isolate()
-// calls against one repository from growing the shared file without bound. A failure here
-// is a `git status` UX nicety, not a run precondition, so it must not fail the isolation.
-async function excludeHarnessArtifacts(dir) {
+// resolves it to the shared common .git dir (verified empirically) — so appending there
+// unconditionally would mutate a repository the harness does not itself own whenever that
+// shared dir is not something the harness created in scratch (the user's own repository,
+// or a campaign base that reuses an already-existing repository as-is; see
+// prepareCampaignBase). The harness must never mutate state it does not own, so this only
+// writes when the resolved exclude path already lives under this run's own scratch root:
+// a standalone copy's fresh `.git` always qualifies (it lives in scratch and is never
+// shared with anything); a linked worktree only qualifies when its repository was itself
+// created fresh in scratch. Everywhere else this is a no-op — merge.js's stageMergeChanges
+// no longer depends on it for correctness, so skipping only forgoes hiding
+// TASK.md/events.jsonl from `git status` in that one tree. The marker check keeps repeated
+// isolate() calls against one owned repository from growing the shared file without bound.
+// A failure here is a `git status` UX nicety, not a run precondition, so it must not fail
+// the isolation.
+async function excludeHarnessArtifacts(dir, scratchRoot) {
   try {
     const excludePath = (await git(dir, 'rev-parse', '--git-path', 'info/exclude')).trim();
     const resolvedExclude = isAbsolute(excludePath) ? excludePath : join(dir, excludePath);
+    if (!isPathUnderRoot(resolvedExclude, scratchRoot)) return;
     const existing = existsSync(resolvedExclude) ? readFileSync(resolvedExclude, 'utf8') : '';
     if (existing.includes(HARNESS_GIT_EXCLUDE_MARKER)) return;
     mkdirSync(dirname(resolvedExclude), { recursive: true });
@@ -400,7 +423,10 @@ export async function isolate({
     // Same repository lock as addWorktree: info/exclude is shared repo state (see
     // excludeHarnessArtifacts above), and concurrent isolations of one repository must not
     // race a read-then-append of it.
-    await withRepositoryLock(targetRepository.lockKey, () => excludeHarnessArtifacts(dir));
+    await withRepositoryLock(
+      targetRepository.lockKey,
+      () => excludeHarnessArtifacts(dir, scratchRoot),
+    );
     const source = resolvedCampaignBase?.source ?? 'git-worktree';
     const isRepo = resolvedCampaignBase?.isRepo ?? true;
     reportEvent(reporter, runId, 'isolate', 'finish', {
@@ -426,7 +452,7 @@ export async function isolate({
   await git(dir, 'init', '-b', branch);
   // This dir is a brand-new standalone repository, wholly owned by this run, so no
   // repository lock is needed here (unlike the linked-worktree branch above).
-  await excludeHarnessArtifacts(dir);
+  await excludeHarnessArtifacts(dir, scratchRoot);
   await git(dir, 'add', '-A');
   await git(dir, '-c', 'user.email=ccc@local', '-c', 'user.name=ccc', 'commit', '-m', 'baseline');
   const baseCommit = (await git(dir, 'rev-parse', 'HEAD')).trim();

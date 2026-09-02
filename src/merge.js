@@ -6,7 +6,6 @@ import {
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { HARNESS_ARTIFACTS } from './artifacts.js';
-import { isHarnessArtifact } from './review-protection.js';
 import { spawnCapture } from './spawn.js';
 import { countTestPaths } from './merge-test-count.js';
 
@@ -107,20 +106,24 @@ async function unmergedPaths(cwd) {
   return result.stdout.split('\0').filter(Boolean).map((path) => path.replaceAll('\\', '/')).sort();
 }
 
-async function stageMergeChanges(cwd) {
-  // The isolated worktree's git exclude file already covers TASK.md/events.jsonl/
-  // CHANGES.diff/__uro_review/ (see isolation.js), so `git add -A` skips them on its own.
-  // Naming an already-gitignored path via :(exclude) too makes git treat it as an explicitly
-  // requested add and refuse with "paths are ignored" (exit non-zero) instead of the silent
-  // skip a bare `-A .` gives it — so only pathspec-exclude the harness artifacts gitignore
-  // does not also cover.
-  const pathspecExcludes = HARNESS_ARTIFACTS
-    .filter((name) => !isHarnessArtifact(name))
-    .map((name) => `:(exclude)${name}`);
-  const add = await spawnCapture('git', [
-    '-C', cwd, 'add', '-A', '--', '.', ...pathspecExcludes,
-  ]);
+// Mirrors run.js's diffText(): stage everything, then unstage every harness artifact by
+// name. This does not depend on the isolated worktree's git exclude file existing, being
+// current, or even applying to this cwd at all — isolation.js's excludeHarnessArtifacts is
+// best-effort and, for a repository the harness does not own, deliberately a no-op (see
+// its comment), so merge staging must be correct on its own. `git add -A` alone already
+// silently skips a gitignored path, but a harness artifact can reach this point either
+// gitignored, freshly created (never gitignored), or tracked-and-modified from a prior
+// commit — reset-by-name after staging unconditionally is the one idiom correct for all
+// three, and `git reset -- <path>` exits 0 even for a path that matches nothing.
+export async function stageMergeChanges(cwd) {
+  const add = await spawnCapture('git', ['-C', cwd, 'add', '-A']);
   if (add.code !== 0) throw new Error(`cannot stage merge resolution: ${add.stderr.trim()}`);
+  const reset = await spawnCapture('git', [
+    '-C', cwd, 'reset', '--quiet', '--', ...HARNESS_ARTIFACTS,
+  ]);
+  if (reset.code !== 0) {
+    throw new Error(`cannot unstage harness artifacts before merge commit: ${reset.stderr.trim()}`);
+  }
 }
 
 async function commitMerge(cwd, message) {
