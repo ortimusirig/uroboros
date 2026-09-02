@@ -19,6 +19,7 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  rmdirSync,
   statSync,
   unlinkSync,
   writeFileSync,
@@ -111,19 +112,21 @@ function looksLikePath(value) {
 
 /**
  * The project statement is file-or-prose, exactly like `loop plan`'s --goal
- * (`resolveGoal` in plan.js): a value that names an existing file is read
- * verbatim; a value that merely looks like a path but is not there is a
- * mistake worth naming rather than silently treating as prose; anything else
- * is the prose itself. Kept local rather than imported so the error text
- * says "project", not "goal" — the two CLI flags must never cross-name each
- * other's mistakes.
+ * (`resolveGoal` in plan.js, same decision shape): a value that names
+ * something already there but is not a file (a directory, most often) is a
+ * mistake worth naming rather than silently read as prose; a value that
+ * merely looks like a path but is not there at all is the same kind of
+ * mistake, worded for absence instead; anything else is the prose itself.
+ * Kept local rather than imported so the error text says "project", not
+ * "goal" — the two CLI flags must never cross-name each other's mistakes.
  */
 function resolveProjectStatement(project, { baseDirectory = process.cwd() } = {}) {
   if (typeof project !== 'string' || project.trim() === '') {
     throw new TypeError('project must be a non-empty string');
   }
   const candidate = isAbsolute(project) ? resolve(project) : resolve(baseDirectory, project);
-  if (isFile(candidate)) {
+  if (existsSync(candidate)) {
+    if (!isFile(candidate)) throw new Error(`project path is not a file: ${candidate}`);
     try { return { source: candidate, text: readFileSync(candidate, 'utf8') }; }
     catch (error) { throw new Error(`cannot read project file ${candidate}: ${error.message}`); }
   }
@@ -328,24 +331,67 @@ export function writeTier2Artifacts(goalDir, { items, sections }) {
 }
 
 /**
+ * "No goal depends on a later goal" is part of the tier-1 incremental law
+ * quoted verbatim into every seat's prompt (TIER1_INCREMENTAL_LAW above) —
+ * goal order is the seats' own MVP-first judgement, not something this
+ * writer may compute or correct. A manifest that violates it is a
+ * contradiction inside an artifact that ARRIVED, named and fed back exactly
+ * like a cycle or a dangling id, never silently repaired by reordering the
+ * seats' own sequence for them.
+ */
+function assertNoGoalDependsOnLaterGoal(items) {
+  const position = new Map(items.map((item, index) => [String(item.id), index]));
+  for (const item of items) {
+    const itemIndex = position.get(String(item.id));
+    for (const dep of (item.dependsOn ?? []).map(String)) {
+      if (position.get(dep) > itemIndex) {
+        throw new RepairableArtifactError(
+          `${item.id} depends on later goal ${dep} — goals are MVP-first and dependency-ordered; reorder or re-scope`);
+      }
+    }
+  }
+}
+
+// project.md is the operator's own words, not this writer's to reflow: a
+// FILE source is copied byte-for-byte (no trim, no appended newline —
+// resolveProjectStatement already read it verbatim); prose typed on the CLI
+// becomes `${prose}\n`, otherwise untouched, so project.md is an ordinary
+// text file without disturbing so much as the prose's own whitespace.
+function projectMdBytes({ text, source }) {
+  const value = String(text);
+  return source ? value : `${value}\n`;
+}
+
+/**
  * The converged project decomposition on disk: the project statement copied
  * verbatim, one spec.md per goal (each goal's own tasks come later, from
  * decomposing it in turn with `--goal`), and the manifest that orders and
  * links them. Every write is create-only (`wx`), so a second convergence over
  * the same --out collides loudly instead of quietly replacing goals an
  * operator may already be decomposing further.
+ *
+ * goals.json is written in exactly the proposal's own order — order here is
+ * the seats' judgement, never this writer's to compute. topologicalOrder is
+ * reused only to validate (a cycle or a self-dependency is still the same
+ * contradiction it is at tier 2); its computed ordering is discarded.
  */
 export function writeTier1Artifacts(outDir, project, { items, sections }) {
-  const ordered = topologicalOrder(assertWritableGoals(items));
+  const goals = assertWritableGoals(items);
+  topologicalOrder(goals); // validate-only: cycles and self-dependencies still throw.
+  assertNoGoalDependsOnLaterGoal(goals);
   const goalsDirectory = join(outDir, 'goals');
   mkdirSync(goalsDirectory, { recursive: true });
   const { write, rollback } = createWriteOnce();
+  const createdGoalDirs = [];
   try {
-    write(join(outDir, 'project.md'), `${String(project).trim()}\n`);
-    const manifest = ordered.map((item) => {
+    write(join(outDir, 'project.md'), projectMdBytes(project));
+    const manifest = goals.map((item) => {
       const goalDirectory = `${item.id}-${item.slug}`;
-      mkdirSync(join(goalsDirectory, goalDirectory), { recursive: true });
-      write(join(goalsDirectory, goalDirectory, 'spec.md'), `${sections.get(String(item.id))}\n`);
+      const goalPath = join(goalsDirectory, goalDirectory);
+      const preexisting = existsSync(goalPath);
+      mkdirSync(goalPath, { recursive: true });
+      if (!preexisting) createdGoalDirs.push(goalPath);
+      write(join(goalPath, 'spec.md'), `${sections.get(String(item.id))}\n`);
       return {
         id: item.id,
         slug: item.slug,
@@ -363,6 +409,14 @@ export function writeTier1Artifacts(outDir, project, { items, sections }) {
     };
   } catch (error) {
     rollback();
+    // Best-effort, empty-only: a directory THIS call created but that ends up
+    // holding nothing once its write is rolled back should not linger for an
+    // operator to find. A directory that predates this call — a prior
+    // convergence's, or anything else already there — is left alone rather
+    // than guessed at.
+    for (const goalPath of createdGoalDirs.reverse()) {
+      try { rmdirSync(goalPath); } catch { /* not empty, or already gone */ }
+    }
     throw error;
   }
 }
@@ -1381,7 +1435,11 @@ export async function runDecomposeProject({
       // returned a value at all — but null, always, is what makes tier 1
       // skip capabilityVetoes entirely (see checkCapability above).
       capabilityPlanText: () => null,
-      writeConverged: (proposal) => writeTier1Artifacts(request.out, request.project, proposal),
+      writeConverged: (proposal) => writeTier1Artifacts(
+        request.out,
+        { text: request.project, source: request.projectSource },
+        proposal,
+      ),
     },
   });
   return {
