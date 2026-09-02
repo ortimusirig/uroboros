@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   runConversation, RepairableArtifactError, CONVERSATION_DNA, parseSeatReview,
+  stanceRepairLines,
 } from '../src/conversation.js';
 import { parsePlanProposal } from '../src/plan.js';
 
@@ -39,6 +40,9 @@ const seatsFor = ({ proposals, agrees = true }) => {
         return { plan: text };
       },
       reviewRequests: () => ({ codex: {}, cursor: {} }),
+      // The tier's own wording of "your answer carried no stance"; the engine
+      // owns the bound of exactly one re-ask per seat per round.
+      reviewRepairRequest: ({ request, content }) => ({ ...request, repairContent: content }),
       agreementRequest: () => ({ type: 'agreement' }),
       capabilityPlanText: () => null,
       writeConverged: () => ({ written: true }),
@@ -328,4 +332,108 @@ test('an unreadable stance carries its raw text into the round history', async (
   assert.equal(cursorRow.content, 'Looks good overall, ship it');
   assert.equal(result.roundHistory[0].reviews.codex.content, undefined,
     'a readable review stays parsed-only');
+});
+
+test('an unreadable stance is re-asked once with the failure fed back', async () => {
+  // F20, live at 63c788f: the seat promised "the required AGREE/S/Q block",
+  // never emitted it, and its genuine verified review was discarded as a
+  // content-free disagreement. The seat RAN and answered; the answer just does
+  // not parse — so the proposal-repair law applies and the text goes back to it.
+  const { seats, strategy } = seatsFor({ proposals: ['GOOD'] });
+  let asks = 0;
+  const promise = 'User-facing response is only the AGREE / S* / Q* block.';
+  seats.reviewCursor = async (request) => {
+    asks += 1;
+    if (asks === 1) return promise; // promises, never delivers
+    assert.match(String(request.repairContent ?? request.prompt ?? ''), /did not contain a parseable stance|AGREE/);
+    assert.equal(request.repairContent, promise,
+      'the unparseable answer goes back verbatim, not summarized');
+    return 'AGREE: yes';
+  };
+  const result = await runConversation({ runId: 'conv-stance-reask', tier: 'goal', seats, strategy, rounds: 1 });
+  assert.equal(asks, 2);
+  assert.equal(result.converged, true, 'the repaired stance counts');
+  assert.equal(result.roundHistory[0].reviews.cursor.stanceRepaired, true,
+    'the record says the reading was repaired, never that the seat changed its mind');
+});
+
+test('a second unreadable answer travels as stance-unreadable with raw content', async () => {
+  const { seats, strategy } = seatsFor({ proposals: ['GOOD'] });
+  let asks = 0;
+  seats.reviewCursor = async () => { asks += 1; return 'still no block here'; };
+  const result = await runConversation({ runId: 'conv-stance-still-dead', tier: 'goal', seats, strategy, rounds: 1 });
+  assert.equal(result.converged, false);
+  assert.equal(result.roundHistory[0].reviews.cursor.readable, false);
+  assert.match(result.roundHistory[0].reviews.cursor.content, /still no block/);
+  // The bound in the audit table: exactly one re-ask per seat per round. A
+  // second failure is not re-asked again — reading is repaired once, meaning
+  // never, and a still-unreadable stance stays non-consenting.
+  assert.equal(asks, 2);
+  assert.equal(result.roundHistory[0].reviews.cursor.stanceRepaired, undefined);
+  assert.equal(result.roundHistory[0].reviews.cursor.stanceReasked, true);
+});
+
+test('the re-ask is bounded per round, not per conversation', async () => {
+  const { seats, strategy } = seatsFor({ proposals: ['GOOD', 'GOOD'] });
+  let asks = 0;
+  seats.reviewCursor = async () => { asks += 1; return 'no stance in here either'; };
+  await runConversation({ runId: 'conv-stance-per-round', tier: 'goal', seats, strategy, rounds: 2 });
+  assert.equal(asks, 4, 'each round gets its own single re-ask');
+});
+
+test('a seat that never ran is never re-asked — there is no reading to repair', async () => {
+  const { seats, strategy } = seatsFor({ proposals: ['GOOD'] });
+  let asks = 0;
+  seats.reviewCursor = async () => { asks += 1; throw new Error('cursor seat failed to launch'); };
+  const result = await runConversation({ runId: 'conv-stance-absent', tier: 'goal', seats, strategy, rounds: 1 });
+  assert.equal(asks, 1, 'refusal is reserved for a seat that did not run; nothing to feed back');
+  assert.equal(result.roundHistory[0].reviews.cursor.unavailable, true);
+  assert.equal(result.roundHistory[0].reviews.cursor.stanceReasked, undefined);
+});
+
+test('a re-ask that keeps different words retains both answers verbatim', async () => {
+  const { seats, strategy } = seatsFor({ proposals: ['GOOD'] });
+  let asks = 0;
+  seats.reviewCursor = async () => (++asks === 1 ? 'first prose, with the real review' : 'second prose, still no stance');
+  const result = await runConversation({ runId: 'conv-stance-both', tier: 'goal', seats, strategy, rounds: 1 });
+  const cursorRow = result.roundHistory[0].reviews.cursor;
+  assert.equal(cursorRow.content, 'first prose, with the real review');
+  assert.equal(cursorRow.reaskContent, 'second prose, still no stance',
+    'a bound states what it withheld: the second answer is evidence too');
+});
+
+test('the F20 seat answer is absence, not a parseable stance variant', () => {
+  // Verbatim from the peer run at 63c788f (G-NIW1 round 2): meta-commentary
+  // about the required block, block never emitted — including the missing
+  // sentence boundary and the U+FFFD where an em dash was. Tolerance lives in
+  // READING, so this shape must keep reading as no-stance: it is the exact
+  // input the bounded re-ask exists to answer, and a parser that "helpfully"
+  // found consent in it would consent on the seat's behalf.
+  const f20 = [
+    'Reading the goal spec, proposed tasks, and repo map to independently review this decomposition.Verifying cited seams and whether the decomposition covers the goal without gaps.Verified the cited seams (`_multi_table_sql_failure` mask, AST drop at `8256-8265`, `policy_metadata` omitting `candidate_origin`, `graph.py` forced `break` + stale `exact_compute_clarification` final override, `MODEL_ERROR_LIMIT=512` on `row["error"]`). The decomposition covers the goal; composing T9 without T4 is the main structural gap.',
+    '# Seat review only',
+    '',
+    'Round-2 goal-decomposition review seat output only \uFFFD no implementation. Final user-visible answer is the required AGREE/S/Q block.',
+    '',
+    '# Round 2 decomposition review (seat output)',
+    '',
+    'This seat does not implement code. Independent review of [PROPOSED_TASKS.md](C:\\Users\\aiuser4\\AppData\\Local\\Temp\\uro-plan-seat-h9Az3L\\PROPOSED_TASKS.md) against [GOAL_SPEC.md](C:\\Users\\aiuser4\\AppData\\Local\\Temp\\uro-plan-seat-h9Az3L\\GOAL_SPEC.md).',
+    '',
+    'Evidence checked: `_multi_table_sql_failure` regex mask; AST rejection return; `policy_metadata` without `candidate_origin`; `graph.py` post-failure `break` and final `exact_compute_clarification` override; `MODEL_ERROR_LIMIT=512` on `row["error"]` vs `ERROR_CHARS=1500` in `react_context`.',
+    '',
+    'User-facing response for this seat is only the AGREE / S* / Q* block required by INSTRUCTIONS.md.',
+  ].join('\n');
+  const review = parseSeatReview(f20);
+  assert.equal(review.readable, false, 'a promise of the block is not the block');
+  assert.equal(review.agree, false, 'silence is never consent');
+  assert.equal(review.content, f20, 'the whole answer is retained, untrimmed');
+});
+
+test('the stance repair paragraph feeds the failure back and never re-asks for meaning', () => {
+  const lines = stanceRepairLines('AGREE line? I simply never wrote one.');
+  const text = lines.join('\n');
+  assert.match(text, /did not contain a parseable stance/);
+  assert.ok(text.includes('AGREE line? I simply never wrote one.'), 'verbatim, untrimmed');
+  assert.match(text, /AGREE: yes or AGREE: no/);
+  assert.match(text, /does not ask you to change what you judged/);
 });

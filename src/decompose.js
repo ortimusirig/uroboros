@@ -42,6 +42,9 @@ import {
   parseSeatReview,
   RepairableArtifactError,
   runConversation,
+  STANCE_REPAIR_CLOSING,
+  STANCE_REPAIR_OPENING,
+  stanceRepairLines,
 } from './conversation.js';
 import { reportEvent } from './events.js';
 import { runExecutor } from './executor.js';
@@ -595,7 +598,7 @@ const TIER2_AGREEMENT_MEANS = 'you are satisfied these tasks achieve the goal an
 const TIER1_AGREEMENT_MEANS = 'you are satisfied these goals achieve the project, each is a self-contained increment of it, and they are ordered MVP-first';
 
 function goalReviewPrompt({
-  seat, goalSpec, constitution, repoMap, tasks, round,
+  seat, goalSpec, constitution, repoMap, tasks, round, repairContent,
 }) {
   return [
     CONVERSATION_DNA,
@@ -613,6 +616,7 @@ function goalReviewPrompt({
     '',
     `ROUND ${round}.`,
     ...reviewResponseContract(TIER2_AGREEMENT_MEANS),
+    ...(repairContent ? stanceRepairLines(repairContent) : []),
   ].join('\n');
 }
 
@@ -693,9 +697,12 @@ async function productionGoalCursorDraft({
 
 async function productionGoalCodexReview({
   goalSpec, constitution, repoMap, tasks, round, target, plannerModel, timeoutMs, runId, env,
+  repairContent,
 }) {
   const result = await runExecutor({
-    plan: goalReviewPrompt({ seat: 'Codex', goalSpec, constitution, repoMap, tasks, round }),
+    plan: goalReviewPrompt({
+      seat: 'Codex', goalSpec, constitution, repoMap, tasks, round, repairContent,
+    }),
     cwd: target,
     model: plannerModel,
     sandbox: 'read-only',
@@ -711,7 +718,7 @@ async function productionGoalCodexReview({
 
 async function productionGoalCursorReview({
   goalSpec, constitution, repoMap, tasks, round, target, verifierModel, timeoutMs,
-  env, home, superpowersDir,
+  env, home, superpowersDir, repairContent,
 }) {
   const result = await cursorSeatCall({
     files: {
@@ -719,6 +726,9 @@ async function productionGoalCursorReview({
       'REPO_MAP.md': `${repoMap}\n`,
       'PROPOSED_TASKS.md': `${tasks}\n`,
       ...(constitution ? { 'CONSTITUTION.md': `${constitution}\n` } : {}),
+      // The seat's own unreadable answer, verbatim: it goes back on disk rather
+      // than in the prompt because argv is where long text dies on Windows.
+      ...(repairContent ? { 'PREVIOUS_ANSWER.md': `${repairContent}\n` } : {}),
     },
     instructions: (workspace) => [
       ONE_LINE_CONVERSATION_DNA,
@@ -731,6 +741,11 @@ async function productionGoalCursorReview({
       `ROUND ${round}.`,
       'Respond in plain chat text,',
       ...reviewResponseContract(TIER2_AGREEMENT_MEANS),
+      ...(repairContent ? [
+        STANCE_REPAIR_OPENING,
+        `Your previous answer is in ${join(workspace, 'PREVIOUS_ANSWER.md')}, verbatim and complete.`,
+        ...STANCE_REPAIR_CLOSING,
+      ] : []),
     ],
     target, verifierModel, timeoutMs, env, home, superpowersDir,
   });
@@ -977,6 +992,12 @@ export async function runDecomposeGoal({
           env, home, superpowersDir: cursorSuperpowersDir,
         },
       }),
+      // The engine owns the bound (exactly one re-ask per seat per round); the
+      // tier owns the transport — the same review request, plus the seat's own
+      // unparseable answer travelling back to it verbatim.
+      reviewRepairRequest: ({ request: reviewRequest, content }) => ({
+        ...reviewRequest, repairContent: content,
+      }),
       agreementRequest: ({ proposal, reviews }) => ({
         type: 'agreement',
         proposal: proposal.text,
@@ -1096,7 +1117,7 @@ function projectAgreementPrompt({
 }
 
 function projectReviewPrompt({
-  seat, project, constitution, repoMap, goals, round,
+  seat, project, constitution, repoMap, goals, round, repairContent,
 }) {
   return [
     CONVERSATION_DNA,
@@ -1114,6 +1135,7 @@ function projectReviewPrompt({
     '',
     `ROUND ${round}.`,
     ...reviewResponseContract(TIER1_AGREEMENT_MEANS),
+    ...(repairContent ? stanceRepairLines(repairContent) : []),
   ].join('\n');
 }
 
@@ -1172,9 +1194,12 @@ async function productionProjectCursorDraft({
 
 async function productionProjectCodexReview({
   project, constitution, repoMap, goals, round, target, plannerModel, timeoutMs, runId, env,
+  repairContent,
 }) {
   const result = await runExecutor({
-    plan: projectReviewPrompt({ seat: 'Codex', project, constitution, repoMap, goals, round }),
+    plan: projectReviewPrompt({
+      seat: 'Codex', project, constitution, repoMap, goals, round, repairContent,
+    }),
     cwd: target,
     model: plannerModel,
     sandbox: 'read-only',
@@ -1190,7 +1215,7 @@ async function productionProjectCodexReview({
 
 async function productionProjectCursorReview({
   project, constitution, repoMap, goals, round, target, verifierModel, timeoutMs,
-  env, home, superpowersDir,
+  env, home, superpowersDir, repairContent,
 }) {
   const result = await cursorSeatCall({
     files: {
@@ -1198,6 +1223,7 @@ async function productionProjectCursorReview({
       'REPO_MAP.md': `${repoMap}\n`,
       'PROPOSED_GOALS.md': `${goals}\n`,
       ...(constitution ? { 'CONSTITUTION.md': `${constitution}\n` } : {}),
+      ...(repairContent ? { 'PREVIOUS_ANSWER.md': `${repairContent}\n` } : {}),
     },
     instructions: (workspace) => [
       ONE_LINE_CONVERSATION_DNA,
@@ -1210,6 +1236,11 @@ async function productionProjectCursorReview({
       `ROUND ${round}.`,
       'Respond in plain chat text,',
       ...reviewResponseContract(TIER1_AGREEMENT_MEANS),
+      ...(repairContent ? [
+        STANCE_REPAIR_OPENING,
+        `Your previous answer is in ${join(workspace, 'PREVIOUS_ANSWER.md')}, verbatim and complete.`,
+        ...STANCE_REPAIR_CLOSING,
+      ] : []),
     ],
     target, verifierModel, timeoutMs, env, home, superpowersDir,
   });
@@ -1430,6 +1461,11 @@ export async function runDecomposeProject({
           target: request.target, verifierModel, timeoutMs: verifierTimeout,
           env, home, superpowersDir: cursorSuperpowersDir,
         },
+      }),
+      // Exactly one re-ask per seat per round, worded by this tier: the seat's
+      // own unparseable answer goes back to it verbatim, nothing else changes.
+      reviewRepairRequest: ({ request: reviewRequest, content }) => ({
+        ...reviewRequest, repairContent: content,
       }),
       agreementRequest: ({ proposal, reviews }) => ({
         type: 'agreement',

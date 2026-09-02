@@ -25,6 +25,8 @@ import {
   parseSeatReview,
   RepairableArtifactError,
   runConversation,
+  STANCE_REPAIR_CLOSING,
+  STANCE_REPAIR_OPENING,
 } from './conversation.js';
 import { reportEvent } from './events.js';
 import { runExecutor } from './executor.js';
@@ -290,7 +292,7 @@ function oneLineArtifact(text) {
 // what matches and carries severities VERBATIM (see parseSeatReview in
 // conversation.js). Nothing anywhere validates a severity, filters by one, or
 // branches on one — they are input to the arbiter's judgement and nothing else.
-function reviewSeatPrompt({ seat, goal, plan, gate, round }) {
+function reviewSeatPrompt({ seat, goal, plan, gate, round, repairContent }) {
   return [
     ONE_LINE_CONVERSATION_DNA,
     `# ${seat} plan review seat`,
@@ -305,6 +307,14 @@ function reviewSeatPrompt({ seat, goal, plan, gate, round }) {
     'Reuse the same S<id> for a suggestion you have raised in an earlier round so recurrence is visible.',
     'Then zero or more question lines formatted: Q<id>: question.',
     'AGREE: yes means you are satisfied the plan achieves the goal and you could work from it as written.',
+    // The seat's own unreadable answer, fed back once. It travels through the
+    // same one-line rendering every other artifact in this prompt uses —
+    // nothing is dropped, and no summary stands in for what the seat said.
+    ...(repairContent ? [
+      STANCE_REPAIR_OPENING,
+      `It said, verbatim: ${oneLineArtifact(repairContent)}`,
+      ...STANCE_REPAIR_CLOSING,
+    ] : []),
   ].join(' ');
 }
 
@@ -363,11 +373,15 @@ async function productionCursorDraft({
 
 async function productionCursorReview({
   goal, plan, gate, round, target, verifierModel, timeoutMs, env, home, superpowersDir,
+  repairContent,
 }) {
   return withSeatWorkspace({
     'GOAL.md': `${goal}\n`,
     'PROPOSAL.md': `${plan}\n`,
     'PROPOSED_GATE.json': `${JSON.stringify(gate, null, 2)}\n`,
+    // Verbatim on disk, like every other artifact this seat reads: argv is
+    // where long text dies on Windows, and the answer must arrive whole.
+    ...(repairContent ? { 'PREVIOUS_ANSWER.md': `${repairContent}\n` } : {}),
   }, async (workspace) => {
     const prompt = [
       ONE_LINE_CONVERSATION_DNA,
@@ -382,6 +396,11 @@ async function productionCursorReview({
       'Reuse the same S<id> for a suggestion you have raised in an earlier round so recurrence is visible.',
       'Then zero or more question lines formatted: Q<id>: question.',
       'AGREE: yes means you are satisfied the plan achieves the goal and you could work from it as written.',
+      ...(repairContent ? [
+        STANCE_REPAIR_OPENING,
+        `Your previous answer is in ${oneLineArtifact(join(workspace, 'PREVIOUS_ANSWER.md'))}, verbatim and complete.`,
+        ...STANCE_REPAIR_CLOSING,
+      ] : []),
     ].join(' ');
     const result = await runVerifier({
       cwd: target, prompt, model: verifierModel, timeoutMs, pass: 'plan', env, home, superpowersDir,
@@ -394,10 +413,10 @@ async function productionCursorReview({
 }
 
 async function productionCodexReview({
-  goal, plan, gate, round, target, plannerModel, timeoutMs, runId, env,
+  goal, plan, gate, round, target, plannerModel, timeoutMs, runId, env, repairContent,
 }) {
   const result = await runExecutor({
-    plan: reviewSeatPrompt({ seat: 'Codex', goal, plan, gate, round }),
+    plan: reviewSeatPrompt({ seat: 'Codex', goal, plan, gate, round, repairContent }),
     cwd: target,
     model: plannerModel,
     sandbox: 'read-only',
@@ -870,6 +889,11 @@ export async function runPlan({
           target: request.target, verifierModel, timeoutMs: verifierTimeout,
           env, home, superpowersDir: cursorSuperpowersDir,
         },
+      }),
+      // Exactly one re-ask per seat per round (the engine's bound): the same
+      // review request, carrying the seat's own unparseable answer back to it.
+      reviewRepairRequest: ({ request: reviewRequest, content }) => ({
+        ...reviewRequest, repairContent: content,
       }),
       agreementRequest: ({ proposal, reviews }) => ({
         type: 'agreement',

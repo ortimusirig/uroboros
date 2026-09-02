@@ -77,6 +77,27 @@ export function parseSeatReview(text) {
   };
 }
 
+// The proposal-repair law, applied to a review: the seat RAN and answered, and
+// the answer simply carries no stance, so the unparseable text goes back to it
+// verbatim — exactly once, and only to repair how the answer is READ. Nothing
+// here asks a seat to change what it judged, and a seat that stays unreadable
+// stays non-consenting. Every tier renders these same sentences, so no seat is
+// told a different law than another.
+export const STANCE_REPAIR_OPENING = 'Your previous response did not contain a parseable stance: no "AGREE: yes" or "AGREE: no" line could be read anywhere in it.';
+export const STANCE_REPAIR_CLOSING = [
+  'Respond again in EXACTLY the required structure: AGREE: yes or AGREE: no, then your S<id> suggestion lines, then your Q<id> question lines.',
+  'This repairs only how your answer is READ. It does not ask you to change what you judged: if you are not satisfied, say AGREE: no and keep every suggestion you meant.',
+];
+
+export function stanceRepairLines(content) {
+  return [
+    STANCE_REPAIR_OPENING,
+    'It said, verbatim:',
+    String(content ?? ''),
+    ...STANCE_REPAIR_CLOSING,
+  ];
+}
+
 function capabilityPrompt({ seat, plan, remedyOnly = false, previousAnswer }) {
   return buildArbiterPrompt({
     type: 'capability', seat, plan, remedyOnly, previousAnswer,
@@ -202,6 +223,7 @@ export async function runConversation({
     parseProposal,
     proposalText,
     reviewRequests,
+    reviewRepairRequest,
     agreementRequest,
     capabilityPlanText,
     writeConverged,
@@ -336,21 +358,70 @@ export async function runConversation({
     agree: false, readable: false, suggestions: [], questions: [], content: '', unavailable: true,
   });
 
+  // A readable review is fully represented by its parsed structure. An
+  // unreadable stance is not — the raw text is the only evidence of what the
+  // seat actually said, so it travels verbatim in exactly that case, alongside
+  // whether the one bounded re-ask ran and whether it repaired the reading.
+  const reviewRow = (review) => ({
+    agree: review.agree,
+    readable: review.readable !== false,
+    suggestions: review.suggestions,
+    questions: review.questions,
+    ...(review.unavailable ? { unavailable: true } : {}),
+    ...(review.stanceReasked ? { stanceReasked: true } : {}),
+    ...(review.stanceRepaired ? { stanceRepaired: true } : {}),
+    ...(review.readable === false && !review.unavailable
+      ? { content: review.content ?? '' } : {}),
+    ...(review.reaskContent ? { reaskContent: review.reaskContent } : {}),
+  });
+
+  /**
+   * One seat's review for one round, with the bounded stance re-ask.
+   *
+   * A seat whose answer carries no stance RAN and SPOKE — that is a reading
+   * failure, not a refusal — so its own words go back to it once, verbatim,
+   * and the answer is read again. The bound is exactly one re-ask per seat per
+   * round (it stands in the design's determinism-and-caps audit table): a
+   * second unreadable answer travels as it does today, non-consenting, with
+   * the raw text intact. Tolerance lives in READING; meaning is never re-asked.
+   * A seat that never ran is not re-asked at all — there is no reading to
+   * repair, and a rule may not stand in for a seat that said nothing.
+   */
+  const askSeatReview = async (seat, call, request) => {
+    if (typeof call !== 'function') return unavailableReview();
+    let review;
+    try { review = normalizeSeatReview(tallyUsage(await call(request))); }
+    catch { return unavailableReview(); }
+    if (review.readable !== false || review.unavailable === true) return review;
+    if (typeof reviewRepairRequest !== 'function') return review;
+    let repaired;
+    try {
+      const repairRequest = reviewRepairRequest({ seat, request, content: review.content ?? '' });
+      if (repairRequest === null || repairRequest === undefined) return review;
+      repaired = normalizeSeatReview(tallyUsage(await call(repairRequest)));
+    } catch {
+      // The re-ask itself never landed. The seat's first answer stands exactly
+      // as it did before this bound existed; nothing is invented for it.
+      return { ...review, stanceReasked: true };
+    }
+    if (repaired.readable === false || repaired.unavailable === true) {
+      return {
+        ...review,
+        stanceReasked: true,
+        // A bound states what it withheld: when the re-ask said something new
+        // and still unreadable, both answers are evidence and both are kept.
+        ...(repaired.content && repaired.content !== review.content
+          ? { reaskContent: repaired.content } : {}),
+      };
+    }
+    return { ...repaired, stanceReasked: true, stanceRepaired: true };
+  };
+
   const reviewBoth = async ({ round, proposal }) => {
     const requests = reviewRequests({ round, proposal });
     const [codex, cursor] = await Promise.all([
-      (async () => {
-        if (typeof reviewCodex !== 'function') return unavailableReview();
-        try {
-          return normalizeSeatReview(tallyUsage(await reviewCodex(requests.codex)));
-        } catch { return unavailableReview(); }
-      })(),
-      (async () => {
-        if (typeof reviewCursor !== 'function') return unavailableReview();
-        try {
-          return normalizeSeatReview(tallyUsage(await reviewCursor(requests.cursor)));
-        } catch { return unavailableReview(); }
-      })(),
+      askSeatReview('codex', reviewCodex, requests.codex),
+      askSeatReview('cursor', reviewCursor, requests.cursor),
     ]);
     for (const [seat, review] of [['codex', codex], ['cursor', cursor]]) {
       reportEvent(reporter, runId, 'plan', 'review', {
@@ -362,6 +433,8 @@ export async function runConversation({
         suggestionIds: review.suggestions.map((item) => item.id),
         questionCount: review.questions.length,
         ...(review.unavailable ? { unavailable: true } : {}),
+        ...(review.stanceReasked ? { stanceReasked: true } : {}),
+        ...(review.stanceRepaired ? { stanceRepaired: true } : {}),
       });
     }
     return { codex, cursor };
@@ -464,27 +537,8 @@ export async function runConversation({
     roundHistory.push({
       round,
       reviews: {
-        // A readable review is fully represented by its parsed structure. An
-        // unreadable stance is not — the raw text is the only evidence of what
-        // the seat actually said, so it travels verbatim in exactly that case.
-        codex: {
-          agree: reviews.codex.agree,
-          readable: reviews.codex.readable !== false,
-          suggestions: reviews.codex.suggestions,
-          questions: reviews.codex.questions,
-          ...(reviews.codex.unavailable ? { unavailable: true } : {}),
-          ...(reviews.codex.readable === false && !reviews.codex.unavailable
-            ? { content: reviews.codex.content ?? '' } : {}),
-        },
-        cursor: {
-          agree: reviews.cursor.agree,
-          readable: reviews.cursor.readable !== false,
-          suggestions: reviews.cursor.suggestions,
-          questions: reviews.cursor.questions,
-          ...(reviews.cursor.unavailable ? { unavailable: true } : {}),
-          ...(reviews.cursor.readable === false && !reviews.cursor.unavailable
-            ? { content: reviews.cursor.content ?? '' } : {}),
-        },
+        codex: reviewRow(reviews.codex),
+        cursor: reviewRow(reviews.cursor),
       },
       agreement,
       converged,

@@ -212,6 +212,33 @@ test('the tier-2 agreement prompt names each seat state and quotes an unreadable
   } finally { fixture.cleanup(); }
 });
 
+test('an unreadable tier-2 review stance is re-asked once with the answer fed back verbatim', async () => {
+  // F20: the seat promised "the required AGREE/S/Q block" and never emitted it,
+  // so a genuine verified review was thrown away as a content-free
+  // disagreement. The tier hands that answer straight back to the same seat.
+  const fixture = goalFixture();
+  const meta = 'Reviewed the seams and the coverage. Final user-visible answer is the required AGREE/S/Q block.';
+  const seen = [];
+  try {
+    const result = await runDecomposeGoal({
+      goalSpecPath: fixture.specPath, target: fixture.root, runId: 'd2-reask', rounds: 1,
+      superpowers: VERIFIED_SUPERPOWERS,
+      adapters: {
+        ...adaptersFor([proposalText(goodTasks, goodMd)]),
+        review: async (request) => {
+          seen.push(request);
+          return seen.length === 1 ? meta : 'AGREE: yes';
+        },
+      },
+    });
+    assert.equal(seen.length, 2, 'exactly one re-ask per seat per round');
+    assert.equal(seen[1].repairContent, meta, 'the unparseable answer travels back verbatim');
+    assert.equal(seen[1].tasks, seen[0].tasks, 'the re-ask asks the same question of the same proposal');
+    assert.equal(seen[0].repairContent, undefined, 'the first ask is not a repair');
+    assert.equal(result.converged, true, 'a repaired reading counts as the stance it states');
+  } finally { fixture.cleanup(); }
+});
+
 test('a seat that never ran is rendered unavailable to the agreement judge, not as disagreement', async () => {
   const fixture = goalFixture();
   let agreementPrompt = null;
@@ -305,6 +332,27 @@ test('the tier-1 agreement prompt renders seat states the same way', async () =>
     assert.match(agreementPrompt, /CURSOR_REVIEW \(stance: stance-unreadable/);
     assert.match(agreementPrompt, /I think these goals are fine/);
     assert.match(agreementPrompt, /CODEX_REVIEW \(stance: agree/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('an unreadable tier-1 review stance is re-asked once too', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'decomp1-'));
+  const seen = [];
+  try {
+    const result = await runDecomposeProject({
+      project: 'Build the demo product.', target: root, out: join(root, 'uro-project'),
+      runId: 'd1-reask', rounds: 1, superpowers: VERIFIED_SUPERPOWERS,
+      adapters: {
+        ...adaptersFor([goalProposal()]),
+        review: async (request) => {
+          seen.push(request);
+          return seen.length === 1 ? 'These goals look right to me' : 'AGREE: yes';
+        },
+      },
+    });
+    assert.equal(seen.length, 2);
+    assert.equal(seen[1].repairContent, 'These goals look right to me');
+    assert.equal(result.converged, true);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 

@@ -176,6 +176,29 @@ test('silence is not consent: an unreadable agreement cannot converge the round'
   } finally { item.cleanup(); }
 });
 
+test('an unreadable plan review stance is re-asked once with the answer fed back verbatim', async () => {
+  const item = fixture();
+  const meta = 'I checked the plan against the goal. My answer is the required AGREE block.';
+  const seen = [];
+  try {
+    const result = await runPlan({
+      goal: 'A stance that cannot be read is not a refusal',
+      target: item.target, out: item.out, rounds: 1,
+      adapters: seats({
+        review: async (request) => {
+          seen.push(request);
+          return seen.length === 1 ? meta : 'AGREE: yes';
+        },
+      }),
+    });
+    assert.equal(seen.length, 2, 'exactly one re-ask per seat per round');
+    assert.equal(seen[1].repairContent, meta, 'the unparseable answer travels back verbatim');
+    assert.equal(seen[1].plan, seen[0].plan, 'the re-ask asks the same question of the same proposal');
+    assert.equal(result.converged, true);
+    assert.equal(result.roundHistory[0].reviews.cursor.stanceRepaired, true);
+  } finally { item.cleanup(); }
+});
+
 test('severities are carried verbatim and never filtered or validated', async () => {
   const item = fixture();
   let agreementRequest = null;
