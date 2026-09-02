@@ -132,6 +132,7 @@ const LISTED_EVENT_PAIRS = [
   'plan/review',
   'plan/agreement',
   'plan/round',
+  'plan/pivot',
   'plan/converged',
   'plan/finish',
   'mutate/start',
@@ -477,6 +478,10 @@ export function detailFor(event) {
         + ` cursor=${stateOf(event.cursorState, event.cursorAgrees)}`
         + ` converged=${oneLine(event.converged)}${tier}${round}`;
     }
+    if (event.type === 'pivot') {
+      return `${event.unjudged ? 'UNJUDGED ladder' : 'decision'}=${oneLine(event.decision)}${tier}${round}`
+        + (event.reason ? ` reason=${oneLine(event.reason)}` : '');
+    }
     if (event.type === 'converged') {
       return `converged suggestions=${oneLine(event.suggestions)}${tier}${round}`;
     }
@@ -591,6 +596,10 @@ export function detailFor(event) {
     return event.type === 'start'
       ? `generating from=${oneLine(event.factsPath)}`
       : `written ${oneLine(event.file ?? event.notePath)}`;
+  }
+  if (event.stage === 'capability' && event.type === 'vetoed') {
+    return `seat=${oneLine(event.seat)} what=${oneLine(event.what)} why=${oneLine(event.why)}`
+      + (event.alternative ? ` alternative=${oneLine(event.alternative)}` : '');
   }
   return [command(event), oneLine(event.file), oneLine(event.verdict)].filter(Boolean).join(' ');
 }

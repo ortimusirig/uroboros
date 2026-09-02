@@ -373,6 +373,40 @@ test('an unjudged pivot keeps the raw answer for diagnosis', async () => {
   assert.equal(result.pivotHistory[0].raw, 'I would keep going, honestly');
 });
 
+test('a judged conclude ends the plan as pivot-conclude and reports a plan/pivot event', async () => {
+  // F14: the pivot decision (amend, replan FRESH, or CONCLUDE) was recorded
+  // only in pivotHistory — invisible to anything watching events live.
+  const objecting = () => ({
+    agree: false, readable: true, content: '', questions: [],
+    suggestions: [{ id: 'S1', severity: 'P0', text: 'the same objection every round' }],
+  });
+  const { seats, strategy } = seatsFor({ proposals: ['GOOD'] });
+  seats.reviewCodex = objecting;
+  seats.reviewCursor = objecting;
+  seats.arbitrate = async (request) => {
+    if (request.type === 'propose') return { verdict: 'answered', answer: 'GOOD' };
+    if (request.type === 'agreement') return { verdict: 'answered', converged: false, reason: 'not yet', feedback: 'again' };
+    if (request.type === 'pivot') return { verdict: 'answered', decision: 'conclude', reason: 'oscillation without substance' };
+    return { verdict: 'answered' };
+  };
+  const events = [];
+  const result = await runConversation({
+    runId: 'conv-pivot-event',
+    tier: 'goal',
+    seats,
+    strategy,
+    rounds: 3,
+    reporter: (event) => events.push(event),
+  });
+  assert.equal(result.converged, false);
+  assert.equal(result.reason, 'pivot-conclude');
+  const pivotEvents = events.filter((event) => event.stage === 'plan' && event.type === 'pivot');
+  assert.equal(pivotEvents.length, 1);
+  assert.equal(pivotEvents[0].decision, 'conclude');
+  assert.equal(pivotEvents[0].unjudged, false);
+  assert.equal(pivotEvents[0].reason, 'oscillation without substance');
+});
+
 test('an unreadable stance carries its raw text into the round history', async () => {
   // When the stance cannot be parsed, the parsed fields cannot represent the
   // response — the raw text is the only evidence of what the seat said, and

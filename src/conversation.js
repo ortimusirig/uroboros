@@ -683,6 +683,13 @@ export async function runConversation({
         // and could not be read — is the only record of why it had to.
         ...(unjudged ? { raw: rawAnswer(pivotResponse) } : {}),
       });
+      reportEvent(reporter, runId, 'plan', 'pivot', {
+        tier,
+        planRound: round,
+        decision,
+        unjudged,
+        ...(pivotJudgement.reason ? { reason: pivotJudgement.reason } : {}),
+      });
       if (decision === PIVOT_CONCLUDE) {
         return finish('pivot-conclude', round, { pivot: PIVOT_CONCLUDE });
       }

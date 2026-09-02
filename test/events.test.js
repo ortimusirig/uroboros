@@ -173,6 +173,17 @@ test('plan events render seats, failures, and verdicts in the one-line summary',
   );
 });
 
+test('pivot decisions and capability vetoes print their substance', () => {
+  assert.match(
+    detailFor({ stage: 'plan', type: 'pivot', tier: 'goal', planRound: 3, decision: 'conclude', unjudged: false, reason: 'oscillation without substance' }),
+    /decision=conclude.*reason=oscillation without substance/,
+  );
+  assert.match(
+    detailFor({ stage: 'capability', type: 'vetoed', seat: 'reviewer', what: 'cannot run the gate', why: 'no python', alternative: 'use node' }),
+    /seat=reviewer.*what=cannot run the gate.*why=no python/,
+  );
+});
+
 test('event construction validates declared pairs and campaign identity vocabulary', () => {
   assert.throws(() => createEvent({
     runId: 'bad-stage', stage: 'nonsense', type: 'start',
@@ -337,7 +348,7 @@ test('every plan event pair round-trips through the declared vocabulary', () => 
     'the orphaned plan-gate type must not linger in the vocabulary');
   const pairs = EVENT_PAIRS.filter((pair) => pair.startsWith('plan/')).sort();
   assert.deepEqual(pairs, [
-    'plan/agreement', 'plan/converged', 'plan/finish', 'plan/proposal',
+    'plan/agreement', 'plan/converged', 'plan/finish', 'plan/pivot', 'plan/proposal',
     'plan/review', 'plan/round', 'plan/stalled', 'plan/start', 'plan/storm',
   ]);
   for (const pair of pairs) {
@@ -826,6 +837,10 @@ test('fully exercised runs have exact pair equality with both event vocabularies
       runId: 'conformance-verify-retry', stage: 'verify', type: 'retry',
       fields: { pass: 'plan', reason: 'ActionRequiredError: usage limit' },
     })];
+    const pivotDecisionEvents = [createEvent({
+      runId: 'conformance-plan-pivot', stage: 'plan', type: 'pivot',
+      fields: { tier: 'goal', planRound: 3, decision: 'conclude', unjudged: false, reason: 'conformance fixture' },
+    })];
     const allEvents = [
       ...campaignEvents,
       ...unitEvents,
@@ -837,6 +852,7 @@ test('fully exercised runs have exact pair equality with both event vocabularies
       ...arbiterEvents,
       ...pivotEvents,
       ...verifyRetryEvents,
+      ...pivotDecisionEvents,
     ];
     assert.doesNotThrow(() => assertEventConformance(allEvents, {
       allowUnemitted: Object.keys(deliberatelyUncovered),
