@@ -2,7 +2,8 @@ import assert from 'node:assert/strict';
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import test from 'node:test';
-import { runPlan as executePlan, withSeatWorkspace } from '../src/plan.js';
+import { productionCapability, runPlan as executePlan, withSeatWorkspace } from '../src/plan.js';
+import { assertUsablePrompt } from '../src/verifier.js';
 
 const VERIFIED_SUPERPOWERS = {
   ok: true,
@@ -500,4 +501,35 @@ test('a plan that never converges still reports what it spent', async () => {
       'every seat call must be tallied: 1000+600+400+300+200+100');
     assert.equal(result.tokens.total.outputTokens, 130);
   } finally { item.cleanup(); }
+});
+
+test('the reviewer capability request travels as a file, whatever its size', async () => {
+  // spawn ENAMETOOLONG killed a twice-converged dogfood run at this exact
+  // call: the capability prompt embeds the whole converged plan, and argv has
+  // a hard ceiling. The request now rides a workspace file verbatim — quotes,
+  // newlines, and all — behind a short quote-free argv pointer.
+  const hugePlan = `judge this plan: ${'a "quoted line" with detail\n'.repeat(600)}`;
+  assert.ok(hugePlan.length > 8191, 'the fixture must exceed the cmd.exe limit');
+  let seen = null;
+  let argvPrompt = null;
+  const answer = await productionCapability({
+    seat: 'reviewer',
+    prompt: hugePlan,
+    target: '.',
+    verifierModel: 'test-model',
+    verifierTimeout: 50,
+    verify: async ({ prompt }) => {
+      argvPrompt = prompt;
+      assertUsablePrompt(prompt);
+      const requestPath = prompt
+        .replace(/^Read /, '')
+        .replace(/ and follow it exactly.*$/, '');
+      seen = readFileSync(requestPath, 'utf8');
+      return { launchFailed: false, timedOut: false, findings: '{"capable":true}' };
+    },
+  });
+  assert.equal(answer, '{"capable":true}');
+  assert.ok(argvPrompt.length < 400, 'argv carries only the pointer');
+  assert.match(seen, /a "quoted line" with detail/);
+  assert.ok(seen.length > 8191, 'the file carries the whole request verbatim');
 });

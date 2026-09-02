@@ -94,7 +94,13 @@ async function capabilityVetoes({
   const vetoes = [];
   for (const seat of ['executor', 'reviewer', 'arbiter']) {
     const firstPrompt = capabilityPrompt({ seat, plan });
-    const first = await checkCapability({ seat, plan, prompt: firstPrompt });
+    // A probe that cannot even launch (spawn ENAMETOOLONG killed a
+    // twice-converged dogfood run at the finish line) is an unavailable
+    // judge — not a veto, not consent, and never a crash that discards
+    // judged work. The seat is skipped and the conversation proceeds.
+    let first;
+    try { first = await checkCapability({ seat, plan, prompt: firstPrompt }); }
+    catch { continue; }
     let judgement = parseCapabilityJudgement(first);
     if (judgement.verdict !== 'answered' || judgement.capable !== false) continue;
     const answers = [first];
@@ -102,13 +108,16 @@ async function capabilityVetoes({
       const prompt = capabilityPrompt({
         seat, plan, remedyOnly: true, previousAnswer: first,
       });
-      const second = await checkCapability({
-        seat,
-        plan,
-        prompt,
-        remedyOnly: true,
-        previousAnswer: first,
-      });
+      let second;
+      try {
+        second = await checkCapability({
+          seat,
+          plan,
+          prompt,
+          remedyOnly: true,
+          previousAnswer: first,
+        });
+      } catch { second = undefined; }
       answers.push(second);
       const supplement = parseCapabilityJudgement(second);
       if (supplement.verdict === 'answered' && supplement.capable === false) {

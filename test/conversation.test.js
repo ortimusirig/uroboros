@@ -210,6 +210,17 @@ test('a markdown-emphasized stance is a stance; prose is still silence', () => {
     'the contract\'s own "AGREE: yes means" echo is not a stance');
 });
 
+test('an unlaunchable capability probe is skipped — never a crash, never a veto', async () => {
+  const { seats, strategy } = seatsFor({ proposals: ['GOOD'] });
+  seats.checkCapability = async () => { throw new Error('spawn ENAMETOOLONG'); };
+  const result = await runConversation({
+    runId: 'conv-cap-crash', tier: 'goal', seats, strategy,
+  });
+  assert.equal(result.converged, true,
+    'judged work must never be discarded because a probe could not launch');
+  assert.deepEqual(result.capabilityVetoes, []);
+});
+
 test('an unreadable stance carries its raw text into the round history', async () => {
   // When the stance cannot be parsed, the parsed fields cannot represent the
   // response — the raw text is the only evidence of what the seat said, and

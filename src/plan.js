@@ -427,6 +427,7 @@ export async function productionCapability({
   env,
   home,
   superpowersDir,
+  verify = runVerifier,
 }) {
   if (seat === 'executor') {
     const result = await runExecutor({
@@ -438,23 +439,27 @@ export async function productionCapability({
       : { verdict: ARBITER_UNVERIFIED };
   }
   if (seat === 'reviewer') {
-    const verifierPrompt = prompt
-      .replace(
-        'Return exactly one JSON object and no prose.',
-        'Return one JSON object followed only by the required final verdict marker.',
-      )
-      .replaceAll('"', "'")
-      .replace(/[\r\n]+/g, ' ');
-    const result = await runVerifier({
+    const instructions = prompt.replace(
+      'Return exactly one JSON object and no prose.',
+      'Return one JSON object followed only by the required final verdict marker.',
+    );
+    // The capability request embeds the whole converged plan, which no argv
+    // survives: spawn ENAMETOOLONG killed a twice-converged dogfood run at
+    // this exact call, and the old quote/newline flattening also mangled the
+    // plan it was asking about. The request travels verbatim as a workspace
+    // file; argv carries only the pointer.
+    const result = await withSeatWorkspace({
+      'CAPABILITY_REQUEST.md': `${instructions}\n`,
+    }, (workspace) => verify({
       cwd: target,
-      prompt: `${verifierPrompt} End with exactly NO_BLOCKERS.`,
+      prompt: `Read ${join(workspace, 'CAPABILITY_REQUEST.md')} and follow it exactly. End with exactly NO_BLOCKERS.`,
       model: verifierModel,
       timeoutMs: verifierTimeout,
       pass: 'capability',
       env,
       home,
       superpowersDir,
-    });
+    }));
     return result.launchFailed || result.timedOut
       ? { verdict: ARBITER_UNVERIFIED }
       : result.findings;
