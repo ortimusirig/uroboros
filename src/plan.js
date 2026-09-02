@@ -27,6 +27,7 @@ import {
   runConversation,
   STANCE_REPAIR_CLOSING,
   STANCE_REPAIR_OPENING,
+  stanceRepairLines,
 } from './conversation.js';
 import { reportEvent } from './events.js';
 import { runExecutor } from './executor.js';
@@ -292,7 +293,7 @@ function oneLineArtifact(text) {
 // what matches and carries severities VERBATIM (see parseSeatReview in
 // conversation.js). Nothing anywhere validates a severity, filters by one, or
 // branches on one — they are input to the arbiter's judgement and nothing else.
-function reviewSeatPrompt({ seat, goal, plan, gate, round, repairContent }) {
+export function reviewSeatPrompt({ seat, goal, plan, gate, round, repairContent }) {
   return [
     ONE_LINE_CONVERSATION_DNA,
     `# ${seat} plan review seat`,
@@ -307,14 +308,11 @@ function reviewSeatPrompt({ seat, goal, plan, gate, round, repairContent }) {
     'Reuse the same S<id> for a suggestion you have raised in an earlier round so recurrence is visible.',
     'Then zero or more question lines formatted: Q<id>: question.',
     'AGREE: yes means you are satisfied the plan achieves the goal and you could work from it as written.',
-    // The seat's own unreadable answer, fed back once. It travels through the
-    // same one-line rendering every other artifact in this prompt uses —
-    // nothing is dropped, and no summary stands in for what the seat said.
-    ...(repairContent ? [
-      STANCE_REPAIR_OPENING,
-      `It said, verbatim: ${oneLineArtifact(repairContent)}`,
-      ...STANCE_REPAIR_CLOSING,
-    ] : []),
+    // The seat's own unreadable answer, fed back once and WHOLE. This prompt
+    // reaches Codex on stdin (runExecutor's `input`), never on argv, so the
+    // one-line rendering the other artifacts use would flatten quotes and line
+    // breaks for no reason — and "verbatim" would stop being true.
+    ...(repairContent ? stanceRepairLines(repairContent) : []),
   ].join(' ');
 }
 

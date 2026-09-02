@@ -59,8 +59,18 @@ export function parseSeatReview(text) {
   // means ..." echo from reading as a stance. Tolerance lives in READING,
   // never in meaning: only an explicit AGREE: yes|no parses, silence stays
   // non-consent, and the last stated stance wins.
+  //
+  // Every review contract — and the stance-repair paragraph that answers an
+  // unreadable one — contains the literal "AGREE: yes or AGREE: no". A seat
+  // that quotes the instruction back instead of answering it must not be
+  // credited with the stance it merely echoed, so neither half of that phrase
+  // parses: the first is refused by the lookahead, the second by the lookbehind
+  // that sees the "or" in front of it. A stance the seat actually states
+  // elsewhere still wins, echo or no echo.
   const stanceSource = source.replace(/[*_`]/g, '');
-  const agreeMatches = [...stanceSource.matchAll(/(?:^|[^A-Za-z0-9])AGREE\s*:\s*(yes|no)\b(?!\s+means\b)/gi)];
+  const agreeMatches = [...stanceSource.matchAll(
+    /(?:^|[^A-Za-z0-9])(?<!\bor\s{1,4})AGREE\s*:\s*(yes|no)\b(?!\s+means\b)(?!\s+or\s+AGREE)/gi,
+  )];
   const agree = agreeMatches.length > 0
     ? agreeMatches.at(-1)[1].toLowerCase() === 'yes'
     : null;
@@ -83,10 +93,14 @@ export function parseSeatReview(text) {
 // here asks a seat to change what it judged, and a seat that stays unreadable
 // stays non-consenting. Every tier renders these same sentences, so no seat is
 // told a different law than another.
-export const STANCE_REPAIR_OPENING = 'Your previous response did not contain a parseable stance: no "AGREE: yes" or "AGREE: no" line could be read anywhere in it.';
+// Deliberately states the missing line WITHOUT writing a stance token: a seat
+// that quotes this sentence back must not be credited with a stance it echoed.
+export const STANCE_REPAIR_OPENING = 'Your previous response did not contain a parseable stance: no AGREE line stating yes or no could be read anywhere in it.';
 export const STANCE_REPAIR_CLOSING = [
   'Respond again in EXACTLY the required structure: AGREE: yes or AGREE: no, then your S<id> suggestion lines, then your Q<id> question lines.',
-  'This repairs only how your answer is READ. It does not ask you to change what you judged: if you are not satisfied, say AGREE: no and keep every suggestion you meant.',
+  // Deliberately carries no second stance token: a seat that quotes this
+  // paragraph back must not be credited with a stance it only echoed.
+  'This repairs only how your answer is READ. It does not ask you to change what you judged: an unchanged, unsatisfied judgement is a complete answer, as long as it arrives in the required structure with every suggestion you meant.',
 ];
 
 export function stanceRepairLines(content) {
@@ -372,6 +386,7 @@ export async function runConversation({
     ...(review.stanceRepaired ? { stanceRepaired: true } : {}),
     ...(review.readable === false && !review.unavailable
       ? { content: review.content ?? '' } : {}),
+    ...(review.priorContent ? { priorContent: review.priorContent } : {}),
     ...(review.reaskContent ? { reaskContent: review.reaskContent } : {}),
   });
 
@@ -394,14 +409,24 @@ export async function runConversation({
     catch { return unavailableReview(); }
     if (review.readable !== false || review.unavailable === true) return review;
     if (typeof reviewRepairRequest !== 'function') return review;
+    const content = review.content ?? '';
+    // Nothing was said, so there is nothing to feed back: every tier's repair
+    // paragraph is gated on that text, which would make the second request
+    // byte-identical to the first — a seat call spent to learn nothing. The
+    // row travels as stance-unreadable directly, still not consenting.
+    if (content.trim() === '') return review;
+    let repairRequest;
+    // A hook that throws means no re-ask was ever made. Recording that as a
+    // re-ask that failed would be a check that did not run reading as one
+    // that did — so the first answer stands exactly as it did before.
+    try { repairRequest = reviewRepairRequest({ seat, request, content }); }
+    catch { return review; }
+    if (repairRequest === null || repairRequest === undefined) return review;
     let repaired;
-    try {
-      const repairRequest = reviewRepairRequest({ seat, request, content: review.content ?? '' });
-      if (repairRequest === null || repairRequest === undefined) return review;
-      repaired = normalizeSeatReview(tallyUsage(await call(repairRequest)));
-    } catch {
-      // The re-ask itself never landed. The seat's first answer stands exactly
-      // as it did before this bound existed; nothing is invented for it.
+    try { repaired = normalizeSeatReview(tallyUsage(await call(repairRequest))); }
+    catch {
+      // The re-ask was made and the seat died on it. That happened, and the
+      // record says so; the seat's first answer stands untouched beside it.
       return { ...review, stanceReasked: true };
     }
     if (repaired.readable === false || repaired.unavailable === true) {
@@ -410,11 +435,17 @@ export async function runConversation({
         stanceReasked: true,
         // A bound states what it withheld: when the re-ask said something new
         // and still unreadable, both answers are evidence and both are kept.
-        ...(repaired.content && repaired.content !== review.content
+        ...(repaired.content && repaired.content !== content
           ? { reaskContent: repaired.content } : {}),
       };
     }
-    return { ...repaired, stanceReasked: true, stanceRepaired: true };
+    // The repaired answer is the review now — but the answer it repaired is
+    // where the seat's original prose lives (F20: a genuine verified review
+    // wrapped in meta-commentary). Reading was repaired; the first words are
+    // not deleted for having been unreadable.
+    return {
+      ...repaired, stanceReasked: true, stanceRepaired: true, priorContent: content,
+    };
   };
 
   const reviewBoth = async ({ round, proposal }) => {

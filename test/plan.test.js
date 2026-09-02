@@ -2,7 +2,9 @@ import assert from 'node:assert/strict';
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import test from 'node:test';
-import { productionCapability, runPlan as executePlan, withSeatWorkspace } from '../src/plan.js';
+import {
+  productionCapability, reviewSeatPrompt, runPlan as executePlan, withSeatWorkspace,
+} from '../src/plan.js';
 import { assertUsablePrompt } from '../src/verifier.js';
 
 const VERIFIED_SUPERPOWERS = {
@@ -173,6 +175,45 @@ test('silence is not consent: an unreadable agreement cannot converge the round'
     });
     assert.equal(result.converged, false);
     assert.equal(result.roundHistory[0].agreement.verdict, 'UNVERIFIED');
+  } finally { item.cleanup(); }
+});
+
+test('the plan-tier Codex repair prompt carries the previous answer verbatim', () => {
+  // The prompt travels to the seat on STDIN (runExecutor's `input: plan`), so
+  // there is no argv line to flatten it onto: quotes and line breaks in the
+  // seat's own answer must arrive as the seat wrote them. Flattening them and
+  // still calling it "verbatim" in the audit table would be a false claim.
+  const answer = 'I checked the "goal" against the plan.\nSecond line: no stance anywhere.\n\nThird.';
+  const prompt = reviewSeatPrompt({
+    seat: 'Codex', goal: 'a goal', plan: 'a plan', gate: [], round: 2, repairContent: answer,
+  });
+  assert.ok(prompt.includes(answer), 'the answer arrives whole — quotes and newlines intact');
+  assert.match(prompt, /did not contain a parseable stance/);
+  assert.doesNotMatch(prompt, /\[newline\]/, 'nothing collapsed the seat\'s own text');
+  assert.ok(!reviewSeatPrompt({ seat: 'Codex', goal: 'g', plan: 'p', gate: [], round: 1 })
+    .includes('did not contain a parseable stance'), 'a first ask is not a repair');
+});
+
+test('an unreadable Codex plan review stance is re-asked once with quotes and newlines intact', async () => {
+  const item = fixture();
+  const answer = 'The plan says "ship it".\nMy answer is the required block.';
+  const seen = [];
+  try {
+    const result = await runPlan({
+      goal: 'Verbatim means verbatim', target: item.target, out: item.out, rounds: 1,
+      adapters: seats({
+        codexReview: async (request) => {
+          seen.push(request);
+          return seen.length === 1 ? answer : 'AGREE: yes';
+        },
+      }),
+    });
+    assert.equal(seen.length, 2);
+    assert.equal(seen[1].repairContent, answer,
+      'byte-identical: no quote swapping, no newline collapsing');
+    assert.equal(result.converged, true);
+    assert.equal(result.roundHistory[0].reviews.codex.priorContent, answer,
+      'the repaired row keeps the answer it repaired');
   } finally { item.cleanup(); }
 });
 

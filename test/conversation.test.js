@@ -373,6 +373,52 @@ test('a second unreadable answer travels as stance-unreadable with raw content',
   assert.equal(result.roundHistory[0].reviews.cursor.stanceReasked, true);
 });
 
+test('a repaired stance keeps the answer it repaired — the first words are not deleted', async () => {
+  // F20's whole lesson is that the first answer is where the genuine review
+  // lives. A FAILED re-ask kept both answers; a SUCCESSFUL one must not throw
+  // the original prose away just because the second answer finally parses.
+  const { seats, strategy } = seatsFor({ proposals: ['GOOD'] });
+  const first = 'Verified the cited seams; composing T9 without T4 is the structural gap.';
+  let asks = 0;
+  seats.reviewCursor = async () => (++asks === 1 ? first : 'AGREE: yes\nS1 P1: name the gap');
+  const result = await runConversation({ runId: 'conv-stance-prior', tier: 'goal', seats, strategy, rounds: 1 });
+  assert.equal(result.converged, true);
+  const cursorRow = result.roundHistory[0].reviews.cursor;
+  assert.equal(cursorRow.readable, true);
+  assert.equal(cursorRow.stanceRepaired, true);
+  assert.equal(cursorRow.priorContent, first,
+    'the pre-repair answer travels verbatim beside the repaired one');
+  assert.deepEqual(cursorRow.suggestions.map((item) => item.id), ['S1']);
+});
+
+test('a repair hook that throws is not recorded as a re-ask that happened', async () => {
+  const { seats, strategy } = seatsFor({ proposals: ['GOOD'] });
+  let asks = 0;
+  seats.reviewCursor = async () => { asks += 1; return 'no stance in this prose'; };
+  strategy.reviewRepairRequest = () => { throw new Error('the tier could not build a repair request'); };
+  const result = await runConversation({ runId: 'conv-stance-hook-threw', tier: 'goal', seats, strategy, rounds: 1 });
+  assert.equal(asks, 1, 'no second call was made');
+  const cursorRow = result.roundHistory[0].reviews.cursor;
+  assert.equal(cursorRow.stanceReasked, undefined,
+    'a check that did not run must never read as one that ran and failed');
+  assert.equal(cursorRow.content, 'no stance in this prose');
+});
+
+test('an empty answer is not re-asked — there is nothing to feed back', async () => {
+  const { seats, strategy } = seatsFor({ proposals: ['GOOD'] });
+  let asks = 0;
+  const seen = [];
+  seats.reviewCursor = async (request) => { asks += 1; seen.push(request); return ''; };
+  const result = await runConversation({ runId: 'conv-stance-empty', tier: 'goal', seats, strategy, rounds: 1 });
+  assert.equal(asks, 1,
+    'a re-ask with no text to feed back is byte-identical to the first: a seat call spent to learn nothing');
+  const cursorRow = result.roundHistory[0].reviews.cursor;
+  assert.equal(cursorRow.readable, false);
+  assert.equal(cursorRow.content, '');
+  assert.equal(cursorRow.stanceReasked, undefined);
+  assert.equal(result.converged, false, 'silence is still not consent');
+});
+
 test('the re-ask is bounded per round, not per conversation', async () => {
   const { seats, strategy } = seatsFor({ proposals: ['GOOD', 'GOOD'] });
   let asks = 0;
@@ -427,6 +473,29 @@ test('the F20 seat answer is absence, not a parseable stance variant', () => {
   assert.equal(review.readable, false, 'a promise of the block is not the block');
   assert.equal(review.agree, false, 'silence is never consent');
   assert.equal(review.content, f20, 'the whole answer is retained, untrimmed');
+});
+
+test('the required-structure instruction echoed back is not a stance', () => {
+  // The repair paragraph and every review contract carry the literal
+  // "AGREE: yes or AGREE: no". A seat prone to meta-commentary quotes the
+  // instruction back instead of answering it — and under last-stance-wins that
+  // echo used to land as a REAL disagreement. Reading is tolerant; it must not
+  // invent a stance the seat never took.
+  const echoed = parseSeatReview(
+    'Understood. I will respond again in EXACTLY the required structure: AGREE: yes or AGREE: no, then the S<id> lines.',
+  );
+  assert.equal(echoed.readable, false, 'quoting the instruction is not answering it');
+  assert.equal(echoed.agree, false, 'and it is never consent');
+  assert.equal(parseSeatReview(stanceRepairLines('nothing parseable here').join('\n')).readable, false,
+    'the repair paragraph itself carries no stance a seat could be credited with');
+
+  // A real stance stated beside the echo still wins.
+  const both = parseSeatReview('AGREE: yes\nThe instruction said: AGREE: yes or AGREE: no.');
+  assert.equal(both.readable, true);
+  assert.equal(both.agree, true);
+  const objecting = parseSeatReview('The structure is AGREE: yes or AGREE: no.\nAGREE: no\nS1 P0: unresolved');
+  assert.equal(objecting.readable, true);
+  assert.equal(objecting.agree, false, 'a stated refusal after the echo is still a refusal');
 });
 
 test('the stance repair paragraph feeds the failure back and never re-asks for meaning', () => {
