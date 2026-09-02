@@ -73,8 +73,8 @@ that count with `--pivot-candidates` (1–5).
 spine. `--goal <spec.md> --target <folder>` debates one goal spec directly into the
 loop-ready task units (`plan.md`/`gate.json` pairs plus a `queue.json`) it converges to,
 written beside the goal spec under a `tasks/` directory — this mode is live. `--project
-<file-or-prose> --out <dir> --target <folder>` is parsed today but not yet implemented; it
-currently exits nonzero with a message naming the next increment. In both modes, `--map-budget`
+<file-or-prose> --out <dir> --target <folder>` debates a project directly into the MVP-first,
+dependency-ordered goals that make it up, written under `--out` — this mode is live too. In both modes, `--map-budget`
 bounds the characters spent on the repo map handed to the seats (default 12000), and every
 task's `gate.json` commands are recorded evidence only: the harness runs them once per round
 and no exit code passes or fails the change.

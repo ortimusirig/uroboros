@@ -25,7 +25,7 @@ import { pruneScratch } from '../src/prune.js';
 import { physicalRunIdFor } from '../src/run-id.js';
 import { executeQueueCommand } from '../src/queue-cli.js';
 import { runPlan } from '../src/plan.js';
-import { runDecomposeGoal } from '../src/decompose.js';
+import { runDecomposeGoal, runDecomposeProject } from '../src/decompose.js';
 
 // Short path, outside OneDrive and outside AppData (both are rejected by
 // assertSafeScratchRoot; AppData is MSIX-redirected under a packaged host).
@@ -119,27 +119,35 @@ async function main() {
     return;
   }
   if (opts.command === 'decompose') {
-    if (opts.mode === 'project') {
-      process.stderr.write('decompose --project ships in the next increment\n');
-      process.exitCode = 2;
-      return;
-    }
     const runId = `decompose-${new Date().toISOString().replace(/[:.]/g, '-')}-${randomUUID().slice(0, 8)}`;
     const reporter = (event) => {
       try { process.stderr.write(`${formatEventSummary(event)}\n`); } catch { /* drop sink */ }
     };
     try {
-      const result = await runDecomposeGoal({
-        goalSpecPath: opts.goal,
-        target: opts.target,
-        rounds: opts.rounds,
-        mapBudget: opts.mapBudget,
-        plannerModel: opts.plannerModel,
-        verifierModel: opts.verifierModel,
-        arbiterModel: opts.arbiterModel,
-        runId,
-        reporter,
-      });
+      const result = opts.mode === 'project'
+        ? await runDecomposeProject({
+          project: opts.project,
+          target: opts.target,
+          out: opts.out,
+          rounds: opts.rounds,
+          mapBudget: opts.mapBudget,
+          plannerModel: opts.plannerModel,
+          verifierModel: opts.verifierModel,
+          arbiterModel: opts.arbiterModel,
+          runId,
+          reporter,
+        })
+        : await runDecomposeGoal({
+          goalSpecPath: opts.goal,
+          target: opts.target,
+          rounds: opts.rounds,
+          mapBudget: opts.mapBudget,
+          plannerModel: opts.plannerModel,
+          verifierModel: opts.verifierModel,
+          arbiterModel: opts.arbiterModel,
+          runId,
+          reporter,
+        });
       process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
       if (!result.converged) process.exitCode = 1;
     } catch (error) {

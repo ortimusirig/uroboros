@@ -3,7 +3,9 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { parseTaggedPair, runDecomposeGoal, topologicalOrder } from '../src/decompose.js';
+import {
+  parseTaggedPair, runDecomposeGoal, runDecomposeProject, topologicalOrder,
+} from '../src/decompose.js';
 import { RepairableArtifactError } from '../src/conversation.js';
 import { VERIFIED_SUPERPOWERS } from '../fixtures/verified-superpowers.mjs';
 import { parseArgs } from '../src/args.js';
@@ -192,6 +194,63 @@ test('a task depending on itself is named honestly, not "T1 and undefined depend
     () => topologicalOrder([{ id: 'T1', name: 'T1-solo', dependsOn: ['T1'], gate: [] }]),
     (error) => error instanceof RepairableArtifactError && /depends on itself/.test(error.message),
   );
+});
+
+const goalProposal = () => `<GOALS_JSON>${JSON.stringify([
+  { id: 'G1', slug: 'mvp', statement: 'Smallest true version.', capability: 'runs end to end', dependsOn: [], rationale: 'MVP-first' },
+  { id: 'G2', slug: 'reports', statement: 'Add reporting.', capability: 'reports', dependsOn: ['G1'], rationale: 'builds on G1' },
+])}</GOALS_JSON>\n<GOALS_MD>## G1: mvp\nDeliver the smallest true version.\n\n## G2: reports\nAdd reporting on top of G1.\n</GOALS_MD>`;
+
+test('a converged project writes the manifest and per-goal specs verbatim, write-once', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'decomp1-'));
+  try {
+    const out = join(root, 'uro-project');
+    const result = await runDecomposeProject({
+      project: 'Build the demo product.', target: root, out, runId: 'd1-ok',
+      superpowers: VERIFIED_SUPERPOWERS, adapters: adaptersFor([goalProposal()]),
+    });
+    assert.equal(result.converged, true);
+    assert.equal(readFileSync(join(out, 'project.md'), 'utf8'), 'Build the demo product.\n');
+    const manifest = JSON.parse(readFileSync(join(out, 'goals', 'goals.json'), 'utf8'));
+    assert.deepEqual(manifest.map((goal) => goal.id), ['G1', 'G2']);
+    assert.match(readFileSync(join(out, 'goals', 'G1-mvp', 'spec.md'), 'utf8'),
+      /Deliver the smallest true version\./);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('a second convergence over the same --out collides loudly, write-once', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'decomp1-'));
+  try {
+    const out = join(root, 'uro-project');
+    const first = await runDecomposeProject({
+      project: 'Build the demo product.', target: root, out, runId: 'd1-again-1',
+      superpowers: VERIFIED_SUPERPOWERS, adapters: adaptersFor([goalProposal()]),
+    });
+    assert.equal(first.converged, true);
+    await assert.rejects(() => runDecomposeProject({
+      project: 'Build the demo product.', target: root, out, runId: 'd1-again-2',
+      superpowers: VERIFIED_SUPERPOWERS, adapters: adaptersFor([goalProposal()]),
+    }), /EEXIST|already exists/i, 'write-once: a second convergence collides loudly');
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('a goal dependency cycle goes back as feedback and the repaired round converges', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'decomp1-'));
+  const cyclicGoals = [
+    { id: 'G1', slug: 'a', statement: 'A.', capability: 'a', dependsOn: ['G2'], rationale: 'x' },
+    { id: 'G2', slug: 'b', statement: 'B.', capability: 'b', dependsOn: ['G1'], rationale: 'x' },
+  ];
+  const cyclicProposal = `<GOALS_JSON>${JSON.stringify(cyclicGoals)}</GOALS_JSON>\n<GOALS_MD>## G1: a\nx\n\n## G2: b\nx\n</GOALS_MD>`;
+  try {
+    const out = join(root, 'uro-project');
+    const result = await runDecomposeProject({
+      project: 'Build the demo product.', target: root, out, runId: 'd1-cycle',
+      superpowers: VERIFIED_SUPERPOWERS,
+      adapters: adaptersFor([cyclicProposal, goalProposal()]),
+    });
+    assert.equal(result.converged, true, 'the cycle repaired through feedback, not refusal');
+    assert.equal(result.rounds, 2);
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
 test('decompose args: goal mode', () => {

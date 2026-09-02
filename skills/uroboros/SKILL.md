@@ -225,7 +225,7 @@ that make it up:
 
     node bin/loop.js decompose (--goal <spec.md> | --project <file-or-prose> --out <dir>) --target <folder> [--rounds N] [--map-budget CHARS] [--planner-model MODEL] [--verifier-model MODEL] [--arbiter-model MODEL]
 
-`--project` is parsed but not yet implemented; it currently exits nonzero. In both modes, each
+`--project` debates a project into the MVP-first goals that make it up, written under `--out`. In both modes, each
 task's `gate.json` commands are recorded evidence only: the harness runs them once per round and
 no exit code passes or fails the change.
 
