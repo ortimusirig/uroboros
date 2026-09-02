@@ -314,13 +314,20 @@ function reviewSeatPrompt({ seat, goal, plan, gate, round }) {
 // The hand-off is therefore the repo's established file pattern: artifacts on
 // disk in a scratch directory, a short prompt naming their absolute paths —
 // exactly how run-mode reviews already read TASK.md and CHANGES.diff.
-function withSeatWorkspace(files, work) {
+//
+// Exported because every tier's Cursor seat needs the same hand-off; the
+// decomposition tiers hand over PROJECT.md/GOAL_SPEC.md the way this one hands
+// over GOAL.md.
+export async function withSeatWorkspace(files, work) {
   const directory = mkdtempSync(join(tmpdir(), 'uro-plan-seat-'));
   try {
     for (const [name, content] of Object.entries(files)) {
       writeFileSync(join(directory, name), content, 'utf8');
     }
-    return work(directory);
+    // AWAITED, not returned: `return work(directory)` hands back a pending
+    // promise, and `finally` then deletes the workspace before the seat has
+    // read a single file out of it.
+    return await work(directory);
   } finally {
     try { rmSync(directory, { recursive: true, force: true }); } catch { /* scratch */ }
   }
@@ -403,7 +410,10 @@ async function productionCodexReview({
   return { ...parseSeatReview(result.lastMessage), usage: result.usage };
 }
 
-async function productionCapability({
+// The capability seats are tier-agnostic: each answers only about its own
+// ability to do the work described in whatever text the tier hands it, so the
+// decomposition tiers launch exactly these three transports.
+export async function productionCapability({
   seat,
   prompt,
   target,
@@ -471,14 +481,26 @@ function normalizeDraft(value) {
 
 // A proposal that ARRIVED but does not parse — missing tags, unreadable
 // gate.json — is a repairable artifact: the parse error goes back to the
-// proposing seat verbatim and it answers next round. An EMPTY answer is not a
-// malformed artifact but a seat that never spoke, and that stays terminal.
-function parsePlanProposal(value) {
-  const empty = value === null || value === undefined
-    || (typeof value === 'string' && value.trim() === '');
-  if (empty) throw new Error('the proposing seat returned no artifact');
+// proposing seat verbatim and it answers next round. An answer with NO artifact
+// in it at all is not a malformed artifact but a seat that never really spoke,
+// and that stays terminal.
+//
+// The engine hands this the seat's RAW response precisely so the plan tier owns
+// that distinction. It is the plan tier — not the engine — that knows a plan
+// proposal is a tagged string, an `answer` carrying one, or the {plan, gate}
+// object an injected seat returns; anything else is silence. Reading silence as
+// a malformed artifact ('[object Object]' has no PLAN_MD either) fed it back
+// round after round, unbounded.
+export function parsePlanProposal(response) {
+  const artifact = typeof response === 'string' ? response
+    : typeof response?.answer === 'string' ? response.answer
+      : typeof response?.plan === 'string' ? response
+        : null;
+  if (artifact === null || (typeof artifact === 'string' && artifact.trim() === '')) {
+    throw new Error('the proposing seat returned no artifact');
+  }
   try {
-    return normalizeDraft(value);
+    return normalizeDraft(artifact);
   } catch (error) {
     throw new RepairableArtifactError(error.message, { cause: error });
   }

@@ -180,6 +180,7 @@ export async function runConversation({
     parseDraft,
     proposeRequest,
     parseProposal,
+    proposalText,
     reviewRequests,
     agreementRequest,
     capabilityPlanText,
@@ -235,6 +236,12 @@ export async function runConversation({
   };
 
   const failureMessage = (error) => (error instanceof Error ? error.message : String(error));
+
+  // What a proposal READS AS, in the tier's own words. Only the plan tier's
+  // artifact happens to be a `plan` string; a tier whose proposal is
+  // {items, sections} says so here, and that rendering — never `undefined` — is
+  // what the next proposal, the pivot judgement, and a FRESH re-storm see.
+  const renderProposal = (proposal) => proposalText?.(proposal) ?? proposal.plan;
 
   // All three seats draft independently from the SAME raw input - never from a
   // paraphrase, so their takes stay uncorrelated.
@@ -360,10 +367,13 @@ export async function runConversation({
     if (proposeResponse && proposeResponse.verdict !== ARBITER_UNVERIFIED
       && !proposeResponse.launchFailed && !proposeResponse.timedOut) {
       try {
-        const text = typeof proposeResponse === 'string'
-          ? proposeResponse
-          : proposeResponse.answer ?? proposeResponse;
-        proposal = parseProposal(text);
+        // The seat's response goes to the tier's parser RAW. Collapsing it to
+        // text here stringified an artifact-less object to '[object Object]',
+        // which every tier parser then read as a MALFORMED artifact and fed
+        // back — forever, when rounds are unbounded. Only the tier knows what
+        // its artifact looks like, so only the tier can tell a seat that said
+        // nothing (terminal) from one that said it badly (repairable).
+        proposal = parseProposal(proposeResponse);
       } catch (error) {
         if (error instanceof RepairableArtifactError) repair = error.message;
         else proposal = null;
@@ -386,7 +396,7 @@ export async function runConversation({
       // cannot be substituted by a rule, so the round cannot proceed.
       return finish('arbiter-unavailable', round);
     }
-    previousProposal = proposal.plan;
+    previousProposal = renderProposal(proposal);
 
     const reviews = await reviewBoth({ round, proposal });
     openQuestions = [
@@ -501,7 +511,7 @@ export async function runConversation({
         })),
         recurringFindings: suggestionIds.filter((id) => ledger.stuckFindings().has(id)),
         attempted: pivotHistory,
-        plan: proposal.plan,
+        plan: renderProposal(proposal),
       }));
       const unjudged = pivotJudgement.verdict !== 'answered';
       const decision = unjudged ? shouldPivot(pivotCount) : pivotJudgement.decision;
@@ -516,7 +526,7 @@ export async function runConversation({
       }
       if (decision === PIVOT_FRESH) {
         reStorm = true;
-        failedPlan = proposal.plan;
+        failedPlan = renderProposal(proposal);
         previousProposal = '';
         openQuestions = [];
         feedback = '';
