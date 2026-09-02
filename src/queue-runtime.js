@@ -422,6 +422,26 @@ export async function judgeGoalAcceptance({ goalSpecPath, target, logPath }, {
   }
   let aggregate;
   try {
+    // A landed commit recorded in the queue log might not resolve in this
+    // repository at all — a stale or foreign log, rewritten history, or the
+    // wrong --target. `<base>^` below fails identically for that case AND
+    // for a genuine root commit, so probing only `<base>^` cannot tell them
+    // apart; folding them together would silently diff the ENTIRE repository
+    // from empty and call that "the goal's diff". Verify the base itself
+    // resolves to a commit first, and refuse outright when it does not,
+    // before the root-vs-parent question below is even asked.
+    const baseProbe = await runCommand('git', [
+      '-C', resolvedTarget, 'rev-parse', '--verify', '--quiet', `${base}^{commit}`,
+    ], { timeoutMs: GIT_TIMEOUT_MS });
+    if (baseProbe.code !== 0) {
+      return {
+        approved: null,
+        reasoning: `landed commit ${base} from the queue log does not resolve in this `
+          + 'repository — refusing to judge an unverifiable trail',
+        findings: [],
+        usage: EMPTY_USAGE,
+      };
+    }
     // `<base>^` has nothing to name when base is the repository's root
     // commit. Probe first so a goal whose earliest landed commit IS the
     // repo's first commit is still judged, diffed from Git's empty-tree

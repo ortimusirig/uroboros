@@ -481,12 +481,18 @@ test('judgeGoalAcceptance hands Claude the spec, constitution, aggregate diff, a
       },
     });
 
-    // The base is the PARENT of the EARLIEST landed commit, so a goal finished
-    // across several invocations still gets its complete aggregate diff. The
-    // parent is probed first so a root-commit base is diffed from the
-    // empty tree instead of failing (Minor 1); this fixture's base has a
-    // parent, so the probe succeeds and the diff still runs from `base^`.
+    // The base itself is verified first (it resolves, so the trail is not
+    // refused). The base is the PARENT of the EARLIEST landed commit, so a
+    // goal finished across several invocations still gets its complete
+    // aggregate diff. The parent is probed next so a root-commit base is
+    // diffed from the empty tree instead of failing (Minor 1); this
+    // fixture's base has a parent, so the probe succeeds and the diff still
+    // runs from `base^`.
     assert.deepEqual(calls, [
+      {
+        bin: 'git',
+        args: ['-C', resolve(workspace.target), 'rev-parse', '--verify', '--quiet', 'aaaa111^{commit}'],
+      },
       {
         bin: 'git',
         args: ['-C', resolve(workspace.target), 'rev-parse', '--verify', '--quiet', 'aaaa111^'],
@@ -620,6 +626,44 @@ test('goal acceptance judges a goal whose base is the repository root commit', a
     assert.match(requests[0].diff, /capability\.txt/);
     assert.match(requests[0].diff, /the delivered capability/);
     assert.equal(judgement.approved, true);
+  } finally { workspace.cleanup(); }
+});
+
+test('goal acceptance refuses when the landed base commit does not resolve in this repository', async () => {
+  // The parent probe (`<base>^`) fails identically whether base is a genuine
+  // root commit or a base that simply does not exist here — a stale or
+  // foreign log, rewritten history, or the wrong --target. Folding those two
+  // together would silently diff the ENTIRE repository from empty and call
+  // that "the goal's diff" (the review's one Important). Base existence is
+  // verified first and refused outright before that question is ever asked.
+  const workspace = goalWorkspace();
+  try {
+    writeFileSync(workspace.logPath,
+      `${JSON.stringify({ name: 'unit-1', landed: true, commit: 'ffffeee0' })}\n`);
+    const calls = [];
+    let arbiterCalls = 0;
+    const judgement = await judgeGoalAcceptance(workspace, {
+      runCommand: async (bin, args) => {
+        calls.push({ bin, args });
+        return { code: 1, stdout: '', stderr: 'fatal: bad revision' };
+      },
+      arbiter: async () => { arbiterCalls++; return { approved: true, reasoning: 'sure' }; },
+    });
+    assert.equal(judgement.approved, null);
+    assert.match(judgement.reasoning, /does not resolve/);
+    assert.match(judgement.reasoning, /ffffeee0/);
+    assert.equal(arbiterCalls, 0,
+      'a base that cannot be verified is refused before Claude is ever asked');
+    assert.deepEqual(calls, [
+      {
+        bin: 'git',
+        args: [
+          '-C', resolve(workspace.target), 'rev-parse', '--verify', '--quiet', 'ffffeee0^{commit}',
+        ],
+      },
+    ], 'refusal happens before the parent probe or the diff — one git call, not three');
+    assert.deepEqual(judgement.findings, []);
+    assert.deepEqual(judgement.usage, EMPTY_USAGE);
   } finally { workspace.cleanup(); }
 });
 

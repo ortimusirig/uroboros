@@ -586,13 +586,24 @@ export async function runQueue({
   }
 
   // Claude closes the goal, not the queue. Acceptance runs only when the
-  // operator asked for it, nothing stopped, the queue file names at least one
-  // unit, and the log shows every one of them landed — a goal is never
-  // achieved unseen, and a partly landed (or empty) goal has nothing to
-  // accept. Landed commits are never rolled back: a refusal is information
-  // for the operator, exactly like a landing refusal.
+  // operator asked for it and nothing already stopped. An empty queue file
+  // names nothing landed to review, so a REQUESTED acceptance over it stops
+  // loudly instead of being silently skipped — a goal is never achieved
+  // unseen, and that includes "unseen because nothing ran". Otherwise,
+  // acceptance runs once the log shows every named unit landed; a queue file
+  // with units that stopped short of landing them all never reaches this
+  // point at all (stop is already non-null). Landed commits are never rolled
+  // back: a refusal is information for the operator, exactly like a landing
+  // refusal.
   let goalAcceptance = null;
-  if (acceptGoalSpec !== undefined && stop === null && queue.units.length > 0) {
+  if (acceptGoalSpec !== undefined && stop === null && queue.units.length === 0) {
+    stop = {
+      kind: 'goal-acceptance',
+      reason: 'nothing queued — nothing to accept; a goal is never achieved unseen',
+      outcome: null,
+      questions: [],
+    };
+  } else if (acceptGoalSpec !== undefined && stop === null && queue.units.length > 0) {
     const landedState = everyUnitLanded(queue.units, queue.logPath, readQueueLog);
     if (landedState.unreadable !== undefined) {
       // Unreadable is not the same as incomplete: an incomplete trail is a

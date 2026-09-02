@@ -310,7 +310,7 @@ it. Uroboros never generates or edits a constitution.
 | Repo-map fallback ladder (incl. no-survey path) | input ration | Every return path measured against the actual budget, success and failure alike; nothing assumed to fit |
 | Acceptance partial-trail / unreadable-log / empty-queue refusals | fail-closed reading | A landed row missing its commit, an unreadable queue-log, or zero queued units refuse the judgement; never judge blind, never vacuously accept |
 | Tier-1 forward-dependency/cycle checks; tier-2 duplicate-section check | bookkeeping | Contradictions inside an artifact that arrived go back as feedback; never silently reordered, merged, or refused |
-| Root-commit empty-tree diff base | bookkeeping | Git's empty-tree sentinel stands in for a nonexistent parent so a goal whose earliest landed commit is the repo's root is still diffable and judgeable |
+| Root-commit empty-tree diff base | bookkeeping | Git's empty-tree sentinel stands in for a nonexistent parent only once the base is verified to resolve as a commit here — a genuine root commit is still diffable and judgeable; a base that does not resolve at all refuses instead of silently widening the diff to the whole repository |
 
 Nothing else mechanical exists in this design. Any future bound must join this
 table with its class and its self-declaration, or it does not ship.

@@ -957,10 +957,14 @@ test('acceptance waits for the whole queue file: a stop short of the last unit n
   } finally { fixture.cleanup(); }
 });
 
-test('an empty queue file never triggers a vacuous goal acceptance', async () => {
+test('an empty queue file stops a requested acceptance loudly instead of vacuously accepting', async () => {
   // units.every(...) over an empty array is vacuously true: without a
   // guard, an empty queue.json plus --accept-goal would ask Claude to close
-  // the goal on the strength of nothing this invocation ran.
+  // the goal on the strength of nothing this invocation ran. The fix is not
+  // to fall silent instead — a goal is never achieved unseen, and that
+  // includes "unseen because nothing ran" — so a REQUESTED acceptance over
+  // an empty queue file stops loudly, the same way any other refused or
+  // unavailable acceptance does.
   const directory = mkdtempSync(join(process.cwd(), '.ccc-test-empty-queue-'));
   const target = join(directory, 'target');
   mkdirSync(target);
@@ -978,7 +982,8 @@ test('an empty queue file never triggers a vacuous goal acceptance', async () =>
     });
     assert.equal(runtime.acceptances.length, 0,
       'nothing landed under this queue file; there is nothing to accept');
-    assert.equal(result.stop, null);
+    assert.equal(result.stop.kind, 'goal-acceptance');
+    assert.match(result.stop.reason, /nothing queued/);
     assert.doesNotMatch(result.summary, /Goal accepted/);
   } finally {
     rmSync(directory, { recursive: true, force: true });
