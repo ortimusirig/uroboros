@@ -208,14 +208,15 @@ Per-task landing review (`491b17c`) is unchanged and still runs for every task.
 - **Each decompose tier** reuses the conversation vocabulary verbatim:
   `converged` / `storm-exhausted` / `arbiter-unavailable` / `pivot-conclude` /
   `proposal-irreparable` / `rounds-exhausted` (unbounded unless `--rounds`),
-  plus thrown availability
-  errors (write-once collision, dependency cycle, invalid artifacts, preflight).
-  `proposal-irreparable` is the artifact-repair budget running out: the
-  proposing seat answered unreadably six times in a row (five fed back
-  verbatim, per `MAX_ARTIFACT_REPAIRS`), so the conversation ends converged
-  false with every repair message in `roundHistory` and nothing written. A
-  repair never spends a deliberation round — the retried proposal reuses the
-  round number it was asked in.
+  plus thrown availability errors (write-once collision, dependency cycle,
+  invalid artifacts, preflight). `proposal-irreparable` is the artifact-repair
+  budget running out: across the whole conversation the proposing seat answered
+  unreadably `MAX_ARTIFACT_REPAIRS` + 1 times — the budget is cumulative per
+  conversation, not per round and not consecutive, so a successful parse in
+  between does not refund it. The first five are fed back verbatim; the sixth
+  ends the conversation converged false, with every repair message in
+  `roundHistory` and nothing written. A repair never spends a deliberation
+  round — the retried proposal reuses the round number it was asked in.
   CLI exit: 0 only on converged, 1 otherwise, 2 on thrown preflight — same as
   `loop plan`.
 - **Queue** gains exactly one stop kind: `goal-acceptance`.
