@@ -221,6 +221,54 @@ test('an unlaunchable capability probe is skipped — never a crash, never a vet
   assert.deepEqual(result.capabilityVetoes, []);
 });
 
+test('an unjudged agreement keeps the raw answer for diagnosis', async () => {
+  // Dogfood run 3, round 3: the agreement came back ANSWERED-but-unparseable and
+  // the answer was dropped on the floor, leaving nothing to diagnose. A parsed
+  // judgement that says UNVERIFIED cannot represent what the seat actually said,
+  // so exactly then the raw text travels — verbatim, untrimmed.
+  const { seats, strategy } = seatsFor({ proposals: ['GOOD'], agrees: true });
+  seats.arbitrate = async (request) => {
+    if (request.type === 'propose') return { verdict: 'answered', answer: 'GOOD' };
+    if (request.type === 'agreement') return { verdict: 'answered', answer: 'prose that fails the agreement parse' };
+    return { verdict: 'answered' };
+  };
+  const result = await runConversation({ runId: 'conv-unjudged-raw', tier: 'goal', seats, strategy, rounds: 1 });
+  assert.equal(result.converged, false);
+  const agreement = result.roundHistory[0].agreement;
+  assert.notEqual(agreement.verdict, 'answered');
+  assert.equal(agreement.raw, 'prose that fails the agreement parse');
+});
+
+test('a judged agreement carries no raw text — the parsed judgement IS the answer', async () => {
+  const { seats, strategy } = seatsFor({ proposals: ['GOOD'] });
+  const result = await runConversation({ runId: 'conv-judged-no-raw', tier: 'goal', seats, strategy, rounds: 1 });
+  assert.equal(result.converged, true);
+  assert.equal(result.roundHistory[0].agreement.raw, undefined);
+});
+
+test('an unjudged pivot keeps the raw answer for diagnosis', async () => {
+  // Same law one judgement over: when the pivot decision cannot be read, the
+  // engine falls back to its own bounded ladder — and the answer that could not
+  // be read is the only evidence of why.
+  const objecting = () => ({
+    agree: false, readable: true, content: '', questions: [],
+    suggestions: [{ id: 'S1', severity: 'P0', text: 'the same objection every round' }],
+  });
+  const { seats, strategy } = seatsFor({ proposals: ['GOOD'] });
+  seats.reviewCodex = objecting;
+  seats.reviewCursor = objecting;
+  seats.arbitrate = async (request) => {
+    if (request.type === 'propose') return { verdict: 'answered', answer: 'GOOD' };
+    if (request.type === 'agreement') return { verdict: 'answered', converged: false, reason: 'not yet', feedback: 'again' };
+    if (request.type === 'pivot') return { verdict: 'answered', answer: 'I would keep going, honestly' };
+    return { verdict: 'answered' };
+  };
+  const result = await runConversation({ runId: 'conv-pivot-raw', tier: 'goal', seats, strategy, rounds: 3 });
+  assert.equal(result.converged, false);
+  assert.equal(result.pivotHistory[0].unjudged, true);
+  assert.equal(result.pivotHistory[0].raw, 'I would keep going, honestly');
+});
+
 test('an unreadable stance carries its raw text into the round history', async () => {
   // When the stance cannot be parsed, the parsed fields cannot represent the
   // response — the raw text is the only evidence of what the seat said, and

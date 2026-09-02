@@ -256,6 +256,17 @@ export async function runConversation({
 
   const failureMessage = (error) => (error instanceof Error ? error.message : String(error));
 
+  // What the seat ACTUALLY said, verbatim and untrimmed. A judgement that did
+  // not parse cannot be represented by its parsed fields — they are all
+  // absent — so exactly then the answer itself is the only evidence of what
+  // happened, and dropping it (dogfood run 3, round 3) makes the failure
+  // undiagnosable after the fact.
+  const rawAnswer = (response) => {
+    if (typeof response === 'string') return response;
+    if (typeof response?.answer === 'string') return response.answer;
+    return '';
+  };
+
   // What a proposal READS AS, in the tier's own words. Only the plan tier's
   // artifact happens to be a `plan` string; a tier whose proposal is
   // {items, sections} says so here, and that rendering — never `undefined` — is
@@ -424,7 +435,10 @@ export async function runConversation({
     ];
 
     const agreementResponse = await arbitrate(agreementRequest({ round, proposal, reviews }));
-    const agreement = parseAgreementJudgement(agreementResponse);
+    const judgedAgreement = parseAgreementJudgement(agreementResponse);
+    const agreement = judgedAgreement.verdict === 'answered'
+      ? judgedAgreement
+      : { ...judgedAgreement, raw: rawAnswer(agreementResponse) };
     reportEvent(reporter, runId, 'plan', 'agreement', {
       tier,
       planRound: round,
@@ -530,7 +544,7 @@ export async function runConversation({
     ].filter(Boolean).join('\n');
 
     if (detectCircling(ledger)) {
-      const pivotJudgement = parsePivotJudgement(await arbitrate({
+      const pivotResponse = await arbitrate({
         type: 'pivot',
         ledger: Array.from({ length: ledger.currentRound }, (_, index) => ({
           round: index + 1, findingIds: ledger.round(index + 1),
@@ -538,7 +552,8 @@ export async function runConversation({
         recurringFindings: suggestionIds.filter((id) => ledger.stuckFindings().has(id)),
         attempted: pivotHistory,
         plan: renderProposal(proposal),
-      }));
+      });
+      const pivotJudgement = parsePivotJudgement(pivotResponse);
       const unjudged = pivotJudgement.verdict !== 'answered';
       const decision = unjudged ? shouldPivot(pivotCount) : pivotJudgement.decision;
       pivotCount++;
@@ -546,6 +561,9 @@ export async function runConversation({
         decision,
         unjudged,
         ...(pivotJudgement.reason ? { reason: pivotJudgement.reason } : {}),
+        // The engine's own ladder decided this one, so what the seat said —
+        // and could not be read — is the only record of why it had to.
+        ...(unjudged ? { raw: rawAnswer(pivotResponse) } : {}),
       });
       if (decision === PIVOT_CONCLUDE) {
         return finish('pivot-conclude', round, { pivot: PIVOT_CONCLUDE });
