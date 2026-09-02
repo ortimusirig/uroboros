@@ -6,6 +6,8 @@
 `{ task, gate, name? }` or `{ goal, out, name? }`, and runs them one at a time against the
 current working directory. Paths in the list are resolved relative to the queue file. A goal
 unit runs `loop plan` first and starts implementation only after the plan debate converges.
+This `goal` unit kind still works but is legacy: prefer `loop decompose --goal` to convert
+a goal spec into task units directly, then queue those.
 Run `loop queue --file queue.json --dry-run` before an unattended session to validate every
 input and goal output path without launching an agent.
 
@@ -35,12 +37,23 @@ log is inside the target worktree, its exact untracked path is exempted from the
 check so a later unit or invocation does not self-block; tracked changes to that path are
 still treated as dirty. Keep the queue definition tracked or outside the target worktree.
 
+Pass `--accept-goal <spec.md>` to close a decomposed goal once every unit named in the
+queue file shows landed in the log. Claude then reads the goal spec, the constitution
+when present, the aggregate diff of everything the goal landed, and the log itself, and
+judges whether the project now delivers that goal's capability. A refusal or an
+unreachable judgement stops the queue with kind `goal-acceptance`; landed commits are
+never rolled back. Landed rows in `queue-log.jsonl` now carry the commit SHA each unit
+landed as, and the acceptance judgement's own usage is metered into the queue's totals
+and its own log row. `--accept-goal` resolves relative to the current working directory,
+unlike the queue file's own `task`/`gate`/`goal`/`out` paths, which resolve relative to
+the queue file.
+
 ```
 node bin/loop.js run --task <plan-file-or-prose> --target <folder> --gate <gate.json> [--gate-retries M] [--pivot-candidates N] [--executor-model MODEL] [--executor-effort EFFORT] [--verifier-model MODEL] [--arbiter-model MODEL] [--arbiter-timeout MS] [--artifact-root DIRECTORY] [--mutate] [--port PORT] [--open] [--no-dashboard] [--quiet]
 node bin/loop.js mutate --target <folder> [--base REF] [--tests COMMAND] [--dry-run]
 node bin/loop.js plan --goal <prose-or-file> --target <folder> --out <folder> [--rounds N] [--candidates N] [--pivot-candidates N] [--planner-model MODEL] [--verifier-model MODEL] [--arbiter-model MODEL] [--dry-run]
 node bin/loop.js decompose (--goal <spec.md> | --project <file-or-prose> --out <dir>) --target <folder> [--rounds N] [--map-budget CHARS] [--planner-model MODEL] [--verifier-model MODEL] [--arbiter-model MODEL]
-node bin/loop.js queue --file <queue.json> [--mode <manual|autonomous>] [--max-runs N] [--token-budget TOKENS] [--dry-run]
+node bin/loop.js queue --file <queue.json> [--accept-goal <spec.md>] [--mode <manual|autonomous>] [--max-runs N] [--token-budget TOKENS] [--dry-run]
 node bin/loop.js batch --task <plan-1> --task <plan-2> --target <folder> --gate <gate.json> [--gate-retries M] [--pivot-candidates N] [--executor-model MODEL] [--executor-effort EFFORT] [--verifier-model MODEL] [--arbiter-model MODEL] [--arbiter-timeout MS] [--artifact-root DIRECTORY] [--concurrency N] [--token-budget TOKENS] [--rounds N] [--round N ...] [--unit-kind KIND] [--unit-id ID ...] [--perspective NAME ...] [--depends-on CHILD=PARENT ...] [--port PORT] [--open] [--no-dashboard] [--quiet]
 node bin/loop.js batch --campaign <campaign.json> [--arbiter-timeout MS] [--artifact-root DIRECTORY] [--port PORT] [--open] [--no-dashboard] [--quiet]
 node bin/loop.js status <run-or-campaign-directory>
@@ -72,12 +85,15 @@ that count with `--pivot-candidates` (1–5).
 `loop decompose` runs the same three-seat debate one level up or down the decomposition
 spine. `--goal <spec.md> --target <folder>` debates one goal spec directly into the
 loop-ready task units (`plan.md`/`gate.json` pairs plus a `queue.json`) it converges to,
-written beside the goal spec under a `tasks/` directory — this mode is live. `--project
-<file-or-prose> --out <dir> --target <folder>` debates a project directly into the MVP-first,
-dependency-ordered goals that make it up, written under `--out` — this mode is live too. In both modes, `--map-budget`
-bounds the characters spent on the repo map handed to the seats (default 12000), and every
-task's `gate.json` commands are recorded evidence only: the harness runs them once per round
-and no exit code passes or fails the change.
+written beside the goal spec under a `tasks/` directory — this mode is live. Only this
+mode's task units carry a `gate.json`; its commands are recorded evidence only, exactly
+like `loop plan`'s: the harness runs them once per round and no exit code passes or fails
+the change. `--project <file-or-prose> --out <dir> --target <folder>` debates a project
+directly into the MVP-first, dependency-ordered goals that make it up, written under
+`--out` as a `goals/goals.json` manifest plus one `spec.md` per goal — this mode is live
+too, and emits no `gate.json` of its own; decompose each resulting goal with `--goal` to
+reach its task units. In both modes, `--map-budget` bounds the characters spent on the
+repo map handed to the seats (default 12000).
 
 `--help` and `-h` remain aliases for `help`.
 

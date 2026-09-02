@@ -52,8 +52,8 @@ Claude is the hub of the debate protocol and uses these exact skills at its deci
 - After fixes, run `superpowers:requesting-code-review` to request Cursor re-review.
 
 A plan written for this loop must run `superpowers:writing-plans`' spec-coverage self-review.
-It must name the design document it implementsâ€”for this protocol,
-`docs/superpowers/specs/2026-08-25-three-way-debate-loop-design.md`â€”and enumerate every
+It must name the design document it implements—for this protocol,
+`docs/superpowers/specs/2026-08-25-three-way-debate-loop-design.md`—and enumerate every
 section of that design it does not implement. This check is mandatory even when the omitted
 sections are already described as out of scope elsewhere in the plan.
 
@@ -118,6 +118,12 @@ For a simple Graph, keep the flag form: give every task a `--unit-id`, then repe
   the operator's tree. It never writes the worktree. Missing arbitration preserves reviewer
   objections, halts challenges for the operator, marks deterministic pivot fallback as
   unjudged, and stops a landing — silence is never consent.
+- **Goal acceptance closes a decomposed goal; nothing mechanical does.** `loop queue
+  --accept-goal <spec.md>` runs only once every unit in the queue file shows landed;
+  Claude then reads the goal spec and the aggregate landed diff first-hand and judges
+  whether the project now delivers the goal's capability. A landed unit missing its
+  recorded commit, or a queue log that cannot be read, refuses the judgement rather than
+  approve a partial trail — silence is never consent here either.
 - **Capability vetoes are seat-authoritative.** Before a generated plan converges, executor,
   reviewer, and arbiter each assess only their own work. A veto must name what is impossible,
   why, and a remedy (or explicitly admit no alternative); incomplete vetoes are re-asked and
@@ -225,9 +231,11 @@ that make it up:
 
     node bin/loop.js decompose (--goal <spec.md> | --project <file-or-prose> --out <dir>) --target <folder> [--rounds N] [--map-budget CHARS] [--planner-model MODEL] [--verifier-model MODEL] [--arbiter-model MODEL]
 
-`--project` debates a project into the MVP-first goals that make it up, written under `--out`. In both modes, each
-task's `gate.json` commands are recorded evidence only: the harness runs them once per round and
-no exit code passes or fails the change.
+`--project` debates a project into the MVP-first goals that make it up, written under
+`--out` as a `goals.json` manifest plus one `spec.md` per goal; it emits no `gate.json` of
+its own. Only `--goal` mode's task units carry a `gate.json`, and its commands are
+recorded evidence only: the harness runs them once per round and no exit code passes or
+fails the change.
 
 For an ordered queue whose approved units should land in the current clean Git worktree:
 

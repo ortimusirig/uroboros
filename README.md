@@ -98,6 +98,19 @@ plan.md ──► Codex writes (isolated copy) ──► commands run once (evid
                 Cursor writes one review report ──► findings ──► Claude judges ──► fix / pivot
 ```
 
+Above one plan, `loop decompose` builds the hierarchy that feeds the loop: a project
+converges into MVP-first, dependency-ordered goals, and each goal converges in turn into
+the task units — `plan.md` plus `gate.json` pairs — that `loop queue` runs. A goal is
+never run directly; once every one of its tasks has landed, `loop queue --accept-goal`
+has Claude read the goal spec and the aggregate landed diff first-hand and judge whether
+the project now delivers that goal's capability before the goal counts as achieved.
+
+```
+Project ──► goals          (loop decompose --project; MVP-first, dependency-ordered)
+Goal    ──► task units     (loop decompose --goal; plan.md + gate.json each)
+Task    ──► landed commit  (loop queue; the same evidence → debate → Claude-lands loop)
+```
+
 Run approved plans sequentially with `loop queue`. Relative task, gate, goal-file, and output
 paths are resolved beside the queue file; the current directory is the target repository.
 Each unit carries either `task` plus `gate`, or `goal` plus `out`:

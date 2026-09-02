@@ -48,7 +48,7 @@
 - Consumes: `spawnCapture` from `src/spawn.js` (`await spawn(bin, args, {cwd}) → {code, stdout, stderr}`).
 - Produces: `export const DEFAULT_MAP_BUDGET = 12_000;` and `export async function buildRepoMap({ target, budget = DEFAULT_MAP_BUDGET, spawn = spawnCapture, readFile = readFileSync }) → Promise<string>`. Later tasks embed the returned string in prompts as `REPO_MAP.md`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```js
 // test/repo-map.test.js
@@ -104,12 +104,12 @@ test('outside a git repository the map says so instead of pretending', async () 
 });
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `node --test test/repo-map.test.js`
 Expected: FAIL — `Cannot find module '../src/repo-map.js'`.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 ```js
 // src/repo-map.js
@@ -232,11 +232,11 @@ export async function buildRepoMap({
 }
 ```
 
-- [ ] **Step 4: Run to verify pass**
+- [x] **Step 4: Run to verify pass**
 
 Run: `node --test test/repo-map.test.js` → `pass 3, fail 0`. Then full suite: `node --test` → `fail 0`.
 
-- [ ] **Step 5: Counterfactual + commit**
+- [x] **Step 5: Counterfactual + commit**
 
 CF (scratchpad script, applied-guard `exit 9` if the mutation misses): delete the `## Withheld by the budget` block append (`if (notes.length > 0) …` line) from `src/repo-map.js`, run `node --test --test-name-pattern="names exactly what it withheld" test/repo-map.test.js`, expect FAIL, restore. Then:
 
@@ -291,7 +291,7 @@ export class RepairableArtifactError extends Error {}
 
 - Consumes: nothing new — the engine body IS `runPlan`'s current loop, moved.
 
-- [ ] **Step 1: Write the engine contract tests (new behavior only — the repairable-feedback rule)**
+- [x] **Step 1: Write the engine contract tests (new behavior only — the repairable-feedback rule)**
 
 ```js
 // test/conversation.test.js
@@ -374,9 +374,9 @@ test('the DNA is present and carries the standing law verbatim', () => {
 });
 ```
 
-- [ ] **Step 2: Run to verify failure** — `node --test test/conversation.test.js` → module not found.
+- [x] **Step 2: Run to verify failure** — `node --test test/conversation.test.js` → module not found.
 
-- [ ] **Step 3: Extract the engine (the recipe — mechanical, anchored)**
+- [x] **Step 3: Extract the engine (the recipe — mechanical, anchored)**
 
 In `src/conversation.js`, define `CONVERSATION_DNA` and `RepairableArtifactError` exactly as in Interfaces. Then MOVE from `src/plan.js` into `runConversation`, verbatim except for the named substitutions: the `ledger`/`usageTotal`/`tallyUsage`/`pivotCount`/histories block (plan.js:807–815), `finish()` (:848–868), `stormOnce` (:874–925 — substitute the three inline prompt/request constructions with `strategy.draftRequest(...)` fields; codex/cursor/claude call sites keep their seat functions from `seats`), `normalizeSeatReview`/`unavailableReview`/`reviewBoth` (:927–977 — request payloads from `strategy.reviewRequests`), and the main `for (round…)` loop (:985–1180) with these substitutions:
   - `arbitrate({type:'propose', …})` → `seats.arbitrate(strategy.proposeRequest({ round, drafts, feedback, questions: openQuestions, previousProposal }))`
@@ -387,9 +387,9 @@ In `src/conversation.js`, define `CONVERSATION_DNA` and `RepairableArtifactError
   - Every `reportEvent(reporter, runId, 'plan', <type>, {…})` gains `tier` in its payload.
 `runPlan` keeps: validation, superpowers preflight, seat resolution (hermetic seam untouched: `adapters.draft` marks hermetic), dry-run, and then delegates to `runConversation` with `tier: 'plan'` and a strategy built from its existing prompt builders (`draftingPrompt`, review prompts, `parseDraftArtifact` as both `parseDraft` and `parseProposal` — with `parseProposal` throwing `RepairableArtifactError` for tag/JSON problems, plain `Error` reserved for empty output) and `writeConverged: (proposal) => writeArtifacts(request.out, proposal.plan, proposal.gate)`. Prepend `CONVERSATION_DNA` to every prompt builder's output in `plan.js`.
 
-- [ ] **Step 4: Run to verify pass** — `node --test test/conversation.test.js test/plan.test.js test/events.test.js` → `fail 0`, then full `node --test` → `fail 0` (existing plan tests green is the extraction's bar; if a plan test pinned malformed-proposal→arbiter-unavailable, update THAT test to the repairable contract and say so in the commit body).
+- [x] **Step 4: Run to verify pass** — `node --test test/conversation.test.js test/plan.test.js test/events.test.js` → `fail 0`, then full `node --test` → `fail 0` (existing plan tests green is the extraction's bar; if a plan test pinned malformed-proposal→arbiter-unavailable, update THAT test to the repairable contract and say so in the commit body).
 
-- [ ] **Step 5: Counterfactual + commit** — CF: in `conversation.js`, change the `RepairableArtifactError` catch to `return finish('arbiter-unavailable', round)`; expect `test/conversation.test.js` FAIL (repair test); restore. Commit `feat(conversation): extract the tier-agnostic engine; malformed artifacts repair, never refuse`.
+- [x] **Step 5: Counterfactual + commit** — CF: in `conversation.js`, change the `RepairableArtifactError` catch to `return finish('arbiter-unavailable', round)`; expect `test/conversation.test.js` FAIL (repair test); restore. Commit `feat(conversation): extract the tier-agnostic engine; malformed artifacts repair, never refuse`.
 
 ---
 
@@ -409,7 +409,7 @@ In `src/conversation.js`, define `CONVERSATION_DNA` and `RepairableArtifactError
 - Tier-2 prompts (all prefixed with `CONVERSATION_DNA`, the constitution's text when `<goalDir>/../../constitution.md` exists, and `REPO_MAP.md` content): drafting asks each seat to break THIS goal (spec text included verbatim) into tasks obeying the tier-2 incremental law quoted verbatim from the spec ("every task is a self-contained increment of the GOAL — runnable and testable alone, exactly one capability"), each `## T<n>` section carrying the same headings `loop plan` demands (Title, Required behavior, Invariants, Test requirements, Out of scope), `gate` as evidence commands with the standard no-verdict sentence. Reviews and agreement reuse the planning contract (`AGREE:`/`S<id>`/`Q<id>`), pinned to THIS goal spec.
 - Hermetic seam: `adapters.draft` injected marks hermetic exactly as `runPlan`.
 
-- [ ] **Step 1: Failing tests**
+- [x] **Step 1: Failing tests**
 
 ```js
 // test/decompose.test.js  (fixtures mirror plan.test.js's hermetic style)
@@ -509,8 +509,8 @@ test('mismatched ids are fed back verbatim, not terminal', async () => {
 });
 ```
 
-- [ ] **Step 2: Run to verify failure** — module not found.
-- [ ] **Step 3: Implement** `src/decompose.js`. The two load-bearing helpers, complete:
+- [x] **Step 2: Run to verify failure** — module not found.
+- [x] **Step 3: Implement** `src/decompose.js`. The two load-bearing helpers, complete:
 
 ```js
 export function parseTaggedPair(text, { jsonTag, mdTag, idPattern }) {
@@ -562,8 +562,8 @@ export function topologicalOrder(tasks) {
 ```
 
 Then: `writeTier2Artifacts(goalDir, { items, sections })` writes `tasks/T<n>-plan.md` (section body verbatim), `tasks/T<n>-gate.json` (`JSON.stringify(item.gate, null, 2)`), and `tasks/queue.json` from `topologicalOrder(items)` — every write `{ flag: 'wx' }`; tier-2 prompt builders (CONVERSATION_DNA + constitution file content when `join(goalDir, '..', '..', 'constitution.md')` exists + `await buildRepoMap({ target, budget: mapBudget })` + the goal spec text verbatim + the tier-2 incremental law quoted verbatim from the spec); seat resolution copied from `runPlan`'s block (hermetic on `adapters.draft`); delegate to `runConversation({ tier: 'goal', … })` with `parseProposal: (text) => parseTaggedPair(text, { jsonTag: 'TASKS_JSON', mdTag: 'TASKS_MD', idPattern: 'T\\d+' })` and `writeConverged` calling `writeTier2Artifacts`.
-- [ ] **Step 4: Run to verify pass** — `node --test test/decompose.test.js` → `fail 0`; full suite `fail 0`.
-- [ ] **Step 5: CF + commit** — CF: make `topologicalOrder` silently drop cycle edges instead of throwing (guarded mutation); expect the cycle test FAIL (converges in 1 round); restore. Commit `feat(decompose): tier 2 — a goal converges into write-once task units`.
+- [x] **Step 4: Run to verify pass** — `node --test test/decompose.test.js` → `fail 0`; full suite `fail 0`.
+- [x] **Step 5: CF + commit** — CF: make `topologicalOrder` silently drop cycle edges instead of throwing (guarded mutation); expect the cycle test FAIL (converges in 1 round); restore. Commit `feat(decompose): tier 2 — a goal converges into write-once task units`.
 
 ---
 
@@ -579,7 +579,7 @@ Then: `writeTier2Artifacts(goalDir, { items, sections })` writes `tasks/T<n>-pla
 - `bin/loop.js` `decompose --goal` branch mirrors the `plan` branch (:92–119): stderr event reporter, `runDecomposeGoal(...)`, JSON result to stdout, exit 1 unless converged, 2 on throw.
 - `cli-help.js` Commands line: `  decompose  Debate a project into goals, or one goal into loop-ready task units.` and `commands/decompose.md` front-matter description IDENTICAL to that line's text (the packaging test enforces it).
 
-- [ ] **Step 1: Failing tests** — add to `test/decompose.test.js`:
+- [x] **Step 1: Failing tests** — add to `test/decompose.test.js`:
 
 ```js
 import { parseArgs } from '../src/args.js';
@@ -595,7 +595,7 @@ test('decompose args: exactly one of --goal/--project', () => {
 });
 ```
 
-- [ ] **Step 2: Verify failure** (unknown command). **Step 3: Implement** the three files + `commands/decompose.md` (front matter `description:` = the Commands line text; body: one paragraph on the two modes + the no-verdict evidence sentence). **Step 4:** `node --test test/decompose.test.js test/plugin-packaging.test.js` → `fail 0`; full suite `fail 0`. **Step 5:** Commit `feat(cli): loop decompose --goal`.
+- [x] **Step 2: Verify failure** (unknown command). **Step 3: Implement** the three files + `commands/decompose.md` (front matter `description:` = the Commands line text; body: one paragraph on the two modes + the no-verdict evidence sentence). **Step 4:** `node --test test/decompose.test.js test/plugin-packaging.test.js` → `fail 0`; full suite `fail 0`. **Step 5:** Commit `feat(cli): loop decompose --goal`.
 
 ---
 
@@ -610,7 +610,7 @@ test('decompose args: exactly one of --goal/--project', () => {
 - Artifacts verbatim from the spec: `--out` dir gains `project.md` (input verbatim — file content if the value names an existing file, else the prose), optional pre-existing `constitution.md` untouched and quoted in prompts, `goals/goals.json` manifest `[{ id, slug, statement, capability, dependsOn, rationale }]`, `goals/G<n>-<slug>/spec.md` from `<GOALS_MD>` sections `## G<n>: <title>`. All `wx`. Goal-level `dependsOn` advisory (no runtime enforcement). Cycle/mismatch/missing-tag → `RepairableArtifactError` (same helpers as tier 2, reused — DRY: generalize `parseTaggedPair(text, jsonTag, mdTag, idPattern)` used by both tiers).
 - Tier-1 prompts: DNA + constitution + repo map + project statement verbatim + the tier-1 incremental law quoted verbatim from the spec ("every goal is a self-contained increment of the PROJECT … MVP-first: goal 1 is the smallest true version of the whole project. No goal depends on a later goal.").
 
-- [ ] **Step 1: Failing tests** — three tests, same shapes as Task 3 but tier 1 (the collision and cycle tests repeat Task 3's structure with these fixtures). The converged-path test, complete:
+- [x] **Step 1: Failing tests** — three tests, same shapes as Task 3 but tier 1 (the collision and cycle tests repeat Task 3's structure with these fixtures). The converged-path test, complete:
 
 ```js
 const goalProposal = () => `<GOALS_JSON>${JSON.stringify([
@@ -635,7 +635,7 @@ test('a converged project writes the manifest and per-goal specs verbatim, write
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 ```
-- [ ] **Step 2:** verify failure. **Step 3:** implement via the shared `parseTaggedPair` + `writeTier1Artifacts`; wire the real `--project` branch in `bin/loop.js`. **Step 4:** targeted + full suite `fail 0`. **Step 5:** CF: sabotage the slug/section writer to drop the `## Assumptions`-carrying section body (write titles only) → the verbatim-spec test FAILS; restore. Commit `feat(decompose): tier 1 — a project converges into an MVP-first goal manifest`.
+- [x] **Step 2:** verify failure. **Step 3:** implement via the shared `parseTaggedPair` + `writeTier1Artifacts`; wire the real `--project` branch in `bin/loop.js`. **Step 4:** targeted + full suite `fail 0`. **Step 5:** CF: sabotage the slug/section writer to drop the `## Assumptions`-carrying section body (write titles only) → the verbatim-spec test FAILS; restore. Commit `feat(decompose): tier 1 — a project converges into an MVP-first goal manifest`.
 
 ---
 
@@ -648,7 +648,7 @@ test('a converged project writes the manifest and per-goal specs verbatim, write
 - `buildArbiterPrompt({ type: 'acceptance', goalSpec, constitution, diff, queueLog })` — prompt text: read the goal spec and the AGGREGATE diff of every landed task first-hand; the question is "is the project in a working state that now delivers this goal's capability?"; schema `{"approved":true|false,"reasoning":"…","findings":[{"id":"A1","severity":"…","text":"…"}]}`; severities the arbiter's own words, nothing mechanical acts on them; sections `GOAL_SPEC`, `CONSTITUTION` (when non-empty), `AGGREGATE_DIFF`, `QUEUE_LOG`.
 - `export function parseAcceptanceJudgement(response)` — exactly `parseLandingJudgement`'s contract (approved boolean required else `{verdict:'UNVERIFIED'}`; findings carried verbatim; returns `{verdict:'answered', approved, reasoning, findings}`). Reuse by delegation: `export const parseAcceptanceJudgement = parseLandingJudgement;` is acceptable ONLY if the landing parser has no landing-specific wording; it does not — delegate and re-export.
 
-- [ ] **Step 1: Failing tests** (extend `test/arbiter.test.js`):
+- [x] **Step 1: Failing tests** (extend `test/arbiter.test.js`):
 
 ```js
 test('the acceptance prompt asks the working-state question with spec, diff, and log in front of Claude', () => {
@@ -668,7 +668,7 @@ test('acceptance parsing: silence is never consent', () => {
 });
 ```
 
-- [ ] **Steps 2–5:** fail → implement (`if (request.type === 'acceptance') { … }` beside the `landing` block; omit the CONSTITUTION line when empty) → targeted + full suite green → commit `feat(arbiter): goal-acceptance judgement`.
+- [x] **Steps 2–5:** fail → implement (`if (request.type === 'acceptance') { … }` beside the `landing` block; omit the CONSTITUTION line when empty) → targeted + full suite green → commit `feat(arbiter): goal-acceptance judgement`.
 
 ---
 
@@ -682,7 +682,7 @@ test('acceptance parsing: silence is never consent', () => {
 
 **Interfaces:** consumes Task 6's `parseAcceptanceJudgement` + `buildArbiterPrompt({type:'acceptance'…})`.
 
-- [ ] **Step 1: Failing tests** — `test/queue.test.js` (fakeRuntime gains a default `acceptGoal: async () => ({ approved: true, reasoning: 'goal verified in fixture' })` and captures calls, mirroring the Task-pattern of `judgeLanding` in the same file):
+- [x] **Step 1: Failing tests** — `test/queue.test.js` (fakeRuntime gains a default `acceptGoal: async () => ({ approved: true, reasoning: 'goal verified in fixture' })` and captures calls, mirroring the Task-pattern of `judgeLanding` in the same file):
 
 ```js
 test('with --accept-goal, Claude closes the goal after the last landing and the judgement is logged', async () => {
@@ -735,7 +735,7 @@ test('without --accept-goal the queue behaves exactly as before', async () => {
 
 `test/queue-runtime.test.js`: `judgeGoalAcceptance` hands the arbiter spec + constitution + `git diff <first-landed-commit>^..HEAD` output + log rows (fake `runCommand` asserts the exact `git diff` argv), and returns `approved: null` with the error text when the arbiter throws. `landQueueDiff` test extends the existing landing test to assert the returned `commit` matches `git rev-parse HEAD` in the fixture repo.
 
-- [ ] **Steps 2–5:** fail → implement → targeted + full `node --test` `fail 0` → CF: change the acceptance gate to `approved !== false` (unavailable-as-consent) with applied guard; expect the unavailable test FAIL; restore → commit `feat(queue): Claude closes every goal — acceptance review with logged commit trail`.
+- [x] **Steps 2–5:** fail → implement → targeted + full `node --test` `fail 0` → CF: change the acceptance gate to `approved !== false` (unavailable-as-consent) with applied guard; expect the unavailable test FAIL; restore → commit `feat(queue): Claude closes every goal — acceptance review with logged commit trail`.
 
 ---
 
@@ -744,7 +744,7 @@ test('without --accept-goal the queue behaves exactly as before', async () => {
 **Files:**
 - Modify: `docs/usage.md` (decompose section: two modes, artifact layout, `--map-budget` as the audit-table ration, `--accept-goal`; one sentence marking queue `goal` units legacy), `README.md` (hierarchy paragraph: Project → goals → tasks with the three-line diagram from the spec), `skills/uroboros/SKILL.md` (one bullet: decompose + acceptance exist and what they cannot do), spec's audit table gains no rows (verify: no new mechanical element beyond those already listed — if implementation added one, it must join the table in this task or be removed).
 
-- [ ] **Step 1:** write the docs. **Step 2:** `node --test` full → `fail 0` (planner-docs/packaging conformance included). **Step 3:** commit `docs: decomposition spine — decompose, acceptance, and the caps audit`. **Step 4:** `git push origin main`, verify `git log --oneline -8` shows Tasks 1–8.
+- [x] **Step 1:** write the docs. **Step 2:** `node --test` full → `fail 0` (planner-docs/packaging conformance included). **Step 3:** commit `docs: decomposition spine — decompose, acceptance, and the caps audit`. **Step 4:** `git push origin main`, verify `git log --oneline -8` shows Tasks 1–8.
 
 ---
 

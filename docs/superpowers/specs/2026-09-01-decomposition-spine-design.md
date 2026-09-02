@@ -306,6 +306,11 @@ it. Uroboros never generates or edits a constitution.
 | Acceptance/landing "no readable boolean" | fail-closed reading | Absence of consent is never consent; stops, never passes |
 | Stage liveness | measured, judged | Silence is judged alive-or-stuck; extensions judged; no flat deadline |
 | `rounds`, `max-runs`, `token-budget` | operator's own caps | Set by the owner, forecast declared, run-in-flight always finishes |
+| `MINIMUM_MAP_BUDGET` rejection | derived validation | Below it no honest self-declaration fits; derived from the map's own smallest renders, never guessed |
+| Repo-map fallback ladder (incl. no-survey path) | input ration | Every return path measured against the actual budget, success and failure alike; nothing assumed to fit |
+| Acceptance partial-trail / unreadable-log / empty-queue refusals | fail-closed reading | A landed row missing its commit, an unreadable queue-log, or zero queued units refuse the judgement; never judge blind, never vacuously accept |
+| Tier-1 forward-dependency/cycle checks; tier-2 duplicate-section check | bookkeeping | Contradictions inside an artifact that arrived go back as feedback; never silently reordered, merged, or refused |
+| Root-commit empty-tree diff base | bookkeeping | Git's empty-tree sentinel stands in for a nonexistent parent so a goal whose earliest landed commit is the repo's root is still diffable and judgeable |
 
 Nothing else mechanical exists in this design. Any future bound must join this
 table with its class and its self-declaration, or it does not ship.
