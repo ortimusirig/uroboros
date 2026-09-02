@@ -425,13 +425,14 @@ test('plan parses its goal, target, output, rounds, model, and dry-run', () => {
   ]), /range \[1-5\]/);
 });
 
-test('queue parses autonomous mode, limits, and dry-run', () => {
+test('queue parses autonomous mode, limits, dry-run, and the goal to accept', () => {
   assert.deepEqual(parseArgs([
     'queue',
     '--file', 'queue.json',
     '--mode', 'autonomous',
     '--max-runs', '3',
     '--token-budget', '25000',
+    '--accept-goal', 'uro-project/goals/G1-first/spec.md',
     '--dry-run',
   ]), {
     command: 'queue',
@@ -439,8 +440,15 @@ test('queue parses autonomous mode, limits, and dry-run', () => {
     mode: 'autonomous',
     maxRuns: 3,
     tokenBudget: 25000,
+    acceptGoalSpec: 'uro-project/goals/G1-first/spec.md',
     dryRun: true,
   });
+
+  // Acceptance is explicit: without the flag the queue carries no goal to close.
+  assert.equal(
+    Object.hasOwn(parseArgs(['queue', '--file', 'queue.json']), 'acceptGoalSpec'),
+    false,
+  );
 });
 
 test('queue rejects missing files, invalid modes, and non-positive or fractional limits', () => {

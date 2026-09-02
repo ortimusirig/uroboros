@@ -28,6 +28,7 @@ test('the queue command sends parsed limits, mode, target, and runtime seams to 
     mode: 'autonomous',
     maxRuns: 2,
     tokenBudget: 5000,
+    acceptGoalSpec: 'goals/G1-first/spec.md',
     dryRun: true,
   }, {
     target: 'C:/target',
@@ -45,6 +46,7 @@ test('the queue command sends parsed limits, mode, target, and runtime seams to 
     mode: 'autonomous',
     maxRuns: 2,
     tokenBudget: 5000,
+    acceptGoalSpec: 'goals/G1-first/spec.md',
     dryRun: true,
     dependencies: runtime,
   }]);
@@ -74,10 +76,12 @@ test('the queue command creates the production runtime when one is not injected'
   assert.equal(received.dependencies, runtime);
   assert.equal(Object.hasOwn(received, 'maxRuns'), false);
   assert.equal(Object.hasOwn(received, 'tokenBudget'), false);
+  assert.equal(Object.hasOwn(received, 'acceptGoalSpec'), false);
 });
 
-test('help documents the queue file, autonomous mode, limits, and dry-run', () => {
+test('help documents the queue file, autonomous mode, limits, acceptance, and dry-run', () => {
   assert.match(CLI_USAGE, /queue --file <queue[.]json>/);
+  assert.match(CLI_USAGE, /--accept-goal <spec[.]md>/);
   assert.match(CLI_USAGE, /--mode <manual\|autonomous>/);
   assert.match(CLI_USAGE, /--max-runs <n>/);
   assert.match(CLI_USAGE, /--token-budget <tokens>/);

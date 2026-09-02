@@ -116,12 +116,45 @@ function factTokens(facts) {
   };
 }
 
+// The arbiter reports the canonical five-field usage shape; the queue meters
+// the two fields it reports, in the same reading it keeps for run facts.
+function usageTokens(usage) {
+  const inputTokens = usage?.inputTokens;
+  const outputTokens = usage?.outputTokens;
+  const valid = [inputTokens, outputTokens].every((value) => (
+    typeof value === 'number' && Number.isFinite(value) && value >= 0
+  ));
+  return valid
+    ? { inputTokens, outputTokens, total: inputTokens + outputTokens }
+    : { inputTokens: 0, outputTokens: 0, total: 0 };
+}
+
 function addTokens(total, next) {
   return {
     inputTokens: total.inputTokens + next.inputTokens,
     outputTokens: total.outputTokens + next.outputTokens,
     total: total.total + next.total,
   };
+}
+
+// Acceptance asks the log, not this invocation's counters: a goal split across
+// several queue runs (stop, resume, finish) is complete when every unit of the
+// queue file carries a landed row, whichever invocation landed it.
+function everyUnitLanded(units, logPath) {
+  let text;
+  try {
+    text = readFileSync(logPath, 'utf8');
+  } catch {
+    return false;
+  }
+  const landed = new Set();
+  for (const line of text.split(/\r?\n/)) {
+    if (line.trim() === '') continue;
+    let row;
+    try { row = JSON.parse(line); } catch { continue; }
+    if (isRecord(row) && row.landed === true && typeof row.name === 'string') landed.add(row.name);
+  }
+  return units.every((unit) => landed.has(unit.name));
 }
 
 function questionsFrom(facts, assumed = false) {
@@ -187,6 +220,7 @@ export function formatQueueSummary({
   remaining,
   totalTokens,
   assumedDecisions,
+  goalAcceptance = null,
 }) {
   if (dryRun) {
     return [
@@ -214,6 +248,9 @@ export function formatQueueSummary({
     lines.push('');
   }
   lines.push(`Units landed: ${landedCount}`);
+  if (goalAcceptance?.approved === true) {
+    lines.push(`Goal accepted: ${goalAcceptance.reasoning || '(no reasoning recorded)'}`);
+  }
   if (stop === null) lines.push('Stopped: no');
   else {
     const where = stop.unit === undefined
@@ -243,6 +280,7 @@ export async function runQueue({
   mode = 'manual',
   maxRuns,
   tokenBudget,
+  acceptGoalSpec,
   dryRun = false,
   dependencies = {},
 }) {
@@ -260,6 +298,7 @@ export async function runQueue({
       totalTokens: zeroTokens,
       stop: null,
       assumedDecisions: [],
+      goalAcceptance: null,
       summary: formatQueueSummary({
         dryRun: true,
         units: queue.units,
@@ -278,6 +317,7 @@ export async function runQueue({
   const readRunFacts = dependencies.readRunFacts ?? missingDependency('readRunFacts');
   const landDiff = dependencies.landDiff ?? missingDependency('landDiff');
   const judgeLanding = dependencies.judgeLanding ?? missingDependency('judgeLanding');
+  const acceptGoal = dependencies.acceptGoal ?? missingDependency('acceptGoal');
   const appendLog = dependencies.appendLog ?? appendQueueLog;
   const now = dependencies.now ?? (() => Date.now());
 
@@ -423,6 +463,7 @@ export async function runQueue({
     }
 
     let landed = false;
+    let landing = null;
     let landingJudgement = null;
     if (evaluation.action === 'land') {
       // The hierarchy's last step: with the reviewer's findings closed,
@@ -443,7 +484,7 @@ export async function runQueue({
       }
       if (landingJudgement.approved === true) {
         try {
-          await landDiff({
+          landing = await landDiff({
             target: resolve(target),
             diffPath: join(launch.runDirectory, 'CHANGES.diff'),
             unit,
@@ -494,6 +535,11 @@ export async function runQueue({
       tokens,
       durationMs,
       landed,
+      // The landed commit is the audit trail, and the base the goal-acceptance
+      // review diffs from when a goal spans several queue invocations.
+      ...(typeof landing?.commit === 'string' && landing.commit !== ''
+        ? { commit: landing.commit }
+        : {}),
       stoppedOn: stop !== null,
       ...(landingJudgement === null ? {} : {
         finalReview: {
@@ -533,6 +579,53 @@ export async function runQueue({
     }
   }
 
+  // Claude closes the goal, not the queue. Acceptance runs only when the
+  // operator asked for it, nothing stopped, and the log shows every unit of
+  // this queue file landed — a goal is never achieved unseen, and a partly
+  // landed goal has nothing to accept. Landed commits are never rolled back:
+  // a refusal is information for the operator, exactly like a landing refusal.
+  let goalAcceptance = null;
+  if (acceptGoalSpec !== undefined && stop === null
+    && everyUnitLanded(queue.units, queue.logPath)) {
+    let acceptance;
+    try {
+      acceptance = await acceptGoal({
+        goalSpecPath: resolve(acceptGoalSpec),
+        target: resolve(target),
+        logPath: queue.logPath,
+      }) ?? { approved: null, reasoning: 'goal acceptance returned nothing' };
+    } catch (error) {
+      acceptance = { approved: null, reasoning: error?.message ?? String(error) };
+    }
+    // The taxi meter runs whether or not you arrive: the acceptance judgement
+    // spends real tokens on every path, approved or refused or unavailable.
+    const acceptanceTokens = usageTokens(acceptance.usage);
+    totalTokens = addTokens(totalTokens, acceptanceTokens);
+    goalAcceptance = {
+      approved: typeof acceptance.approved === 'boolean' ? acceptance.approved : null,
+      reasoning: acceptance.reasoning ?? '',
+      ...(Array.isArray(acceptance.findings) && acceptance.findings.length > 0
+        ? { findings: acceptance.findings }
+        : {}),
+    };
+    if (goalAcceptance.approved !== true) {
+      stop = {
+        kind: 'goal-acceptance',
+        reason: goalAcceptance.approved === false
+          ? `Claude refused the goal: ${goalAcceptance.reasoning || '(no reasoning recorded)'}`
+          : "Claude's goal acceptance was unavailable — a goal is never achieved "
+            + `unseen: ${goalAcceptance.reasoning || '(no detail)'}`,
+        outcome: null,
+        questions: [],
+      };
+    }
+    appendLog(queue.logPath, {
+      goalAcceptance,
+      tokens: acceptanceTokens,
+      ...(stop === null ? {} : { stopReason: stop.reason }),
+    });
+  }
+
   const remaining = queue.units.length - attemptedCount;
   return {
     dryRun: false,
@@ -542,6 +635,7 @@ export async function runQueue({
     totalTokens,
     stop,
     assumedDecisions,
+    goalAcceptance,
     summary: formatQueueSummary({
       units: queue.units,
       landedCount,
@@ -549,6 +643,7 @@ export async function runQueue({
       remaining,
       totalTokens,
       assumedDecisions,
+      goalAcceptance,
     }),
   };
 }

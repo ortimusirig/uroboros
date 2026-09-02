@@ -24,6 +24,7 @@ export async function executeQueueCommand(options, {
     mode: options.mode,
     ...(options.maxRuns === undefined ? {} : { maxRuns: options.maxRuns }),
     ...(options.tokenBudget === undefined ? {} : { tokenBudget: options.tokenBudget }),
+    ...(options.acceptGoalSpec === undefined ? {} : { acceptGoalSpec: options.acceptGoalSpec }),
     dryRun: options.dryRun,
     dependencies: runtime ?? createRuntime({ env }),
   });

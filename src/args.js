@@ -225,6 +225,7 @@ export function parseArgs(argv) {
         mode: { type: 'string' },
         'max-runs': { type: 'string' },
         'token-budget': { type: 'string' },
+        'accept-goal': { type: 'string' },
         'dry-run': { type: 'boolean' },
       },
       allowPositionals: false,
@@ -245,6 +246,7 @@ export function parseArgs(argv) {
       ...(values['token-budget'] === undefined ? {} : {
         tokenBudget: strictInt(values['token-budget'], undefined, 1, Number.MAX_SAFE_INTEGER),
       }),
+      ...(values['accept-goal'] === undefined ? {} : { acceptGoalSpec: values['accept-goal'] }),
       dryRun: values['dry-run'] === true,
     };
   }

@@ -1,15 +1,18 @@
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import test from 'node:test';
 import {
   assertCleanTarget,
+  judgeGoalAcceptance,
   judgeLandingWithClaude,
   landQueueDiff,
   launchLoopPlan,
   launchLoopRun,
   readRunFacts,
 } from '../src/queue-runtime.js';
+import { EMPTY_USAGE } from '../src/usage.js';
 
 function scratch() {
   const directory = mkdtempSync(join(process.cwd(), '.ccc-test-queue-runtime-'));
@@ -158,6 +161,7 @@ test('landing checks first, applies to the index, and commits only touched paths
     { code: 0, stdout: '1\t0\tsrc/a.js\u00001\t0\tdocs/b.md\0', stderr: '' },
     { code: 0, stdout: '', stderr: '' },
     { code: 0, stdout: '[main abc123] queue commit\n', stderr: '' },
+    { code: 0, stdout: '9f1c0de6a4b2c8d0e1f2a3b4c5d6e7f8091a2b3c\n', stderr: '' },
   ];
   const runCommand = async (bin, args, options = {}) => {
     calls.push({ bin, args, options });
@@ -186,9 +190,13 @@ test('landing checks first, applies to the index, and commits only touched paths
       '-C', resolve('C:/repo'), 'commit', '--only', '-m', 'queue: land plan x (run-9)',
       '--pathspec-from-file=-', '--pathspec-file-nul',
     ],
+    ['-C', resolve('C:/repo'), 'rev-parse', 'HEAD'],
   ]);
   assert.equal(calls[8].options.input, 'src/a.js\0docs/b.md\0');
   assert.deepEqual(result.paths, ['src/a.js', 'docs/b.md']);
+  // The landed commit SHA is the queue log's audit trail and the acceptance
+  // review's diff base, so it travels back with the paths.
+  assert.equal(result.commit, '9f1c0de6a4b2c8d0e1f2a3b4c5d6e7f8091a2b3c');
 });
 
 test('landing accepts Git rename numstat records while still comparing the new path', async () => {
@@ -204,6 +212,7 @@ test('landing accepts Git rename numstat records while still comparing the new p
     { code: 0, stdout: stagedRename, stderr: '' },
     { code: 0, stdout: '', stderr: '' },
     { code: 0, stdout: '[main abc123] queue commit\n', stderr: '' },
+    { code: 0, stdout: '5c4b3a29187f6e5d4c3b2a1908f7e6d5c4b3a291\n', stderr: '' },
   ];
   const runCommand = async (bin, args, options = {}) => {
     calls.push({ bin, args, options });
@@ -218,10 +227,50 @@ test('landing accepts Git rename numstat records while still comparing the new p
   }, { runCommand });
 
   assert.deepEqual(result.paths, ['src/old.js', 'src/new.js']);
-  assert.equal(calls.at(-1).args.includes('--no-verify'), false);
-  assert.equal(calls.at(-1).args.includes('--no-gpg-sign'), false);
-  assert.equal(calls.at(-1).args.includes('--only'), true);
-  assert.equal(calls.at(-1).options.input, 'src/old.js\0src/new.js\0');
+  const commitCall = calls.at(-2);
+  assert.equal(commitCall.args.includes('--no-verify'), false);
+  assert.equal(commitCall.args.includes('--no-gpg-sign'), false);
+  assert.equal(commitCall.args.includes('--only'), true);
+  assert.equal(commitCall.options.input, 'src/old.js\0src/new.js\0');
+});
+
+test('the commit a real landing creates is the SHA it reports back', async () => {
+  const { directory, cleanup } = scratch();
+  const root = join(directory, 'repo');
+  const git = (...args) => execFileSync('git', ['-C', root, ...args], {
+    stdio: 'pipe', encoding: 'utf8',
+  });
+  try {
+    mkdirSync(root);
+    git('init', '-q');
+    git('config', 'user.email', 'queue-runtime@example.test');
+    git('config', 'user.name', 'uro queue test');
+    writeFileSync(join(root, 'a.txt'), 'one\n');
+    git('add', '--', 'a.txt');
+    git('commit', '-qm', 'base');
+    const before = git('rev-parse', 'HEAD').trim();
+
+    // A real patch, produced by Git itself, then restored so the tree is clean
+    // again — exactly the shape landQueueDiff receives from a completed run.
+    writeFileSync(join(root, 'a.txt'), 'one\ntwo\n');
+    const patch = git('diff', '--', 'a.txt');
+    git('checkout', '--', 'a.txt');
+    const diffPath = join(directory, 'CHANGES.diff');
+    writeFileSync(diffPath, patch);
+
+    // No injected runCommand: this exercises the production Git path.
+    const result = await landQueueDiff({
+      target: root, diffPath, unit: { name: 'unit-1' }, runId: 'run-real',
+    });
+
+    const head = git('rev-parse', 'HEAD').trim();
+    assert.notEqual(head, before, 'positive control: the landing must create a commit');
+    assert.equal(result.commit, head, 'the reported SHA is the commit the landing created');
+    assert.deepEqual(result.paths, ['a.txt']);
+    assert.match(git('log', '-1', '--pretty=%s'), /queue: land unit-1 \(run-real\)/);
+  } finally {
+    cleanup();
+  }
 });
 
 test('a commit failure reverses the applied patch before reporting the stop', async () => {
@@ -382,4 +431,122 @@ test('judgeLandingWithClaude treats an unreachable or unreadable arbiter as not-
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
+});
+
+// The tier-1 layout the acceptance review reads from:
+//   <project>/constitution.md
+//   <project>/goals/G1-first/spec.md
+function goalWorkspace(withConstitution = true) {
+  const { directory, cleanup } = scratch();
+  const project = join(directory, 'uro-project');
+  const goalDirectory = join(project, 'goals', 'G1-first');
+  mkdirSync(goalDirectory, { recursive: true });
+  writeFileSync(join(goalDirectory, 'spec.md'), '# Goal 1\n\nDeliver the capability.\n');
+  if (withConstitution) {
+    writeFileSync(join(project, 'constitution.md'), 'The project constitution stands.\n');
+  }
+  return {
+    directory,
+    cleanup,
+    goalSpecPath: join(goalDirectory, 'spec.md'),
+    target: join(directory, 'repo'),
+    logPath: join(directory, 'queue-log.jsonl'),
+  };
+}
+
+test('judgeGoalAcceptance hands Claude the spec, constitution, aggregate diff, and log rows', async () => {
+  const workspace = goalWorkspace();
+  try {
+    writeFileSync(workspace.logPath, `${[
+      JSON.stringify({ name: 'unit-1', landed: true, commit: 'aaaa111' }),
+      JSON.stringify({ name: 'unit-2', landed: false }),
+      'this line is not JSON and must not stop the review',
+      JSON.stringify({ name: 'unit-2', landed: true, commit: 'bbbb222' }),
+    ].join('\n')}\n`);
+    const calls = [];
+    const requests = [];
+    const judgement = await judgeGoalAcceptance(workspace, {
+      runCommand: async (bin, args) => {
+        calls.push({ bin, args });
+        return { code: 0, stdout: 'diff --git a/x b/x\n+capability\n', stderr: '' };
+      },
+      arbiter: async ({ request }) => {
+        requests.push(request);
+        return {
+          approved: true,
+          reasoning: 'the tree delivers the goal',
+          findings: [{ id: 'A1', severity: 'P2', text: 'a note, not a blocker' }],
+          usage: { inputTokens: 90, cachedInputTokens: 10, outputTokens: 15 },
+        };
+      },
+    });
+
+    // The base is the PARENT of the EARLIEST landed commit, so a goal finished
+    // across several invocations still gets its complete aggregate diff.
+    assert.deepEqual(calls, [{
+      bin: 'git',
+      args: ['-C', resolve(workspace.target), 'diff', 'aaaa111^..HEAD'],
+    }]);
+    assert.equal(requests.length, 1);
+    assert.equal(requests[0].type, 'acceptance');
+    assert.match(requests[0].goalSpec, /Deliver the capability/);
+    assert.match(requests[0].constitution, /constitution stands/);
+    assert.equal(requests[0].diff, 'diff --git a/x b/x\n+capability\n');
+    assert.deepEqual(requests[0].queueLog.map((row) => row.commit),
+      ['aaaa111', undefined, 'bbbb222']);
+    assert.deepEqual(judgement, {
+      approved: true,
+      reasoning: 'the tree delivers the goal',
+      findings: [{ id: 'A1', severity: 'P2', text: 'a note, not a blocker' }],
+      usage: { inputTokens: 90, cachedInputTokens: 10, outputTokens: 15 },
+    });
+  } finally { workspace.cleanup(); }
+});
+
+test('goal acceptance without a constitution still asks, and no readable answer is never consent', async () => {
+  const workspace = goalWorkspace(false);
+  try {
+    writeFileSync(workspace.logPath,
+      `${JSON.stringify({ name: 'unit-1', landed: true, commit: 'aaaa111' })}\n`);
+    const runCommand = async () => ({ code: 0, stdout: 'diff --git a/x b/x\n', stderr: '' });
+
+    const requests = [];
+    const unreadable = await judgeGoalAcceptance(workspace, {
+      runCommand,
+      arbiter: async ({ request }) => {
+        requests.push(request);
+        return { answer: 'looks finished to me' };
+      },
+    });
+    assert.equal(requests[0].constitution, '',
+      'an absent constitution is empty, and the prompt drops its line');
+    assert.equal(unreadable.approved, null,
+      'prose without a readable approval boolean is never consent');
+
+    const thrown = await judgeGoalAcceptance(workspace, {
+      runCommand,
+      arbiter: async () => { throw new Error('spawn claude ENOENT'); },
+    });
+    assert.equal(thrown.approved, null);
+    assert.match(thrown.reasoning, /ENOENT/);
+    assert.deepEqual(thrown.usage, EMPTY_USAGE);
+  } finally { workspace.cleanup(); }
+});
+
+test('goal acceptance refuses to judge a goal with no landed commit trail', async () => {
+  const workspace = goalWorkspace();
+  try {
+    writeFileSync(workspace.logPath,
+      `${JSON.stringify({ name: 'unit-1', landed: false })}\n`);
+    let arbiterCalls = 0;
+    let gitCalls = 0;
+    const judgement = await judgeGoalAcceptance(workspace, {
+      runCommand: async () => { gitCalls++; return { code: 0, stdout: '', stderr: '' }; },
+      arbiter: async () => { arbiterCalls++; return { approved: true, reasoning: 'sure' }; },
+    });
+    assert.equal(judgement.approved, null);
+    assert.match(judgement.reasoning, /no landed commit/i);
+    assert.equal(arbiterCalls, 0, 'there is nothing first-hand to read, so nothing is asked');
+    assert.equal(gitCalls, 0);
+  } finally { workspace.cleanup(); }
 });

@@ -53,11 +53,13 @@ function fakeRuntime(facts, overrides = {}) {
   const launches = [];
   const landings = [];
   const judgements = [];
+  const acceptances = [];
   const directories = new Map();
   return {
     launches,
     landings,
     judgements,
+    acceptances,
     dependencies: {
       assertCleanTarget: async () => {},
       // Tests declare their world: the default final review approves so
@@ -66,6 +68,24 @@ function fakeRuntime(facts, overrides = {}) {
       judgeLanding: async (request) => {
         judgements.push(request);
         return { approved: true, reasoning: 'reviewed first-hand in fixture' };
+      },
+      // Same declaration for the goal-level review: the default accepts, and
+      // its usage is non-zero so the metering assertions have something real
+      // to read.
+      acceptGoal: async (request) => {
+        acceptances.push(request);
+        return {
+          approved: true,
+          reasoning: 'goal verified in fixture',
+          findings: [],
+          usage: {
+            inputTokens: 11,
+            cachedInputTokens: 4,
+            outputTokens: 7,
+            reasoningOutputTokens: 0,
+            cacheWriteTokens: 0,
+          },
+        };
       },
       launchRun: async (request) => {
         const index = launches.length;
@@ -830,4 +850,109 @@ test('an unavailable final review never lands — silence is not consent at land
   } finally {
     fixture.cleanup();
   }
+});
+
+test('with --accept-goal, Claude closes the goal after the last landing and the judgement is logged', async () => {
+  const fixture = makeFixture(2);
+  try {
+    const runtime = fakeRuntime([reviewReady('run-1'), reviewReady('run-2')]);
+    const result = await runQueue({
+      file: fixture.file,
+      target: fixture.target,
+      acceptGoalSpec: 'G1/spec.md',
+      dependencies: runtime.dependencies,
+    });
+    assert.equal(runtime.acceptances.length, 1, 'acceptance runs exactly once, after all landings');
+    assert.equal(runtime.acceptances[0].logPath, fixture.logPath);
+    assert.equal(runtime.acceptances[0].target, resolve(fixture.target));
+    assert.match(runtime.acceptances[0].goalSpecPath, /G1[\\/]spec[.]md$/);
+    assert.equal(result.stop, null);
+    const log = readLog(fixture.logPath);
+    assert.equal(log.at(-1).goalAcceptance.approved, true);
+    assert.equal(log.at(-1).goalAcceptance.reasoning, 'goal verified in fixture');
+    assert.ok(log[0].commit, 'landed rows carry their commit SHA');
+    assert.equal(log[1].commit, 'commit-2');
+    // The taxi meter runs whether or not you arrive: the acceptance judgement
+    // spends real tokens, so it is metered into the queue totals and its row.
+    assert.deepEqual(log.at(-1).tokens, { inputTokens: 11, outputTokens: 7, total: 18 });
+    assert.deepEqual(result.totalTokens, { inputTokens: 17, outputTokens: 11, total: 28 });
+    assert.match(result.summary, /Goal accepted: goal verified in fixture/);
+  } finally { fixture.cleanup(); }
+});
+
+test('a refused goal acceptance stops with kind goal-acceptance and rolls nothing back', async () => {
+  const fixture = makeFixture(1);
+  try {
+    const runtime = fakeRuntime([reviewReady('run-1')], {
+      acceptGoal: async () => ({ approved: false, reasoning: 'capability incomplete' }),
+    });
+    const result = await runQueue({
+      file: fixture.file,
+      target: fixture.target,
+      acceptGoalSpec: 'G1/spec.md',
+      dependencies: runtime.dependencies,
+    });
+    assert.equal(runtime.landings.length, 1, 'the landing already happened and stays');
+    assert.equal(result.stop.kind, 'goal-acceptance');
+    assert.match(result.stop.reason, /Claude refused the goal/);
+    assert.match(result.stop.reason, /capability incomplete/);
+    const log = readLog(fixture.logPath);
+    assert.equal(log[0].landed, true, 'a refused goal never un-lands a landed unit');
+    assert.equal(log.at(-1).goalAcceptance.approved, false);
+    assert.match(log.at(-1).stopReason, /capability incomplete/);
+  } finally { fixture.cleanup(); }
+});
+
+test('an unavailable goal acceptance never marks a goal achieved', async () => {
+  const fixture = makeFixture(1);
+  try {
+    const runtime = fakeRuntime([reviewReady('run-1')], {
+      acceptGoal: async () => { throw new Error('claude unreachable'); },
+    });
+    const result = await runQueue({
+      file: fixture.file,
+      target: fixture.target,
+      acceptGoalSpec: 'G1/spec.md',
+      dependencies: runtime.dependencies,
+    });
+    assert.equal(result.stop.kind, 'goal-acceptance');
+    assert.match(result.stop.reason, /never achieved unseen/);
+    assert.match(result.stop.reason, /claude unreachable/);
+    assert.equal(readLog(fixture.logPath).at(-1).goalAcceptance.approved, null);
+  } finally { fixture.cleanup(); }
+});
+
+test('without --accept-goal the queue behaves exactly as before', async () => {
+  const fixture = makeFixture(1);
+  try {
+    const runtime = fakeRuntime([reviewReady('run-1')]);
+    const result = await runQueue({
+      file: fixture.file,
+      target: fixture.target,
+      dependencies: runtime.dependencies,
+    });
+    assert.equal(runtime.acceptances.length, 0);
+    assert.equal(result.stop, null);
+    assert.equal(readLog(fixture.logPath).length, 1, 'no acceptance row without --accept-goal');
+    assert.doesNotMatch(result.summary, /Goal accepted/);
+  } finally { fixture.cleanup(); }
+});
+
+test('acceptance waits for the whole queue file: a stop short of the last unit never closes the goal', async () => {
+  const fixture = makeFixture(2);
+  try {
+    const runtime = fakeRuntime([reviewReady('run-1'), reviewReady('run-2')], {
+      judgeLanding: async ({ runDirectory }) => (runDirectory === 'run-directory-2'
+        ? { approved: false, reasoning: 'second unit is not sound' }
+        : { approved: true, reasoning: 'sound' }),
+    });
+    const result = await runQueue({
+      file: fixture.file,
+      target: fixture.target,
+      acceptGoalSpec: 'G1/spec.md',
+      dependencies: runtime.dependencies,
+    });
+    assert.equal(runtime.acceptances.length, 0, 'a partly landed goal is never judged achieved');
+    assert.equal(result.stop.kind, 'final-review');
+  } finally { fixture.cleanup(); }
 });

@@ -1,13 +1,15 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import {
+  dirname,
   isAbsolute,
   join,
   relative,
   resolve,
 } from 'node:path';
 import { spawnCapture } from './spawn.js';
-import { parseLandingJudgement, runArbiter } from './arbiter.js';
+import { parseAcceptanceJudgement, parseLandingJudgement, runArbiter } from './arbiter.js';
+import { EMPTY_USAGE } from './usage.js';
 
 const GIT_TIMEOUT_MS = 30_000;
 const DEFAULT_LOOP_PATH = fileURLToPath(new URL('../bin/loop.js', import.meta.url));
@@ -234,6 +236,7 @@ export async function landQueueDiff({
     ...prefix, 'apply', '--index', '--', diffPath,
   ], {}, 'diff apply failed after a successful check');
 
+  let paths;
   try {
     const stagedStats = await gitCommand(runCommand, [
       ...prefix, 'diff', '--cached', '--numstat', '-z', '--find-renames',
@@ -248,7 +251,7 @@ export async function landQueueDiff({
     const names = await gitCommand(runCommand, [
       ...prefix, 'diff', '--cached', '--name-only', '-z', '--find-renames',
     ], {}, 'cannot list paths touched by the diff');
-    const paths = names.stdout.split('\0').filter(Boolean);
+    paths = names.stdout.split('\0').filter(Boolean);
     if (paths.length === 0) {
       throw new Error('applied diff touched no paths; refusing to create an empty commit');
     }
@@ -283,7 +286,6 @@ export async function landQueueDiff({
       '--pathspec-from-file=-',
       '--pathspec-file-nul',
     ], { input: names.stdout }, 'queue commit failed');
-    return { paths };
   } catch (error) {
     const rollback = await runCommand('git', [
       ...prefix, 'apply', '--reverse', '--index', '--', diffPath,
@@ -297,6 +299,15 @@ export async function landQueueDiff({
     }
     throw error;
   }
+
+  // Read the SHA outside the rollback guard: the commit exists now, and
+  // reversing the patch because a read failed would strip a change that is
+  // already committed. The SHA is the queue log's audit trail and the base the
+  // goal-acceptance review diffs from.
+  const head = await gitCommand(runCommand, [
+    ...prefix, 'rev-parse', 'HEAD',
+  ], {}, 'cannot read the SHA of the queue commit');
+  return { paths, commit: head.stdout.trim() };
 }
 
 // Claude's final review before landing — the hierarchy's last step. Claude
@@ -341,6 +352,95 @@ export async function judgeLandingWithClaude({ unit, facts, runDirectory }, {
   };
 }
 
+function readQueueLogRows(logPath) {
+  let text;
+  try {
+    text = readFileSync(logPath, 'utf8');
+  } catch {
+    return [];
+  }
+  const rows = [];
+  for (const line of text.split(/\r?\n/)) {
+    if (line.trim() === '') continue;
+    let row;
+    // A log line the queue did not write is not a reason to refuse to judge the
+    // goal; it is simply not one of the rows.
+    try { row = JSON.parse(line); } catch { continue; }
+    if (row !== null && typeof row === 'object' && !Array.isArray(row)) rows.push(row);
+  }
+  return rows;
+}
+
+// Claude's goal-acceptance review — the goal-level counterpart of the landing
+// review. Every task of the goal has landed; Claude reads the goal spec, the
+// constitution when the project has one, and the aggregate diff of everything
+// that landed, first-hand, and judges whether the project now delivers the
+// goal. The base is the PARENT of the earliest landed commit in the log, so a
+// goal finished across several queue invocations is still judged whole. An
+// unreachable or unreadable judgement returns approved: null; the queue treats
+// anything but an explicit yes as a stop.
+export async function judgeGoalAcceptance({ goalSpecPath, target, logPath }, {
+  arbiter = runArbiter,
+  runCommand = spawnCapture,
+  cwd = process.cwd(),
+} = {}) {
+  const readOptional = (path) => {
+    try { return readFileSync(path, 'utf8'); } catch { return ''; }
+  };
+  const resolvedTarget = resolve(target);
+  const queueLog = readQueueLogRows(logPath);
+  const base = queueLog.find((row) => row.landed === true
+    && typeof row.commit === 'string' && row.commit !== '')?.commit;
+  if (base === undefined) {
+    return {
+      approved: null,
+      reasoning: `no landed commit is recorded in ${logPath}; there is nothing to review first-hand`,
+      findings: [],
+      usage: EMPTY_USAGE,
+    };
+  }
+  const aggregate = await gitCommand(runCommand, [
+    '-C', resolvedTarget, 'diff', `${base}^..HEAD`,
+  ], {}, 'cannot read the aggregate diff for the goal');
+
+  const request = {
+    type: 'acceptance',
+    goalSpec: readOptional(goalSpecPath),
+    // Tier-1 layout: goals/G1-x/spec.md sits two levels under the project root
+    // that holds constitution.md. A project without one simply has no line.
+    constitution: readOptional(join(dirname(goalSpecPath), '..', '..', 'constitution.md')),
+    diff: aggregate.stdout,
+    queueLog,
+  };
+  let result;
+  try {
+    result = await arbiter({ cwd, request });
+  } catch (error) {
+    return {
+      approved: null,
+      reasoning: error instanceof Error ? error.message : String(error),
+      findings: [],
+      usage: EMPTY_USAGE,
+    };
+  }
+  const usage = result?.usage ?? EMPTY_USAGE;
+  const judgement = parseAcceptanceJudgement(result);
+  if (judgement.verdict !== 'answered') {
+    return {
+      approved: null,
+      reasoning: result?.error ?? 'no readable goal acceptance judgement',
+      findings: [],
+      usage,
+    };
+  }
+  return {
+    approved: judgement.approved,
+    reasoning: judgement.reasoning,
+    findings: judgement.findings,
+    usage,
+  };
+}
+
 export function createQueueRuntime(options = {}) {
   return {
     assertCleanTarget: (target, request = {}) => assertCleanTarget(target, { ...options, ...request }),
@@ -349,5 +449,6 @@ export function createQueueRuntime(options = {}) {
     readRunFacts,
     landDiff: (request) => landQueueDiff(request, options),
     judgeLanding: (request) => judgeLandingWithClaude(request, options),
+    acceptGoal: (request) => judgeGoalAcceptance(request, options),
   };
 }
