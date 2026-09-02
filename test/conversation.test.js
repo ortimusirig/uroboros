@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   runConversation, RepairableArtifactError, CONVERSATION_DNA, parseSeatReview,
-  stanceRepairLines,
+  stanceRepairLines, MAX_ARTIFACT_REPAIRS,
 } from '../src/conversation.js';
 import { parsePlanProposal } from '../src/plan.js';
 
@@ -50,18 +50,74 @@ const seatsFor = ({ proposals, agrees = true }) => {
   };
 };
 
-test('a malformed proposal is fed back verbatim and repaired next round — never a terminal', async () => {
+test('a malformed proposal is fed back verbatim and repaired inside the same round — never a terminal', async () => {
   const { calls, seats, strategy } = seatsFor({ proposals: ['MALFORMED', 'GOOD'] });
   const proposeFeedback = [];
   const wrapped = { ...strategy, proposeRequest: (ctx) => { proposeFeedback.push(ctx.feedback ?? ''); return { type: 'propose' }; } };
   const result = await runConversation({ runId: 'conv-repair', tier: 'goal', seats, strategy: wrapped });
   assert.equal(result.converged, true);
-  assert.equal(result.rounds, 2);
+  // F12 (dogfood run 6): this asserted `rounds === 2` while a repair burned a
+  // round number for a retry in which no seat reviewed anything. A repair is
+  // not deliberation, so the repaired proposal reuses the round it was asked in.
+  assert.equal(result.rounds, 1, 'the repair and its retry are one round, not two');
   assert.match(proposeFeedback[1], /GOALS_JSON missing/, 'the parse error reaches the proposer verbatim');
   // The engine hands the parser the seat's response UNTOUCHED — no collapsing to
   // text on the way in, because only the tier can read its own artifact.
   assert.deepEqual(calls.rawProposals[0], { verdict: 'answered', answer: 'MALFORMED' },
     'the raw seat response reaches the tier parser, not a stringified shadow of it');
+  // The repair row stays in the record and shares the round number with the
+  // real round — that is the truthful account of what happened in round 1.
+  assert.deepEqual(result.roundHistory.map((row) => row.round), [1, 1]);
+  assert.equal(result.roundHistory[0].repair, 'GOALS_JSON missing');
+});
+
+test('a repair does not consume a deliberation round', async () => {
+  // F12: with a one-round budget, a repair that ate round 1 left nothing for
+  // the repaired proposal to be reviewed in, and the conversation ended
+  // rounds-exhausted having never held a single round of deliberation.
+  const { seats, strategy } = seatsFor({ proposals: ['BROKEN', 'GOOD'] });
+  let parses = 0;
+  strategy.parseProposal = (response) => {
+    parses += 1;
+    if (parses === 1) throw new RepairableArtifactError('missing tags');
+    return { plan: response.answer };
+  };
+  const result = await runConversation({ runId: 'conv-repair-budget', tier: 'goal', seats, strategy, rounds: 1 });
+  assert.equal(result.converged, true, 'one round budget survives one repair');
+  assert.equal(result.rounds, 1, 'the repaired proposal is still round 1');
+});
+
+test('the fifth repair is still fed back — the bound is five, not four', async () => {
+  const { seats, strategy } = seatsFor({ proposals: ['BROKEN'] });
+  let parses = 0;
+  strategy.parseProposal = (response) => {
+    parses += 1;
+    if (parses <= MAX_ARTIFACT_REPAIRS) throw new RepairableArtifactError(`broken ${parses}`);
+    return { plan: response.answer };
+  };
+  const result = await runConversation({ runId: 'conv-repair-fifth', tier: 'goal', seats, strategy, rounds: 1 });
+  assert.equal(MAX_ARTIFACT_REPAIRS, 5);
+  assert.equal(result.converged, true, 'exhausting the budget exactly still converges');
+  assert.equal(parses, MAX_ARTIFACT_REPAIRS + 1, 'five repairs, then the answered retry');
+  assert.equal(result.rounds, 1, 'none of the five repairs advanced the round');
+});
+
+test('repairs are bounded: the sixth ends the conversation as proposal-irreparable', async () => {
+  const { seats, strategy } = seatsFor({ proposals: ['BROKEN'] });
+  let parses = 0;
+  strategy.parseProposal = () => { parses += 1; throw new RepairableArtifactError('always broken'); };
+  let written = false;
+  strategy.writeConverged = () => { written = true; return { written: true }; };
+  const result = await runConversation({ runId: 'conv-repair-cap', tier: 'goal', seats, strategy, rounds: 3 });
+  assert.equal(result.converged, false);
+  assert.equal(result.reason, 'proposal-irreparable');
+  assert.equal(parses, MAX_ARTIFACT_REPAIRS + 1, 'the sixth malformed artifact ends it');
+  assert.equal(written, false, 'nothing is written when the artifact never became readable');
+  // No silent cap: every repair the bound withheld is still in the record,
+  // including the sixth that ended the conversation.
+  assert.equal(result.roundHistory.length, MAX_ARTIFACT_REPAIRS + 1);
+  assert.equal(result.roundHistory.at(-1).repair, 'always broken');
+  assert.equal(result.rounds, 1, 'a repair loop never advances the round it is stuck in');
 });
 
 test('an answer with no artifact in it at all is terminal, and unbounded rounds do not loop', async () => {

@@ -44,6 +44,16 @@ export class RepairableArtifactError extends Error {
   }
 }
 
+/**
+ * How many times one conversation will feed a malformed proposal back to the
+ * seat that produced it. Repair is unbounded feedback otherwise: the same seat
+ * can answer badly forever, and with `rounds` unbounded nothing ever stops it.
+ * The bound is stated, never silent — the sixth malformed artifact ends the
+ * conversation as `proposal-irreparable`, converged false, nothing written,
+ * with every repair message still in `roundHistory`.
+ */
+export const MAX_ARTIFACT_REPAIRS = 5;
+
 // Structured seat responses. The format is prompt discipline, not protocol: the
 // parser extracts what matches and carries severities VERBATIM. Nothing anywhere
 // validates a severity, filters by one, or branches on one — they are input to
@@ -478,6 +488,7 @@ export async function runConversation({
   let previousProposal = '';
   let openQuestions = [];
   let round = 0;
+  let artifactRepairs = 0;
 
   for (round = 1; rounds === undefined || round <= rounds; round++) {
     if (reStorm) {
@@ -520,10 +531,26 @@ export async function runConversation({
     if (repair !== null) {
       // The seat ran and answered; the answer just does not parse. That is a
       // repairable artifact, so the error goes back to it verbatim rather than
-      // ending the conversation.
+      // ending the conversation. The row keeps this round's number: a repair
+      // and the retry it buys happened INSIDE the round, and the record says so.
       roundHistory.push({ round, repair });
+      artifactRepairs += 1;
+      if (artifactRepairs > MAX_ARTIFACT_REPAIRS) {
+        // A stated bound, not a silent cap: the seat has now answered
+        // unreadably MAX_ARTIFACT_REPAIRS + 1 times, every message is in
+        // roundHistory above, and the conversation ends without converging so
+        // no partial artifact is ever written from an artifact that never
+        // parsed. Unbounded `rounds` would otherwise loop here forever.
+        return finish('proposal-irreparable', round);
+      }
       feedback = repair;
       reStorm = false;
+      // F12 (dogfood run 6): a repair is not deliberation — no seat reviewed
+      // anything in it — so it must not spend a round. Undoing the loop's
+      // increment lets the retried proposal reuse this round's number, which
+      // is what makes `--rounds 1` still buy one real round of review after a
+      // malformed first answer. The budget on repairs is the one above.
+      round -= 1;
       continue;
     }
     if (proposal === null) {

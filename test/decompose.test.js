@@ -96,7 +96,11 @@ test('mismatched ids are fed back verbatim, not terminal', async () => {
       ]),
     });
     assert.equal(result.converged, true);
-    assert.equal(result.rounds, 2);
+    // F12 (dogfood run 6): this asserted `rounds === 2`, pinning the behaviour
+    // where a parse repair burned a round in which no seat reviewed anything.
+    // The id mismatch is caught by parseTaskProposal, so the retry reuses
+    // round 1 and the single round of real deliberation is the one below.
+    assert.equal(result.rounds, 1, 'the parse repair and its retry are one round');
   } finally { fixture.cleanup(); }
 });
 
