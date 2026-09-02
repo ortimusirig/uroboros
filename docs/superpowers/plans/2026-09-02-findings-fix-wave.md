@@ -180,8 +180,17 @@ CURSOR_REVIEW (stance: stance-unreadable — the AGREE line did not parse; judge
 
 with the four states mapped exactly: `unavailable: true` → `unavailable (seat never ran)`; `readable === false` → `stance-unreadable` + raw content; else `agree`/`disagree`. Do not summarize or trim the raw content.
 
-- [ ] **Step 6: Full suite green.** `node --test`.
-- [ ] **Step 7: Commit** — `fix(conversation): unjudged judgements keep raw answers; the agreement judge sees true seat states`.
+- [ ] **Step 6: The round event and its formatter carry per-seat STATE, not collapsed booleans** — peer-observed at 63c788f: an unreadable stance prints as `cursor=disagree` in the `plan/round` line, collapsing a measurement failure into a judgement. In `src/conversation.js` where the `plan/round` event is emitted (fields `codexAgrees`/`cursorAgrees`), ADD `codexState` and `cursorState` with exactly one of `'agree' | 'disagree' | 'stance-unreadable' | 'unavailable'` (same mapping as Step 5); keep the existing boolean fields for compatibility. In `src/events.js` `detailFor`'s plan/round branch, render the states instead of the booleans: `codex=agree cursor=stance-unreadable converged=false ...`. When a round fails to converge and any seat's state is `stance-unreadable`, the engine's agreement handling must be able to say so — verify the Step-5 prompt context makes the judge's reason name the measurement failure, and add a formatter test:
+
+```js
+assert.match(
+  detailFor({ stage: 'plan', type: 'round', tier: 'goal', planRound: 2, codexState: 'disagree', cursorState: 'stance-unreadable', codexAgrees: false, cursorAgrees: false, converged: false }),
+  /codex=disagree cursor=stance-unreadable/,
+);
+```
+
+- [ ] **Step 7: Full suite green.** `node --test`.
+- [ ] **Step 8: Commit** — `fix(conversation): unjudged judgements keep raw answers; the agreement judge sees true seat states`.
 
 ### Task 3: Artifact repairs stop consuming deliberation rounds (F12)
 
