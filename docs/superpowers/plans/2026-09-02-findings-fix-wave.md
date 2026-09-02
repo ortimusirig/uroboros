@@ -96,6 +96,13 @@ Filter in the restoration path list: `restoredPaths = (restoration?.restoredPath
 
 ```js
 test('harness files are git-invisible inside the isolated worktree', () => {
+  // AMENDED after Task 1's re-review: this guarantee holds only for
+  // harness-OWNED trees (a .git the harness created under scratch). A target
+  // that is already a git repository shares its info/exclude with the user's
+  // own repo, and the harness never mutates a repo it does not own — the
+  // constitution outranks the convenience. Real-repo executor confusion over
+  // untracked TASK.md/events.jsonl is re-opened as future prompt-level
+  // disclosure work, never mutation.
   // After isolation setup writes TASK.md and the run appends events.jsonl,
   // `git status --porcelain` in the worktree must not list them.
 });
@@ -189,8 +196,43 @@ assert.match(
 );
 ```
 
-- [ ] **Step 7: Full suite green.** `node --test`.
-- [ ] **Step 8: Commit** — `fix(conversation): unjudged judgements keep raw answers; the agreement judge sees true seat states`.
+- [ ] **Step 7: An unreadable review stance gets ONE bounded re-ask with the failure fed back verbatim** — live fixture at `.git/sdd/f20-fixture.txt` (READ IT): the seat produced meta-commentary promising "the required AGREE/S/Q block" and never emitted it, while its prose carried a genuine verified review that was then discarded as a content-free disagreement. This is the proposal-repair law applied to reviews ("the seat ran and answered; the answer just does not parse — the error goes back verbatim"). In `src/conversation.js`'s `reviewBoth`: when a seat's parsed review comes back `readable === false` (and NOT `unavailable`), re-invoke that seat's review function ONCE with the same request plus a repair context — the strategy grows an optional hook `reviewRepairRequest({ seat, request, content })` returning the augmented request; tiers implement it by appending to the instruction body: `Your previous response did not contain a parseable stance. It said: <content verbatim>. Respond again in EXACTLY the required structure: AGREE: yes or AGREE: no, then S/Q lines.` If the re-ask parses, use it (and record `stanceRepaired: true` on the review row); if it is still unreadable, proceed with today's behavior (state `stance-unreadable`, raw content retained). Exactly one re-ask per seat per round — the bound joins the audit table:
+
+```markdown
+| Review stance re-ask | bounded feedback loop | An unreadable stance is re-asked once with the unparseable text fed back verbatim; a second failure travels as stance-unreadable with the raw content — reading is repaired, meaning never is (silence still never consents) |
+```
+
+Failing test first (harness style):
+
+```js
+test('an unreadable stance is re-asked once with the failure fed back', async () => {
+  const { seats, strategy } = seatsFor({ proposals: ['GOOD'] });
+  let asks = 0;
+  seats.reviewCursor = async (request) => {
+    asks += 1;
+    if (asks === 1) return 'User-facing response is only the AGREE / S* / Q* block.'; // promises, never delivers
+    assert.match(String(request.repairContent ?? request.prompt ?? ''), /did not contain a parseable stance|AGREE/);
+    return 'AGREE: yes';
+  };
+  const result = await runConversation({ runId: 'conv-stance-reask', tier: 'goal', seats, strategy, rounds: 1 });
+  assert.equal(asks, 2);
+  assert.equal(result.converged, true, 'the repaired stance counts');
+});
+
+test('a second unreadable answer travels as stance-unreadable with raw content', async () => {
+  const { seats, strategy } = seatsFor({ proposals: ['GOOD'] });
+  seats.reviewCursor = async () => 'still no block here';
+  const result = await runConversation({ runId: 'conv-stance-still-dead', tier: 'goal', seats, strategy, rounds: 1 });
+  assert.equal(result.converged, false);
+  assert.equal(result.roundHistory[0].reviews.cursor.readable, false);
+  assert.match(result.roundHistory[0].reviews.cursor.content, /still no block/);
+});
+```
+
+Adapt the re-ask plumbing to how `reviewRequests`/`reviewBoth` actually thread requests (read the engine first); the tier builders (decompose tier-1/2, plan) implement the repair-request hook by reusing their existing instruction-assembly with the appended repair paragraph. Also add the f20 fixture's exact text (from the fixture file) as a `parseSeatReview` regression case asserting `readable === false` — pinning that this shape is absence, not a parseable variant.
+
+- [ ] **Step 8: Full suite green.** `node --test`.
+- [ ] **Step 9: Commit** — `fix(conversation): unjudged judgements keep raw answers; seat states travel; unreadable stances are re-asked once`.
 
 ### Task 3: Artifact repairs stop consuming deliberation rounds (F12)
 
