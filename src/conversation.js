@@ -49,7 +49,13 @@ export class RepairableArtifactError extends Error {
 // the arbiter's judgement and nothing else.
 export function parseSeatReview(text) {
   const source = String(text ?? '');
-  const agreeMatches = [...source.matchAll(/(?:^|\n|\s)AGREE:\s*(yes|no)\b/gi)];
+  // Cursor writes markdown, so **AGREE: no** must read as a stance, not as
+  // silence — the second dogfood run lost all three rounds of Cursor stances
+  // to emphasis marks. Stripping *_` for stance detection only is tolerance
+  // in READING, never in meaning: nothing but an explicit AGREE: yes|no
+  // parses, silence stays non-consent, and the last stated stance wins.
+  const stanceSource = source.replace(/[*_`]/g, '');
+  const agreeMatches = [...stanceSource.matchAll(/(?:^|\n|\s)AGREE\s*:\s*(yes|no)\b/gi)];
   const agree = agreeMatches.length > 0
     ? agreeMatches.at(-1)[1].toLowerCase() === 'yes'
     : null;
@@ -430,12 +436,17 @@ export async function runConversation({
     roundHistory.push({
       round,
       reviews: {
+        // A readable review is fully represented by its parsed structure. An
+        // unreadable stance is not — the raw text is the only evidence of what
+        // the seat actually said, so it travels verbatim in exactly that case.
         codex: {
           agree: reviews.codex.agree,
           readable: reviews.codex.readable !== false,
           suggestions: reviews.codex.suggestions,
           questions: reviews.codex.questions,
           ...(reviews.codex.unavailable ? { unavailable: true } : {}),
+          ...(reviews.codex.readable === false && !reviews.codex.unavailable
+            ? { content: reviews.codex.content ?? '' } : {}),
         },
         cursor: {
           agree: reviews.cursor.agree,
@@ -443,6 +454,8 @@ export async function runConversation({
           suggestions: reviews.cursor.suggestions,
           questions: reviews.cursor.questions,
           ...(reviews.cursor.unavailable ? { unavailable: true } : {}),
+          ...(reviews.cursor.readable === false && !reviews.cursor.unavailable
+            ? { content: reviews.cursor.content ?? '' } : {}),
         },
       },
       agreement,

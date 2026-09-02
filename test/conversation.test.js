@@ -1,6 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { runConversation, RepairableArtifactError, CONVERSATION_DNA } from '../src/conversation.js';
+import {
+  runConversation, RepairableArtifactError, CONVERSATION_DNA, parseSeatReview,
+} from '../src/conversation.js';
 import { parsePlanProposal } from '../src/plan.js';
 
 const seatsFor = ({ proposals, agrees = true }) => {
@@ -173,4 +175,37 @@ test('the DNA is present and carries the standing law verbatim', () => {
   assert.match(CONVERSATION_DNA, /Determinism advises; the model decides; contradiction asks/);
   assert.match(CONVERSATION_DNA, /SUPERSEDED/);
   assert.match(CONVERSATION_DNA, /Repair until it works/);
+});
+
+test('a markdown-emphasized stance is a stance; prose is still silence', () => {
+  // Dogfood run 2 (2026-09-02): Cursor stated AGREE: no in every round and all
+  // three were read as silence, because cursor-agent wraps the marker in
+  // markdown emphasis. Tolerance lives in reading only — meaning stays strict.
+  const emphasized = parseSeatReview('**AGREE: no**\nS1 P0: bound the reads');
+  assert.equal(emphasized.readable, true);
+  assert.equal(emphasized.agree, false);
+  assert.equal(emphasized.suggestions[0].id, 'S1');
+  assert.equal(parseSeatReview('**AGREE:** yes').agree, true);
+  assert.equal(parseSeatReview('`AGREE: yes`').agree, true);
+  assert.equal(parseSeatReview('AGREE: yes').agree, true, 'plain form keeps working');
+  assert.equal(parseSeatReview('I broadly agree with these tasks').readable, false,
+    'prose agreement is not a stance');
+  assert.equal(parseSeatReview('').readable, false);
+});
+
+test('an unreadable stance carries its raw text into the round history', async () => {
+  // When the stance cannot be parsed, the parsed fields cannot represent the
+  // response — the raw text is the only evidence of what the seat said, and
+  // without it (dogfood run 2) the failure was undiagnosable after the fact.
+  const { seats, strategy } = seatsFor({ proposals: ['GOOD'] });
+  seats.reviewCursor = async () => 'Looks good overall, ship it';
+  const result = await runConversation({
+    runId: 'conv-unreadable-content', tier: 'goal', seats, strategy, rounds: 1,
+  });
+  assert.equal(result.converged, false);
+  const cursorRow = result.roundHistory[0].reviews.cursor;
+  assert.equal(cursorRow.readable, false);
+  assert.equal(cursorRow.content, 'Looks good overall, ship it');
+  assert.equal(result.roundHistory[0].reviews.codex.content, undefined,
+    'a readable review stays parsed-only');
 });
