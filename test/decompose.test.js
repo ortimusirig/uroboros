@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { runDecomposeGoal } from '../src/decompose.js';
+import { parseTaggedPair, runDecomposeGoal, topologicalOrder } from '../src/decompose.js';
+import { RepairableArtifactError } from '../src/conversation.js';
 import { VERIFIED_SUPERPOWERS } from '../fixtures/verified-superpowers.mjs';
 
 function goalFixture() {
@@ -116,12 +117,14 @@ test('the standing law, the constitution, the repo map and the goal spec reach t
   writeFileSync(join(fixture.root, 'uro-project', 'constitution.md'), 'Rule 1: no new dependencies.\n');
   const drafted = [];
   const reviewed = [];
+  let agreementPrompt = null;
+  const base = adaptersFor([proposalText(goodTasks, goodMd)]);
   try {
     const result = await runDecomposeGoal({
       goalSpecPath: fixture.specPath, target: fixture.root, runId: 'd2-prompts',
       superpowers: VERIFIED_SUPERPOWERS,
       adapters: {
-        ...adaptersFor([proposalText(goodTasks, goodMd)]),
+        ...base,
         draft: async (request) => {
           drafted.push(request);
           return '<TASKS_JSON>[]</TASKS_JSON>\n<TASKS_MD></TASKS_MD>';
@@ -129,6 +132,13 @@ test('the standing law, the constitution, the repo map and the goal spec reach t
         codexReview: async (request) => {
           reviewed.push(request);
           return { agree: true, readable: true, suggestions: [], questions: [], content: '' };
+        },
+        // The agreement seat has the final say, so what reaches it is what
+        // matters here — capture the actual PROMPT tier2Prompt built for it
+        // (not just its structured request), exactly as the transport sees it.
+        runArbiter: async (args) => {
+          if (args.request?.type === 'agreement') agreementPrompt = args.prompt;
+          return base.runArbiter(args);
         },
       },
     });
@@ -147,5 +157,38 @@ test('the standing law, the constitution, the repo map and the goal spec reach t
       'gate commands are evidence, never a verdict');
     assert.equal(reviewed[0].goalSpec.includes('Deliver the demo capability'), true,
       'the reviewing seat is pinned to THIS goal spec');
+    assert.ok(agreementPrompt, 'the agreement seat must actually have been invoked');
+    assert.match(agreementPrompt, /Rule 1: no new dependencies/,
+      'the agreement seat — final say on the decomposition — must see the constitution too');
+    assert.match(agreementPrompt, /# Repository map/,
+      'the agreement seat must see the repo map too');
   } finally { fixture.cleanup(); }
+});
+
+test('a duplicate "## T<n>" section feeds back as a named contradiction, not a silent overwrite', () => {
+  // Two "## T1:" headings: without the guard, the second body silently
+  // replaces the first in the sections Map and id-set equality still passes
+  // (the KEY "T1" was already there) — the first task's plan just vanishes.
+  const text = [
+    '<TASKS_JSON>[{"id":"T1"}]</TASKS_JSON>',
+    '<TASKS_MD>',
+    '## T1: first',
+    'first body',
+    '',
+    '## T1: first again',
+    'second body',
+    '</TASKS_MD>',
+  ].join('\n');
+  assert.throws(
+    () => parseTaggedPair(text, { jsonTag: 'TASKS_JSON', mdTag: 'TASKS_MD', idPattern: 'T\\d+' }),
+    (error) => error instanceof RepairableArtifactError
+      && /duplicate section ## T1 — one section per task/.test(error.message),
+  );
+});
+
+test('a task depending on itself is named honestly, not "T1 and undefined depend on each other"', () => {
+  assert.throws(
+    () => topologicalOrder([{ id: 'T1', name: 'T1-solo', dependsOn: ['T1'], gate: [] }]),
+    (error) => error instanceof RepairableArtifactError && /depends on itself/.test(error.message),
+  );
 });

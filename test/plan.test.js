@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import test from 'node:test';
-import { runPlan as executePlan } from '../src/plan.js';
+import { runPlan as executePlan, withSeatWorkspace } from '../src/plan.js';
 
 const VERIFIED_SUPERPOWERS = {
   ok: true,
@@ -59,6 +59,21 @@ function seats({ arbiter = {}, codexReview, review, draft, cursorDraft } = {}) {
 }
 
 const runPlan = (options) => executePlan({ ...options, adapters: { ...seats(), ...options.adapters } });
+
+// Pins the fix at src/plan.js:330 (`return await work(directory)`). A
+// refactor back to `return work(directory)` hands `finally` a pending
+// promise: `rmSync` deletes the workspace before the async seat inside
+// `work` gets to read a byte out of it, silently breaking every production
+// Cursor hand-off (plan drafting/review, tier-2 goal drafting/review). This
+// test proves the workspace still exists after control has yielded at least
+// once inside `work`, which `return work(directory)` cannot survive.
+test('the seat workspace outlives the async seat that reads it', async () => {
+  const content = await withSeatWorkspace({ 'A.md': 'workspace survives\n' }, async (dir) => {
+    await new Promise((resolve) => setImmediate(resolve));
+    return readFileSync(join(dir, 'A.md'), 'utf8');
+  });
+  assert.equal(content, 'workspace survives\n');
+});
 
 test('three seats storm, Claude proposes, both seats agree, Claude converges', async () => {
   const item = fixture();

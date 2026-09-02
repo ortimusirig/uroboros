@@ -105,6 +105,15 @@ export function parseTaggedPair(text, { jsonTag, mdTag, idPattern }) {
   for (const [index, match] of matches.entries()) {
     const start = match.index + match[0].length;
     const end = index + 1 < matches.length ? matches[index + 1].index : mdText.length;
+    // A second "## T<n>" heading for an id already seen would otherwise
+    // overwrite the first section's body in this Map — the earlier task's
+    // plan silently vanishes and id-set equality (below) still passes because
+    // the KEY was already there. That is silent absorption, so it is a named
+    // contradiction instead: it goes back to the seat as feedback.
+    if (sections.has(match[1])) {
+      throw new RepairableArtifactError(
+        `duplicate section ## ${match[1]} — one section per task`);
+    }
     sections.set(match[1], mdText.slice(start, end).trim());
   }
   const jsonIds = items.map((item) => String(item.id));
@@ -122,7 +131,9 @@ export function parseTaggedPair(text, { jsonTag, mdTag, idPattern }) {
  * Bookkeeping, never judgement: nothing here reorders on its own opinion, and a
  * cycle is not silently broken. Two tasks that depend on each other are a
  * CONTRADICTION, and contradiction asks — the named pair goes back to the
- * conversation as feedback for the next round.
+ * conversation as feedback for the next round. A task depending on itself is
+ * the same class of contradiction but named honestly rather than reported as
+ * a pair with a phantom second member.
  */
 export function topologicalOrder(tasks) {
   const remaining = new Map(tasks.map((task) => [task.id, new Set(task.dependsOn ?? [])]));
@@ -131,6 +142,15 @@ export function topologicalOrder(tasks) {
     const ready = [...remaining.entries()].filter(([, deps]) =>
       [...deps].every((dep) => !remaining.has(dep))).map(([id]) => id);
     if (ready.length === 0) {
+      // A self-dependency ([a] = ['T1'], b = undefined below) must be named
+      // for what it is before falling through to the pair message, which
+      // would otherwise read as the honest but false "T1 and undefined depend
+      // on each other".
+      const selfDependent = [...remaining.entries()].find(([id, deps]) => deps.has(id));
+      if (selfDependent) {
+        throw new RepairableArtifactError(
+          `${selfDependent[0]} depends on itself — remove the self-dependency or split the task`);
+      }
       const [a, b] = [...remaining.keys()];
       throw new RepairableArtifactError(`${a} and ${b} depend on each other — resolve or merge them`);
     }
@@ -328,7 +348,12 @@ function goalProposePrompt({
   ].join('\n');
 }
 
-function goalAgreementPrompt({ goalSpec, proposal, reviews }) {
+// The agreement seat has the final say on this goal's decomposition, so it
+// gets the same standing context every other seat gets — the constitution
+// (when the operator has one) and the repo-map ration — not goalSpec alone.
+function goalAgreementPrompt({
+  goalSpec, constitution, repoMap, proposal, reviews,
+}) {
   return [
     CONVERSATION_DNA,
     '',
@@ -339,7 +364,7 @@ function goalAgreementPrompt({ goalSpec, proposal, reviews }) {
     `The tier-2 incremental law, verbatim: "${TIER2_INCREMENTAL_LAW}".`,
     'Converge only when these tasks genuinely achieve THIS goal, each task is a self-contained increment of it, and both seats have said AGREE: yes. If either seat disagrees, or you are not satisfied, do not converge; say what must change.',
     'Schema: {"converged":true,"reason":"brief merits"} or {"converged":false,"reason":"...","feedback":"exact corrections for the next proposal"}.',
-    `GOAL_SPEC ${goalSpec}`,
+    goalContext({ goalSpec, constitution, repoMap }),
     `TASKS ${proposal}`,
     `CODEX_REVIEW ${JSON.stringify(reviews?.codex ?? null, null, 2)}`,
     `CURSOR_REVIEW ${JSON.stringify(reviews?.cursor ?? null, null, 2)}`,
@@ -596,7 +621,7 @@ export async function runDecomposeGoal({
       return goalProposePrompt({ ...context, ...arbiterRequest });
     }
     if (arbiterRequest?.type === 'agreement') {
-      return goalAgreementPrompt({ goalSpec: request.goalSpec, ...arbiterRequest });
+      return goalAgreementPrompt({ ...context, ...arbiterRequest });
     }
     return `${CONVERSATION_DNA}\n\n${buildArbiterPrompt(arbiterRequest)}`;
   };
