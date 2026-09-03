@@ -1,7 +1,9 @@
 // test/repo-map.test.js
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildRepoMap, DEFAULT_MAP_BUDGET, MINIMUM_MAP_BUDGET } from '../src/repo-map.js';
+import {
+  buildRepoMap, DEFAULT_MAP_BUDGET, MINIMUM_MAP_BUDGET, readPrefixSync,
+} from '../src/repo-map.js';
 
 function fakeSpawnFor(files) {
   return async (bin, args) => {
@@ -10,10 +12,20 @@ function fakeSpawnFor(files) {
     return { code: 0, stdout: `${files.join('\n')}\n`, stderr: '' };
   };
 }
-const fakeRead = (contents) => (path) => {
-  const key = Object.keys(contents).find((name) => path.replaceAll('\\', '/').endsWith(name));
-  if (key === undefined) throw new Error(`ENOENT ${path}`);
-  return contents[key];
+const fakeRead = (contents) => {
+  const find = (path) => Object.keys(contents).find((name) => path.replaceAll('\\', '/').endsWith(name));
+  const read = (path) => {
+    const key = find(path);
+    if (key === undefined) throw new Error(`ENOENT ${path}`);
+    return contents[key];
+  };
+  read.stat = (path) => {
+    const key = find(path);
+    if (key === undefined) throw new Error(`ENOENT ${path}`);
+    const content = contents[key];
+    return { size: typeof content === 'string' ? Buffer.byteLength(content) : content.length };
+  };
+  return read;
 };
 
 function symbolAccounting(map) {
@@ -41,7 +53,7 @@ function symbolStateFixture({ longOmissions = false } = {}) {
 
   if (longOmissions) {
     for (let i = 0; i < 8; i++) {
-      const path = `z${i}-${'x'.repeat(160)}/note.txt`;
+      const path = `z${i}-${'x'.repeat(300)}/note.txt`;
       files.push(path);
       contents[path] = 'note\n';
     }
@@ -67,7 +79,7 @@ test('the map declares its grade, its fetchability, and every omission', async (
 test('the detailed rung distinguishes rendered, withheld, and never-ran symbol scans', async () => {
   const { files, contents } = symbolStateFixture();
   const map = await buildRepoMap({
-    target: 'T', budget: 1200, spawn: fakeSpawnFor(files), readFile: fakeRead(contents),
+    target: 'T', budget: 1500, spawn: fakeSpawnFor(files), readFile: fakeRead(contents),
   });
 
   assert.match(map, /^## Symbols \(largest files first\)$/m);
@@ -75,8 +87,8 @@ test('the detailed rung distinguishes rendered, withheld, and never-ran symbol s
   assert.deepEqual(symbolAccounting(map), {
     rendered: 2,
     withheld: 1,
-    neverRan: 2,
-    symbolsSkipped: 2,
+    neverRan: 0,
+    symbolsSkipped: 0,
     zeroResults: 1,
   });
 });
@@ -87,7 +99,7 @@ test('collapsedNoSymbols reclassifies removed symbol rows as withheld results, n
   let map;
   let selectedBudget;
 
-  for (let budget = MINIMUM_MAP_BUDGET; budget <= 1800; budget++) {
+  for (let budget = MINIMUM_MAP_BUDGET; budget <= 2600; budget++) {
     const control = await buildRepoMap({
       target: 'T', budget, spawn: fakeSpawnFor(base.files), readFile: fakeRead(base.contents),
     });
@@ -112,13 +124,13 @@ test('collapsedNoSymbols reclassifies removed symbol rows as withheld results, n
   assert.deepEqual(symbolAccounting(map), {
     rendered: 1,
     withheld: 2,
-    neverRan: 2,
-    symbolsSkipped: 2,
+    neverRan: 0,
+    symbolsSkipped: 0,
     zeroResults: 1,
   });
 });
 
-test('the minimal rung keeps all three symbol-scan states explicit', async () => {
+test('the compact fallback keeps all three symbol-scan states explicit', async () => {
   const files = ['s/empty.js', 's/withheld.js', 's/never-one.js', 's/never-two.js'];
   const contents = {
     's/empty.js': '// no symbols\n'.repeat(50),
@@ -131,12 +143,12 @@ test('the minimal rung keeps all three symbol-scan states explicit', async () =>
     spawn: fakeSpawnFor(files), readFile: fakeRead(contents),
   });
 
-  assert.doesNotMatch(map, /^## Files$/m, 'the fixture must exercise the minimal rung');
+  assert.match(map, /^## Files$/m, 'the fixture must exercise the compact fallback');
   assert.deepEqual(symbolAccounting(map), {
     rendered: 1,
     withheld: 1,
-    neverRan: 2,
-    symbolsSkipped: 2,
+    neverRan: 0,
+    symbolsSkipped: 0,
     zeroResults: 1,
   });
 });
@@ -213,16 +225,20 @@ test('a budget-trimmed binary row remains covered by omission accounting and tre
   const contents = Object.fromEntries(textFiles.map((file) => [file, 'text\n']));
   contents[binaryPath] = Buffer.alloc(96, 0xff);
 
+  const budget = Math.max(900, MINIMUM_MAP_BUDGET);
   const map = await buildRepoMap({
-    target: 'T', budget: 900, spawn: fakeSpawnFor(files), readFile: fakeRead(contents),
+    target: 'T', budget, spawn: fakeSpawnFor(files), readFile: fakeRead(contents),
   });
 
-  assert.ok(map.length <= 900, `map ${map.length} exceeds its declared budget`);
+  assert.ok(map.length <= budget, `map ${map.length} exceeds its declared budget`);
   assert.doesNotMatch(map, /z-binary\.bin/, 'the fixture must exercise the trimmed-row fallback');
   assert.match(map, /Binary treatment:.*not line-counted or symbol-scanned/i);
-  const omitted = Number(map.match(/… and (\d+) more files under src\/ \(budget\)/)?.[1]);
-  const shown = [...map.matchAll(/^- src\/t\d+\.txt /gm)].length;
-  assert.equal(shown + omitted, files.length, 'the omitted count must include the binary file');
+  const declared = map.match(/inspected=(\d+)[,;].*admitted-but-too-large=(\d+)[,;].*omitted=(\d+)/);
+  assert.equal(
+    Number(declared?.[1] ?? 0) + Number(declared?.[2] ?? 0) + Number(declared?.[3] ?? 0),
+    files.length,
+    'the declared identities must account for the binary file',
+  );
 });
 
 test('a trimming budget names exactly what it withheld — never a silent cap', async () => {
@@ -232,7 +248,8 @@ test('a trimming budget names exactly what it withheld — never a silent cap', 
     target: 'T', budget: 1200, spawn: fakeSpawnFor(files), readFile: fakeRead(contents),
   });
   assert.ok(map.length <= 1200, `map ${map.length} exceeds its declared budget`);
-  assert.match(map, /and \d+ more files under src/, 'the trim must be named');
+  assert.match(map, /omitted=397/, 'the admission trim must be declared');
+  assert.match(map, /Details withheld \(budget\)/, 'the fallback must name its withheld detail');
   assert.match(map, /may read any file directly/i, 'fetchability survives trimming');
 });
 
@@ -259,10 +276,11 @@ test('a no-git fixture is measured against the budget too, even at the survey mi
 test('many omitted directories collapse into one bounded note — the budget bounds the notes too', async () => {
   const files = Array.from({ length: 60 }, (_, i) => `d${String(i).padStart(2, '0')}/a.js`);
   const contents = Object.fromEntries(files.map((f) => [f, 'export const x = 1;\n']));
+  const budget = Math.max(900, MINIMUM_MAP_BUDGET);
   const map = await buildRepoMap({
-    target: 'T', budget: 900, spawn: fakeSpawnFor(files), readFile: fakeRead(contents),
+    target: 'T', budget, spawn: fakeSpawnFor(files), readFile: fakeRead(contents),
   });
-  assert.ok(map.length <= 900, `map ${map.length} exceeds its declared budget of 900`);
+  assert.ok(map.length <= budget, `map ${map.length} exceeds its declared budget of ${budget}`);
   assert.match(map, /withheld|more files/i, 'the omission declaration survives collapsing');
   assert.match(map, /may read any file directly/i, 'fetchability line survives collapsing');
 });
@@ -277,7 +295,7 @@ test('a spawn rejection (e.g. ENOENT) is as honest a "no survey" as a non-zero e
 });
 
 test('a long spawn-rejection message is shortened to fit the budget, with an explicit marker', async () => {
-  const longMessage = `spawn git ENOENT: ${'a'.repeat(180)}`;
+  const longMessage = `spawn git ENOENT: ${'a'.repeat(MINIMUM_MAP_BUDGET * 2)}`;
   const map = await buildRepoMap({
     target: 'T',
     budget: MINIMUM_MAP_BUDGET,
@@ -372,4 +390,351 @@ test('the exact minimum map budget remains valid', async () => {
     readFile: fakeRead({ 'src/a.js': 'x\n' }),
   });
   assert.ok(map.length <= MINIMUM_MAP_BUDGET);
+});
+
+test('the named content-admission rule bounds positive reads equally for a large tree and its doubled twin', async () => {
+  const large = Array.from({ length: 1700 }, (_, index) => `src/f${String(index).padStart(4, '0')}.js`);
+  const doubled = [...large, ...large.map((path) => path.replace('src/', 'extra/'))];
+  const budget = 1200;
+
+  async function survey(files) {
+    const reads = [];
+    const map = await buildRepoMap({
+      target: 'T', budget, spawn: fakeSpawnFor(files),
+      stat: () => ({ size: 24 }),
+      readFile: (path, options) => {
+        reads.push({ path, options });
+        return 'export const bounded = 1;\n';
+      },
+    });
+    return { map, reads };
+  }
+
+  const one = await survey(large);
+  const two = await survey(doubled);
+  const ceiling = (map) => Number(map.match(/Content admission rule: [^\n]*r≤(\d+)/)?.[1]);
+
+  assert.ok(ceiling(one.map) > 0, 'the declared ceiling must be positive at this budget');
+  assert.equal(ceiling(one.map), ceiling(two.map), 'the operator budget alone determines the ceiling');
+  assert.ok(one.reads.length > 0, 'the test must observe real content reads, not only a below-ceiling count');
+  assert.ok(one.reads.length <= ceiling(one.map));
+  assert.ok(two.reads.length <= ceiling(two.map));
+  assert.equal(one.reads.length, two.reads.length, 'doubling tracked files must not double content reads');
+});
+
+test('an oversized admitted file is prefix-read at the declared limit and remains admitted-but-too-large', async () => {
+  const calls = [];
+  const map = await buildRepoMap({
+    target: 'T', budget: 1200, spawn: fakeSpawnFor(['src/huge.js']),
+    stat: () => ({ size: 50_000 }),
+    readFile: (path, options) => {
+      calls.push({ path, options });
+      return Buffer.alloc(options.length, 0x61);
+    },
+  });
+
+  const byteCeiling = Number(map.match(/Content admission rule: [^\n]*b≤(\d+)/)?.[1]);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].options.length, byteCeiling + 1);
+  assert.match(map, /states in rows/);
+  assert.match(map, /src\/huge\.js \(admitted-but-too-large/);
+});
+
+test('metadata failures and a longest classified row remain declared within the pre-read template reservation', async () => {
+  const longPath = `src/${'long-'.repeat(28)}name.js`;
+  const map = await buildRepoMap({
+    target: 'T', budget: 4000, spawn: fakeSpawnFor(['src/no-metadata.js', longPath]),
+    stat: (path) => {
+      if (path.endsWith('no-metadata.js')) throw new Error('EACCES');
+      return { size: 28 };
+    },
+    readFile: () => 'export const visible = 1;\n',
+  });
+
+  const reservation = Number(map.match(/Pre-read row reservation: (\d+) chars/)?.[1]);
+  const longRow = map.match(new RegExp(`^- ${longPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} \\([^\\n]+\\)(?: \\[inspected\\])?$`, 'm'))?.[0];
+  assert.match(map, /src\/no-metadata\.js \(metadata-unavailable; inspected\)/);
+  assert.ok(longRow, 'the longest classified path must have a visible row');
+  assert.ok(longRow.length <= reservation, `${longRow.length} must fit the declared reservation ${reservation}`);
+});
+
+test('availability facets preserve admitted inspection identity and omitted identity', async () => {
+  const files = [
+    'a/stat-fails.js', 'b/read-fails.js', 'c/works.js', 'd/works.js', 'e/works.js',
+    'f/works.js', 'g/works.js', 'h/works.js', 'i/works.js', 'j/works.js', 'z/omitted-stat-fails.js',
+  ];
+  const map = await buildRepoMap({
+    target: 'T', budget: 4000, spawn: fakeSpawnFor(files),
+    stat: (path) => {
+      if (path.endsWith('stat-fails.js')) throw new Error('EACCES');
+      return { size: 24 };
+    },
+    readFile: (path) => {
+      if (path.endsWith('read-fails.js')) throw new Error('EIO');
+      return 'export const works = 1;\n';
+    },
+  });
+
+  assert.match(map, /inspected=10; admitted-but-too-large=0; omitted=1/);
+  assert.match(map, /metadata-unavailable=2/);
+  assert.match(map, /content-unavailable=1/);
+  assert.match(map, /a\/stat-fails\.js \(metadata-unavailable; inspected\)/);
+  assert.match(map, /b\/read-fails\.js \(content-unavailable; inspected\)/);
+  assert.match(map, /z\/omitted-stat-fails\.js \(metadata-unavailable; omitted/);
+});
+
+test('fallback declarations retain every identity and render an omitted row whenever it fits', async () => {
+  const files = [
+    `src/${'a'.repeat(240)}.js`,
+    `src/${'b'.repeat(1000)}.js`,
+    `src/${'c'.repeat(240)}.js`,
+    `src/${'d'.repeat(240)}.js`,
+    `src/${'e'.repeat(240)}.js`,
+    `src/${'f'.repeat(240)}.js`,
+  ];
+  const map = await buildRepoMap({
+    target: 'T', budget: 2000, spawn: fakeSpawnFor(files),
+    stat: (path) => ({ size: path.includes('b'.repeat(1000)) ? 50_000 : 24 }),
+    readFile: () => 'export const visible = 1;\n',
+  });
+
+  assert.match(map, /^## Withheld by the budget$/m);
+  assert.match(map, /inspected rows withheld/);
+  assert.match(map, /admitted-but-too-large rows withheld/);
+  assert.match(map, /omitted=1/);
+  assert.match(map, /\.js \(omitted; content admission budget\)/);
+});
+
+test('content reads execute in declared lexical admission order', async () => {
+  const calls = [];
+  await buildRepoMap({
+    target: 'T', budget: 1200,
+    spawn: fakeSpawnFor(['src/m.js', 'src/z.js', 'src/a.js', 'src/q.js']),
+    stat: () => ({ size: 24 }),
+    readFile: (path) => {
+      calls.push(path.replaceAll('\\', '/').split('/').slice(-2).join('/'));
+      return 'export const ordered = 1;\n';
+    },
+  });
+  assert.deepEqual(calls, ['src/a.js', 'src/m.js', 'src/q.js']);
+});
+
+test('the exact minimum declares all-zero content identities for an empty tracked tree', async () => {
+  const map = await buildRepoMap({
+    target: 'T', budget: MINIMUM_MAP_BUDGET, spawn: fakeSpawnFor([]), readFile: fakeRead({}),
+  });
+  assert.match(map, /inspected=0; admitted-but-too-large=0; omitted=0/);
+});
+
+test('an inspected binary source is not counted as a budget-skipped symbol scan', async () => {
+  const map = await buildRepoMap({
+    target: 'T', budget: DEFAULT_MAP_BUDGET,
+    spawn: fakeSpawnFor(['src/binary.js', 'src/text.js']),
+    readFile: fakeRead({
+      'src/binary.js': Buffer.alloc(96, 0xff),
+      'src/text.js': 'export const textSymbol = 1;\n',
+    }),
+  });
+  assert.equal(symbolAccounting(map).neverRan, 0);
+  assert.match(map, /textSymbol/);
+  assert.doesNotMatch(map, /symbolsSkipped=1/);
+});
+
+test('the actual reservation is the declared true maximum even when it exceeds one third of the budget', async () => {
+  const path = `src/${'long-'.repeat(900)}row.js`;
+  const budget = 12000;
+  const map = await buildRepoMap({
+    target: 'T', budget, spawn: fakeSpawnFor([path]), stat: () => ({ size: 24 }),
+    readFile: () => 'export const row = 1;\n',
+  });
+  const reservation = Number(map.match(/(?:Pre-read row reservation: |Reservation=)(\d+)/)?.[1]);
+  assert.ok(reservation > budget / 3);
+  assert.match(map, new RegExp(path.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+});
+
+test('stat always completes before the first content read and stat failure prevents that read', async () => {
+  const events = [];
+  await buildRepoMap({
+    target: 'T', budget: 1200, spawn: fakeSpawnFor(['a/fail.js', 'b/ok.js']),
+    stat: (path) => {
+      events.push(`stat:${path.split(/[\\/]/).slice(-2).join('/')}`);
+      if (path.endsWith('fail.js')) throw new Error('EACCES');
+      return { size: 24 };
+    },
+    readFile: (path) => { events.push(`read:${path.split(/[\\/]/).slice(-2).join('/')}`); return 'x\n'; },
+  });
+  assert.deepEqual(events, ['stat:a/fail.js', 'stat:b/ok.js', 'read:b/ok.js']);
+});
+
+test('the production prefix reader completes legal short reads without exceeding its requested bound', () => {
+  const source = Buffer.from('abcdef');
+  const calls = [];
+  let closed = false;
+  const result = readPrefixSync('virtual-file', {
+    length: 5,
+    adapters: {
+      openSync: () => 17,
+      readSync: (descriptor, buffer, offset, length, position) => {
+        calls.push({ descriptor, length, position });
+        assert.ok(position + length <= 5, 'a read request must stay within the prefix ceiling');
+        const chunk = source.subarray(position, Math.min(position + length, position + 2));
+        chunk.copy(buffer, offset);
+        return chunk.length;
+      },
+      closeSync: (descriptor) => { assert.equal(descriptor, 17); closed = true; },
+    },
+  });
+  assert.equal(result.toString(), 'abcde');
+  assert.deepEqual(calls.map(({ position }) => position), [0, 2, 4]);
+  assert.equal(closed, true);
+});
+
+test('every non-inspected classified row variant fits the declared pre-read reservation', async () => {
+  const cases = [
+    {
+      name: 'admitted-but-too-large',
+      path: `src/${'too-large-'.repeat(36)}row.js`,
+      stat: () => ({ size: 50_000 }),
+      readFile: () => 'x\n',
+      expected: /admitted-but-too-large/,
+    },
+    {
+      name: 'metadata-unavailable inspected',
+      path: `src/${'metadata-'.repeat(34)}row.js`,
+      stat: () => { throw new Error('EACCES'); },
+      readFile: () => { throw new Error('must not read'); },
+      expected: /metadata-unavailable; inspected/,
+    },
+    {
+      name: 'metadata-unavailable omitted',
+      path: `z/${'metadata-'.repeat(34)}omitted.js`,
+      files: [
+        ...Array.from({ length: 10 }, (_, index) => `a/${index}.js`),
+        `z/${'metadata-'.repeat(34)}omitted.js`,
+      ],
+      stat: (path) => {
+        if (path.endsWith('omitted.js')) throw new Error('EACCES');
+        return { size: 24 };
+      },
+      readFile: () => 'x\n',
+      expected: /metadata-unavailable; omitted/,
+    },
+    {
+      name: 'content-unavailable inspected',
+      path: `src/${'content-'.repeat(36)}row.js`,
+      stat: () => ({ size: 24 }),
+      readFile: () => { throw new Error('EIO'); },
+      expected: /content-unavailable; inspected/,
+    },
+  ];
+
+  for (const scenario of cases) {
+    const map = await buildRepoMap({
+      target: 'T', budget: 4000, spawn: fakeSpawnFor(scenario.files ?? [scenario.path]),
+      stat: scenario.stat, readFile: scenario.readFile,
+    });
+    const reservation = Number(map.match(/Pre-read row reservation: (\d+) chars/)?.[1]);
+    const row = map.match(new RegExp(`^- ${scenario.path.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} \\([^\\n]+\\)$`, 'm'))?.[0];
+    assert.ok(row, `${scenario.name} row must remain visible`);
+    assert.match(row, scenario.expected);
+    assert.ok(row.length <= reservation, `${scenario.name} row must fit reservation`);
+  }
+});
+
+test('minimal fallback compactly discloses its reservation at the exact minimum budget', async () => {
+  const map = await buildRepoMap({
+    target: 'T', budget: MINIMUM_MAP_BUDGET,
+    spawn: fakeSpawnFor(['d0000/a.js', 'd0001/a.js']),
+    stat: () => ({ size: 24 }), readFile: () => 'export const xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx = 1;\n',
+  });
+  assert.ok(map.length <= MINIMUM_MAP_BUDGET);
+  assert.doesNotMatch(map, /^## Files$/m, 'fixture must reach the minimal fallback');
+  assert.match(map, /Reservation=\d+\./);
+});
+
+test('the minimum fallback retains a fitting admission-omitted row', async () => {
+  const files = ['d/f00.js', 'd/f01.js', 'd/f02.js'];
+  const map = await buildRepoMap({
+    target: 'T', budget: MINIMUM_MAP_BUDGET, spawn: fakeSpawnFor(files),
+    stat: () => ({ size: 24 }), readFile: () => 'export const symbol = 1;\n',
+  });
+
+  assert.ok(map.length <= MINIMUM_MAP_BUDGET);
+  assert.match(map, /^## Files$/m);
+  assert.match(map, /^### d\/$/m);
+  assert.match(map, /^- d\/f02\.js \(omitted; content admission budget\)$/m);
+});
+
+test('metadata-proven oversized files retain too-large identity when the prefix read fails', async () => {
+  const map = await buildRepoMap({
+    target: 'T', budget: 1200, spawn: fakeSpawnFor(['src/huge.js']),
+    stat: () => ({ size: 50_000 }), readFile: () => { throw new Error('EIO'); },
+  });
+
+  assert.match(map, /inspected=0; admitted-but-too-large=1/);
+  assert.match(map, /^- src\/huge\.js \(admitted-but-too-large; metadata size exceeds 4800-byte ceiling; content-unavailable\)$/m);
+});
+
+test('prefix-proven oversized files declare the bounded-content basis rather than metadata size', async () => {
+  const map = await buildRepoMap({
+    target: 'T', budget: 1200, spawn: fakeSpawnFor(['src/prefix.js']),
+    stat: () => ({ size: 24 }), readFile: (path, options) => Buffer.alloc(options.length, 0x61),
+  });
+
+  assert.match(map, /^- src\/prefix\.js \(admitted-but-too-large; bounded content prefix exceeds 4800-byte ceiling\)$/m);
+  assert.doesNotMatch(map, /src\/prefix\.js \(admitted-but-too-large; metadata size exceeds/);
+});
+
+test('the minimum budget reserves the maximum possible reservation display width', () => {
+  // The maximum safe integer is the widest value this numeric reservation can
+  // honestly display.  The real minimal render with its 16-digit placeholder
+  // is 951 characters; the former empty-tree reservation produced only 938.
+  assert.equal(String(Number.MAX_SAFE_INTEGER).length, 16);
+  assert.ok(MINIMUM_MAP_BUDGET >= 951);
+});
+
+test('an admission-omitted path with available metadata uses its declared omitted row while it fits', async () => {
+  const map = await buildRepoMap({
+    target: 'T', budget: 1200,
+    spawn: fakeSpawnFor(['src/a.js', 'src/m.js', 'src/q.js', 'src/z.js']),
+    stat: () => ({ size: 24 }),
+    readFile: () => 'export const ordered = 1;\n',
+  });
+
+  assert.match(map, /r≤3\b/, 'this fixture admits exactly three content reads');
+  assert.match(map, /^- src\/z\.js \(omitted; content admission budget\)$/m);
+});
+
+test('an omitted directory heading and its fitting row bypass the conservative row reserve', async () => {
+  const omittedDirectory = `z${'z'.repeat(40)}`;
+  const omittedPath = `${omittedDirectory}/omitted.txt`;
+  const files = ['a/a.txt', 'a/b.txt', 'a/c.txt', omittedPath];
+  const map = await buildRepoMap({
+    target: 'T', budget: 1200, spawn: fakeSpawnFor(files),
+    stat: () => ({ size: 2 }), readFile: () => 'x\n',
+  });
+
+  assert.ok(map.length <= 1200);
+  assert.match(map, new RegExp(`^### ${omittedDirectory}/$`, 'm'));
+  assert.match(map, new RegExp(`^- ${omittedPath} \\(omitted; content admission budget\\)$`, 'm'));
+});
+
+test('symbolsSkipped excludes source paths omitted by content admission', async () => {
+  const files = Array.from(
+    { length: 100 },
+    (_, index) => `src/f${String(index).padStart(3, '0')}.js`,
+  );
+  const map = await buildRepoMap({
+    target: 'T', budget: 1200, spawn: fakeSpawnFor(files),
+    stat: () => ({ size: 24 }),
+    readFile: () => 'export const bounded = 1;\n',
+  });
+
+  const readCeiling = Number(map.match(/r≤(\d+)/)?.[1]);
+  const symbolsSkipped = Number(map.match(/symbolsSkipped=(\d+)/)?.[1] ?? 0);
+  assert.ok(readCeiling > 0);
+  assert.ok(
+    symbolsSkipped <= readCeiling,
+    'only content-admitted source scans may contribute to symbolsSkipped',
+  );
 });

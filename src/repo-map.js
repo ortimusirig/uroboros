@@ -3,7 +3,7 @@
 // (never seat output), carries a single operator-set budget as its only bound,
 // and DECLARES ITSELF: grade, omissions, fetchability. A bound that hides
 // what it withheld is a defect.
-import { readFileSync } from 'node:fs';
+import { closeSync, openSync, readSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawnCapture } from './spawn.js';
 
@@ -14,6 +14,9 @@ const SOURCE_EXTENSIONS = new Set(['.js', '.mjs', '.cjs', '.ts', '.tsx', '.jsx',
 
 const BINARY_SAMPLE_SIZE = 8 * 1024;
 const BINARY_SUSPICIOUS_FRACTION = 0.30;
+const ADMISSION_READ_COST = 400;
+const BYTE_CEILING_MULTIPLIER = 4;
+const SYMBOL_PAYLOAD_DIVISOR = 3;
 
 // Conservative binary rule: any NUL unit anywhere is binary. Otherwise, sample
 // the first 8,192 units and classify as binary when more than 30% of them are
@@ -72,6 +75,105 @@ function scanSymbols(text) {
     if (name) symbols.push(name);
   }
   return symbols;
+}
+
+// The named content-admission rule runs before any file content is opened. Its
+// stable lexical order is intentional: the same operator budget admits the
+// same prefix regardless of how many paths follow it in `git ls-files`.
+function contentAdmission(paths, budget) {
+  const readCeiling = Math.max(1, Math.floor(budget / ADMISSION_READ_COST));
+  const byteCeiling = Math.max(1, Math.floor(budget * BYTE_CEILING_MULTIPLIER));
+  const longestPathLength = paths.reduce((longest, path) => Math.max(longest, path.length), 0);
+  // A symbol row and a file row can name the same longest path.  Keep the
+  // symbol payload small enough that its row cannot inflate the true maximum
+  // beyond the normal one-third packing share; a genuinely long file row is
+  // still allowed to be the (larger) reservation and is handled as such.
+  const symbolPayloadCeiling = Math.max(
+    1,
+    Math.floor(budget / SYMBOL_PAYLOAD_DIVISOR) - longestPathLength - '- : '.length,
+  );
+  return {
+    orderedPaths: [...paths].sort(),
+    readCeiling,
+    byteCeiling,
+    prefixLength: byteCeiling + 1,
+    symbolPayloadCeiling,
+  };
+}
+
+// All possible per-file rows are defined here, before content reads. The
+// reservation is the true maximum for the actual path/count/ceiling widths;
+// no representative path or fixed column width can silently underestimate it.
+function rowTemplateRegistry({ longestPath, countWidth, byteCeiling, symbolPayloadCeiling }) {
+  const count = '9'.repeat(countWidth);
+  const payload = 's'.repeat(symbolPayloadCeiling);
+  const format = {
+    inspectedText: (path, lines) => `- ${path} (${lines} lines) [inspected]`,
+    inspectedBinary: (path) => `- ${path} (binary — not line-counted or symbol-scanned) [inspected]`,
+    tooLargeMetadata: (path) => `- ${path} (admitted-but-too-large; metadata size exceeds ${byteCeiling}-byte ceiling)`,
+    tooLargePrefix: (path) => `- ${path} (admitted-but-too-large; bounded content prefix exceeds ${byteCeiling}-byte ceiling)`,
+    tooLargeContentUnavailable: (path) => `- ${path} (admitted-but-too-large; metadata size exceeds ${byteCeiling}-byte ceiling; content-unavailable)`,
+    metadataUnavailable: (path, identity) => `- ${path} (metadata-unavailable; ${identity})`,
+    contentUnavailable: (path, identity) => `- ${path} (content-unavailable; ${identity})`,
+    omitted: (path) => `- ${path} (omitted; content admission budget)`,
+    symbols: (path, names) => `- ${path}: ${names}`,
+  };
+  return {
+    format,
+    templates: [
+      format.inspectedText(longestPath, count),
+      format.inspectedBinary(longestPath),
+      format.tooLargeMetadata(longestPath),
+      format.tooLargePrefix(longestPath),
+      format.tooLargeContentUnavailable(longestPath),
+      format.metadataUnavailable(longestPath, 'inspected'),
+      format.metadataUnavailable(longestPath, 'omitted'),
+      format.contentUnavailable(longestPath, 'inspected'),
+      format.contentUnavailable(longestPath, 'omitted'),
+      format.omitted(longestPath),
+      format.symbols(longestPath, payload),
+    ],
+  };
+}
+
+function rowTemplateContext(paths, admission) {
+  const longestPath = paths.reduce((longest, path) => (path.length > longest.length ? path : longest), '');
+  return {
+    longestPath,
+    countWidth: String(Math.max(1, paths.length, admission.readCeiling, admission.byteCeiling)).length,
+    byteCeiling: admission.byteCeiling,
+    symbolPayloadCeiling: admission.symbolPayloadCeiling,
+  };
+}
+
+function reservePreReadRowSpace(paths, admission) {
+  const { templates } = rowTemplateRegistry(rowTemplateContext(paths, admission));
+  return Math.max(...templates.map((template) => template.length));
+}
+
+export function readPrefixSync(path, {
+  length,
+  adapters = { openSync, readSync, closeSync },
+}) {
+  const descriptor = adapters.openSync(path, 'r');
+  try {
+    const buffer = Buffer.alloc(length);
+    let bytesRead = 0;
+    while (bytesRead < length) {
+      const chunk = adapters.readSync(descriptor, buffer, bytesRead, length - bytesRead, bytesRead);
+      if (chunk === 0) break;
+      bytesRead += chunk;
+    }
+    return buffer.subarray(0, bytesRead);
+  } finally {
+    adapters.closeSync(descriptor);
+  }
+}
+
+function boundedSymbols(symbols, ceiling) {
+  const payload = symbols.join(', ');
+  if (payload.length <= ceiling) return payload;
+  return `${payload.slice(0, Math.max(0, ceiling - 1))}…`;
 }
 
 function countNoun(count) {
@@ -160,11 +262,10 @@ function renderNoSurveyMinimal() {
 // survey was produced...') is fixed text and is never what gets cut.
 function noSurvey(reason, budget) {
   const detail = (reason || 'git ls-files failed').trim();
-  const full = renderNoSurvey(detail);
-  if (full.length <= budget) return full;
-
   const overhead = HEADER.length + NO_SURVEY_SHORTENED_MARKER.length + NO_SURVEY_SUFFIX.length;
-  const shortenedDetail = detail.slice(0, Math.max(0, budget - overhead));
+  const detailLimit = Math.max(0, budget - overhead);
+  if (detail.length <= detailLimit) return renderNoSurvey(detail);
+  const shortenedDetail = detail.slice(0, detailLimit);
   const shortened = renderNoSurvey(`${shortenedDetail}${NO_SURVEY_SHORTENED_MARKER}`);
 
   // Defensive final guard, in the same spirit as the fallback ladder's last
@@ -184,9 +285,46 @@ function noSurvey(reason, budget) {
 // fallback without claiming its already-completed scans were withheld work.
 const LAST_RESORT_LINE = 'Details withheld (budget); read the tree directly.';
 
-function renderMinimal(symbolAccounting) {
+function compactAdmissionDeclaration({ readCeiling, byteCeiling, prefixLength, symbolPayloadCeiling }, identity) {
+  return `Content admission rule: lexical; r≤${readCeiling}, b≤${byteCeiling}, p≤${prefixLength}, s≤${symbolPayloadCeiling}; inspected=${identity.inspected}, admitted-but-too-large=${identity.tooLarge}, omitted=${identity.omitted}, metadata-unavailable=${identity.metadataUnavailable}; attempted survey declared.`;
+}
+
+function renderMinimal(symbolAccounting, admission, identity, preReadReservation = 0) {
   const accounting = compactSymbolAccounting(symbolAccounting);
-  return `${HEADER}${LAST_RESORT_LINE}${accounting ? `\n${accounting}` : ''}\n`;
+  return `${HEADER}${compactAdmissionDeclaration(admission, identity)}\nReservation=${preReadReservation}. Content availability: unavailable=${identity.contentUnavailable ?? 0}.\n${LAST_RESORT_LINE}${accounting ? `\n${accounting}` : ''}\n`;
+}
+
+function renderCompactFallback({
+  symbolAccounting, admission, identity, preReadReservation, entries, rowFormatters, budget,
+}) {
+  const accounting = compactSymbolAccounting(symbolAccounting);
+  const prefix = `${HEADER}${compactAdmissionDeclaration(admission, identity)}\nReservation=${preReadReservation}. Content availability: unavailable=${identity.contentUnavailable ?? 0}.\n`;
+  const suffix = `${LAST_RESORT_LINE}${accounting ? `\n${accounting}` : ''}\n`;
+  const render = (fileLines) => `${prefix}${fileLines.length > 0
+    ? `\n## Files\n\n${fileLines.join('\n')}\n`
+    : ''}${suffix}`;
+  const fileLines = [];
+  const byDirectory = new Map();
+  for (const entry of entries) {
+    if (entry.identity !== 'omitted' || entry.metadata !== 'available') continue;
+    const slash = entry.path.lastIndexOf('/');
+    const directory = slash === -1 ? '.' : entry.path.slice(0, slash);
+    if (!byDirectory.has(directory)) byDirectory.set(directory, []);
+    byDirectory.get(directory).push(entry);
+  }
+  for (const [directory, group] of [...byDirectory.entries()].sort(byEntryKey)) {
+    let wroteHeading = false;
+    for (const entry of group) {
+      const row = rowFormatters.omitted(entry.path);
+      const candidate = wroteHeading
+        ? [...fileLines, row]
+        : [...fileLines, `### ${directory}/`, row];
+      if (render(candidate).length > budget) continue;
+      fileLines.push(...(wroteHeading ? [row] : [`### ${directory}/`, row]));
+      wroteHeading = true;
+    }
+  }
+  return render(fileLines);
 }
 
 // The floor: below this, not even the least detailed honest output fits, so
@@ -198,22 +336,47 @@ function renderMinimal(symbolAccounting) {
 // `paths` is an Array, whose maximum length is 2^32 - 1; using that maximum in
 // every state reserves enough decimal digits for any possible runtime count.
 const MAX_ARRAY_COUNT = (2 ** 32) - 1;
+// Reservations are numeric string lengths.  The minimal-rung floor cannot use
+// the empty-tree value because a real applied reservation may need every digit
+// a safe JavaScript integer can display; render that widest honest placeholder
+// directly, without constructing a representative path or circularly asking
+// the admission calculation for one.
+const MAX_RESERVATION_FOR_DISPLAY = Number.MAX_SAFE_INTEGER;
 const MAX_SYMBOL_ACCOUNTING = {
   scanRanWithResultsRendered: MAX_ARRAY_COUNT,
   scanRanButResultWithheld: MAX_ARRAY_COUNT,
   scanNeverRan: MAX_ARRAY_COUNT,
   scannedWithZeroResults: MAX_ARRAY_COUNT,
 };
-export const MINIMUM_MAP_BUDGET = Math.max(
-  renderMinimal(MAX_SYMBOL_ACCOUNTING).length,
-  renderNoSurveyMinimal().length,
-);
+const MAX_ADMISSION_IDENTITY = {
+  inspected: MAX_ARRAY_COUNT,
+  tooLarge: MAX_ARRAY_COUNT,
+  omitted: MAX_ARRAY_COUNT,
+  metadataUnavailable: MAX_ARRAY_COUNT,
+  contentUnavailable: MAX_ARRAY_COUNT,
+};
+let minimumMapBudget = 0;
+for (let attempt = 0; attempt < 8; attempt++) {
+  const candidate = Math.max(
+    renderMinimal(
+      MAX_SYMBOL_ACCOUNTING,
+      contentAdmission([], minimumMapBudget),
+      MAX_ADMISSION_IDENTITY,
+      MAX_RESERVATION_FOR_DISPLAY,
+    ).length,
+    renderNoSurveyMinimal().length,
+  );
+  if (candidate === minimumMapBudget) break;
+  minimumMapBudget = candidate;
+}
+export const MINIMUM_MAP_BUDGET = minimumMapBudget;
 
 export async function buildRepoMap({
   target,
   budget = DEFAULT_MAP_BUDGET,
   spawn = spawnCapture,
-  readFile = readFileSync,
+  readFile = readPrefixSync,
+  stat,
 } = {}) {
   // Loud input validation, like the repo's other argument checks: do not let
   // JavaScript coerce malformed values into character counts. Below the floor
@@ -246,20 +409,61 @@ export async function buildRepoMap({
     return noSurvey(ls.stderr, budget);
   }
   const paths = ls.stdout.split(/\r?\n/).filter(Boolean);
+  const admission = contentAdmission(paths, budget);
+  const admittedPaths = admission.orderedPaths.slice(0, admission.readCeiling);
+  const admittedPathSet = new Set(admittedPaths);
+  const preReadReservation = reservePreReadRowSpace(paths, admission);
+  const { format: rowFormatters } = rowTemplateRegistry(rowTemplateContext(paths, admission));
+  const statAdapter = stat ?? readFile.stat ?? statSync;
   const entries = paths.map((path) => {
     let lines = null;
     let text = null;
     let binary = false;
+    const admitted = admittedPathSet.has(path);
+    let size = null;
     try {
-      const content = readFile(join(target, path));
-      binary = isBinaryContent(content);
-      if (!binary) {
-        text = String(content);
-        lines = text.split('\n').length - (text.endsWith('\n') ? 1 : 0);
-      }
-    } catch { /* unreadable stays null — declared below, never invented */ }
-    return { path, lines, text, binary };
+      size = statAdapter(join(target, path)).size;
+    } catch {
+      return {
+        path, lines, text, binary, size,
+        identity: admitted ? 'inspected' : 'omitted', metadata: 'unavailable', content: 'not-attempted',
+      };
+    }
+    return {
+      path, lines, text, binary, size, tooLargeBasis: null,
+      identity: admitted ? 'inspected' : 'omitted', metadata: 'available', content: 'not-attempted',
+    };
   });
+
+  // Admission order is the declared lexical order, not the source order from
+  // git. Stat collection above intentionally never opens file content.
+  const entriesByPath = new Map(entries.map((entry) => [entry.path, entry]));
+  for (const path of admittedPaths) {
+    const entry = entriesByPath.get(path);
+    if (entry.metadata === 'unavailable') continue;
+    if (entry.size > admission.byteCeiling) {
+      entry.identity = 'admitted-but-too-large';
+      entry.tooLargeBasis = 'metadata';
+    }
+    entry.content = 'available';
+    try {
+      const content = readFile(join(target, path), { length: admission.prefixLength });
+      if (content.length > admission.byteCeiling) {
+        entry.identity = 'admitted-but-too-large';
+        if (entry.tooLargeBasis === null) entry.tooLargeBasis = 'prefix';
+      }
+      if (entry.identity === 'admitted-but-too-large') {
+        continue;
+      }
+      entry.binary = isBinaryContent(content);
+      if (!entry.binary) {
+        entry.text = String(content);
+        entry.lines = entry.text.split('\n').length - (entry.text.endsWith('\n') ? 1 : 0);
+      }
+    } catch {
+      entry.content = 'unavailable';
+    }
+  }
 
   // Directory-grouped file listing, then symbol scans largest-first, appended
   // while the budget holds. Whatever does not fit is COUNTED and NAMED.
@@ -271,30 +475,71 @@ export async function buildRepoMap({
     byDirectory.get(directory).push(entry);
   }
 
-  const lines = [HEADER, '## Files', ''];
+  const admissionCounts = {
+    inspected: entries.filter((entry) => entry.identity === 'inspected').length,
+    tooLarge: entries.filter((entry) => entry.identity === 'admitted-but-too-large').length,
+    omitted: entries.filter((entry) => entry.identity === 'omitted').length,
+    metadataUnavailable: entries.filter((entry) => entry.metadata === 'unavailable').length,
+    contentUnavailable: entries.filter((entry) => entry.content === 'unavailable').length,
+  };
+  const availabilityCounts = {
+    metadataUnavailable: entries.filter((entry) => entry.metadata === 'unavailable').length,
+    contentUnavailable: entries.filter((entry) => entry.content === 'unavailable').length,
+  };
+  const admissionDeclaration = [
+    `Content admission rule: lexical; r≤${admission.readCeiling}, b≤${admission.byteCeiling}, p≤${admission.prefixLength}, s≤${admission.symbolPayloadCeiling}; states in rows.`,
+    `Identity: inspected=${admissionCounts.inspected}; admitted-but-too-large=${admissionCounts.tooLarge}; omitted=${admissionCounts.omitted}; metadata-unavailable=${availabilityCounts.metadataUnavailable}; content-unavailable=${availabilityCounts.contentUnavailable}.`,
+    `Pre-read row reservation: ${preReadReservation} chars.`,
+  ];
+  const lines = [HEADER, ...admissionDeclaration, '', '## Files', ''];
   const omitted = new Map();
+  const recordWithheld = (directory, entry) => {
+    const key = `${entry.identity}\u0000${directory}`;
+    omitted.set(key, (omitted.get(key) ?? 0) + 1);
+  };
   // Space kept clear of Files/Symbols content so the '## Withheld by the budget'
   // section below usually has room without falling back further. A packing
   // heuristic only, not a correctness guarantee — the fallback ladder after this
   // function measures every candidate's actual rendered length against `budget`
   // regardless of what this reserve left behind.
-  const reserve = 400;
+  const reserve = preReadReservation;
   let spent = lines.join('\n').length;
   for (const [directory, group] of [...byDirectory.entries()].sort(byEntryKey)) {
     const heading = `### ${directory}/`;
-    if (spent + heading.length + 1 > budget - reserve) {
-      omitted.set(directory, group.length);
+    const omittedRowFitsWithHeading = group.some((entry) => (
+      entry.identity === 'omitted'
+      && entry.metadata === 'available'
+      && spent + heading.length + rowFormatters.omitted(entry.path).length + 2 <= budget
+    ));
+    const headingPackingLimit = omittedRowFitsWithHeading ? budget : budget - reserve;
+    if (spent + heading.length + 1 > headingPackingLimit) {
+      for (const entry of group) recordWithheld(directory, entry);
       continue;
     }
     lines.push(heading);
     spent += heading.length + 1;
     for (const entry of group) {
-      const treatment = entry.binary
-        ? 'binary — not line-counted or symbol-scanned'
-        : `${entry.lines ?? 'unreadable'} lines`;
-      const row = `- ${entry.path} (${treatment})`;
-      if (spent + row.length + 1 > budget - reserve) {
-        omitted.set(directory, (omitted.get(directory) ?? 0) + 1);
+      const row = entry.metadata === 'unavailable'
+        ? rowFormatters.metadataUnavailable(entry.path, entry.identity)
+        : entry.identity === 'admitted-but-too-large'
+          ? entry.content === 'unavailable'
+            ? rowFormatters.tooLargeContentUnavailable(entry.path)
+            : entry.tooLargeBasis === 'prefix'
+              ? rowFormatters.tooLargePrefix(entry.path)
+              : rowFormatters.tooLargeMetadata(entry.path)
+          : entry.content === 'unavailable'
+            ? rowFormatters.contentUnavailable(entry.path, entry.identity)
+            : entry.identity === 'omitted'
+              ? rowFormatters.omitted(entry.path)
+              : entry.binary
+                ? rowFormatters.inspectedBinary(entry.path)
+                : rowFormatters.inspectedText(entry.path, entry.lines);
+      if (row.length > preReadReservation) {
+        throw new Error('repo-map bug: classified row exceeds its pre-read template reservation');
+      }
+      const packingLimit = entry.identity === 'omitted' ? budget : budget - reserve;
+      if (spent + row.length + 1 > packingLimit) {
+        recordWithheld(directory, entry);
         continue;
       }
       lines.push(row);
@@ -302,8 +547,16 @@ export async function buildRepoMap({
     }
   }
 
+  const eligibleSymbolFiles = entries
+    .filter((entry) => (
+      entry.identity === 'inspected'
+      && entry.metadata === 'available'
+      && entry.content === 'available'
+      && !entry.binary
+      && SOURCE_EXTENSIONS.has(extensionOf(entry.path))
+    ));
   const largestFirst = entries
-    .filter((entry) => entry.text !== null && SOURCE_EXTENSIONS.has(extensionOf(entry.path)))
+    .filter((entry) => entry.identity === 'inspected' && entry.text !== null && SOURCE_EXTENSIONS.has(extensionOf(entry.path)))
     .sort((left, right) => (right.lines ?? 0) - (left.lines ?? 0));
   const symbolLines = [];
   let symbolFilesScanned = 0;
@@ -317,7 +570,10 @@ export async function buildRepoMap({
       scannedWithZeroResults++;
       continue;
     }
-    const row = `- ${entry.path}: ${symbols.join(', ')}`;
+    const row = rowFormatters.symbols(entry.path, boundedSymbols(symbols, admission.symbolPayloadCeiling));
+    if (row.length > preReadReservation) {
+      throw new Error('repo-map bug: symbol row exceeds its pre-read template reservation');
+    }
     if (spent + row.length + SYMBOLS_HEADER_MARGIN > budget - reserve) {
       symbolResultsWithheld++;
       break;
@@ -337,7 +593,7 @@ export async function buildRepoMap({
   // `symbolsSkipped` means exactly one thing: eligible files whose scan never
   // ran. Empty scans and completed scans whose result row did not fit are
   // tracked independently and can never inflate this count.
-  const symbolsSkipped = largestFirst.length - symbolFilesScanned;
+  const symbolsSkipped = eligibleSymbolFiles.length - symbolFilesScanned;
   const accountingWithSymbolRows = {
     scanRanWithResultsRendered: symbolResultsRendered + scannedWithZeroResults,
     scanRanButResultWithheld: symbolResultsWithheld,
@@ -366,13 +622,24 @@ export async function buildRepoMap({
   // this section too: with many small omitted directories, one line each is
   // unbounded and can itself blow the budget. Try the detailed form first...
   const directoryNotesDetailed = [...omitted.entries()].sort(byEntryKey)
-    .map(([directory, count]) => `… and ${count} more files under ${directory}/ (budget) — read them directly if relevant.`);
+    .map(([key, count]) => {
+      const [identity, directory] = key.split('\u0000');
+      return `… and ${count} more files under ${directory}/ (budget) — ${identity} rows withheld; read them directly if relevant.`;
+    });
   // ...and when it doesn't fit, collapse every omitted directory into one bounded
   // summary line instead of truncating mid-list (a silent, undeclared cap — the
   // exact defect this exists to prevent).
   const omittedFilesTotal = [...omitted.values()].reduce((sum, count) => sum + count, 0);
+  const withheldIdentityCounts = Object.fromEntries(
+    ['inspected', 'admitted-but-too-large', 'omitted'].map((identity) => [
+      identity,
+      [...omitted.entries()]
+        .filter(([key]) => key.startsWith(`${identity}\u0000`))
+        .reduce((sum, [, count]) => sum + count, 0),
+    ]),
+  );
   const directoryNotesCollapsed = omitted.size > 0
-    ? [`… omissions for ${omitted.size} directories (${omittedFilesTotal} files) withheld (budget) — this survey is incomplete; read the tree directly.`]
+    ? [`… omissions for ${new Set([...omitted.keys()].map((key) => key.split('\u0000')[1])).size} directories (${omittedFilesTotal} files) withheld (budget) — inspected rows withheld=${withheldIdentityCounts.inspected}; admitted-but-too-large rows withheld=${withheldIdentityCounts['admitted-but-too-large']}; omitted rows withheld=${withheldIdentityCounts.omitted}; this survey is incomplete; read the tree directly.`]
     : [];
   // Fallback ladder from most to least detailed, MEASURING THE ACTUAL RENDERED
   // STRING at every step — the `reserve` above is a packing heuristic that keeps
@@ -402,11 +669,19 @@ export async function buildRepoMap({
   // it always fits. The check below is not what makes that true; it is a
   // defensive, self-explaining guard against a future edit breaking the
   // invariant silently instead of loudly.
-  const minimal = renderMinimal(accountingWithoutSymbolRows);
-  if (minimal.length > budget) {
+  const compactFallback = renderCompactFallback({
+    symbolAccounting: accountingWithoutSymbolRows,
+    admission,
+    identity: admissionCounts,
+    preReadReservation,
+    entries,
+    rowFormatters,
+    budget,
+  });
+  if (compactFallback.length > budget) {
     throw new Error(
-      `repo-map bug: the minimal self-declaration (${minimal.length} chars) exceeds budget ${budget} even though budget >= MINIMUM_MAP_BUDGET (${MINIMUM_MAP_BUDGET}) — this should be impossible; renderMinimal() and MINIMUM_MAP_BUDGET have drifted apart`,
+      `repo-map bug: the compact fallback (${compactFallback.length} chars) exceeds budget ${budget} even though budget >= MINIMUM_MAP_BUDGET (${MINIMUM_MAP_BUDGET}) — this should be impossible; renderCompactFallback() and MINIMUM_MAP_BUDGET have drifted apart`,
     );
   }
-  return minimal;
+  return compactFallback;
 }

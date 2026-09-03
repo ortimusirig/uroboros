@@ -327,6 +327,7 @@ it. Uroboros never generates or edits a constitution.
 | Element | Class | Why it is not a decision |
 |---|---|---|
 | Repo-map budget (`--map-budget`) | input ration | Operator-set, self-declaring, fetch-past-able; no fixed internal counts |
+| Repo-map content admission (lexical path order; budget-derived read ceiling, per-file byte ceiling, bounded prefix read, and template-registry row reservation) | input ration | The operator budget alone determines which bounded prefix is content-read and how much of each admitted file can be read; every map declares the ceilings, inspected/admitted-but-too-large/omitted identity, metadata failures, and the true-max reservation, while every path remains directly fetchable. |
 | Topological task ordering | bookkeeping | Serializes the seats' own declared order; cycles go back as feedback |
 | Write-once artifacts (`wx`) | safety | Protects prior judgements from silent overwrite; collision is loud |
 | Tag parsing (`GOALS_JSON` …) | availability | Malformed goes back as feedback; only a seat that never ran is unavailable |
