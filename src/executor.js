@@ -218,6 +218,7 @@ export async function runExecutor({
   getWorktreeActivity,
   onLivenessDecision,
   env = process.env,
+  ownedTmpDir = false,
 }) {
   const resolvedTimeoutMs = timeoutMs === undefined
     ? resolveStageTimeouts(env).executor
@@ -232,11 +233,19 @@ export async function runExecutor({
   // root and every write fails with a sandbox ACL error. Give such tools a temp dir the
   // sandbox actually allows, and let it win over both the inherited process env and any
   // caller-supplied override above — those were never chosen with the sandbox root in mind.
-  const executorTmp = join(cwd, '.uro-tmp');
-  mkdirSync(executorTmp, { recursive: true });
-  launchEnv.TMP = executorTmp;
-  launchEnv.TEMP = executorTmp;
-  launchEnv.TMPDIR = executorTmp;
+  //
+  // Gated behind ownedTmpDir: runExecutor is also the Codex path for plan/decompose, which
+  // pass the operator's real, un-isolated target directly as `cwd` (no worktree, no copy) —
+  // their own prompts say "do not modify any file." Only run.js's isolated-worktree call site
+  // owns `cwd` and may opt in; every other caller must get today's untouched environment and
+  // must never have a directory created inside a repository the harness does not own.
+  if (ownedTmpDir) {
+    const executorTmp = join(cwd, '.uro-tmp');
+    mkdirSync(executorTmp, { recursive: true });
+    launchEnv.TMP = executorTmp;
+    launchEnv.TEMP = executorTmp;
+    launchEnv.TMPDIR = executorTmp;
+  }
   const nowMs = () => {
     const value = now();
     return value instanceof Date ? value.getTime() : value;

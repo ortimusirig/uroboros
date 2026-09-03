@@ -714,6 +714,7 @@ export async function run(opts) {
           operation: () => runExecutor({
             plan: executorPlan, cwd: iso.dir, model: executorModel, effort: executorEffort,
             env: runEnvironment,
+            ownedTmpDir: true,
             timeoutMs: stageTimeouts.executor,
             reporter: eventReporter, runId, attempt,
             beforeKill,

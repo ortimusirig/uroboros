@@ -153,11 +153,14 @@ test('runExecutor launches Codex under the environment whose registry was verifi
     'a registry override must not remove the PATH needed to launch Codex');
 });
 
-test('the executor sandbox owns its temp dir inside the worktree', async () => {
+test('an owned-worktree caller opts in to the sandbox temp dir with ownedTmpDir', async () => {
   // Codex's workspace-write sandbox confines writes to the worktree. A tool that defaults
   // to writing under the OS temp dir (pytest's tmp under %TEMP%, observed in the field) then
   // fails every write with an ACL error, because %TEMP% lives outside the sandboxed root.
-  // The executor must give such tools a temp dir the sandbox actually allows.
+  // The executor must give such tools a temp dir the sandbox actually allows — but only when
+  // the caller owns `cwd` as a disposable, isolated worktree (run.js). Plan/decompose call
+  // runExecutor directly against the operator's real, un-isolated target directory, so this
+  // behavior must never fire unless the caller explicitly opts in.
   const dir = mkdtempSync(join(tmpdir(), 'ccc-executor-sandbox-tmp-'));
   try {
     const child = fakeChild();
@@ -166,6 +169,7 @@ test('the executor sandbox owns its temp dir inside the worktree', async () => {
       plan: 'observe the sandbox temp dir',
       cwd: dir,
       bin: process.execPath,
+      ownedTmpDir: true,
       spawnProcess: (_bin, _args, options) => { spawnOptions = options; return child; },
     });
     await new Promise((resolve) => setImmediate(resolve));
@@ -177,6 +181,39 @@ test('the executor sandbox owns its temp dir inside the worktree', async () => {
     assert.equal(spawnOptions.env.TEMP, executorTmp);
     assert.equal(spawnOptions.env.TMPDIR, executorTmp);
     assert.equal(existsSync(executorTmp), true, 'the sandbox temp dir must actually exist on disk');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('without ownedTmpDir, runExecutor never mutates a caller-supplied directory', async () => {
+  // The regression pin for the wave's law: the harness must never mutate a repository (or
+  // any directory) it does not own. plan.js and decompose.js pass the operator's real target
+  // as `cwd` directly — no isolation, no worktree copy — and their own prompts say "do not
+  // modify any file." ownedTmpDir defaults to false, so this must be a true no-op: no
+  // directory created, no TMP/TEMP/TMPDIR override, whatever the caller's env already was.
+  const dir = mkdtempSync(join(tmpdir(), 'ccc-executor-unowned-'));
+  try {
+    const child = fakeChild();
+    let spawnOptions;
+    const pending = runExecutor({
+      plan: 'observe an unowned directory',
+      cwd: dir,
+      bin: process.execPath,
+      spawnProcess: (_bin, _args, options) => { spawnOptions = options; return child; },
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    child.emit('close', 0, null);
+    await pending;
+
+    assert.equal(spawnOptions.env.TMP, process.env.TMP,
+      'TMP must pass through unchanged when the caller does not own cwd');
+    assert.equal(spawnOptions.env.TEMP, process.env.TEMP,
+      'TEMP must pass through unchanged when the caller does not own cwd');
+    assert.equal(spawnOptions.env.TMPDIR, process.env.TMPDIR,
+      'TMPDIR must pass through unchanged when the caller does not own cwd');
+    assert.equal(existsSync(join(dir, '.uro-tmp')), false,
+      'the harness must not create anything inside a directory it does not own');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
