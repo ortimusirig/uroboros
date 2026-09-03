@@ -277,13 +277,43 @@ test('a mutation pin sequence is reconstructible in order', async () => {
   assert.deepEqual(shape, ['file:src/target.js', 'exit:1', 'file:src/target.js', 'exit:0']);
 });
 
+test('an executor finish event carries no tokens field when the real stream reported none', async () => {
+  const events = await runFakeExecutorStream([
+    { type: 'item.completed', item: { id: '1', type: 'agent_message', text: 'done' } },
+  ]);
+  const finish = events.find((event) => event.stage === 'executor' && event.type === 'finish');
+  assert.ok(finish, 'a finish event must still be reported');
+  assert.equal(Object.hasOwn(finish, 'tokens'), false,
+    'no usage line ever arrived on the real stream, so the event must not claim a zero');
+});
+
+test('an executor finish event carries a genuine zero tokens field when the real stream reported one', async () => {
+  const events = await runFakeExecutorStream([
+    { type: 'turn.completed', usage: { input_tokens: 0, output_tokens: 0 } },
+    { type: 'item.completed', item: { id: '1', type: 'agent_message', text: 'done' } },
+  ]);
+  const finish = events.find((event) => event.stage === 'executor' && event.type === 'finish');
+  assert.deepEqual(finish.tokens, EMPTY_USAGE);
+});
+
 test('parseCodexStream handles the real wrapped item.completed schema, ignores errors and item.started', () => {
   const sample = readFileSync(schemaSamplePath, 'utf8');
   const r = parseCodexStream(sample);
   assert.deepEqual(r.changedFiles, ['ok.txt']);
   assert.equal(r.lastMessage, 'Created ok.txt.');
   assert.deepEqual(r.agentMessages, ['Created ok.txt.']);
-  assert.deepEqual(r.usage, EMPTY_USAGE);
+  // This real stream's only turn.completed line carries no usage field at all
+  // ({"type":"turn.completed"}) — nothing was ever accounted, so this must be
+  // null, never a fake EMPTY_USAGE zero.
+  assert.equal(r.usage, null);
+});
+
+test('parseCodexStream reports a genuinely zero usage as accounted, not absent', () => {
+  const zeroUsage = JSON.stringify({
+    type: 'turn.completed',
+    usage: { input_tokens: 0, output_tokens: 0 },
+  });
+  assert.deepEqual(parseCodexStream(zeroUsage).usage, EMPTY_USAGE);
 });
 
 test('normalizeCodexUsage maps the real Codex usage object', () => {
@@ -316,13 +346,20 @@ test('normalizeCursorUsage maps the real Cursor usage object', () => {
   assert.equal(checkUsageConsistency(normalized).status, 'consistent');
 });
 
-test('usage normalizers return zero usage for missing or garbage input and sanitize invalid fields', () => {
+test('usage normalizers return null for a missing usage object, never a fake zero, but still sanitize invalid fields on a real one', () => {
   for (const raw of [undefined, null, 'garbage', 42, [], () => {}]) {
-    assert.deepEqual(normalizeCodexUsage(raw), EMPTY_USAGE);
-    assert.deepEqual(normalizeCursorUsage(raw), EMPTY_USAGE);
+    assert.equal(normalizeCodexUsage(raw), null,
+      'nothing shaped like a usage object arrived, so nothing was accounted');
+    assert.equal(normalizeCursorUsage(raw), null);
   }
+  // A genuine usage object with unusable field values is still a REPORTED
+  // usage object — the seat did report; the fields just do not parse. That
+  // stays a truthful (sanitized) zero, never null.
   assert.deepEqual(normalizeCodexUsage({ input_tokens: -1, output_tokens: '96' }), EMPTY_USAGE);
   assert.deepEqual(normalizeCursorUsage({ inputTokens: Number.NaN, cacheReadTokens: -2 }), EMPTY_USAGE);
+  // A genuinely all-zero usage object is real accounting, not absence of it.
+  assert.deepEqual(normalizeCodexUsage({ input_tokens: 0, output_tokens: 0 }), EMPTY_USAGE);
+  assert.deepEqual(normalizeCursorUsage({ inputTokens: 0, outputTokens: 0 }), EMPTY_USAGE);
 });
 
 test('addUsage sums canonical fields without mutating either argument', () => {

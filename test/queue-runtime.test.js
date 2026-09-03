@@ -537,6 +537,10 @@ test('goal acceptance without a constitution still asks, and no readable answer 
       'an absent constitution is empty, and the prompt drops its line');
     assert.equal(unreadable.approved, null,
       'prose without a readable approval boolean is never consent');
+    // The arbiter DID answer, but its reply carried no usage field of its
+    // own — nothing was ever accounted, so this must be null, never a fake
+    // EMPTY_USAGE zero.
+    assert.equal(unreadable.usage, null);
 
     const thrown = await judgeGoalAcceptance(workspace, {
       runCommand,
@@ -544,7 +548,27 @@ test('goal acceptance without a constitution still asks, and no readable answer 
     });
     assert.equal(thrown.approved, null);
     assert.match(thrown.reasoning, /ENOENT/);
-    assert.deepEqual(thrown.usage, EMPTY_USAGE);
+    // The arbiter call itself threw before producing anything — nothing was
+    // ever accounted, so this must be null, never a fake EMPTY_USAGE zero.
+    assert.equal(thrown.usage, null);
+  } finally { workspace.cleanup(); }
+});
+
+test('goal acceptance keeps a genuinely zero arbiter usage as accounted, not absent', async () => {
+  const workspace = goalWorkspace();
+  try {
+    writeFileSync(workspace.logPath,
+      `${JSON.stringify({ name: 'unit-1', landed: true, commit: 'aaaa111' })}\n`);
+    const judgement = await judgeGoalAcceptance(workspace, {
+      runCommand: async () => ({ code: 0, stdout: 'diff --git a/x b/x\n', stderr: '' }),
+      arbiter: async () => ({
+        approved: true, reasoning: 'sure',
+        // The full canonical shape, as a real normalizeClaudeUsage() zero
+        // result would actually carry.
+        usage: EMPTY_USAGE,
+      }),
+    });
+    assert.deepEqual(judgement.usage, EMPTY_USAGE);
   } finally { workspace.cleanup(); }
 });
 
@@ -563,6 +587,9 @@ test('goal acceptance refuses to judge a goal with no landed commit trail', asyn
     assert.match(judgement.reasoning, /no landed commit/i);
     assert.equal(arbiterCalls, 0, 'there is nothing first-hand to read, so nothing is asked');
     assert.equal(gitCalls, 0);
+    // The arbiter was never called — nothing was ever accounted, so this
+    // must be null, never a fake EMPTY_USAGE zero.
+    assert.equal(judgement.usage, null);
   } finally { workspace.cleanup(); }
 });
 
@@ -588,7 +615,9 @@ test('goal acceptance refuses to judge a goal with a partial commit trail', asyn
     assert.equal(arbiterCalls, 0, 'a partial trail is refused before asking Claude anything');
     assert.equal(gitCalls, 0, 'a partial trail is refused before reading any diff');
     assert.deepEqual(judgement.findings, []);
-    assert.deepEqual(judgement.usage, EMPTY_USAGE);
+    // The arbiter was never even called on this refusal path — nothing was
+    // ever accounted, so this must be null, never a fake EMPTY_USAGE zero.
+    assert.equal(judgement.usage, null);
   } finally { workspace.cleanup(); }
 });
 
@@ -663,7 +692,9 @@ test('goal acceptance refuses when the landed base commit does not resolve in th
       },
     ], 'refusal happens before the parent probe or the diff — one git call, not three');
     assert.deepEqual(judgement.findings, []);
-    assert.deepEqual(judgement.usage, EMPTY_USAGE);
+    // The arbiter was never even called on this refusal path — nothing was
+    // ever accounted, so this must be null, never a fake EMPTY_USAGE zero.
+    assert.equal(judgement.usage, null);
   } finally { workspace.cleanup(); }
 });
 
@@ -684,6 +715,8 @@ test('goal acceptance returns approved:null instead of throwing when the aggrega
     assert.match(judgement.reasoning, /bad revision/);
     assert.equal(arbiterCalls, 0, 'an unreadable diff is never handed to the arbiter');
     assert.deepEqual(judgement.findings, []);
-    assert.deepEqual(judgement.usage, EMPTY_USAGE);
+    // The arbiter was never even called on this refusal path — nothing was
+    // ever accounted, so this must be null, never a fake EMPTY_USAGE zero.
+    assert.equal(judgement.usage, null);
   } finally { workspace.cleanup(); }
 });

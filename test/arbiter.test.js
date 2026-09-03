@@ -13,6 +13,7 @@ import {
   parsePivotJudgement,
   runArbiter,
 } from '../src/arbiter.js';
+import { EMPTY_USAGE, normalizeClaudeUsage } from '../src/usage.js';
 
 function fakeChild() {
   const child = new EventEmitter();
@@ -41,15 +42,92 @@ test('arbiter stream parsing distinguishes a readable result from no answer', ()
   assert.equal(readable.verdict, 'ANSWERED');
   assert.equal(readable.answer, '{"verdict":"valid"}');
   assert.equal(readable.usage.inputTokens, 5);
-  assert.equal(parseArbiterStream('{not-json}\n').verdict, 'UNVERIFIED');
-  assert.equal(parseArbiterStream(`${JSON.stringify({ type: 'result', is_error: true })}\n`).verdict,
-    'UNVERIFIED');
-  assert.equal(parseArbiterStream([
+
+  const notJson = parseArbiterStream('{not-json}\n');
+  assert.equal(notJson.verdict, 'UNVERIFIED');
+  // No line in the stream ever parsed as a result event — nothing was ever
+  // accounted, so this must be null, never a fake EMPTY_USAGE zero.
+  assert.equal(notJson.usage, null);
+
+  const errored = parseArbiterStream(`${JSON.stringify({ type: 'result', is_error: true })}\n`);
+  assert.equal(errored.verdict, 'UNVERIFIED');
+  // A result event did arrive, but it carried no usage field of its own.
+  assert.equal(errored.usage, null);
+
+  const emptyFinal = parseArbiterStream([
     JSON.stringify({
       type: 'assistant', message: { content: [{ type: 'text', text: '{"verdict":"valid"}' }] },
     }),
     JSON.stringify({ type: 'result', is_error: false, result: '' }),
-  ].join('\n')).verdict, 'UNVERIFIED', 'an empty final result must beat stale assistant prose');
+  ].join('\n'));
+  assert.equal(emptyFinal.verdict, 'UNVERIFIED', 'an empty final result must beat stale assistant prose');
+  assert.equal(emptyFinal.usage, null);
+});
+
+test('arbiter stream parsing reports a genuinely zero usage as accounted, not absent', () => {
+  const zero = parseArbiterStream(`${JSON.stringify({
+    type: 'result', result: '{"verdict":"valid"}', usage: { input_tokens: 0, output_tokens: 0 },
+  })}\n`);
+  assert.deepEqual(zero.usage, EMPTY_USAGE);
+});
+
+test('normalizeClaudeUsage returns null for a missing usage object, sanitizes a real one, and preserves a genuine zero', () => {
+  for (const raw of [undefined, null, 'garbage', 42, [], () => {}]) {
+    assert.equal(normalizeClaudeUsage(raw), null,
+      'nothing shaped like a usage object arrived, so nothing was accounted');
+  }
+  assert.deepEqual(
+    normalizeClaudeUsage({ input_tokens: -1, cache_read_input_tokens: 'x', output_tokens: 3 }),
+    {
+      inputTokens: 0, cachedInputTokens: 0, outputTokens: 3,
+      reasoningOutputTokens: 0, cacheWriteTokens: 0,
+    },
+    'a real usage object with unusable fields still sanitizes, never turns into null',
+  );
+  assert.deepEqual(normalizeClaudeUsage({ input_tokens: 0, output_tokens: 0 }), EMPTY_USAGE);
+});
+
+test('an arbiter finish event carries no tokens field when the process produced no readable result', async () => {
+  const child = fakeChild();
+  const events = [];
+  const pending = runArbiter({
+    cwd: process.cwd(),
+    bin: process.execPath,
+    request: { type: 'finding', finding: { id: 'F1' }, plan: 'plan', diff: 'diff' },
+    reporter: (event) => events.push(event),
+    runId: 'arbiter-no-usage',
+    spawnProcess: () => child,
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  child.emit('close', 1, null);
+  await pending;
+  const finish = events.find((event) => event.stage === 'arbiter' && event.type === 'finish');
+  assert.ok(finish, 'a finish event must still be reported');
+  assert.equal(Object.hasOwn(finish, 'tokens'), false,
+    'no result line ever arrived on the real stream, so the event must not claim a zero');
+});
+
+test('an arbiter finish event carries a genuine zero tokens field when the result reported one', async () => {
+  const child = fakeChild();
+  const events = [];
+  const pending = runArbiter({
+    cwd: process.cwd(),
+    bin: process.execPath,
+    request: { type: 'finding', finding: { id: 'F1' }, plan: 'plan', diff: 'diff' },
+    reporter: (event) => events.push(event),
+    runId: 'arbiter-zero-usage',
+    spawnProcess: () => child,
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  child.stdout.emit('data', Buffer.from(`${JSON.stringify({
+    type: 'result', result: '{"verdict":"valid"}',
+    usage: { input_tokens: 0, output_tokens: 0 },
+  })}\n`));
+  child.emit('close', 0, null);
+  const result = await pending;
+  const finish = events.find((event) => event.stage === 'arbiter' && event.type === 'finish');
+  assert.deepEqual(finish.tokens, EMPTY_USAGE);
+  assert.deepEqual(result.usage, EMPTY_USAGE);
 });
 
 test('typed arbiter judgements reject unreadable or incomplete answers', () => {

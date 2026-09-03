@@ -506,7 +506,7 @@ export async function runReviewPass({
     code: result.code,
     pass: 'review',
     timedOut: result.timedOut,
-    tokens: usage,
+    ...(usage ? { tokens: usage } : {}),
     usageConsistency: review.usageConsistency.status,
   });
   return review;
@@ -725,7 +725,7 @@ async function runVerifierAttempt({
     code: exitCode,
     verdict,
     source,
-    tokens: usage,
+    ...(usage ? { tokens: usage } : {}),
     timedOut: r.timedOut,
     pass,
     verdictConsistency: result.verdictConsistency?.status ?? null,

@@ -151,11 +151,45 @@ test('a long plan artifact keeps its whole text while its verdict evidence stays
 });
 
 test('a failed launch reports stderr and carries no findings', async () => {
-  const r = await runVerifier({ cwd: process.cwd(), bin: process.execPath, extraArgv: [brokenFakeAgent] });
+  const events = [];
+  const r = await runVerifier({
+    cwd: process.cwd(), bin: process.execPath, extraArgv: [brokenFakeAgent],
+    reporter: (event) => events.push(event), runId: 'verify-broken',
+  });
   assert.equal(r.launchFailed, true);
   assert.equal(r.findings, undefined);
   assert.equal(r.verdictSource, 'none');
-  assert.deepEqual(r.usage, EMPTY_USAGE);
+  // The real process never printed a result line at all — nothing was ever
+  // accounted, so this must be null, never a fake EMPTY_USAGE zero.
+  assert.equal(r.usage, null);
+  const finishes = events.filter((event) => event.stage === 'verify' && event.type === 'finish');
+  assert.ok(finishes.length > 0, 'at least one finish event must still be reported');
+  for (const finish of finishes) {
+    assert.equal(Object.hasOwn(finish, 'tokens'), false,
+      'no usage line ever arrived on the real stream, so no finish event may claim a zero');
+  }
+});
+
+test('a verify-pass finish event carries a genuine zero tokens field when the result reported one', async () => {
+  const child = fakeChild();
+  const events = [];
+  const pending = runVerifier({
+    cwd: process.cwd(),
+    bin: process.execPath,
+    reporter: (event) => events.push(event),
+    runId: 'verify-zero-usage',
+    spawnProcess: () => child,
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  child.stdout.emit('data', Buffer.from(`${JSON.stringify({
+    type: 'result', subtype: 'success', is_error: false, result: 'NO_BLOCKERS',
+    usage: { inputTokens: 0, outputTokens: 0 },
+  })}\n`));
+  child.emit('close', 0, null);
+  const result = await pending;
+  assert.deepEqual(result.usage, EMPTY_USAGE);
+  const finish = events.find((event) => event.stage === 'verify' && event.type === 'finish');
+  assert.deepEqual(finish.tokens, EMPTY_USAGE);
 });
 
 test('assertUsablePrompt accepts a usable prompt', () => {
@@ -340,6 +374,36 @@ test('runReviewPass launches the separate sandboxed writer without verdict mode'
   assert.deepEqual(args.slice(args.indexOf('--sandbox'), args.indexOf('--sandbox') + 2),
     ['--sandbox', 'enabled']);
   assert.equal(result.launchFailed, false);
+  // The fake child above never emitted any stdout at all — nothing was ever
+  // accounted, so this must be null, never a fake EMPTY_USAGE zero.
+  assert.equal(result.usage, null);
+  const finish = events.find((event) => event.stage === 'verify' && event.type === 'finish');
+  assert.equal(Object.hasOwn(finish, 'tokens'), false,
+    'no usage line ever arrived, so the event must not claim a zero');
+});
+
+test('a review-pass finish event carries a genuine zero tokens field when the result reported one', async () => {
+  const child = fakeChild();
+  const events = [];
+  const pending = runReviewPass({
+    cwd: process.cwd(),
+    bin: process.execPath,
+    superpowersDir: null,
+    runId: 'review-zero-usage',
+    reporter: (event) => events.push(event),
+    platform: 'linux',
+    spawnProcess: () => child,
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  child.stdout.emit('data', Buffer.from(`${JSON.stringify({
+    type: 'result', is_error: false, result: 'done',
+    usage: { inputTokens: 0, outputTokens: 0 },
+  })}\n`));
+  child.emit('close', 0, null);
+  const result = await pending;
+  assert.deepEqual(result.usage, EMPTY_USAGE);
+  const finish = events.find((event) => event.stage === 'verify' && event.type === 'finish');
+  assert.deepEqual(finish.tokens, EMPTY_USAGE);
 });
 
 test('runReviewPass rejects a forbidden flag before spawning the writer', async () => {

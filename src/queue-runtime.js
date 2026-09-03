@@ -9,7 +9,6 @@ import {
 } from 'node:path';
 import { spawnCapture } from './spawn.js';
 import { parseAcceptanceJudgement, parseLandingJudgement, runArbiter } from './arbiter.js';
-import { EMPTY_USAGE } from './usage.js';
 
 const GIT_TIMEOUT_MS = 30_000;
 // Git's well-known empty-tree object hash — valid in any repository without
@@ -407,7 +406,9 @@ export async function judgeGoalAcceptance({ goalSpecPath, target, logPath }, {
       reasoning: `landed unit "${unrecordedLanding.name}" has no recorded commit — the `
         + 'aggregate diff would omit its work; refusing to judge a partial trail',
       findings: [],
-      usage: EMPTY_USAGE,
+      // The arbiter was never called on this refusal path: nothing was
+      // accounted, never a fake zero.
+      usage: null,
     };
   }
   const base = queueLog.find((row) => row.landed === true
@@ -417,7 +418,9 @@ export async function judgeGoalAcceptance({ goalSpecPath, target, logPath }, {
       approved: null,
       reasoning: `no landed commit is recorded in ${logPath}; there is nothing to review first-hand`,
       findings: [],
-      usage: EMPTY_USAGE,
+      // The arbiter was never called on this refusal path: nothing was
+      // accounted, never a fake zero.
+      usage: null,
     };
   }
   let aggregate;
@@ -439,7 +442,9 @@ export async function judgeGoalAcceptance({ goalSpecPath, target, logPath }, {
         reasoning: `landed commit ${base} from the queue log does not resolve in this `
           + 'repository — refusing to judge an unverifiable trail',
         findings: [],
-        usage: EMPTY_USAGE,
+        // The arbiter was never called on this refusal path: nothing was
+        // accounted, never a fake zero.
+        usage: null,
       };
     }
     // `<base>^` has nothing to name when base is the repository's root
@@ -466,7 +471,9 @@ export async function judgeGoalAcceptance({ goalSpecPath, target, logPath }, {
       reasoning: `cannot read the aggregate diff for the goal: `
         + `${error instanceof Error ? error.message : String(error)}`,
       findings: [],
-      usage: EMPTY_USAGE,
+      // The arbiter was never called on this refusal path: nothing was
+      // accounted, never a fake zero.
+      usage: null,
     };
   }
 
@@ -487,10 +494,15 @@ export async function judgeGoalAcceptance({ goalSpecPath, target, logPath }, {
       approved: null,
       reasoning: error instanceof Error ? error.message : String(error),
       findings: [],
-      usage: EMPTY_USAGE,
+      // The arbiter call itself threw before producing anything: nothing
+      // was accounted, never a fake zero.
+      usage: null,
     };
   }
-  const usage = result?.usage ?? EMPTY_USAGE;
+  // A defined-but-invalid usage (e.g. the answer carried no usage field of
+  // its own) already normalizes to null upstream; preserve that null rather
+  // than papering over it with a fake EMPTY_USAGE zero.
+  const usage = result?.usage ?? null;
   const judgement = parseAcceptanceJudgement(result);
   if (judgement.verdict !== 'answered') {
     return {

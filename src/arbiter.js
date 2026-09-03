@@ -2,7 +2,6 @@ import { spawnCapture } from './spawn.js';
 import { reportEvent } from './events.js';
 import {
   annotateUsageConsistency,
-  EMPTY_USAGE,
   normalizeClaudeUsage,
 } from './usage.js';
 import { resolveStageTimeouts } from './timeouts.js';
@@ -43,7 +42,9 @@ function readableText(streamText) {
   let result = '';
   let resultSeen = false;
   let resultUsable = false;
-  let usage = EMPTY_USAGE;
+  // Null until a result line actually carries a usage field: nothing was
+  // accounted yet, and that must never be reported as a fake zero.
+  let usage = null;
   for (const line of String(streamText ?? '').split(/\r?\n/)) {
     const source = line.trim();
     if (!source) continue;
@@ -469,7 +470,9 @@ export async function runArbiter({
     const failed = annotateUsageConsistency({
       verdict: ARBITER_UNVERIFIED,
       answer: '',
-      usage: EMPTY_USAGE,
+      // The process never launched at all: nothing was accounted, never a
+      // fake zero.
+      usage: null,
       launchFailed: true,
       timedOut: false,
       error: error instanceof Error ? error.message : String(error),
@@ -497,7 +500,7 @@ export async function runArbiter({
     code: captured.code,
     verdict: result.verdict,
     timedOut: captured.timedOut,
-    tokens: result.usage,
+    ...(result.usage ? { tokens: result.usage } : {}),
     judgement: request?.type,
   });
   return result;

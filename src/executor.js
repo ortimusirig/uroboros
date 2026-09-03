@@ -1,7 +1,7 @@
 import { spawnCapture } from './spawn.js';
 import { reportEvent } from './events.js';
 import { encodeRecordedText } from './execution-record.js';
-import { annotateUsageConsistency, EMPTY_USAGE, normalizeCodexUsage } from './usage.js';
+import { annotateUsageConsistency, normalizeCodexUsage } from './usage.js';
 import { resolveStageTimeouts } from './timeouts.js';
 import { StringDecoder } from 'node:string_decoder';
 import { readEnv } from './env-compat.js';
@@ -78,7 +78,9 @@ export function parseCodexStream(streamText) {
   const changedFiles = [];
   const agentMessages = [];
   let lastMessage = '';
-  let usage = EMPTY_USAGE;
+  // Null until a turn.completed line actually carries a usage field: nothing
+  // was accounted yet, and that must never be reported as a fake zero.
+  let usage = null;
   for (const line of streamText.split('\n')) {
     const s = line.trim();
     if (!s) continue;
@@ -343,7 +345,7 @@ export async function runExecutor({
   progress?.observe({ runId, stage: 'executor', type: 'finish', code: r.code, attempt });
   progress?.dispose();
   reportEvent(reporter, runId, 'executor', 'finish', {
-    code: r.code, tokens: parsed.usage, timedOut: r.timedOut, attempt,
+    code: r.code, ...(parsed.usage ? { tokens: parsed.usage } : {}), timedOut: r.timedOut, attempt,
     ...(r.timeoutReason ? { timeoutReason: r.timeoutReason } : {}),
     usageConsistency: result.usageConsistency.status,
   });

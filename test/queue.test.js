@@ -884,7 +884,10 @@ test('a refused goal acceptance stops with kind goal-acceptance and rolls nothin
   const fixture = makeFixture(1);
   try {
     const runtime = fakeRuntime([reviewReady('run-1')], {
-      acceptGoal: async () => ({ approved: false, reasoning: 'capability incomplete' }),
+      // A refusal (or any answered-but-usage-less reply) carries no usage
+      // field of its own: usageTokens(null) must contribute nothing to the
+      // queue's totals, never crash, and never silently inflate the total.
+      acceptGoal: async () => ({ approved: false, reasoning: 'capability incomplete', usage: null }),
     });
     const result = await runQueue({
       file: fixture.file,
@@ -900,6 +903,9 @@ test('a refused goal acceptance stops with kind goal-acceptance and rolls nothin
     assert.equal(log[0].landed, true, 'a refused goal never un-lands a landed unit');
     assert.equal(log.at(-1).goalAcceptance.approved, false);
     assert.match(log.at(-1).stopReason, /capability incomplete/);
+    // usageTokens(null) must not crash and must contribute zero: only the
+    // one unit's own real tokens (3 in, 2 out) show up in the total.
+    assert.deepEqual(result.totalTokens, { inputTokens: 3, outputTokens: 2, total: 5 });
   } finally { fixture.cleanup(); }
 });
 

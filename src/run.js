@@ -652,7 +652,7 @@ export async function run(opts) {
         error: error instanceof Error ? error.message : String(error),
       };
     }
-    if (result?.usage !== undefined) {
+    if (result?.usage) {
       result = observeUsage(result, { seat: 'arbiter', judgement: request.type, iteration: n });
       arbiterUsage = addUsage(arbiterUsage, result.usage);
     }
@@ -668,7 +668,7 @@ export async function run(opts) {
         verdict: result?.verdict ?? (result ? 'ANSWERED' : ARBITER_UNVERIFIED),
         timedOut: result?.timedOut === true,
         judgement: request.type,
-        ...(result?.usage === undefined ? {} : { tokens: result.usage }),
+        ...(result?.usage ? { tokens: result.usage } : {}),
       });
     }
     return result ?? { verdict: ARBITER_UNVERIFIED, answer: '' };
@@ -1077,7 +1077,7 @@ export async function run(opts) {
           if (detected.reviewed) {
             for (const testFile of detected.testFiles) accumulatedReviewTests.add(testFile);
           }
-          if (reviewer.usage !== undefined) {
+          if (reviewer.usage) {
             reviewer = observeUsage(reviewer,
               { seat: 'verifier', pass: 'review', iteration: n });
             verifierUsage = addUsage(verifierUsage, reviewer.usage);

@@ -22,7 +22,11 @@ function isUsageObject(raw) {
 // inputTokens is new input only and cacheReadTokens is separate, so Cursor must be
 // converted by adding the two into the canonical inputTokens total.
 export function normalizeCodexUsage(raw) {
-  if (!isUsageObject(raw)) return EMPTY_USAGE;
+  // No usage-shaped object arrived at all: nothing was accounted, so this is
+  // null, never a fake EMPTY_USAGE zero. A genuine usage object that merely
+  // fails sanitization below (or is genuinely all-zero) still returns a real
+  // object — the truthful-zero rule stays intact for anything that DID report.
+  if (!isUsageObject(raw)) return null;
   return {
     inputTokens: valueOrZero(raw.input_tokens),
     cachedInputTokens: valueOrZero(raw.cached_input_tokens),
@@ -33,7 +37,11 @@ export function normalizeCodexUsage(raw) {
 }
 
 export function normalizeCursorUsage(raw) {
-  if (!isUsageObject(raw)) return EMPTY_USAGE;
+  // No usage-shaped object arrived at all: nothing was accounted, so this is
+  // null, never a fake EMPTY_USAGE zero. A genuine usage object that merely
+  // fails sanitization below (or is genuinely all-zero) still returns a real
+  // object — the truthful-zero rule stays intact for anything that DID report.
+  if (!isUsageObject(raw)) return null;
   const newInputTokens = valueOrZero(raw.inputTokens);
   const cachedInputTokens = valueOrZero(raw.cacheReadTokens);
   return {
@@ -48,7 +56,11 @@ export function normalizeCursorUsage(raw) {
 // Claude reports cache reads and cache creation separately from uncached input.
 // Canonical input is inclusive, matching the Codex/Cursor accounting contract.
 export function normalizeClaudeUsage(raw) {
-  if (!isUsageObject(raw)) return EMPTY_USAGE;
+  // No usage-shaped object arrived at all: nothing was accounted, so this is
+  // null, never a fake EMPTY_USAGE zero. A genuine usage object that merely
+  // fails sanitization below (or is genuinely all-zero) still returns a real
+  // object — the truthful-zero rule stays intact for anything that DID report.
+  if (!isUsageObject(raw)) return null;
   const cachedInputTokens = valueOrZero(raw.cache_read_input_tokens);
   const cacheWriteTokens = valueOrZero(raw.cache_creation_input_tokens);
   return {
