@@ -57,7 +57,7 @@ test('status is read-only and ignores a final NDJSON line truncated mid-write', 
     const result = await spawnCapture(process.execPath, [cli, 'status', directory]);
     assert.equal(result.code, 0, result.stderr);
     assert.match(result.stdout, /Current stage: gate \(gate_command\)/);
-    assert.match(result.stdout, /Files changed \(1\): src\/a[.]js/);
+    assert.match(result.stdout, /Files changed \(1\):\n {2}src\/a[.]js\n/);
     assert.match(result.stdout, /node --test -> 7/);
     assert.match(result.stdout, /Stalls \(1\):/);
     assert.deepEqual(snapshot(directory), before,
@@ -103,11 +103,61 @@ test('status filters a mixed event file to the run named by its directory and wa
     const result = await spawnCapture(process.execPath, [cli, 'status', runDirectory]);
     assert.equal(result.code, 0, result.stderr);
     assert.match(result.stdout, /contains 2 runs; showing only/);
-    assert.match(result.stdout, /Files changed \(2\): requested\/one[.]js, requested\/two[.]js/);
+    assert.match(result.stdout,
+      /Files changed \(2\):\n {2}requested\/one[.]js\n {2}requested\/two[.]js\n/);
     assert.match(result.stdout, /Tokens: input 11; cached 0; output 7/);
     assert.doesNotMatch(result.stdout, /other\/[abc][.]js|input 1011|output 307/);
   } finally {
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('status shows tokens as not-yet-accounted, never zeros, until a usage row lands', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'ccc-status-tokens-'));
+  const eventsPath = join(directory, 'events.jsonl');
+  const events = [
+    { ts: '2026-08-15T00:00:00.000Z', runId: 'status-run', stage: 'executor', type: 'start' },
+  ];
+  writeFileSync(eventsPath, `${events.map(JSON.stringify).join('\n')}\n`);
+  try {
+    const status = readRunStatus(directory, { now: Date.parse('2026-08-15T00:00:05.000Z') });
+    assert.equal(status.tokensAccounted, false,
+      'no event carried a tokens field, so nothing has been accounted yet');
+    assert.deepEqual(status.files, []);
+
+    const result = await spawnCapture(process.execPath, [cli, 'status', directory]);
+    assert.equal(result.code, 0, result.stderr);
+    assert.match(result.stdout, /Files changed \(0\):\n {2}\(none\)\n/);
+    assert.match(result.stdout,
+      /Tokens: not yet accounted \(usage lands when the stage completes\)/);
+    assert.doesNotMatch(result.stdout, /Tokens: input 0/,
+      'must never claim a zero that was never actually accounted');
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('a genuinely recorded zero usage still prints zeros, not "not yet accounted"', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'ccc-status-zero-tokens-'));
+  const eventsPath = join(directory, 'events.jsonl');
+  const events = [
+    { ts: '2026-08-15T00:00:00.000Z', runId: 'status-run', stage: 'executor',
+      type: 'finish', tokens: { inputTokens: 0, outputTokens: 0 } },
+  ];
+  writeFileSync(eventsPath, `${events.map(JSON.stringify).join('\n')}\n`);
+  try {
+    const status = readRunStatus(directory, { now: Date.parse('2026-08-15T00:00:05.000Z') });
+    assert.equal(status.tokensAccounted, true,
+      'a usage row did arrive, even though every field on it is zero');
+
+    const result = await spawnCapture(process.execPath, [cli, 'status', directory]);
+    assert.equal(result.code, 0, result.stderr);
+    assert.match(result.stdout,
+      /Tokens: input 0; cached 0; output 0; reasoning 0; cache write 0/);
+    assert.doesNotMatch(result.stdout, /not yet accounted/,
+      'a real recorded zero is truthful and must still be printed as a zero');
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
   }
 });
 

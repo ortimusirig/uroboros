@@ -11,7 +11,7 @@ import { readEnv } from './env-compat.js';
 
 const LOOP_CLI_PATH = fileURLToPath(new URL('../bin/loop.js', import.meta.url));
 const DEFAULT_PROBE_TIMEOUT_MS = 200;
-const DEFAULT_STARTUP_TIMEOUT_MS = 1500;
+const DEFAULT_STARTUP_TIMEOUT_MS = 8000;
 const DEFAULT_STARTUP_POLL_MS = 50;
 const MAX_PROBE_BYTES = 128 * 1024;
 
@@ -218,7 +218,8 @@ export async function launchDashboard(scratchRoot, options = {}) {
     }
     return {
       status: 'unavailable',
-      reason: `dashboard did not become available on port ${port} within ${startupTimeoutMs} ms`,
+      reason: `dashboard did not answer on ${url} within ${startupTimeoutMs}ms — it may `
+        + 'still be starting; re-check the URL before assuming it is down.',
     };
   } catch (error) {
     return {

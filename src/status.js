@@ -28,6 +28,7 @@ export function digestEvents(events, now = Date.now(), requestedRunId = null) {
   const gateCommands = [];
   const stalls = [];
   let tokens = EMPTY_USAGE;
+  let tokensAccounted = false;
   for (const event of runEvents) {
     if (event?.type === 'file_change' && typeof event.file === 'string'
       && !seenFiles.has(event.file)) {
@@ -38,7 +39,10 @@ export function digestEvents(events, now = Date.now(), requestedRunId = null) {
       gateCommands.push({ bin: event.bin, args: event.args, code: event.code });
     }
     if (event?.type === 'stalled') stalls.push(event);
-    if (event?.tokens) tokens = addUsage(tokens, event.tokens);
+    if (event?.tokens) {
+      tokens = addUsage(tokens, event.tokens);
+      tokensAccounted = true;
+    }
   }
   const lastEvent = runEvents.at(-1) ?? null;
   const timestamp = Date.parse(lastEvent?.ts);
@@ -54,6 +58,7 @@ export function digestEvents(events, now = Date.now(), requestedRunId = null) {
     files,
     gateCommands,
     tokens,
+    tokensAccounted,
     stalls,
   };
 }
@@ -178,10 +183,13 @@ export function formatRunStatus(status) {
     `Current stage: ${status.currentStage ?? '(none)'}` +
       (status.currentType ? ` (${status.currentType})` : ''),
     `Since last event: ${duration(status.gapMs)}`,
-    `Files changed (${status.files.length}): ${status.files.join(', ') || '(none)'}`,
-    `Tokens: input ${status.tokens.inputTokens}; cached ${status.tokens.cachedInputTokens}; ` +
-      `output ${status.tokens.outputTokens}; reasoning ${status.tokens.reasoningOutputTokens}; ` +
-      `cache write ${status.tokens.cacheWriteTokens}`,
+    `Files changed (${status.files.length}):`,
+    ...(status.files.length === 0 ? ['  (none)'] : status.files.map((file) => `  ${file}`)),
+    status.tokensAccounted === false
+      ? 'Tokens: not yet accounted (usage lands when the stage completes)'
+      : `Tokens: input ${status.tokens.inputTokens}; cached ${status.tokens.cachedInputTokens}; ` +
+        `output ${status.tokens.outputTokens}; reasoning ${status.tokens.reasoningOutputTokens}; ` +
+        `cache write ${status.tokens.cacheWriteTokens}`,
   ];
   if (status.otherRunIds?.length > 0) {
     lines.splice(1, 0, `Note: ${EVENTS_FILENAME} contains ${status.runIds.length} runs; ` +

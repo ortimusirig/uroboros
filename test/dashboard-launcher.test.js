@@ -58,6 +58,59 @@ test('default launch starts a detached scratch-root dashboard and announces its 
   assert.doesNotMatch(announcement, /^\[uroboros\]/);
 });
 
+test('a slow-binding dashboard is found, not declared missing', async () => {
+  let calls = 0;
+  const child = new EventEmitter();
+  child.unref = () => {};
+  const result = await launchDashboard('C:/scratch', {
+    env: {},
+    port: 48131,
+    probe: async () => { calls += 1; return { status: calls >= 3 ? 'uroboros' : 'vacant' }; },
+    spawn: () => child,
+    startupTimeoutMs: 5000,
+    wait: async () => {},
+  });
+  assert.equal(result.status, 'started');
+  assert.ok(calls >= 3, 'the probe retries until the bind lands');
+});
+
+test('the default startup budget survives a realistically slow bind, not just an instant one', async () => {
+  let calls = 0;
+  const child = new EventEmitter();
+  child.unref = () => {};
+  const result = await launchDashboard('C:/scratch', {
+    env: {},
+    port: 48132,
+    probe: async () => { calls += 1; return { status: calls >= 45 ? 'uroboros' : 'vacant' }; },
+    spawn: () => child,
+    startupPollMs: 50,
+    // startupTimeoutMs intentionally omitted: this exercises the module's real
+    // default budget, paced by real (unmocked) waits between probes, so it fails
+    // under the old 1500ms default and only passes once the budget is 8000ms.
+  });
+  assert.equal(result.status, 'started');
+  assert.ok(calls >= 45, 'the probe kept retrying across a multi-second real bind');
+});
+
+test('an exhausted probe budget reports a truthful, non-alarmist notice', async () => {
+  const child = new EventEmitter();
+  child.unref = () => {};
+  const result = await launchDashboard('C:/scratch', {
+    env: {},
+    port: 48133,
+    probe: async () => ({ status: 'vacant' }),
+    spawn: () => child,
+    startupTimeoutMs: 80,
+    startupPollMs: 20,
+  });
+  assert.equal(result.status, 'unavailable');
+  assert.equal(
+    result.reason,
+    'dashboard did not answer on http://127.0.0.1:48133/ within 80ms — it may still be '
+      + 'starting; re-check the URL before assuming it is down.',
+  );
+});
+
 test('--no-dashboard and URO_NO_DASHBOARD=1 perform no probe or spawn', async () => {
   let probes = 0;
   let spawns = 0;
