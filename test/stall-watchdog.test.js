@@ -179,6 +179,48 @@ test('a debate-stage silence is reported, not fatal — the R5 crash regression'
   assert.equal(stalled.gapMs >= 100, true);
 });
 
+test('flowing file_change events are progress, not a stall', () => {
+  // Field evidence: `executor/stalled no completed work for 300013ms last
+  // action=editing agent/__init__.py` fired during a healthy 22-minute
+  // single-file edit — file_change events were flowing the whole time, but
+  // only item_completed advanced lastProgressAt. A steady stream of
+  // file_change events (evidence of work product) must keep the progress
+  // tier from ever seeing a gap as large as the threshold.
+  const clock = fakeClock();
+  const events = [];
+  const progress = createProgressWatchdog({
+    reporter: (item) => events.push(item), runId: 'gap-run', thresholdMs: 300000,
+    now: clock.now, setTimer: clock.setTimer, clearTimer: clock.clearTimer,
+  });
+  progress.observe(event(clock, 'start', { attempt: 1 }));
+  for (let index = 1; index <= 6; index++) {
+    clock.advance(60000);
+    progress.observe(event(clock, 'file_change', { file: 'agent/__init__.py', attempt: 1 }));
+  }
+  assert.equal(clock.now(), 360000,
+    'positive setup: total elapsed time exceeds the 300s progress threshold');
+  assert.equal(events.some((item) => item.type === 'stalled'), false,
+    'a flowing single-file edit is progress, not a stall');
+  progress.dispose();
+});
+
+test('true silence still stalls', () => {
+  // Control for the test above: with no events at all, the progress tier
+  // must still fire — existing behavior pinned, exactly one stalled event.
+  const clock = fakeClock();
+  const events = [];
+  const progress = createProgressWatchdog({
+    reporter: (item) => events.push(item), runId: 'gap-run', thresholdMs: 300000,
+    now: clock.now, setTimer: clock.setTimer, clearTimer: clock.clearTimer,
+  });
+  progress.observe(event(clock, 'start', { attempt: 1 }));
+  clock.advance(301000);
+  const stalls = events.filter((item) => item.type === 'stalled');
+  assert.equal(stalls.length, 1,
+    'positive control: true silence across the threshold still fires exactly one stalled event');
+  progress.dispose();
+});
+
 test('an unconstructible silence report is contained instead of escaping the timer', () => {
   // Raw reporter payloads are not guaranteed to have vocabulary stages. If the
   // report cannot be constructed, the watchdog swallows it — a stall report
