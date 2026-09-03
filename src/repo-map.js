@@ -12,6 +12,37 @@ export const DEFAULT_MAP_BUDGET = 12_000;
 const SYMBOL_PATTERN = /^\s*(?:export\s+(?:default\s+)?(?:async\s+)?)?(?:function\s+([A-Za-z_$][\w$]*)|class\s+([A-Za-z_$][\w$]*)|const\s+([A-Za-z_$][\w$]*)\s*=|def\s+([A-Za-z_]\w*)\s*\()/;
 const SOURCE_EXTENSIONS = new Set(['.js', '.mjs', '.cjs', '.ts', '.tsx', '.jsx', '.py']);
 
+const BINARY_SAMPLE_SIZE = 8 * 1024;
+const BINARY_SUSPICIOUS_FRACTION = 0.30;
+
+// Conservative binary rule: any NUL unit anywhere is binary. Otherwise, sample
+// the first 8,192 units and classify as binary when more than 30% of them are
+// outside printable ASCII (0x20..0x7e) plus TAB, LF, and CR. Buffer units are
+// inspected as raw bytes; string test doubles use their UTF-16 character units.
+function isBinaryContent(content) {
+  const units = typeof content === 'string' || Buffer.isBuffer(content)
+    ? content
+    : String(content);
+  const unitAt = typeof units === 'string'
+    ? (index) => units.charCodeAt(index)
+    : (index) => units[index];
+
+  for (let index = 0; index < units.length; index++) {
+    if (unitAt(index) === 0) return true;
+  }
+
+  const sampleLength = Math.min(units.length, BINARY_SAMPLE_SIZE);
+  if (sampleLength === 0) return false;
+  let suspicious = 0;
+  for (let index = 0; index < sampleLength; index++) {
+    const unit = unitAt(index);
+    const printableAscii = unit >= 0x20 && unit <= 0x7e;
+    const commonWhitespace = unit === 0x09 || unit === 0x0a || unit === 0x0d;
+    if (!printableAscii && !commonWhitespace) suspicious++;
+  }
+  return suspicious / sampleLength > BINARY_SUSPICIOUS_FRACTION;
+}
+
 // Extra characters the '## Symbols (largest files first)' section header costs
 // once the symbol loop below prepends it — DERIVED from the same two elements
 // that lines.push() adds ('' then the header, each costing its length plus a
@@ -23,7 +54,8 @@ const HEADER = [
   '# Repository map (heuristic file/symbol survey, not the repository)',
   '',
   'This is a RATION, not a wall: you may read any file directly for the whole',
-  'truth. File list from `git ls-files`; line counts read; symbols regex-scanned.',
+  'truth. File list from `git ls-files`; text line counts read; text symbols regex-scanned.',
+  'Binary treatment: a NUL byte/character anywhere, or >30% of the first 8192 byte/character units outside printable ASCII plus TAB/LF/CR, means binary — not line-counted or symbol-scanned.',
   '',
 ].join('\n');
 
@@ -151,11 +183,16 @@ export async function buildRepoMap({
   const entries = paths.map((path) => {
     let lines = null;
     let text = null;
+    let binary = false;
     try {
-      text = String(readFile(join(target, path)));
-      lines = text.split('\n').length - (text.endsWith('\n') ? 1 : 0);
+      const content = readFile(join(target, path));
+      binary = isBinaryContent(content);
+      if (!binary) {
+        text = String(content);
+        lines = text.split('\n').length - (text.endsWith('\n') ? 1 : 0);
+      }
     } catch { /* unreadable stays null — declared below, never invented */ }
-    return { path, lines, text };
+    return { path, lines, text, binary };
   });
 
   // Directory-grouped file listing, then symbol scans largest-first, appended
@@ -186,7 +223,10 @@ export async function buildRepoMap({
     lines.push(heading);
     spent += heading.length + 1;
     for (const entry of group) {
-      const row = `- ${entry.path} (${entry.lines ?? 'unreadable'} lines)`;
+      const treatment = entry.binary
+        ? 'binary — not line-counted or symbol-scanned'
+        : `${entry.lines ?? 'unreadable'} lines`;
+      const row = `- ${entry.path} (${treatment})`;
       if (spent + row.length + 1 > budget - reserve) {
         omitted.set(directory, (omitted.get(directory) ?? 0) + 1);
         continue;

@@ -30,6 +30,74 @@ test('the map declares its grade, its fetchability, and every omission', async (
   assert.doesNotMatch(map, /and \d+ more files/, 'nothing was withheld, so nothing claims to be');
 });
 
+test('dense non-NUL bytes are binary while equal-length printable ASCII remains text', async () => {
+  const binary = Buffer.alloc(96, 0xff);
+  const text = Buffer.from('a'.repeat(binary.length));
+  const map = await buildRepoMap({
+    target: 'T', budget: DEFAULT_MAP_BUDGET,
+    spawn: fakeSpawnFor(['fixtures/dense.bin', 'fixtures/control.txt']),
+    readFile: fakeRead({ 'fixtures/dense.bin': binary, 'fixtures/control.txt': text }),
+  });
+
+  assert.match(map, /fixtures\/dense\.bin \(binary — not line-counted or symbol-scanned\)/);
+  assert.match(map, /fixtures\/control\.txt \(1 lines?\)/);
+  assert.match(map, /Binary treatment:.*NUL.*30%.*not line-counted or symbol-scanned/i);
+});
+
+test('binary string test doubles use the same conservative classification', async () => {
+  const map = await buildRepoMap({
+    target: 'T', budget: DEFAULT_MAP_BUDGET,
+    spawn: fakeSpawnFor(['fixtures/dense.dat']),
+    readFile: fakeRead({ 'fixtures/dense.dat': '\xff'.repeat(64) }),
+  });
+
+  assert.match(map, /fixtures\/dense\.dat \(binary — not line-counted or symbol-scanned\)/);
+});
+
+test('a NUL anywhere marks a file binary, even beyond the heuristic sample', async () => {
+  const content = Buffer.alloc(8 * 1024 + 1, 0x61);
+  content[content.length - 1] = 0;
+  const map = await buildRepoMap({
+    target: 'T', budget: DEFAULT_MAP_BUDGET,
+    spawn: fakeSpawnFor(['fixtures/late-nul.bin']),
+    readFile: fakeRead({ 'fixtures/late-nul.bin': content }),
+  });
+
+  assert.match(map, /fixtures\/late-nul\.bin \(binary — not line-counted or symbol-scanned\)/);
+});
+
+test('binary content with a source extension is neither line-counted nor symbol-scanned', async () => {
+  const binarySource = `${'\xff'.repeat(96)}\nexport function binaryTrap() {}\n`;
+  const map = await buildRepoMap({
+    target: 'T', budget: DEFAULT_MAP_BUDGET,
+    spawn: fakeSpawnFor(['src/not-really.js']),
+    readFile: fakeRead({ 'src/not-really.js': binarySource }),
+  });
+
+  assert.match(map, /src\/not-really\.js \(binary — not line-counted or symbol-scanned\)/);
+  assert.doesNotMatch(map, /\d+ lines?/);
+  assert.doesNotMatch(map, /binaryTrap/);
+});
+
+test('a budget-trimmed binary row remains covered by omission accounting and treatment disclosure', async () => {
+  const textFiles = Array.from({ length: 40 }, (_, i) => `src/t${String(i).padStart(2, '0')}.txt`);
+  const binaryPath = 'src/z-binary.bin';
+  const files = [...textFiles, binaryPath];
+  const contents = Object.fromEntries(textFiles.map((file) => [file, 'text\n']));
+  contents[binaryPath] = Buffer.alloc(96, 0xff);
+
+  const map = await buildRepoMap({
+    target: 'T', budget: 900, spawn: fakeSpawnFor(files), readFile: fakeRead(contents),
+  });
+
+  assert.ok(map.length <= 900, `map ${map.length} exceeds its declared budget`);
+  assert.doesNotMatch(map, /z-binary\.bin/, 'the fixture must exercise the trimmed-row fallback');
+  assert.match(map, /Binary treatment:.*not line-counted or symbol-scanned/i);
+  const omitted = Number(map.match(/… and (\d+) more files under src\/ \(budget\)/)?.[1]);
+  const shown = [...map.matchAll(/^- src\/t\d+\.txt /gm)].length;
+  assert.equal(shown + omitted, files.length, 'the omitted count must include the binary file');
+});
+
 test('a trimming budget names exactly what it withheld — never a silent cap', async () => {
   const files = Array.from({ length: 400 }, (_, i) => `src/mod${String(i).padStart(3, '0')}.js`);
   const contents = Object.fromEntries(files.map((f) => [f, 'export const x = 1;\n'.repeat(3)]));
