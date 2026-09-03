@@ -304,9 +304,16 @@ function renderCompactFallback({
     ? `\n## Files\n\n${fileLines.join('\n')}\n`
     : ''}${suffix}`;
   const fileLines = [];
+  const renderedPathByRow = new Map();
+  const explicitlyWithheldPaths = new Set();
   const byDirectory = new Map();
   for (const entry of entries) {
-    if (entry.identity !== 'omitted' || entry.metadata !== 'available') continue;
+    if (entry.identity !== 'omitted' || entry.metadata !== 'available') {
+      // The last-resort line explicitly withholds this entry's detail. Record
+      // that render decision here, independently of the classified-path set.
+      explicitlyWithheldPaths.add(entry.path);
+      continue;
+    }
     const slash = entry.path.lastIndexOf('/');
     const directory = slash === -1 ? '.' : entry.path.slice(0, slash);
     if (!byDirectory.has(directory)) byDirectory.set(directory, []);
@@ -319,12 +326,41 @@ function renderCompactFallback({
       const candidate = wroteHeading
         ? [...fileLines, row]
         : [...fileLines, `### ${directory}/`, row];
-      if (render(candidate).length > budget) continue;
+      if (render(candidate).length > budget) {
+        // This exact row did not render; LAST_RESORT_LINE declares it withheld.
+        explicitlyWithheldPaths.add(entry.path);
+        continue;
+      }
       fileLines.push(...(wroteHeading ? [row] : [`### ${directory}/`, row]));
+      // The finalizer parses the actual output against this row metadata, so a
+      // dropped line cannot survive as a declaration by construction.
+      renderedPathByRow.set(row, entry.path);
       wroteHeading = true;
     }
   }
-  return render(fileLines);
+  return {
+    rung: 'compactFallback',
+    text: render(fileLines),
+    renderedPathByRow,
+    explicitlyWithheldPathsByLine: new Map([[LAST_RESORT_LINE, explicitlyWithheldPaths]]),
+  };
+}
+
+export function reconcileRepoMapCoverage({ classifiedPaths, declaredPaths, rung }) {
+  for (const path of declaredPaths) {
+    if (!classifiedPaths.has(path)) {
+      throw new Error(
+        `repo-map internal coverage error on ${rung}: extraneous declaration for unclassified path ${JSON.stringify(path)}`,
+      );
+    }
+  }
+  for (const path of classifiedPaths) {
+    if (!declaredPaths.has(path)) {
+      throw new Error(
+        `repo-map internal coverage error on ${rung}: missing declaration for classified path ${JSON.stringify(path)}`,
+      );
+    }
+  }
 }
 
 // The floor: below this, not even the least detailed honest output fits, so
@@ -377,6 +413,7 @@ export async function buildRepoMap({
   spawn = spawnCapture,
   readFile = readPrefixSync,
   stat,
+  renderHook = (result) => result,
 } = {}) {
   // Loud input validation, like the repo's other argument checks: do not let
   // JavaScript coerce malformed values into character counts. Below the floor
@@ -493,9 +530,13 @@ export async function buildRepoMap({
   ];
   const lines = [HEADER, ...admissionDeclaration, '', '## Files', ''];
   const omitted = new Map();
+  const renderedPathByRow = new Map();
   const recordWithheld = (directory, entry) => {
     const key = `${entry.identity}\u0000${directory}`;
-    omitted.set(key, (omitted.get(key) ?? 0) + 1);
+    const declaration = omitted.get(key) ?? { count: 0, paths: new Set() };
+    declaration.count++;
+    declaration.paths.add(entry.path);
+    omitted.set(key, declaration);
   };
   // Space kept clear of Files/Symbols content so the '## Withheld by the budget'
   // section below usually has room without falling back further. A packing
@@ -543,6 +584,7 @@ export async function buildRepoMap({
         continue;
       }
       lines.push(row);
+      renderedPathByRow.set(row, entry.path);
       spent += row.length + 1;
     }
   }
@@ -606,60 +648,105 @@ export async function buildRepoMap({
     scanNeverRan: symbolsSkipped,
     scannedWithZeroResults,
   };
-  const render = (directoryNotes, symbolAccounting, baseLines = lines) => {
+  const render = (rung, directoryDeclarations, symbolAccounting, baseLines = lines) => {
     const rendered = [...baseLines];
     const accountingNotes = symbolAccountingNotes(symbolAccounting);
     if (accountingNotes.length > 0) {
       rendered.push('', '## Symbol scan accounting', ...accountingNotes);
     }
-    if (directoryNotes.length > 0) {
-      rendered.push('', '## Withheld by the budget', ...directoryNotes);
+    if (directoryDeclarations.length > 0) {
+      rendered.push(
+        '',
+        '## Withheld by the budget',
+        ...directoryDeclarations.map(({ line }) => line),
+      );
     }
-    return `${rendered.join('\n')}\n`;
+    return {
+      rung,
+      text: `${rendered.join('\n')}\n`,
+      renderedPathByRow,
+      explicitlyWithheldPathsByLine: new Map(
+        directoryDeclarations.map(({ line, paths }) => [line, paths]),
+      ),
+    };
   };
 
   // Prefer one note per omitted directory — most specific — but the budget bounds
   // this section too: with many small omitted directories, one line each is
   // unbounded and can itself blow the budget. Try the detailed form first...
-  const directoryNotesDetailed = [...omitted.entries()].sort(byEntryKey)
-    .map(([key, count]) => {
+  const directoryDeclarationsDetailed = [...omitted.entries()].sort(byEntryKey)
+    .map(([key, { count, paths: declaredPaths }]) => {
       const [identity, directory] = key.split('\u0000');
-      return `… and ${count} more files under ${directory}/ (budget) — ${identity} rows withheld; read them directly if relevant.`;
+      return {
+        line: `… and ${count} more files under ${directory}/ (budget) — ${identity} rows withheld; read them directly if relevant.`,
+        paths: declaredPaths,
+      };
     });
   // ...and when it doesn't fit, collapse every omitted directory into one bounded
   // summary line instead of truncating mid-list (a silent, undeclared cap — the
   // exact defect this exists to prevent).
-  const omittedFilesTotal = [...omitted.values()].reduce((sum, count) => sum + count, 0);
+  const omittedFilesTotal = [...omitted.values()].reduce((sum, { count }) => sum + count, 0);
   const withheldIdentityCounts = Object.fromEntries(
     ['inspected', 'admitted-but-too-large', 'omitted'].map((identity) => [
       identity,
       [...omitted.entries()]
         .filter(([key]) => key.startsWith(`${identity}\u0000`))
-        .reduce((sum, [, count]) => sum + count, 0),
+        .reduce((sum, [, { count }]) => sum + count, 0),
     ]),
   );
-  const directoryNotesCollapsed = omitted.size > 0
-    ? [`… omissions for ${new Set([...omitted.keys()].map((key) => key.split('\u0000')[1])).size} directories (${omittedFilesTotal} files) withheld (budget) — inspected rows withheld=${withheldIdentityCounts.inspected}; admitted-but-too-large rows withheld=${withheldIdentityCounts['admitted-but-too-large']}; omitted rows withheld=${withheldIdentityCounts.omitted}; this survey is incomplete; read the tree directly.`]
+  const collapsedDeclaredPaths = new Set();
+  for (const { paths: declaredPaths } of omitted.values()) {
+    for (const path of declaredPaths) collapsedDeclaredPaths.add(path);
+  }
+  const directoryDeclarationsCollapsed = omitted.size > 0
+    ? [{
+      line: `… omissions for ${new Set([...omitted.keys()].map((key) => key.split('\u0000')[1])).size} directories (${omittedFilesTotal} files) withheld (budget) — inspected rows withheld=${withheldIdentityCounts.inspected}; admitted-but-too-large rows withheld=${withheldIdentityCounts['admitted-but-too-large']}; omitted rows withheld=${withheldIdentityCounts.omitted}; this survey is incomplete; read the tree directly.`,
+      paths: collapsedDeclaredPaths,
+    }]
     : [];
   // Fallback ladder from most to least detailed, MEASURING THE ACTUAL RENDERED
   // STRING at every step — the `reserve` above is a packing heuristic that keeps
   // this ladder short in the common case, never a guarantee, so nothing here
   // trusts it. Every rung but the last is checked before it is returned.
-  const detailed = render(directoryNotesDetailed, accountingWithSymbolRows);
-  if (detailed.length <= budget) return detailed;
+  // Classification and declarations are now complete. The former comes from
+  // the surveyed entries; every renderer derives the latter from rows it
+  // actually emitted plus omission declarations it actually included.
+  const classifiedPaths = new Set(entries.map((entry) => entry.path));
+  const finalize = (result) => {
+    const rendered = renderHook(result);
+    const renderedLines = new Set(rendered.text.split('\n'));
+    const declaredPaths = new Set();
+    for (const [row, path] of rendered.renderedPathByRow) {
+      if (renderedLines.has(row)) declaredPaths.add(path);
+    }
+    for (const [line, pathsForLine] of rendered.explicitlyWithheldPathsByLine) {
+      if (!renderedLines.has(line)) continue;
+      for (const path of pathsForLine) declaredPaths.add(path);
+    }
+    reconcileRepoMapCoverage({
+      classifiedPaths,
+      declaredPaths,
+      rung: result.rung,
+    });
+    return rendered.text;
+  };
 
-  const collapsed = render(directoryNotesCollapsed, accountingWithSymbolRows);
-  if (collapsed.length <= budget) return collapsed;
+  const detailed = render('detailed', directoryDeclarationsDetailed, accountingWithSymbolRows);
+  if (detailed.text.length <= budget) return finalize(detailed);
+
+  const collapsed = render('collapsed', directoryDeclarationsCollapsed, accountingWithSymbolRows);
+  if (collapsed.text.length <= budget) return finalize(collapsed);
 
   // This rung removes symbol result rows, not the scans that produced them.
   // Reclassify only those removed results as withheld while leaving genuinely
   // unrun scans in `symbolsSkipped` and empty completed scans as rendered zeroes.
   const collapsedNoSymbols = render(
-    directoryNotesCollapsed,
+    'collapsedNoSymbols',
+    directoryDeclarationsCollapsed,
     accountingWithoutSymbolRows,
     linesWithoutSymbols,
   );
-  if (collapsedNoSymbols.length <= budget) return collapsedNoSymbols;
+  if (collapsedNoSymbols.text.length <= budget) return finalize(collapsedNoSymbols);
 
   // Last rung: drop the Files/Symbols sections entirely and fall back to the
   // header, one last-resort detail line, and compact scan accounting. Not
@@ -678,10 +765,10 @@ export async function buildRepoMap({
     rowFormatters,
     budget,
   });
-  if (compactFallback.length > budget) {
+  if (compactFallback.text.length > budget) {
     throw new Error(
-      `repo-map bug: the compact fallback (${compactFallback.length} chars) exceeds budget ${budget} even though budget >= MINIMUM_MAP_BUDGET (${MINIMUM_MAP_BUDGET}) — this should be impossible; renderCompactFallback() and MINIMUM_MAP_BUDGET have drifted apart`,
+      `repo-map bug: the compact fallback (${compactFallback.text.length} chars) exceeds budget ${budget} even though budget >= MINIMUM_MAP_BUDGET (${MINIMUM_MAP_BUDGET}) — this should be impossible; renderCompactFallback() and MINIMUM_MAP_BUDGET have drifted apart`,
     );
   }
-  return compactFallback;
+  return finalize(compactFallback);
 }

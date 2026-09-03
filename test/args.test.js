@@ -1,7 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { parseArgs } from '../src/args.js';
 import { CLI_COMMANDS } from '../src/cli-help.js';
+import { MINIMUM_MAP_BUDGET } from '../src/repo-map.js';
 
 test('parses mutate options and requires a target', () => {
   assert.deepEqual(parseArgs([
@@ -482,4 +484,45 @@ test('every command answers --help with usage instead of an error', () => {
     { command: 'help' },
     '--help wins even mixed among other flags',
   );
+});
+
+test('--map-budget rejects values below the builder floor and explains the repair', () => {
+  const received = String(MINIMUM_MAP_BUDGET - 1);
+  assert.throws(
+    () => parseArgs([
+      'decompose', '--goal', 'spec.md', '--target', '.', '--map-budget', received,
+    ]),
+    (error) => {
+      assert.match(error.message, /--map-budget/);
+      assert.match(error.message, new RegExp(received));
+      assert.match(error.message, new RegExp(String(MINIMUM_MAP_BUDGET)));
+      assert.match(error.message, /increase|use|pass/i);
+      return true;
+    },
+  );
+});
+
+test('--map-budget malformed values name the flag, received value, and repair', () => {
+  assert.throws(
+    () => parseArgs([
+      'decompose', '--goal', 'spec.md', '--target', '.', '--map-budget', '12oops',
+    ]),
+    (error) => {
+      assert.match(error.message, /--map-budget/);
+      assert.match(error.message, /12oops/);
+      assert.match(error.message, /whole number|digits|integer/i);
+      return true;
+    },
+  );
+});
+
+test('the bin exits 2 and names --map-budget plus its floor for a below-floor value', () => {
+  const result = spawnSync(process.execPath, [
+    'bin/loop.js', 'decompose', '--goal', 'spec.md', '--target', '.',
+    '--map-budget', String(MINIMUM_MAP_BUDGET - 1),
+  ], { encoding: 'utf8' });
+
+  assert.equal(result.status, 2, result.error?.stack ?? result.stderr);
+  assert.match(result.stderr, /--map-budget/);
+  assert.match(result.stderr, new RegExp(String(MINIMUM_MAP_BUDGET)));
 });

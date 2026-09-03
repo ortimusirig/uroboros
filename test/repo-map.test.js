@@ -738,3 +738,119 @@ test('symbolsSkipped excludes source paths omitted by content admission', async 
     'only content-admitted source scans may contribute to symbolsSkipped',
   );
 });
+
+test('every renderer rung rejects missing and extraneous coverage declarations', async (t) => {
+  const crowded = symbolStateFixture({ longOmissions: true });
+  let collapsedBudget;
+  let collapsedNoSymbolsBudget;
+  for (let budget = MINIMUM_MAP_BUDGET; budget <= 2600; budget++) {
+    const map = await buildRepoMap({
+      target: 'T', budget, spawn: fakeSpawnFor(crowded.files), readFile: fakeRead(crowded.contents),
+    });
+    if (/omissions for 8 directories \(8 files\)/.test(map) && /^- .+ \(.+\)$/m.test(map)) {
+      if (/^## Symbols \(largest files first\)$/m.test(map)) collapsedBudget ??= budget;
+      else if (/^## Files$/m.test(map)) collapsedNoSymbolsBudget ??= budget;
+    }
+    if (collapsedBudget !== undefined && collapsedNoSymbolsBudget !== undefined) break;
+  }
+  assert.notEqual(collapsedBudget, undefined, 'fixture did not reach the collapsed rung');
+  assert.notEqual(
+    collapsedNoSymbolsBudget, undefined, 'fixture did not reach the collapsedNoSymbols rung',
+  );
+  const longDetailedDirectory = `z${'z'.repeat(600)}`;
+  const detailedFiles = ['a/a.txt', `${longDetailedDirectory}/b.txt`];
+  const cases = [
+    {
+      rung: 'detailed',
+      options: {
+        target: 'T', budget: 2400, spawn: fakeSpawnFor(detailedFiles),
+        stat: () => ({ size: 2 }), readFile: () => 'x\n',
+      },
+    },
+    {
+      rung: 'collapsed',
+      options: {
+        target: 'T', budget: collapsedBudget,
+        spawn: fakeSpawnFor(crowded.files), readFile: fakeRead(crowded.contents),
+      },
+    },
+    {
+      rung: 'collapsedNoSymbols',
+      options: {
+        target: 'T', budget: collapsedNoSymbolsBudget,
+        spawn: fakeSpawnFor(crowded.files), readFile: fakeRead(crowded.contents),
+      },
+    },
+    {
+      rung: 'compactFallback',
+      options: {
+        target: 'T', budget: MINIMUM_MAP_BUDGET,
+        spawn: fakeSpawnFor(['d/f00.js', 'd/f01.js', 'd/f02.js']),
+        stat: () => ({ size: 24 }),
+        readFile: () => 'export const symbol = 1;\n',
+      },
+    },
+  ];
+
+  for (const scenario of cases) {
+    await t.test(`${scenario.rung}: a dropped declaration fails in the missing direction`, async () => {
+      let mutated = false;
+      await assert.rejects(
+        buildRepoMap({
+          ...scenario.options,
+          renderHook: (result) => {
+            assert.equal(result.rung, scenario.rung);
+            const row = result.text.match(/^- .+ \(.+\)(?: \[inspected\])?$/m)?.[0];
+            assert.ok(row, 'control fixture must render a real file row');
+            const text = result.text.replace(`${row}\n`, '');
+            assert.notEqual(text, result.text, 'control must drop a row from actual renderer output');
+            mutated = true;
+            return { ...result, text };
+          },
+        }),
+        /missing declaration/i,
+      );
+      assert.equal(mutated, true, 'the selected renderer must run the mutation control');
+    });
+
+    await t.test(`${scenario.rung}: a dropped withholding line fails in the missing direction`, async () => {
+      let mutated = false;
+      await assert.rejects(
+        buildRepoMap({
+          ...scenario.options,
+          renderHook: (result) => {
+            assert.equal(result.rung, scenario.rung);
+            const declaration = result.explicitlyWithheldPathsByLine.keys().next().value;
+            assert.ok(declaration, 'control fixture must render an explicit withholding line');
+            const text = result.text.replace(`${declaration}\n`, '');
+            assert.notEqual(text, result.text, 'control must drop an actual withholding line');
+            mutated = true;
+            return { ...result, text };
+          },
+        }),
+        /missing declaration/i,
+      );
+      assert.equal(mutated, true, 'the selected renderer must run the withholding control');
+    });
+
+    await t.test(`${scenario.rung}: an extra declaration fails in the extraneous direction`, async () => {
+      let mutated = false;
+      await assert.rejects(
+        buildRepoMap({
+          ...scenario.options,
+          renderHook: (result) => {
+            assert.equal(result.rung, scenario.rung);
+            const extraPath = '__coverage_control__/extra.js';
+            const extraRow = `- ${extraPath} (omitted; content admission budget)`;
+            const renderedPathByRow = new Map(result.renderedPathByRow ?? []);
+            renderedPathByRow.set(extraRow, extraPath);
+            mutated = true;
+            return { ...result, text: `${result.text}${extraRow}\n`, renderedPathByRow };
+          },
+        }),
+        /extraneous declaration/i,
+      );
+      assert.equal(mutated, true, 'the selected renderer must run the mutation control');
+    });
+  }
+});

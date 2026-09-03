@@ -9,6 +9,7 @@ import {
 } from './campaign-validation.js';
 import { loadCampaignFile } from './campaign-file.js';
 import { UNIT_KINDS } from './events.js';
+import { DEFAULT_MAP_BUDGET, MINIMUM_MAP_BUDGET } from './repo-map.js';
 import { parseTimeoutMs } from './timeouts.js';
 
 const EXECUTOR_EFFORTS = new Set([
@@ -79,6 +80,22 @@ function strictInt(v, def, lo, hi) {
     throw new Error(`value out of range [${lo}-${hi}]: ${v}`);
   }
   return n;
+}
+
+function parseMapBudget(value) {
+  if (value === undefined) return DEFAULT_MAP_BUDGET;
+  if (!/^\d+$/.test(value) || !Number.isSafeInteger(Number(value))) {
+    throw new Error(
+      `invalid --map-budget: received ${JSON.stringify(value)}; pass --map-budget as whole-number digits at or above ${MINIMUM_MAP_BUDGET}`,
+    );
+  }
+  const budget = Number(value);
+  if (budget < MINIMUM_MAP_BUDGET) {
+    throw new Error(
+      `invalid --map-budget: received ${value}; the floor is ${MINIMUM_MAP_BUDGET}; increase --map-budget to ${MINIMUM_MAP_BUDGET} or more`,
+    );
+  }
+  return budget;
 }
 
 function validateExecutorEffort(executorEffort) {
@@ -327,7 +344,7 @@ export function parseArgs(argv) {
       ...(hasGoal ? { goal: values.goal } : { project: values.project }),
       target: values.target,
       ...(values.out === undefined ? {} : { out: values.out }),
-      mapBudget: strictInt(values['map-budget'], 12000, 1, Number.MAX_SAFE_INTEGER),
+      mapBudget: parseMapBudget(values['map-budget']),
       ...(values.rounds === undefined ? {} : {
         rounds: strictInt(values.rounds, undefined, 1, Number.MAX_SAFE_INTEGER),
       }),

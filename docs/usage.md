@@ -102,7 +102,8 @@ directly into the MVP-first, dependency-ordered goals that make it up, written u
 `--out` as a `goals/goals.json` manifest plus one `spec.md` per goal — this mode is live
 too, and emits no `gate.json` of its own; decompose each resulting goal with `--goal` to
 reach its task units. In both modes, `--map-budget` bounds the characters spent on the
-repo map handed to the seats (default 12000).
+repo map handed to the seats (default 12000); values below the builder-derived
+`MINIMUM_MAP_BUDGET` floor (currently 951 characters) are rejected with guidance to raise it.
 
 Before a long program, run `loop doctor --deep` — plain `doctor` checks sign-in, only
 `--deep` exercises a real seat launch with the run's default model; on a free Cursor plan
