@@ -1,0 +1,22 @@
+[
+  {
+    "name": "T1-plan-survives-and-outage-is-complete",
+    "task": "T1-plan-survives-and-outage-is-complete.md",
+    "gate": "gate-T1.json"
+  },
+  {
+    "name": "T2-report-renderer",
+    "task": "T2-report-renderer.md",
+    "gate": "gate-T2.json"
+  },
+  {
+    "name": "T3-writer-lands-everywhere-at-once",
+    "task": "T3-writer-lands-everywhere-at-once.md",
+    "gate": "gate-T3.json"
+  },
+  {
+    "name": "T4-report-travels-with-the-work",
+    "task": "T4-report-travels-with-the-work.md",
+    "gate": "gate-T4.json"
+  }
+]

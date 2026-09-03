@@ -1,0 +1,9 @@
+[
+  {
+    "bin": "node",
+    "args": [
+      "--test",
+      "test/non-convergence-report.test.js"
+    ]
+  }
+]

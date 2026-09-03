@@ -1,0 +1,9 @@
+[
+  {
+    "bin": "node",
+    "args": [
+      "--test",
+      "test/conversation.test.js"
+    ]
+  }
+]
