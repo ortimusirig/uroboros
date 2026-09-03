@@ -774,8 +774,23 @@ export async function runConversation({
         // A contradiction the writer found (a cycle, a mismatch) is the seats'
         // to resolve, and they only can if they are told what it was.
         roundHistory.push({ round, repair: error.message });
+        // The SAME budget as a parse repair, deliberately: both are one seat
+        // answering unreadably about one artifact, and the audit row bounds
+        // the pair at MAX_ARTIFACT_REPAIRS per conversation. Nothing else can
+        // stop this loop — the `continue` below leaves from inside the
+        // converged branch, so circling detection and the pivot never run, and
+        // at production defaults `rounds` is unbounded. Agreeing seats plus a
+        // writer that rejects deterministically (the same cycle every time)
+        // burned tokens forever before this bound existed.
+        artifactRepairs += 1;
+        if (artifactRepairs > MAX_ARTIFACT_REPAIRS) {
+          return finish('proposal-irreparable', round);
+        }
         feedback = error.message;
         reStorm = false;
+        // No `round -= 1` here, unlike the parse-repair path: deliberation DID
+        // happen in this round — both seats read the proposal and agreed — and
+        // only then did the writer find the contradiction. The round was spent.
         continue;
       }
       reportEvent(reporter, runId, 'plan', 'converged', {

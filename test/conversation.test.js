@@ -229,6 +229,64 @@ test('a repairable writeConverged failure (e.g. a dependency cycle) loops as fee
   const result = await runConversation({ runId: 'conv-cycle', tier: 'goal', seats, strategy });
   assert.equal(result.converged, true);
   assert.match(seen[1], /depend on each other/);
+  // This repair KEEPS its round: unlike a parse failure, deliberation really
+  // happened — both seats reviewed the proposal and agreed before the writer
+  // found the contradiction. Only the repair budget bounds it.
+  assert.equal(result.rounds, 2);
+});
+
+test('a writeConverged contradiction that never resolves ends as proposal-irreparable', async () => {
+  // Branch review: agreeing seats plus a deterministically-rejecting writer
+  // (cycle, duplicate id, dangling dependency) had no bound at all here. At
+  // production defaults — `rounds` unbounded, as below — that is an infinite
+  // token burn, and the `continue` skips circling and the pivot entirely, so
+  // nothing else could ever break the loop either.
+  const { seats, strategy } = seatsFor({ proposals: ['GOOD'] });
+  let writes = 0;
+  strategy.writeConverged = () => {
+    writes += 1;
+    // Bounded-iteration guard: a regression that unbounds this loop again
+    // throws a NON-repairable error, which propagates straight out of
+    // runConversation, so the suite fails fast instead of hanging forever.
+    if (writes > MAX_ARTIFACT_REPAIRS + 3) throw new Error('runaway writeConverged repair loop');
+    throw new RepairableArtifactError('T2 and T4 depend on each other — resolve or merge them');
+  };
+  const result = await runConversation({ runId: 'conv-write-cap', tier: 'goal', seats, strategy });
+  assert.equal(result.converged, false);
+  assert.equal(result.reason, 'proposal-irreparable');
+  assert.equal(writes, MAX_ARTIFACT_REPAIRS + 1, 'the sixth contradiction ends it');
+  assert.equal(result.roundHistory.filter((row) => row.repair !== undefined).length,
+    MAX_ARTIFACT_REPAIRS + 1, 'no silent cap: every contradiction is still in the record');
+  // Deliberation happened in each of these rounds, so each one counted.
+  assert.equal(result.rounds, MAX_ARTIFACT_REPAIRS + 1);
+});
+
+test('both repair sites draw on ONE budget per conversation', async () => {
+  // The audit row says "up to 5 times per conversation" across both sites, so
+  // parse repairs and writer contradictions must not each get their own five.
+  const { seats, strategy } = seatsFor({ proposals: ['GOOD'] });
+  let parses = 0;
+  let parseRepairs = 0;
+  let writes = 0;
+  strategy.parseProposal = (response) => {
+    parses += 1;
+    if (parses <= 3) { parseRepairs += 1; throw new RepairableArtifactError(`parse ${parses}`); }
+    return { plan: response.answer };
+  };
+  strategy.writeConverged = () => {
+    writes += 1;
+    if (writes > MAX_ARTIFACT_REPAIRS + 3) throw new Error('runaway repair loop');
+    throw new RepairableArtifactError(`cycle ${writes}`);
+  };
+  const result = await runConversation({ runId: 'conv-shared-budget', tier: 'goal', seats, strategy });
+  assert.equal(result.reason, 'proposal-irreparable');
+  assert.equal(parseRepairs + writes, MAX_ARTIFACT_REPAIRS + 1,
+    'three parse repairs leave three writer attempts, not five');
+  assert.equal(parseRepairs, 3);
+  assert.equal(writes, 3, 'the writer does not get a fresh budget of its own');
+  // Only the three writer rounds were deliberation; the parse repairs reused
+  // round 1, so the two laws hold together in one conversation.
+  assert.equal(result.rounds, 3);
 });
 
 // ---------------------------------------------------------------------------

@@ -211,13 +211,19 @@ Per-task landing review (`491b17c`) is unchanged and still runs for every task.
   (unbounded unless `--rounds`),
   plus thrown availability errors (write-once collision, dependency cycle,
   invalid artifacts, preflight). `proposal-irreparable` is the artifact-repair
-  budget running out: across the whole conversation the proposing seat answered
-  unreadably `MAX_ARTIFACT_REPAIRS` + 1 times — the budget is cumulative per
-  conversation, not per round and not consecutive, so a successful parse in
-  between does not refund it. The first five are fed back verbatim; the sixth
-  ends the conversation converged false, with every repair message in
-  `roundHistory` and nothing written. A repair never spends a deliberation
-  round — the retried proposal reuses the round number it was asked in.
+  budget running out. One budget of `MAX_ARTIFACT_REPAIRS` covers BOTH places an
+  artifact can come back unusable: a proposal that does not parse, and a
+  converged proposal the writer rejects as self-contradictory (cycle, duplicate
+  id, dangling dependency). It is cumulative per conversation — not per round,
+  not per site, and not consecutive — so three parse repairs leave three writer
+  attempts, and a success in between refunds nothing. The first five go back to
+  the seat verbatim; the sixth ends the conversation converged false, with every
+  repair message in `roundHistory` and nothing written. A parse repair never
+  spends a deliberation round (the retried proposal reuses the round number it
+  was asked in); a writer contradiction does, because the seats really did read
+  the proposal and agree before the writer found the contradiction. The bound is
+  what terminates the writer loop at all: its retry leaves from inside the
+  converged branch, so circling detection and the pivot never see it.
   `verifier-unlaunchable` is the conversation's FIRST cursor call being refused
   deterministically — a named model the account may not use — which will be
   refused identically every call, so the run stops there rather than spending
@@ -328,8 +334,8 @@ it. Uroboros never generates or edits a constitution.
 | Acceptance/landing "no readable boolean" | fail-closed reading | Absence of consent is never consent; stops, never passes |
 | Stage liveness | measured, judged | Silence is judged alive-or-stuck; extensions judged; no flat deadline |
 | Verifier launch retry | bounded transport retry | Exactly one re-launch when the seat process died before producing anything judgeable; never after a timeout; announced as a `verify/retry` event carrying the stderr reason; it re-launches only — no answer is ever reinterpreted |
-| Review stance re-ask | bounded feedback loop | An unreadable stance is re-asked once with the unparseable text fed back verbatim; a second failure travels as stance-unreadable with the raw content — reading is repaired, meaning never is (silence still never consents) |
-| Artifact repair budget | bounded feedback loop | A malformed artifact re-asks the same judge with the exact parse error, up to 5 times per conversation; it never consumes a deliberation round, and exhaustion ends loudly as `proposal-irreparable` — no partial artifact ever lands |
+| Review stance re-ask | bounded feedback loop | An unreadable stance is re-asked exactly once per seat per round (not once per conversation) with the unparseable text fed back verbatim; a second failure travels as stance-unreadable with the raw content — reading is repaired, meaning never is (silence still never consents) |
+| Artifact repair budget | bounded feedback loop | An unusable artifact re-asks the same judge with the exact error, up to 5 times per conversation across BOTH repair sites together: a proposal that does not parse, and a converged proposal the writer rejects as self-contradictory (cycle, duplicate id, dangling dependency). A parse repair never consumes a deliberation round; a writer contradiction does, because the seats really did review and agree first. Exhaustion at either site ends loudly as `proposal-irreparable` — no partial artifact ever lands |
 | Seat-outage classification and refusal stop | availability | Reads only what the seat itself said about why it could not run, on the discriminating substring and never the shared `ActionRequiredError` prefix; a config refusal on the conversation's FIRST cursor call ends it as `verifier-unlaunchable` with the flag that fixes it, because a deterministic refusal repeats identically every call. Quota and unrecognised failures proceed as unavailable and are only summarised; an unclassifiable failure gets no invented remedy, and a seat that answered once is never reported capped |
 | `rounds`, `max-runs`, `token-budget` | operator's own caps | Set by the owner, forecast declared, run-in-flight always finishes |
 | `MINIMUM_MAP_BUDGET` rejection | derived validation | Below it no honest self-declaration fits; derived from the map's own smallest renders, never guessed |
