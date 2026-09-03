@@ -1,0 +1,16 @@
+[
+  {
+    "bin": "node",
+    "args": [
+      "--test",
+      "test/repo-map.test.js"
+    ]
+  },
+  {
+    "bin": "node",
+    "args": [
+      "--test",
+      "test/args.test.js"
+    ]
+  }
+]
