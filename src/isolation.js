@@ -24,7 +24,7 @@ const repositoryLocks = new Map();
 // tell they are the harness's own writes rather than stray output it forgot to add.
 const HARNESS_GIT_EXCLUDE_MARKER = '# uroboros harness artifacts';
 const HARNESS_GIT_EXCLUDE_BLOCK = `\n${HARNESS_GIT_EXCLUDE_MARKER} — not the seat's work\n`
-  + 'TASK.md\nevents.jsonl\nCHANGES.diff\n__uro_review/\n';
+  + 'TASK.md\nevents.jsonl\nCHANGES.diff\n__uro_review/\n.uro-tmp/\n';
 
 // Containment check via canonicalPath (realpath-based, defined below) rather than a plain
 // resolve(): a symlinked scratch root must still be recognized as containing its own

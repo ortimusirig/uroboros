@@ -118,6 +118,8 @@ For a simple Graph, keep the flag form: give every task a `--unit-id`, then repe
   the operator's tree. It never writes the worktree. Missing arbitration preserves reviewer
   objections, halts challenges for the operator, marks deterministic pivot fallback as
   unjudged, and stops a landing — silence is never consent.
+- **The loop STAGES the executor's edits.** A bare `git diff` in the run worktree is empty;
+  read the work with `git diff --cached --binary`.
 - **Goal acceptance closes a decomposed goal; nothing mechanical does.** `loop queue
   --accept-goal <spec.md>` runs only once every unit in the queue file shows landed;
   Claude then reads the goal spec and the aggregate landed diff first-hand and judges

@@ -166,7 +166,7 @@ export async function createFreshPivotBranch({
     // Preserve it across the destructive branch reset so pre-pivot evidence remains visible.
     await checkedGit(
       cwd,
-      ['clean', '-ffd', '-x', '-e', 'events.jsonl'],
+      ['clean', '-ffd', '-x', '-e', 'events.jsonl', '-e', '.uro-tmp'],
       'fresh pivot clean',
       spawn,
     );

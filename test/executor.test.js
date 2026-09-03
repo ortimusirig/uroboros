@@ -139,7 +139,7 @@ test('runExecutor launches Codex under the environment whose registry was verifi
   let spawnOptions;
   const pending = runExecutor({
     plan: 'observe the launch environment',
-    cwd: process.cwd(),
+    cwd: tmpdir(),
     bin: process.execPath,
     env,
     spawnProcess: (_bin, _args, options) => { spawnOptions = options; return child; },
@@ -153,8 +153,37 @@ test('runExecutor launches Codex under the environment whose registry was verifi
     'a registry override must not remove the PATH needed to launch Codex');
 });
 
+test('the executor sandbox owns its temp dir inside the worktree', async () => {
+  // Codex's workspace-write sandbox confines writes to the worktree. A tool that defaults
+  // to writing under the OS temp dir (pytest's tmp under %TEMP%, observed in the field) then
+  // fails every write with an ACL error, because %TEMP% lives outside the sandboxed root.
+  // The executor must give such tools a temp dir the sandbox actually allows.
+  const dir = mkdtempSync(join(tmpdir(), 'ccc-executor-sandbox-tmp-'));
+  try {
+    const child = fakeChild();
+    let spawnOptions;
+    const pending = runExecutor({
+      plan: 'observe the sandbox temp dir',
+      cwd: dir,
+      bin: process.execPath,
+      spawnProcess: (_bin, _args, options) => { spawnOptions = options; return child; },
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    child.emit('close', 0, null);
+    await pending;
+
+    const executorTmp = join(dir, '.uro-tmp');
+    assert.equal(spawnOptions.env.TMP, executorTmp);
+    assert.equal(spawnOptions.env.TEMP, executorTmp);
+    assert.equal(spawnOptions.env.TMPDIR, executorTmp);
+    assert.equal(existsSync(executorTmp), true, 'the sandbox temp dir must actually exist on disk');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('runExecutor parses file_change and agent_message from the stream', async () => {
-  const r = await runExecutor({ plan: 'do the thing', cwd: process.cwd(),
+  const r = await runExecutor({ plan: 'do the thing', cwd: tmpdir(),
     bin: process.execPath, extraArgv: [fakeCodex] });
   assert.deepEqual(r.changedFiles, ['a.py', 'b.py']);
   assert.equal(r.lastMessage, 'implemented the thing');
@@ -401,7 +430,7 @@ test('parseCodexStream retains real usage and ignores command_execution items', 
 });
 
 test('a failed executor keeps its stderr, the only account of why it died', async () => {
-  const r = await runExecutor({ plan: 'x', cwd: process.cwd(),
+  const r = await runExecutor({ plan: 'x', cwd: tmpdir(),
     bin: process.execPath, extraArgv: [fakeCodex, 'die-quietly'] });
 
   // Observed in production: exit 1, no diff, no usage, and nothing anywhere in
@@ -416,7 +445,7 @@ test('a failed executor keeps its stderr, the only account of why it died', asyn
 });
 
 test('a successful executor carries no stderr noise', async () => {
-  const r = await runExecutor({ plan: 'x', cwd: process.cwd(),
+  const r = await runExecutor({ plan: 'x', cwd: tmpdir(),
     bin: process.execPath, extraArgv: [fakeCodex] });
   assert.equal(r.exitCode, 0);
   assert.equal(r.stderr, undefined);

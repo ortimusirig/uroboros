@@ -163,3 +163,11 @@ test('the Graph declaration is documented in file and flag forms', () => {
   assert.match(CLI_USAGE, /batch --campaign <file>/);
   assert.match(usage, /batch --campaign <campaign[.]json>/);
 });
+
+test('SKILL.md warns that a run worktree diff is staged, not bare', () => {
+  // A reader who inspects the isolated run worktree directly (rather than reading
+  // CHANGES.diff) hits an empty `git diff`, because diffText() stages everything first.
+  // Field evidence: a peer read this as "no changes" when real work was already staged.
+  assert.match(skill, /loop STAGES the executor's edits/);
+  assert.match(skill, /git diff --cached --binary/);
+});

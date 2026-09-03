@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { parseArgs } from '../src/args.js';
+import { CLI_COMMANDS } from '../src/cli-help.js';
 
 test('parses mutate options and requires a target', () => {
   assert.deepEqual(parseArgs([
@@ -468,4 +469,17 @@ test('queue rejects missing files, invalid modes, and non-positive or fractional
       /value out of range/,
     );
   }
+});
+
+test('every command answers --help with usage instead of an error', () => {
+  for (const command of CLI_COMMANDS) {
+    if (command === 'help') continue;
+    assert.deepEqual(parseArgs([command, '--help']), { command: 'help' });
+  }
+  assert.deepEqual(parseArgs(['run', '-h']), { command: 'help' });
+  assert.deepEqual(
+    parseArgs(['run', '--task', 'p', '--help']),
+    { command: 'help' },
+    '--help wins even mixed among other flags',
+  );
 });

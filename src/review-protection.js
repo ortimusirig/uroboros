@@ -30,6 +30,7 @@ export class WorktreeRestorationError extends Error {
 // peer session watched it happen twice in live runs.
 export const HARNESS_ARTIFACT_PATTERNS = Object.freeze([
   /^events\.jsonl$/, /^TASK\.md$/, /^CHANGES\.diff$/, /^__uro_review(\/|\\|$)/,
+  /^\.uro-tmp(\/|\\|$)/,
 ]);
 export function isHarnessArtifact(relativePath) {
   const normalized = String(relativePath).replace(/\\/g, '/');

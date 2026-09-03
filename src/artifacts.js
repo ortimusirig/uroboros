@@ -20,6 +20,7 @@ export const HARNESS_ARTIFACTS = Object.freeze([
   'DECISION.md',
   '__uro_review/',
   '__uro_evidence/',
+  '.uro-tmp/',
   'CHANGES.diff',
   'uro-report.md',
   'uro-runfacts.json',

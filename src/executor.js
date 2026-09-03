@@ -4,6 +4,8 @@ import { encodeRecordedText } from './execution-record.js';
 import { annotateUsageConsistency, normalizeCodexUsage } from './usage.js';
 import { resolveStageTimeouts } from './timeouts.js';
 import { StringDecoder } from 'node:string_decoder';
+import { mkdirSync } from 'node:fs';
+import { join } from 'node:path';
 import { readEnv } from './env-compat.js';
 import { inspectWorktreeActivity } from './liveness-evidence.js';
 import {
@@ -225,6 +227,16 @@ export async function runExecutor({
   const resolvedProgressThresholdMs = progressThresholdMs ?? thresholds.progressThresholdMs;
   const args = [...extraArgv, ...buildCodexArgs({ cwd, model, effort, sandbox })];
   const launchEnv = { ...process.env, ...env };
+  // Codex's workspace-write sandbox confines writes to `cwd`. A tool the executor invokes
+  // (observed in the field: pytest's default tmp under %TEMP%) otherwise writes outside that
+  // root and every write fails with a sandbox ACL error. Give such tools a temp dir the
+  // sandbox actually allows, and let it win over both the inherited process env and any
+  // caller-supplied override above — those were never chosen with the sandbox root in mind.
+  const executorTmp = join(cwd, '.uro-tmp');
+  mkdirSync(executorTmp, { recursive: true });
+  launchEnv.TMP = executorTmp;
+  launchEnv.TEMP = executorTmp;
+  launchEnv.TMPDIR = executorTmp;
   const nowMs = () => {
     const value = now();
     return value instanceof Date ? value.getTime() : value;

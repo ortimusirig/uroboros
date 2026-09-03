@@ -149,6 +149,9 @@ export function parseArgs(argv) {
   if (!CLI_COMMANDS.includes(command)) {
     throw new Error(`unknown command: ${command ?? '(none)'}`);
   }
+  if (argv.slice(1).some((arg) => arg === '--help' || arg === '-h')) {
+    return { command: 'help' };
+  }
   if (command === 'doctor') {
     const { values } = nodeParseArgs({
       args: argv.slice(1),
