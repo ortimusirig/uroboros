@@ -22,6 +22,35 @@ The whole-branch review of the decomposition spine (commits 415a33a..ac0614b) le
 - `symbolsSkipped` (and every similar self-description) is accurate on every return path.
 - `--map-budget` at the CLI refuses values below `MINIMUM_MAP_BUDGET` with a message naming the floor, so the flag and the builder agree.
 
+## Settled semantics (from the deliberation record, runs 1–8)
+
+Eight debates converged on these accounting rules before stances blocked the
+plans; they are now SPEC, not open design questions — task splits must adopt
+them rather than re-derive them:
+
+1. Per-file identity is three-way on every fallback rung: inspected /
+   admitted-but-too-large / omitted — never a two-way read/row identity. A
+   scanned-empty file, an unrun scan, and a scanned-but-unrendered result are
+   three distinct declared states (including on collapsedNoSymbols).
+2. Content admission is a NAMED rule: which paths open, in what order, in
+   what quantity, computed from the operator budget with a declared ceiling —
+   doubling the tracked-file count must not double readFile calls, and a test
+   pins actual reads ≤ the computed ceiling on a large tree and a doubled tree.
+3. Work is bounded in BYTES as well as read-calls: a budget-derived,
+   self-declared per-file size ceiling is mandatory (one huge admitted file
+   must not make work unbounded); it joins the audit table.
+4. Pre-read row-space reservation uses a true maximum over every possible row
+   template, never a fixed-width estimate.
+5. Coverage accounting is a bidirectional membership check (every declared
+   row exists, every existing row is declared), never a bare count equality.
+6. The binary classifier is conservative and DISCLOSED: a NUL-only check on a
+   stringified buffer is insufficient (non-NUL binaries exist); preserve
+   raw-buffer evidence while supporting string test doubles, and test a
+   non-NUL binary plus a text control.
+7. The malformed---budget repair message has a direct buildRepoMap test for
+   the numeric-string case, asserting the message names the received value
+   and the repair.
+
 ## Constraints
 
 - Everything in `constitution.md` applies, especially rule 3: any new bound joins the audit table or does not ship.
