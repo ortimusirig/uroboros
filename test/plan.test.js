@@ -3,9 +3,10 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import test from 'node:test';
 import {
-  productionCapability, reviewSeatPrompt, runPlan as executePlan, withSeatWorkspace,
+  productionCapability, productionCursorDraft, productionCursorReview,
+  reviewSeatPrompt, runPlan as executePlan, withSeatWorkspace,
 } from '../src/plan.js';
-import { assertUsablePrompt } from '../src/verifier.js';
+import { assertUsablePrompt, classifySeatOutage } from '../src/verifier.js';
 
 const VERIFIED_SUPERPOWERS = {
   ok: true,
@@ -596,4 +597,76 @@ test('the reviewer capability request travels as a file, whatever its size', asy
   assert.ok(argvPrompt.length < 400, 'argv carries only the pointer');
   assert.match(seen, /a "quoted line" with detail/);
   assert.ok(seen.length > 8191, 'the file carries the whole request verbatim');
+});
+
+test('the plan cursor draft seat splits a dead process from an unparseable answer', async () => {
+  // Before this, a launch failure fed an EMPTY result to parseDraftArtifact,
+  // which threw "did not return PLAN_MD and GATE_JSON" and discarded the
+  // ActionRequiredError sitting in stderr. The split was inverted in both
+  // directions: a dead process read as a bad answer, and the only text that
+  // could name the account condition was thrown away. Mirrors the decompose
+  // draft seats (63c788f).
+  await assert.rejects(
+    () => productionCursorDraft({
+      goal: 'ship it', target: '.', verifierModel: 'test-model', timeoutMs: 50,
+      verify: async () => ({
+        launchFailed: true,
+        timedOut: false,
+        stderr: "ActionRequiredError: You've hit your usage limit",
+        findings: '',
+        plan: '',
+      }),
+    }),
+    (error) => {
+      assert.match(error.message, /cursor draft seat failed to launch/);
+      assert.match(error.message, /usage limit/, 'the stderr explanation survives to the storm line');
+      assert.equal(classifySeatOutage(error.message).kind, 'quota-exhausted');
+      return true;
+    },
+  );
+
+  await assert.rejects(
+    () => productionCursorDraft({
+      goal: 'ship it', target: '.', verifierModel: 'test-model', timeoutMs: 50,
+      verify: async () => ({ launchFailed: false, timedOut: true, stderr: '', findings: '', plan: '' }),
+    }),
+    /cursor draft seat timed out/,
+  );
+
+  // Discrimination control: a seat that RAN and answered badly still gets the
+  // parse error, not a launch-class failure.
+  await assert.rejects(
+    () => productionCursorDraft({
+      goal: 'ship it', target: '.', verifierModel: 'test-model', timeoutMs: 50,
+      verify: async () => ({ launchFailed: false, timedOut: false, findings: 'here is my plan, prose only', plan: '' }),
+    }),
+    /did not return PLAN_MD and GATE_JSON/,
+  );
+});
+
+test('the plan cursor review seat carries its launch stderr onto the unavailable row', async () => {
+  const row = await productionCursorReview({
+    goal: 'ship it', plan: 'PLAN', gate: [], round: 1, target: '.',
+    verifierModel: 'test-model', timeoutMs: 50,
+    verify: async () => ({
+      launchFailed: true,
+      timedOut: false,
+      stderr: 'ActionRequiredError: Named models unavailable Free plans can only use Auto.',
+      findings: '',
+      plan: '',
+    }),
+  });
+  assert.equal(row.unavailable, true);
+  assert.equal(row.agree, false, 'an absent seat never consents');
+  assert.equal(row.readable, false);
+  assert.equal(classifySeatOutage(row.error).kind, 'config-refusal',
+    'a review-only outage must be classifiable, or a capped account reads as an anonymous absence');
+
+  const answered = await productionCursorReview({
+    goal: 'ship it', plan: 'PLAN', gate: [], round: 1, target: '.',
+    verifierModel: 'test-model', timeoutMs: 50,
+    verify: async () => ({ launchFailed: false, timedOut: false, findings: 'AGREE: yes', plan: '' }),
+  });
+  assert.equal(answered.unavailable, undefined, 'positive control: a seat that answered is not unavailable');
+  assert.equal(answered.agree, true);
 });

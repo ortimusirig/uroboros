@@ -25,9 +25,11 @@ import {
   parseSeatReview,
   RepairableArtifactError,
   runConversation,
+  seatLaunchFailure,
   STANCE_REPAIR_CLOSING,
   STANCE_REPAIR_OPENING,
   stanceRepairLines,
+  unavailableSeatReview,
 } from './conversation.js';
 import { reportEvent } from './events.js';
 import { runExecutor } from './executor.js';
@@ -342,8 +344,9 @@ export async function withSeatWorkspace(files, work) {
   }
 }
 
-async function productionCursorDraft({
+export async function productionCursorDraft({
   goal, target, verifierModel, timeoutMs, runId, env, home, superpowersDir, feedback, failedPlan,
+  verify = runVerifier,
 }) {
   return withSeatWorkspace({
     'GOAL.md': `${goal}\n`,
@@ -361,17 +364,25 @@ async function productionCursorDraft({
       'Reply in plain chat text, not a plan tool artifact. If your client renders a plan tool anyway, ALSO print both tagged artifacts as chat text — the tags are the only thing read.',
       'Return exactly <PLAN_MD>...markdown...</PLAN_MD> then <GATE_JSON>[...]</GATE_JSON> and no prose outside them.',
     ].join(' ');
-    const result = await runVerifier({
+    const result = await verify({
       cwd: target, prompt, model: verifierModel, timeoutMs, pass: 'plan', env, home, superpowersDir,
     });
+    // A seat whose process died produced nothing judgeable, and that is a
+    // LAUNCH failure carrying its stderr — the same split the decompose draft
+    // seats make (63c788f). Feeding the empty result to the parser instead
+    // inverted it in both directions: a dead process read as an unparseable
+    // answer, and the ActionRequiredError explaining WHY was discarded with it.
+    if (result.launchFailed || result.timedOut) {
+      throw new Error(seatLaunchFailure('cursor draft', result));
+    }
     const artifact = parseDraftArtifact(`${result.findings ?? ''}\n${result.plan ?? ''}`);
     return { ...artifact, usage: result.usage };
   });
 }
 
-async function productionCursorReview({
+export async function productionCursorReview({
   goal, plan, gate, round, target, verifierModel, timeoutMs, env, home, superpowersDir,
-  repairContent,
+  repairContent, verify = runVerifier,
 }) {
   return withSeatWorkspace({
     'GOAL.md': `${goal}\n`,
@@ -400,12 +411,10 @@ async function productionCursorReview({
         ...STANCE_REPAIR_CLOSING,
       ] : []),
     ].join(' ');
-    const result = await runVerifier({
+    const result = await verify({
       cwd: target, prompt, model: verifierModel, timeoutMs, pass: 'plan', env, home, superpowersDir,
     });
-    if (result.launchFailed || result.timedOut) {
-      return { agree: false, readable: false, suggestions: [], questions: [], content: '', unavailable: true, usage: result.usage };
-    }
+    if (result.launchFailed || result.timedOut) return unavailableSeatReview(result);
     return { ...parseSeatReview(`${result.findings ?? ''}\n${result.plan ?? ''}`), usage: result.usage };
   });
 }

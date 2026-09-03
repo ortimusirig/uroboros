@@ -267,6 +267,43 @@ test('a seat that worked at all has no outage row', async () => {
   assert.equal(result.seatOutages, undefined);
 });
 
+test('an unavailable review row is a FAILED interaction — the production launch-failure shape', async () => {
+  // The production review seats do NOT throw when the seat process dies: they
+  // return an `unavailable: true` row keyed off launchFailed||timedOut
+  // (plan.js, decompose.js x2). Counting that non-throwing return as a
+  // successful interaction suppressed the outage summary for every round past
+  // the first — the headline feature was inert against the exact shape it was
+  // built for. This is that shape, verbatim.
+  const { seats, strategy } = seatsFor({ proposals: ['GOOD'] });
+  seats.draftCursor = null;
+  seats.reviewCursor = async () => ({
+    agree: false,
+    readable: false,
+    suggestions: [],
+    questions: [],
+    content: '',
+    unavailable: true,
+    error: "cursor review seat failed to launch: ActionRequiredError: You've hit your usage limit",
+  });
+  const result = await runConversation({ runId: 'conv-unavailable-row', tier: 'goal', seats, strategy, rounds: 2 });
+  assert.equal(result.seatOutages.cursor.kind, 'quota-exhausted');
+  assert.match(result.seatOutages.cursor.message, /usage limit/);
+  // The failure text feeds the summary ONLY: it must reach neither the round
+  // record nor an event.
+  assert.equal(result.roundHistory[0].reviews.cursor.error, undefined);
+  assert.equal(result.roundHistory[0].reviews.cursor.unavailable, true);
+});
+
+test('an unconfigured seat is not a capped seat — no hook is no interaction', async () => {
+  const { seats, strategy } = seatsFor({ proposals: ['GOOD'] });
+  seats.draftCursor = null;
+  seats.reviewCursor = null;
+  const result = await runConversation({ runId: 'conv-no-cursor', tier: 'goal', seats, strategy, rounds: 1 });
+  assert.equal(result.seatOutages, undefined,
+    'a seat that was never called has neither succeeded nor failed');
+  assert.equal(result.reason, 'rounds-exhausted');
+});
+
 test('a seat that answered once is not capped, however loudly it failed later', async () => {
   const { seats, strategy } = seatsFor({ proposals: ['GOOD'], agrees: false });
   let drafts = 0;

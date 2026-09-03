@@ -174,6 +174,11 @@ test('both operator docs name doctor --deep as the honest pre-program check', ()
       'what --deep does that plain doctor does not'],
     [/`--verifier-model auto`/, 'the free-plan remedy flag'],
     [/`verifier-unlaunchable`/, 'the terminal reason a refused launch ends in'],
+    // The probe rides the built-in default, so an operator already passing
+    // `--verifier-model auto` sees a red probe over green runs. Unstated, that
+    // reads as a broken install.
+    [/probe always requests the built-in default model, never whatever `--verifier-model` your runs pass/,
+      'that the probe judges the default model, not the run flag'],
   ];
   for (const [label, text] of [['skills/uroboros/SKILL.md', skill], ['docs/usage.md', usage]]) {
     // Prose wraps where the paragraph wraps; the claim is the sentence, not its

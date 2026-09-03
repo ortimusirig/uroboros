@@ -55,6 +55,39 @@ export class RepairableArtifactError extends Error {
  */
 export const MAX_ARTIFACT_REPAIRS = 5;
 
+/**
+ * The one wording a seat uses to say its process died before producing anything
+ * judgeable, with the launch stderr excerpt appended. The excerpt is the whole
+ * point: bare "failed to launch" names no cause, and the account condition
+ * behind it (63c788f — "You've hit your usage limit", sitting unread in stderr)
+ * can then be neither classified nor remedied.
+ */
+export function seatLaunchFailure(seat, result) {
+  const stderr = result?.stderr ? String(result.stderr).trim().slice(0, 200) : '';
+  return `${seat} seat ${result?.timedOut ? 'timed out' : 'failed to launch'}${stderr ? `: ${stderr}` : ''}`;
+}
+
+/**
+ * What a PRODUCTION review seat returns when its process died: not a throw — a
+ * non-consenting `unavailable` row, exactly as before. It carries the launch
+ * text in `error`, which `reviewRow` deliberately does not copy: that text
+ * feeds the terminal outage summary only, never an event and never the round
+ * record. Without it a review-only outage has nothing to classify, and a capped
+ * account reads as an anonymous absent seat.
+ */
+export function unavailableSeatReview(result, seat = 'cursor review') {
+  return {
+    agree: false,
+    readable: false,
+    suggestions: [],
+    questions: [],
+    content: '',
+    unavailable: true,
+    error: seatLaunchFailure(seat, result),
+    usage: result?.usage,
+  };
+}
+
 // Structured seat responses. The format is prompt discipline, not protocol: the
 // parser extracts what matches and carries severities VERBATIM. Nothing anywhere
 // validates a severity, filters by one, or branches on one — they are input to
@@ -281,6 +314,20 @@ export async function runConversation({
   };
 
   /**
+   * A production review seat does NOT throw when its process dies — it returns
+   * an `unavailable` row (src/plan.js and both decompose review seats, all
+   * keyed off `launchFailed || timedOut`). That non-throwing return is a FAILED
+   * interaction: reading it as a success made the terminal outage summary inert
+   * for every round past the first, against the exact shape it was built for.
+   * A seat with no hook at all is not routed here — nothing was called, so
+   * nothing is recorded.
+   */
+  const noteSeatReview = (seat, review) => {
+    if (review.unavailable === true) noteCursorCall(seat, false, review.error);
+    else noteCursorCall(seat, true);
+  };
+
+  /**
    * The seat is capped only when EVERY call to it failed and at least one
    * failure names a condition we can actually classify. A seat that answered
    * once demonstrably launched, so however loudly it failed afterwards it is not
@@ -473,8 +520,8 @@ export async function runConversation({
       noteCursorCall(seat, false, failureMessage(error));
       return unavailableReview();
     }
-    noteCursorCall(seat, true);
     const review = normalizeSeatReview(answer);
+    noteSeatReview(seat, review);
     if (review.readable !== false || review.unavailable === true) return review;
     if (typeof reviewRepairRequest !== 'function') return review;
     const content = review.content ?? '';
@@ -493,8 +540,8 @@ export async function runConversation({
     let repaired;
     try {
       const reaskAnswer = tallyUsage(await call(repairRequest));
-      noteCursorCall(seat, true);
       repaired = normalizeSeatReview(reaskAnswer);
+      noteSeatReview(seat, repaired);
     } catch (error) {
       // The re-ask was made and the seat died on it. That happened, and the
       // record says so; the seat's first answer stands untouched beside it.
@@ -554,6 +601,7 @@ export async function runConversation({
 
   for (round = 1; rounds === undefined || round <= rounds; round++) {
     if (reStorm) {
+      const cursorCallsBeforeStorm = cursorInteractions.length;
       stormDrafts = await stormOnce({ round, feedback, failedPlan });
       reStorm = false;
       // A deterministic refusal — a named model a free plan may not use —
@@ -568,7 +616,13 @@ export async function runConversation({
       // Checked before storm-exhaustion because it is the strictly more
       // actionable account of the same moment — it names the flag that fixes
       // the run — and every draft error stays in `storm` either way.
-      if (cursorInteractions.length === 1 && cursorInteractions[0].ok === false
+      //
+      // `cursorCallsBeforeStorm === 0` keeps the rule provably storm-scoped now
+      // that reviews also record interactions: without it, a run whose only
+      // cursor calls are reviews could reach a FRESH re-storm holding exactly
+      // one refused interaction and stop there, rounds after the fact.
+      if (cursorCallsBeforeStorm === 0 && cursorInteractions.length === 1
+        && cursorInteractions[0].ok === false
         && classifySeatOutage(cursorInteractions[0].message)?.kind === 'config-refusal') {
         // Fail closed: nothing is written, converged false, and the remedy
         // travels in `seatOutages` that `finish` attaches.

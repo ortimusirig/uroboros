@@ -262,7 +262,10 @@ exercises a real seat launch with the run's default model; on a free Cursor plan
 `--verifier-model auto` or the reviewer seat refuses every named-model launch. That refusal on a
 conversation's first Cursor call ends it immediately as `verifier-unlaunchable` (converged false,
 nothing written, remedy in `seatOutages.cursor`); an out-of-quota account instead proceeds with
-the seat unavailable and is named in the same summary at the terminal.
+the seat unavailable and is named in the same summary at the terminal. The deep probe always
+requests the built-in default model, never whatever `--verifier-model` your runs pass, so an
+operator who already runs with `--verifier-model auto` on a free plan will see the probe fail
+while those runs succeed — read a probe failure against the model you actually run.
 Use `status` or the read-only `dashboard` to observe a run, `publish` only after planner review,
 `prune --dry-run` to inspect scratch retention, and `help` to print the command surface.
 

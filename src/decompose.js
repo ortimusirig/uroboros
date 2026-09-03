@@ -42,9 +42,11 @@ import {
   parseSeatReview,
   RepairableArtifactError,
   runConversation,
+  seatLaunchFailure,
   STANCE_REPAIR_CLOSING,
   STANCE_REPAIR_OPENING,
   stanceRepairLines,
+  unavailableSeatReview,
 } from './conversation.js';
 import { reportEvent } from './events.js';
 import { runExecutor } from './executor.js';
@@ -689,9 +691,7 @@ async function productionGoalCursorDraft({
     ],
     target, verifierModel, timeoutMs, env, home, superpowersDir,
   });
-  if (result.launchFailed || result.timedOut) {
-    throw new Error(`cursor draft seat ${result.timedOut ? 'timed out' : 'failed to launch'}${result.stderr ? `: ${String(result.stderr).trim().slice(0, 200)}` : ''}`);
-  }
+  if (result.launchFailed || result.timedOut) throw new Error(seatLaunchFailure('cursor draft', result));
   return { text: `${result.findings ?? ''}\n${result.plan ?? ''}`, usage: result.usage };
 }
 
@@ -749,9 +749,9 @@ async function productionGoalCursorReview({
     ],
     target, verifierModel, timeoutMs, env, home, superpowersDir,
   });
-  if (result.launchFailed || result.timedOut) {
-    return { agree: false, readable: false, suggestions: [], questions: [], content: '', unavailable: true, usage: result.usage };
-  }
+  // The launch stderr travels on the row: without it a review-only outage has
+  // no text to classify, and a capped account reads as an anonymous absence.
+  if (result.launchFailed || result.timedOut) return unavailableSeatReview(result);
   return { ...parseSeatReview(`${result.findings ?? ''}\n${result.plan ?? ''}`), usage: result.usage };
 }
 
@@ -1186,9 +1186,7 @@ async function productionProjectCursorDraft({
     ],
     target, verifierModel, timeoutMs, env, home, superpowersDir,
   });
-  if (result.launchFailed || result.timedOut) {
-    throw new Error(`cursor draft seat ${result.timedOut ? 'timed out' : 'failed to launch'}${result.stderr ? `: ${String(result.stderr).trim().slice(0, 200)}` : ''}`);
-  }
+  if (result.launchFailed || result.timedOut) throw new Error(seatLaunchFailure('cursor draft', result));
   return { text: `${result.findings ?? ''}\n${result.plan ?? ''}`, usage: result.usage };
 }
 
@@ -1244,9 +1242,9 @@ async function productionProjectCursorReview({
     ],
     target, verifierModel, timeoutMs, env, home, superpowersDir,
   });
-  if (result.launchFailed || result.timedOut) {
-    return { agree: false, readable: false, suggestions: [], questions: [], content: '', unavailable: true, usage: result.usage };
-  }
+  // The launch stderr travels on the row: without it a review-only outage has
+  // no text to classify, and a capped account reads as an anonymous absence.
+  if (result.launchFailed || result.timedOut) return unavailableSeatReview(result);
   return { ...parseSeatReview(`${result.findings ?? ''}\n${result.plan ?? ''}`), usage: result.usage };
 }
 
