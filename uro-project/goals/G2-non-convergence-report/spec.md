@@ -49,7 +49,11 @@ report needs:
 - `seatOutages` — a capped or refusing seat, named at every terminal
 - `tokens` — the conversation's usage
 
-Nothing new needs to be measured. What is missing is a writer.
+Nothing new needs to be measured EXCEPT the plan itself. **Correction, from
+G2's own debate (2026-09-03):** `finish()` does NOT retain the proposal — the
+plan text reaches the pivot judge as an arbiter-request field and is discarded.
+Both seats caught this during the debate. Retaining the plan is therefore the
+first thing the implementation must do; everything else is a writer.
 
 ## Required behavior
 
