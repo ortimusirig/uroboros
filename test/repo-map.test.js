@@ -122,14 +122,59 @@ test('every budget from the minimum up stays within itself and stays honest', as
   }
 });
 
-test("a budget below the survey's minimum is rejected, never silently overflowed", async () => {
-  await assert.rejects(
-    () => buildRepoMap({
-      target: 'T',
-      budget: MINIMUM_MAP_BUDGET - 1,
-      spawn: fakeSpawnFor(['src/a.js']),
-      readFile: fakeRead({ 'src/a.js': 'x\n' }),
-    }),
-    new RegExp('at least MINIMUM_MAP_BUDGET \\(' + MINIMUM_MAP_BUDGET + '\\) characters'),
-  );
+test('non-finite numeric budgets are rejected with the received value and a repair', async () => {
+  for (const budget of [NaN, Infinity]) {
+    await assert.rejects(
+      () => buildRepoMap({
+        target: 'T', budget, spawn: fakeSpawnFor([]), readFile: fakeRead({}),
+      }),
+      (error) => {
+        assert.match(error.message, new RegExp(`received ${String(budget)}`));
+        assert.match(error.message, /must be a finite number of characters, e\.g\. 12000/);
+        return true;
+      },
+    );
+  }
+});
+
+test('numeric-looking string budgets are rejected with conversion guidance', async () => {
+  for (const budget of ['12k', '12000']) {
+    await assert.rejects(
+      () => buildRepoMap({
+        target: 'T', budget, spawn: fakeSpawnFor([]), readFile: fakeRead({}),
+      }),
+      (error) => {
+        assert.ok(error.message.includes(budget), `message did not name received value ${budget}`);
+        assert.match(error.message, /pass a number \(parse or convert it\)/);
+        assert.match(error.message, /must be a finite number of characters, e\.g\. 12000/);
+        return true;
+      },
+    );
+  }
+});
+
+test("budgets below the survey's minimum are rejected with the value, floor, and repair", async () => {
+  for (const budget of [0, MINIMUM_MAP_BUDGET - 1]) {
+    await assert.rejects(
+      () => buildRepoMap({
+        target: 'T', budget, spawn: fakeSpawnFor([]), readFile: fakeRead({}),
+      }),
+      (error) => {
+        assert.match(error.message, new RegExp(`received ${budget}`));
+        assert.match(error.message, new RegExp(`MINIMUM_MAP_BUDGET \\(${MINIMUM_MAP_BUDGET}\\)`));
+        assert.match(error.message, new RegExp(`increase it to ${MINIMUM_MAP_BUDGET} or more`, 'i'));
+        return true;
+      },
+    );
+  }
+});
+
+test('the exact minimum map budget remains valid', async () => {
+  const map = await buildRepoMap({
+    target: 'T',
+    budget: MINIMUM_MAP_BUDGET,
+    spawn: fakeSpawnFor(['src/a.js']),
+    readFile: fakeRead({ 'src/a.js': 'x\n' }),
+  });
+  assert.ok(map.length <= MINIMUM_MAP_BUDGET);
 });

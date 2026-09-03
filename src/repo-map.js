@@ -117,13 +117,22 @@ export async function buildRepoMap({
   spawn = spawnCapture,
   readFile = readFileSync,
 } = {}) {
-  // Loud input validation, like the repo's other argument checks: below this
-  // floor no return path — not even the last-resort one — can be honest, so
-  // there is nothing truthful buildRepoMap could hand back. Fail before doing
-  // any work rather than let a later step overflow trying anyway.
+  // Loud input validation, like the repo's other argument checks: do not let
+  // JavaScript coerce malformed values into character counts. Below the floor
+  // no return path — not even the last-resort one — can be honest, so fail
+  // before doing any work rather than let a later step overflow trying anyway.
+  if (!Number.isFinite(budget)) {
+    const stringRepair = typeof budget === 'string'
+      ? 'pass a number (parse or convert it); '
+      : '';
+    const receivedType = typeof budget === 'string' ? ' (string)' : '';
+    throw new TypeError(
+      `map budget received ${String(budget)}${receivedType}; ${stringRepair}budget must be a finite number of characters, e.g. 12000`,
+    );
+  }
   if (budget < MINIMUM_MAP_BUDGET) {
     throw new TypeError(
-      `map budget must be at least MINIMUM_MAP_BUDGET (${MINIMUM_MAP_BUDGET}) characters — below that no honest self-declaration fits`,
+      `map budget received ${budget}; budget must be at least MINIMUM_MAP_BUDGET (${MINIMUM_MAP_BUDGET}) characters — increase it to ${MINIMUM_MAP_BUDGET} or more`,
     );
   }
   let ls;
