@@ -74,6 +74,60 @@ function scanSymbols(text) {
   return symbols;
 }
 
+function countNoun(count) {
+  return count === 1 ? 'file' : 'files';
+}
+
+function symbolAccountingNotes({
+  scanRanWithResultsRendered,
+  scanRanButResultWithheld,
+  scanNeverRan,
+  scannedWithZeroResults,
+}) {
+  const notes = [];
+  if (scanRanWithResultsRendered > 0) {
+    const zeroResults = scannedWithZeroResults > 0
+      ? ` (zero-results=${scannedWithZeroResults})`
+      : '';
+    notes.push(
+      `… scan-ran-with-results-rendered: ${scanRanWithResultsRendered} ${countNoun(scanRanWithResultsRendered)}${zeroResults}.`,
+    );
+  }
+  if (scanRanButResultWithheld > 0) {
+    notes.push(
+      `… scan-ran-but-result-withheld: ${scanRanButResultWithheld} ${countNoun(scanRanButResultWithheld)} (budget) — completed scan results did not fit this rung; read the files directly if relevant.`,
+    );
+  }
+  if (scanNeverRan > 0) {
+    notes.push(
+      `… scan-never-ran: ${scanNeverRan} ${countNoun(scanNeverRan)} (symbolsSkipped=${scanNeverRan}; budget) — scans were not attempted; read the files directly if relevant.`,
+    );
+  }
+  return notes;
+}
+
+function compactSymbolAccounting({
+  scanRanWithResultsRendered,
+  scanRanButResultWithheld,
+  scanNeverRan,
+  scannedWithZeroResults,
+}) {
+  const states = [];
+  if (scanRanWithResultsRendered > 0) {
+    const zeroResults = scannedWithZeroResults > 0
+      ? ` (zero-results=${scannedWithZeroResults})`
+      : '';
+    states.push(`scan-ran-with-results-rendered=${scanRanWithResultsRendered}${zeroResults}`);
+  }
+  if (scanRanButResultWithheld > 0) {
+    states.push(`scan-ran-but-result-withheld=${scanRanButResultWithheld} (budget)`);
+  }
+  if (scanNeverRan > 0) {
+    states.push(`scan-never-ran=${scanNeverRan} (symbolsSkipped=${scanNeverRan}; budget)`);
+  }
+  return states.length > 0 ? `Symbol scan accounting: ${states.join('; ')}.` : '';
+}
+
 // Sort [key, ...] entry pairs by the key alone. Array#sort()'s default comparator
 // stringifies and compares lexicographically too, but leaving it implicit invites
 // exactly the bug it doesn't have yet — spell out what's actually being compared.
@@ -126,13 +180,13 @@ function noSurvey(reason, budget) {
   return shortened;
 }
 
-// The last line a map can EVER lose: even when nothing else fits, this alone
-// must survive, because a bound that hides its own withholding is the exact
-// defect this module exists to prevent.
-const LAST_RESORT_LINE = "survey withheld (budget below the survey's minimum); read the tree directly.";
+// The last detail line a map can EVER lose: it names content removed by the
+// fallback without claiming its already-completed scans were withheld work.
+const LAST_RESORT_LINE = 'Details withheld (budget); read the tree directly.';
 
-function renderMinimal() {
-  return `${HEADER}${LAST_RESORT_LINE}\n`;
+function renderMinimal(symbolAccounting) {
+  const accounting = compactSymbolAccounting(symbolAccounting);
+  return `${HEADER}${LAST_RESORT_LINE}${accounting ? `\n${accounting}` : ''}\n`;
 }
 
 // The floor: below this, not even the least detailed honest output fits, so
@@ -141,7 +195,19 @@ function renderMinimal() {
 // thing this module ever returns — the ladder's last-resort line and the
 // no-survey path's fully-shortened form — never a guessed number, so it can
 // never drift from what those renders really produce.
-export const MINIMUM_MAP_BUDGET = Math.max(renderMinimal().length, renderNoSurveyMinimal().length);
+// `paths` is an Array, whose maximum length is 2^32 - 1; using that maximum in
+// every state reserves enough decimal digits for any possible runtime count.
+const MAX_ARRAY_COUNT = (2 ** 32) - 1;
+const MAX_SYMBOL_ACCOUNTING = {
+  scanRanWithResultsRendered: MAX_ARRAY_COUNT,
+  scanRanButResultWithheld: MAX_ARRAY_COUNT,
+  scanNeverRan: MAX_ARRAY_COUNT,
+  scannedWithZeroResults: MAX_ARRAY_COUNT,
+};
+export const MINIMUM_MAP_BUDGET = Math.max(
+  renderMinimal(MAX_SYMBOL_ACCOUNTING).length,
+  renderNoSurveyMinimal().length,
+);
 
 export async function buildRepoMap({
   target,
@@ -240,15 +306,25 @@ export async function buildRepoMap({
     .filter((entry) => entry.text !== null && SOURCE_EXTENSIONS.has(extensionOf(entry.path)))
     .sort((left, right) => (right.lines ?? 0) - (left.lines ?? 0));
   const symbolLines = [];
-  let symbolFilesShown = 0;
+  let symbolFilesScanned = 0;
+  let symbolResultsRendered = 0;
+  let symbolResultsWithheld = 0;
+  let scannedWithZeroResults = 0;
   for (const entry of largestFirst) {
     const symbols = scanSymbols(entry.text);
-    if (symbols.length === 0) continue;
+    symbolFilesScanned++;
+    if (symbols.length === 0) {
+      scannedWithZeroResults++;
+      continue;
+    }
     const row = `- ${entry.path}: ${symbols.join(', ')}`;
-    if (spent + row.length + SYMBOLS_HEADER_MARGIN > budget - reserve) break;
+    if (spent + row.length + SYMBOLS_HEADER_MARGIN > budget - reserve) {
+      symbolResultsWithheld++;
+      break;
+    }
     symbolLines.push(row);
     spent += row.length + 1;
-    symbolFilesShown++;
+    symbolResultsRendered++;
   }
   // Snapshot BEFORE the Symbols section (if any) is spliced in, for the
   // collapsedNoSymbols rung below — that rung must never show a Symbols
@@ -258,10 +334,32 @@ export async function buildRepoMap({
   const linesWithoutSymbols = [...lines];
   if (symbolLines.length > 0) lines.push('', '## Symbols (largest files first)', ...symbolLines);
 
-  const symbolsSkipped = largestFirst.length - symbolFilesShown;
-  const render = (notes, baseLines = lines) => {
-    const withNotes = notes.length > 0 ? [...baseLines, '', '## Withheld by the budget', ...notes] : baseLines;
-    return `${withNotes.join('\n')}\n`;
+  // `symbolsSkipped` means exactly one thing: eligible files whose scan never
+  // ran. Empty scans and completed scans whose result row did not fit are
+  // tracked independently and can never inflate this count.
+  const symbolsSkipped = largestFirst.length - symbolFilesScanned;
+  const accountingWithSymbolRows = {
+    scanRanWithResultsRendered: symbolResultsRendered + scannedWithZeroResults,
+    scanRanButResultWithheld: symbolResultsWithheld,
+    scanNeverRan: symbolsSkipped,
+    scannedWithZeroResults,
+  };
+  const accountingWithoutSymbolRows = {
+    scanRanWithResultsRendered: scannedWithZeroResults,
+    scanRanButResultWithheld: symbolResultsWithheld + symbolResultsRendered,
+    scanNeverRan: symbolsSkipped,
+    scannedWithZeroResults,
+  };
+  const render = (directoryNotes, symbolAccounting, baseLines = lines) => {
+    const rendered = [...baseLines];
+    const accountingNotes = symbolAccountingNotes(symbolAccounting);
+    if (accountingNotes.length > 0) {
+      rendered.push('', '## Symbol scan accounting', ...accountingNotes);
+    }
+    if (directoryNotes.length > 0) {
+      rendered.push('', '## Withheld by the budget', ...directoryNotes);
+    }
+    return `${rendered.join('\n')}\n`;
   };
 
   // Prefer one note per omitted directory — most specific — but the budget bounds
@@ -276,47 +374,35 @@ export async function buildRepoMap({
   const directoryNotesCollapsed = omitted.size > 0
     ? [`… omissions for ${omitted.size} directories (${omittedFilesTotal} files) withheld (budget) — this survey is incomplete; read the tree directly.`]
     : [];
-  const symbolsNote = symbolsSkipped > 0
-    ? [`… symbol scans withheld for ${symbolsSkipped} more files (budget) — read them directly if relevant.`]
-    : [];
-
-  // The collapsedNoSymbols rung (below) strips the '## Symbols' section
-  // entirely rather than merely dropping its note — so from that rung's
-  // perspective ALL symbol info is withheld, not just whatever symbolsNote
-  // above would have named. Fold that into ONE line with the directory
-  // omissions so a dropped note can never leave an (im)partial section
-  // undeclared.
-  const symbolsWithheldEntirely = largestFirst.length > 0;
-  const collapsedNoSymbolsNotes = (() => {
-    const clauses = [];
-    if (omitted.size > 0) clauses.push(`omissions for ${omitted.size} directories (${omittedFilesTotal} files)`);
-    if (symbolsWithheldEntirely) clauses.push('all symbol scans');
-    return clauses.length > 0
-      ? [`… ${clauses.join(' and ')} withheld (budget) — this survey is incomplete; read the tree directly.`]
-      : [];
-  })();
-
   // Fallback ladder from most to least detailed, MEASURING THE ACTUAL RENDERED
   // STRING at every step — the `reserve` above is a packing heuristic that keeps
   // this ladder short in the common case, never a guarantee, so nothing here
   // trusts it. Every rung but the last is checked before it is returned.
-  const detailed = render([...directoryNotesDetailed, ...symbolsNote]);
+  const detailed = render(directoryNotesDetailed, accountingWithSymbolRows);
   if (detailed.length <= budget) return detailed;
 
-  const collapsed = render([...directoryNotesCollapsed, ...symbolsNote]);
+  const collapsed = render(directoryNotesCollapsed, accountingWithSymbolRows);
   if (collapsed.length <= budget) return collapsed;
 
-  const collapsedNoSymbols = render(collapsedNoSymbolsNotes, linesWithoutSymbols);
+  // This rung removes symbol result rows, not the scans that produced them.
+  // Reclassify only those removed results as withheld while leaving genuinely
+  // unrun scans in `symbolsSkipped` and empty completed scans as rendered zeroes.
+  const collapsedNoSymbols = render(
+    directoryNotesCollapsed,
+    accountingWithoutSymbolRows,
+    linesWithoutSymbols,
+  );
   if (collapsedNoSymbols.length <= budget) return collapsedNoSymbols;
 
   // Last rung: drop the Files/Symbols sections entirely and fall back to the
-  // header plus the one last-resort line. Not measured against `budget` above
+  // header, one last-resort detail line, and compact scan accounting. Not
+  // measured against `budget` above
   // like the rungs before it — by construction (MINIMUM_MAP_BUDGET is this
   // exact string's length, and budget was already rejected below that floor)
   // it always fits. The check below is not what makes that true; it is a
   // defensive, self-explaining guard against a future edit breaking the
   // invariant silently instead of loudly.
-  const minimal = renderMinimal();
+  const minimal = renderMinimal(accountingWithoutSymbolRows);
   if (minimal.length > budget) {
     throw new Error(
       `repo-map bug: the minimal self-declaration (${minimal.length} chars) exceeds budget ${budget} even though budget >= MINIMUM_MAP_BUDGET (${MINIMUM_MAP_BUDGET}) — this should be impossible; renderMinimal() and MINIMUM_MAP_BUDGET have drifted apart`,

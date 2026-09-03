@@ -16,6 +16,40 @@ const fakeRead = (contents) => (path) => {
   return contents[key];
 };
 
+function symbolAccounting(map) {
+  const count = (label) => Number(map.match(new RegExp(`${label}(?::|=)\\s*(\\d+)`))?.[1] ?? 0);
+  return {
+    rendered: count('scan-ran-with-results-rendered'),
+    withheld: count('scan-ran-but-result-withheld'),
+    neverRan: count('scan-never-ran'),
+    symbolsSkipped: count('symbolsSkipped'),
+    zeroResults: count('zero-results'),
+  };
+}
+
+function symbolStateFixture({ longOmissions = false } = {}) {
+  const files = ['s/a.js', 's/b.js', 's/c.js', 's/d.js', 's/e.js'];
+  const contents = {
+    's/a.js': `export const shown = 1;\n${'// filler\n'.repeat(39)}`,
+    's/b.js': '// no symbols\n'.repeat(35),
+    's/c.js': `${Array.from({ length: 30 }, (_, i) => (
+      `export const withheldSymbol_${String(i).padStart(2, '0')}_${'x'.repeat(24)} = ${i};`
+    )).join('\n')}\n`,
+    's/d.js': `export const neverOne = 1;\n${'// filler\n'.repeat(19)}`,
+    's/e.js': `export const neverTwo = 2;\n${'// filler\n'.repeat(9)}`,
+  };
+
+  if (longOmissions) {
+    for (let i = 0; i < 8; i++) {
+      const path = `z${i}-${'x'.repeat(160)}/note.txt`;
+      files.push(path);
+      contents[path] = 'note\n';
+    }
+  }
+
+  return { files, contents };
+}
+
 test('the map declares its grade, its fetchability, and every omission', async () => {
   const files = ['src/a.js', 'src/b.js', 'docs/c.md'];
   const map = await buildRepoMap({
@@ -28,6 +62,99 @@ test('the map declares its grade, its fetchability, and every omission', async (
   assert.match(map, /src\/a\.js \(1 lines?\)/);
   assert.match(map, /alpha/);
   assert.doesNotMatch(map, /and \d+ more files/, 'nothing was withheld, so nothing claims to be');
+});
+
+test('the detailed rung distinguishes rendered, withheld, and never-ran symbol scans', async () => {
+  const { files, contents } = symbolStateFixture();
+  const map = await buildRepoMap({
+    target: 'T', budget: 1200, spawn: fakeSpawnFor(files), readFile: fakeRead(contents),
+  });
+
+  assert.match(map, /^## Symbols \(largest files first\)$/m);
+  assert.match(map, /^- s\/a\.js: shown$/m);
+  assert.deepEqual(symbolAccounting(map), {
+    rendered: 2,
+    withheld: 1,
+    neverRan: 2,
+    symbolsSkipped: 2,
+    zeroResults: 1,
+  });
+});
+
+test('collapsedNoSymbols reclassifies removed symbol rows as withheld results, not skipped scans', async () => {
+  const base = symbolStateFixture();
+  const crowded = symbolStateFixture({ longOmissions: true });
+  let map;
+  let selectedBudget;
+
+  for (let budget = MINIMUM_MAP_BUDGET; budget <= 1800; budget++) {
+    const control = await buildRepoMap({
+      target: 'T', budget, spawn: fakeSpawnFor(base.files), readFile: fakeRead(base.contents),
+    });
+    const candidate = await buildRepoMap({
+      target: 'T', budget, spawn: fakeSpawnFor(crowded.files), readFile: fakeRead(crowded.contents),
+    });
+    if (
+      /^## Symbols \(largest files first\)$/m.test(control)
+      && /^## Files$/m.test(candidate)
+      && !/^## Symbols \(largest files first\)$/m.test(candidate)
+      && /omissions for 8 directories \(8 files\)/.test(candidate)
+    ) {
+      map = candidate;
+      selectedBudget = budget;
+      break;
+    }
+  }
+
+  assert.ok(map, 'fixture did not reach the collapsedNoSymbols rung');
+  assert.ok(map.length <= selectedBudget);
+  assert.doesNotMatch(map, /^- s\/a\.js: shown$/m, 'the rendered symbol row must be removed on this rung');
+  assert.deepEqual(symbolAccounting(map), {
+    rendered: 1,
+    withheld: 2,
+    neverRan: 2,
+    symbolsSkipped: 2,
+    zeroResults: 1,
+  });
+});
+
+test('the minimal rung keeps all three symbol-scan states explicit', async () => {
+  const files = ['s/empty.js', 's/withheld.js', 's/never-one.js', 's/never-two.js'];
+  const contents = {
+    's/empty.js': '// no symbols\n'.repeat(50),
+    's/withheld.js': `export const withheld = 1;\n${'// filler\n'.repeat(39)}`,
+    's/never-one.js': `export const neverOne = 1;\n${'// filler\n'.repeat(29)}`,
+    's/never-two.js': `export const neverTwo = 2;\n${'// filler\n'.repeat(19)}`,
+  };
+  const map = await buildRepoMap({
+    target: 'T', budget: MINIMUM_MAP_BUDGET,
+    spawn: fakeSpawnFor(files), readFile: fakeRead(contents),
+  });
+
+  assert.doesNotMatch(map, /^## Files$/m, 'the fixture must exercise the minimal rung');
+  assert.deepEqual(symbolAccounting(map), {
+    rendered: 1,
+    withheld: 1,
+    neverRan: 2,
+    symbolsSkipped: 2,
+    zeroResults: 1,
+  });
+});
+
+test('a scanned-empty source contributes zero to symbolsSkipped', async () => {
+  const map = await buildRepoMap({
+    target: 'T', budget: DEFAULT_MAP_BUDGET,
+    spawn: fakeSpawnFor(['src/empty.js']),
+    readFile: fakeRead({ 'src/empty.js': '// no declarations\n' }),
+  });
+
+  assert.deepEqual(symbolAccounting(map), {
+    rendered: 1,
+    withheld: 0,
+    neverRan: 0,
+    symbolsSkipped: 0,
+    zeroResults: 1,
+  });
 });
 
 test('dense non-NUL bytes are binary while equal-length printable ASCII remains text', async () => {
