@@ -1,27 +1,7 @@
 [
   {
-    "name": "T1-finite-budget-guards",
-    "task": "T1-finite-budget-guards.md",
-    "gate": "gate-T1.json"
-  },
-  {
-    "name": "T2-binary-classifier",
-    "task": "T2-binary-classifier.md",
-    "gate": "gate-T2.json"
-  },
-  {
-    "name": "T3-symbol-accounting",
-    "task": "T3-symbol-accounting.md",
-    "gate": "gate-T3.json"
-  },
-  {
-    "name": "T4-bounded-reads",
-    "task": "T4-bounded-reads.md",
-    "gate": "gate-T4.json"
-  },
-  {
-    "name": "T5-cli-floor-coverage",
-    "task": "T5-cli-floor-coverage.md",
+    "name": "T5b-honest-fallback-coverage",
+    "task": "T5b-honest-fallback-coverage.md",
     "gate": "gate-T5.json"
   }
 ]
