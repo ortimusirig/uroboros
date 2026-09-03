@@ -15,6 +15,7 @@ import {
 } from './arbiter.js';
 import { reportEvent } from './events.js';
 import { addUsage, EMPTY_USAGE } from './usage.js';
+import { classifySeatOutage } from './verifier.js';
 
 // The standing law every seat reads before it drafts, proposes, reviews, or
 // judges agreement — identical in every tier, so a seat cannot be told one
@@ -264,6 +265,40 @@ export async function runConversation({
   const stormHistory = [];
   const roundHistory = [];
 
+  /**
+   * Every call actually MADE to the cursor seat, in order, with the failure text
+   * when it failed. A seat that was never configured contributes nothing here —
+   * a call that did not happen must read as neither a success nor a failure.
+   *
+   * This ledger is deliberately narrower than the record: the failure texts feed
+   * only the terminal outage summary, never an event and never a review row, so
+   * naming the outage costs the transcript nothing.
+   */
+  const cursorInteractions = [];
+  const noteCursorCall = (seat, ok, message) => {
+    if (seat !== 'cursor') return;
+    cursorInteractions.push(ok ? { ok: true } : { ok: false, message });
+  };
+
+  /**
+   * The seat is capped only when EVERY call to it failed and at least one
+   * failure names a condition we can actually classify. A seat that answered
+   * once demonstrably launched, so however loudly it failed afterwards it is not
+   * capped — and a run whose cursor calls all died of something unrecognised
+   * gets no invented remedy. The last classifiable message wins: it is the most
+   * recent thing the seat actually said about itself.
+   */
+  const cursorOutage = () => {
+    if (cursorInteractions.length === 0) return null;
+    if (cursorInteractions.some((call) => call.ok)) return null;
+    let outage = null;
+    for (const call of cursorInteractions) {
+      const classified = classifySeatOutage(call.message);
+      if (classified) outage = { ...classified, message: call.message };
+    }
+    return outage;
+  };
+
   const arbitrate = async (arbiterRequest) => {
     if (typeof arbitrateSeat !== 'function') {
       return { verdict: ARBITER_UNVERIFIED, unavailable: true };
@@ -279,6 +314,10 @@ export async function runConversation({
 
   const finish = (reason, round, extra = {}) => {
     const converged = reason === 'converged';
+    // A capped seat is named at EVERY terminal, not only the one it caused. The
+    // peer's run discovered the cap at round 4 of a 25-minute conversation; the
+    // record has to say so wherever the conversation happens to end.
+    const outage = cursorOutage();
     const result = {
       runId,
       converged,
@@ -289,6 +328,7 @@ export async function runConversation({
       capabilityVetoes: capabilityHistory,
       pivotHistory,
       tokens: { total: { ...usageTotal } },
+      ...(outage === null ? {} : { seatOutages: { cursor: outage } }),
       ...extra,
     };
     reportEvent(reporter, runId, 'plan', 'finish', {
@@ -335,9 +375,19 @@ export async function runConversation({
       })(),
       (async () => {
         if (typeof draftCursor !== 'function') return { seat: 'cursor', error: 'cursor drafting seat unavailable' };
+        let response;
+        try { response = tallyUsage(await draftCursor(requests.cursorRequest)); }
+        catch (error) {
+          const message = failureMessage(error);
+          noteCursorCall('cursor', false, message);
+          return { seat: 'cursor', error: message };
+        }
+        // The seat launched and answered. Whatever the tier then makes of the
+        // artifact, this seat is demonstrably not capped — an unparseable draft
+        // must never be counted as an account that could not run.
+        noteCursorCall('cursor', true);
         try {
-          const artifact = parseDraft(tallyUsage(await draftCursor(requests.cursorRequest)));
-          return { seat: 'cursor', ...artifact };
+          return { seat: 'cursor', ...parseDraft(response) };
         } catch (error) { return { seat: 'cursor', error: failureMessage(error) }; }
       })(),
       (async () => {
@@ -414,9 +464,17 @@ export async function runConversation({
    */
   const askSeatReview = async (seat, call, request) => {
     if (typeof call !== 'function') return unavailableReview();
-    let review;
-    try { review = normalizeSeatReview(tallyUsage(await call(request))); }
-    catch { return unavailableReview(); }
+    let answer;
+    try { answer = tallyUsage(await call(request)); }
+    catch (error) {
+      // The seat call itself died. The engine keeps proceeding-as-unavailable
+      // exactly as before; the failure text is captured only for the terminal
+      // outage summary, so it reaches neither the events nor the review row.
+      noteCursorCall(seat, false, failureMessage(error));
+      return unavailableReview();
+    }
+    noteCursorCall(seat, true);
+    const review = normalizeSeatReview(answer);
     if (review.readable !== false || review.unavailable === true) return review;
     if (typeof reviewRepairRequest !== 'function') return review;
     const content = review.content ?? '';
@@ -433,10 +491,14 @@ export async function runConversation({
     catch { return review; }
     if (repairRequest === null || repairRequest === undefined) return review;
     let repaired;
-    try { repaired = normalizeSeatReview(tallyUsage(await call(repairRequest))); }
-    catch {
+    try {
+      const reaskAnswer = tallyUsage(await call(repairRequest));
+      noteCursorCall(seat, true);
+      repaired = normalizeSeatReview(reaskAnswer);
+    } catch (error) {
       // The re-ask was made and the seat died on it. That happened, and the
       // record says so; the seat's first answer stands untouched beside it.
+      noteCursorCall(seat, false, failureMessage(error));
       return { ...review, stanceReasked: true };
     }
     if (repaired.readable === false || repaired.unavailable === true) {
@@ -494,6 +556,24 @@ export async function runConversation({
     if (reStorm) {
       stormDrafts = await stormOnce({ round, feedback, failedPlan });
       reStorm = false;
+      // A deterministic refusal — a named model a free plan may not use —
+      // answers identically every single call. Continuing burns Codex and
+      // Claude rounds toward a convergence that has been impossible since the
+      // first second (peer-observed: a full 25-minute round with the reviewer
+      // dead). It is caught HERE, on the conversation's first cursor call, and
+      // only there: a seat that already launched once is not refusing, and a
+      // quota failure is not deterministic in this way, so both keep today's
+      // proceed-as-unavailable behaviour with the outage named at the terminal.
+      //
+      // Checked before storm-exhaustion because it is the strictly more
+      // actionable account of the same moment — it names the flag that fixes
+      // the run — and every draft error stays in `storm` either way.
+      if (cursorInteractions.length === 1 && cursorInteractions[0].ok === false
+        && classifySeatOutage(cursorInteractions[0].message)?.kind === 'config-refusal') {
+        // Fail closed: nothing is written, converged false, and the remedy
+        // travels in `seatOutages` that `finish` attaches.
+        return finish('verifier-unlaunchable', round);
+      }
       if (stormDrafts.every((attempt) => attempt.error)) {
         // Nothing was drafted, so there is nothing to talk about. This is
         // inability, not a mechanical verdict on any artifact.

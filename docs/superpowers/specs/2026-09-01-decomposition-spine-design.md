@@ -207,7 +207,8 @@ Per-task landing review (`491b17c`) is unchanged and still runs for every task.
 
 - **Each decompose tier** reuses the conversation vocabulary verbatim:
   `converged` / `storm-exhausted` / `arbiter-unavailable` / `pivot-conclude` /
-  `proposal-irreparable` / `rounds-exhausted` (unbounded unless `--rounds`),
+  `proposal-irreparable` / `verifier-unlaunchable` / `rounds-exhausted`
+  (unbounded unless `--rounds`),
   plus thrown availability errors (write-once collision, dependency cycle,
   invalid artifacts, preflight). `proposal-irreparable` is the artifact-repair
   budget running out: across the whole conversation the proposing seat answered
@@ -217,6 +218,17 @@ Per-task landing review (`491b17c`) is unchanged and still runs for every task.
   ends the conversation converged false, with every repair message in
   `roundHistory` and nothing written. A repair never spends a deliberation
   round — the retried proposal reuses the round number it was asked in.
+  `verifier-unlaunchable` is the conversation's FIRST cursor call being refused
+  deterministically — a named model the account may not use — which will be
+  refused identically every call, so the run stops there rather than spending
+  Codex and Claude rounds toward a convergence that was impossible from the
+  first second. Nothing is written, converged is false, and the result carries
+  `seatOutages: { cursor: { kind, remedy, message } }` with the failure text
+  verbatim and the flag that fixes it. A quota exhaustion or an unrecognised
+  crash does NOT stop the run: the seat proceeds as unavailable exactly as
+  before and the same `seatOutages` summary names it at whatever terminal the
+  run reaches — but only when EVERY cursor call in the run failed, since a seat
+  that answered once is not capped.
   CLI exit: 0 only on converged, 1 otherwise, 2 on thrown preflight — same as
   `loop plan`.
 - **Queue** gains exactly one stop kind: `goal-acceptance`.
@@ -318,6 +330,7 @@ it. Uroboros never generates or edits a constitution.
 | Verifier launch retry | bounded transport retry | Exactly one re-launch when the seat process died before producing anything judgeable; never after a timeout; announced as a `verify/retry` event carrying the stderr reason; it re-launches only — no answer is ever reinterpreted |
 | Review stance re-ask | bounded feedback loop | An unreadable stance is re-asked once with the unparseable text fed back verbatim; a second failure travels as stance-unreadable with the raw content — reading is repaired, meaning never is (silence still never consents) |
 | Artifact repair budget | bounded feedback loop | A malformed artifact re-asks the same judge with the exact parse error, up to 5 times per conversation; it never consumes a deliberation round, and exhaustion ends loudly as `proposal-irreparable` — no partial artifact ever lands |
+| Seat-outage classification and refusal stop | availability | Reads only what the seat itself said about why it could not run, on the discriminating substring and never the shared `ActionRequiredError` prefix; a config refusal on the conversation's FIRST cursor call ends it as `verifier-unlaunchable` with the flag that fixes it, because a deterministic refusal repeats identically every call. Quota and unrecognised failures proceed as unavailable and are only summarised; an unclassifiable failure gets no invented remedy, and a seat that answered once is never reported capped |
 | `rounds`, `max-runs`, `token-budget` | operator's own caps | Set by the owner, forecast declared, run-in-flight always finishes |
 | `MINIMUM_MAP_BUDGET` rejection | derived validation | Below it no honest self-declaration fits; derived from the map's own smallest renders, never guessed |
 | Repo-map fallback ladder (incl. no-survey path) | input ration | Every return path measured against the actual budget, success and failure alike; nothing assumed to fit |

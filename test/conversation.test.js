@@ -231,6 +231,106 @@ test('a repairable writeConverged failure (e.g. a dependency cycle) loops as fee
   assert.match(seen[1], /depend on each other/);
 });
 
+// ---------------------------------------------------------------------------
+// Capped / refusing seats (peer session, live EULR program): a Cursor account
+// that cannot launch takes a run down mid-flight, and plain `loop doctor` is
+// green throughout because it never exercises a launch. The terminal record has
+// to NAME the outage and its remedy, and a refusal that will repeat identically
+// every call has to stop the run rather than burn rounds toward an impossible
+// convergence.
+// ---------------------------------------------------------------------------
+
+test('an account-capped seat is named in the terminal record with its remedy', async () => {
+  const { seats, strategy } = seatsFor({ proposals: ['GOOD'] });
+  // Verbatim from the peer's failing run: the draft error now carries the
+  // stderr excerpt, the review call throws the bare CLI error.
+  seats.draftCursor = async () => {
+    throw new Error("cursor draft seat failed to launch: ActionRequiredError: You've hit your usage limit");
+  };
+  seats.reviewCursor = async () => {
+    throw new Error("ActionRequiredError: You've hit your usage limit");
+  };
+  const result = await runConversation({ runId: 'conv-capped', tier: 'goal', seats, strategy, rounds: 1 });
+  assert.match(result.seatOutages.cursor.message, /usage limit/);
+  assert.equal(result.seatOutages.cursor.kind, 'quota-exhausted');
+  assert.match(result.seatOutages.cursor.remedy, /renew/i);
+  // A quota failure is NOT deterministic in the way a config refusal is, so it
+  // keeps today's proceed-as-unavailable behaviour: the run spends its rounds
+  // and the summary names the outage at the end.
+  assert.equal(result.reason, 'rounds-exhausted');
+  assert.equal(result.converged, false);
+});
+
+test('a seat that worked at all has no outage row', async () => {
+  const { seats, strategy } = seatsFor({ proposals: ['GOOD'] });
+  const result = await runConversation({ runId: 'conv-not-capped', tier: 'goal', seats, strategy, rounds: 1 });
+  assert.equal(result.seatOutages, undefined);
+});
+
+test('a seat that answered once is not capped, however loudly it failed later', async () => {
+  const { seats, strategy } = seatsFor({ proposals: ['GOOD'], agrees: false });
+  let drafts = 0;
+  seats.draftCursor = async () => {
+    drafts++;
+    if (drafts === 1) return 'DRAFT';
+    throw new Error("ActionRequiredError: You've hit your usage limit");
+  };
+  seats.reviewCursor = async () => {
+    throw new Error("ActionRequiredError: You've hit your usage limit");
+  };
+  const result = await runConversation({ runId: 'conv-partial', tier: 'goal', seats, strategy, rounds: 2 });
+  assert.equal(result.seatOutages, undefined,
+    'partial failure is not an outage — the seat demonstrably launched');
+});
+
+test('a deterministic config refusal stops the run at storm, naming the flag', async () => {
+  const { seats, strategy } = seatsFor({ proposals: ['GOOD'] });
+  seats.draftCursor = async () => {
+    throw new Error('cursor draft seat failed to launch: ActionRequiredError: Named models unavailable Free plans can only use Auto. Switch to Auto or upgrade plans to continue.');
+  };
+  const result = await runConversation({ runId: 'conv-config-refusal', tier: 'goal', seats, strategy, rounds: 3 });
+  assert.equal(result.converged, false);
+  assert.equal(result.reason, 'verifier-unlaunchable');
+  assert.equal(result.seatOutages.cursor.kind, 'config-refusal');
+  assert.match(result.seatOutages.cursor.remedy, /--verifier-model auto/);
+  assert.match(result.seatOutages.cursor.message, /Named models unavailable/);
+  // Fail closed: nothing is written and the run ends in the round it refused in.
+  assert.equal(result.rounds, 1);
+  assert.equal(result.written, undefined);
+  assert.equal(result.roundHistory.length, 0, 'no deliberation happened, so none is recorded');
+});
+
+test('the refusal stop fires only on the FIRST cursor interaction, never mid-run', async () => {
+  const { seats, strategy } = seatsFor({ proposals: ['GOOD'], agrees: false });
+  seats.draftCursor = async () => 'DRAFT';
+  seats.reviewCursor = async () => {
+    throw new Error('ActionRequiredError: Named models unavailable Free plans can only use Auto.');
+  };
+  const result = await runConversation({ runId: 'conv-late-refusal', tier: 'goal', seats, strategy, rounds: 2 });
+  assert.equal(result.reason, 'rounds-exhausted',
+    'a seat that already launched once is not capped, so the run is not cut short');
+  assert.equal(result.seatOutages, undefined);
+});
+
+test('a bare account action names doctor --deep; an ordinary failure names nothing', async () => {
+  const { seats, strategy } = seatsFor({ proposals: ['GOOD'] });
+  seats.draftCursor = async () => { throw new Error('cursor draft seat failed to launch: ActionRequiredError'); };
+  seats.reviewCursor = async () => { throw new Error('ActionRequiredError'); };
+  const account = await runConversation({ runId: 'conv-account', tier: 'goal', seats, strategy, rounds: 1 });
+  assert.equal(account.seatOutages.cursor.kind, 'account-action');
+  assert.match(account.seatOutages.cursor.remedy, /doctor --deep/);
+  assert.equal(account.reason, 'rounds-exhausted', 'an account action is not a deterministic config refusal');
+
+  const plain = seatsFor({ proposals: ['GOOD'] });
+  plain.seats.draftCursor = async () => { throw new Error('spawn ENOENT'); };
+  plain.seats.reviewCursor = async () => { throw new Error('spawn ENOENT'); };
+  const ordinary = await runConversation({
+    runId: 'conv-enoent', tier: 'goal', seats: plain.seats, strategy: plain.strategy, rounds: 1,
+  });
+  assert.equal(ordinary.seatOutages, undefined,
+    'a crash that names no account condition is not classified as one');
+});
+
 test('the DNA is present and carries the standing law verbatim', () => {
   assert.match(CONVERSATION_DNA, /Determinism advises; the model decides; contradiction asks/);
   assert.match(CONVERSATION_DNA, /SUPERSEDED/);

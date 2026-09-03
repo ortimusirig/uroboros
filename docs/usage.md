@@ -104,6 +104,14 @@ too, and emits no `gate.json` of its own; decompose each resulting goal with `--
 reach its task units. In both modes, `--map-budget` bounds the characters spent on the
 repo map handed to the seats (default 12000).
 
+Before a long program, run `loop doctor --deep` — plain `doctor` checks sign-in, only
+`--deep` exercises a real seat launch with the run's default model; on a free Cursor plan
+pass `--verifier-model auto` or the reviewer seat refuses every named-model launch. A
+conversation whose first Cursor call is refused that way ends immediately as
+`verifier-unlaunchable`, converged false and nothing written, with the remedy in
+`seatOutages.cursor`; a Cursor account that is merely out of quota proceeds with the seat
+unavailable and is named in the same summary at whatever terminal the run reaches.
+
 A fresh `--out` written inside `--target` leaves its plan/gate/queue files untracked, so
 commit them (or keep `--out` outside the target) before `loop queue`, which requires a
 clean tree.

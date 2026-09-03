@@ -14,6 +14,7 @@ import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DOCTOR_CHECKS } from '../src/doctor-checks.js';
 import { runDoctor } from '../src/doctor.js';
+import { DEFAULT_VERIFIER_MODEL } from '../src/verifier.js';
 
 const fakeGit = fileURLToPath(new URL('../fixtures/fake-doctor-git.mjs', import.meta.url));
 const fakeCodex = fileURLToPath(new URL('../fixtures/fake-doctor-codex.mjs', import.meta.url));
@@ -669,5 +670,52 @@ test('doctor all-fail output is byte-identical to its committed golden', async (
     assertGoldenEquality(result.output, expected);
   } finally {
     removeFixture(fixture.root);
+  }
+});
+
+test('the deep cursor probe launches the model the runs use, not the account default', async () => {
+  // Peer-verified on this exact machine: a probe that names no model rides
+  // whatever the Cursor account defaults to and reports PASS, while every real
+  // run asks for DEFAULT_VERIFIER_MODEL and is refused ("Named models
+  // unavailable Free plans can only use Auto"). A green check that never
+  // exercised what the runs do is a check that did not run reading as one that
+  // passed — so the probe's argv is pinned to the run default.
+  const root = mkdtempSync(join(process.cwd(), '.ccc-doctor-probe-model-'));
+  const plugin = join(root, 'superpowers');
+  mkdirSync(join(plugin, '.cursor-plugin'), { recursive: true });
+  writeFileSync(join(plugin, '.cursor-plugin', 'plugin.json'), JSON.stringify({
+    name: 'superpowers', version: '6.0.2',
+  }));
+  mkdirSync(join(plugin, 'skills', 'using-superpowers'), { recursive: true });
+  writeFileSync(join(plugin, 'skills', 'using-superpowers', 'SKILL.md'), '# skill\n');
+  const calls = [];
+  const spawn = async (bin, args, options) => {
+    calls.push({ bin, args });
+    return {
+      code: 0,
+      timedOut: false,
+      stdout: readFileSync(join(options.cwd, 'ccc-doctor-read.txt'), 'utf8'),
+      stderr: '',
+    };
+  };
+  try {
+    const cursor = await doctorCheck('cursor-read-probe').probe({
+      bins: { agent: 'agent' },
+      deep: true,
+      state: { agentPresent: true, workspace: root },
+      env: { URO_SUPERPOWERS_DIR: plugin },
+      home: root,
+      spawn,
+    });
+    assert.equal(cursor.status, 'PASS');
+    const launches = calls.filter(({ bin }) => bin === 'agent');
+    assert.equal(launches.length, 1, 'positive control: the deep probe must actually launch the agent');
+    const args = launches[0].args;
+    const modelIndex = args.indexOf('--model');
+    assert.notEqual(modelIndex, -1, 'the probe must request a model explicitly');
+    assert.equal(args[modelIndex + 1], DEFAULT_VERIFIER_MODEL,
+      'the probe must request the same model every run requests');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });

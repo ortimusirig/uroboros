@@ -24,6 +24,43 @@ export const PLAN_LIMIT = 8000;
 
 const FORBIDDEN = ['--force', '--yolo', '-f', '--approve-mcps'];
 
+/**
+ * Why a Cursor seat could not run, and what the caller can actually do about it.
+ *
+ * Two entirely different outages wear the same `ActionRequiredError` coat on the
+ * wire, so the shared prefix must never be what decides — only the
+ * DISCRIMINATING substring does. A CONFIG refusal is deterministic and
+ * caller-fixable in one flag; a QUOTA exhaustion needs the account renewed and
+ * no flag can buy it. Offering the wrong one of those two sends the caller down
+ * a dead end, which is worse than saying nothing.
+ *
+ * Peer-observed verbatim texts, captured from real failures:
+ *   "Named models unavailable Free plans can only use Auto"  -> config-refusal
+ *   "You've hit your usage limit"                            -> quota-exhausted
+ *   bare "ActionRequiredError"                               -> account-action
+ *
+ * Anything else returns null: an unrecognised crash is not diagnosed, and no
+ * remedy is invented for it.
+ *
+ * This lives here rather than in the conversation engine because the knowledge
+ * is cursor-agent's own error vocabulary — the same module that owns its argv
+ * and its stream parsing — and because both the engine and `doctor` reach it
+ * from here without a cycle (verifier.js imports nothing that reaches back).
+ */
+export function classifySeatOutage(message) {
+  const text = String(message ?? '');
+  if (/Named models unavailable|Free plans can only use Auto/i.test(text)) {
+    return { kind: 'config-refusal', remedy: 'free Cursor plans accept only auto — rerun with --verifier-model auto' };
+  }
+  if (/usage limit|out of usage/i.test(text)) {
+    return { kind: 'quota-exhausted', remedy: 'the Cursor account is out of usage — renew the plan or wait for the quota cycle' };
+  }
+  if (/ActionRequiredError/i.test(text)) {
+    return { kind: 'account-action', remedy: 'the Cursor account needs attention — run loop doctor --deep' };
+  }
+  return null;
+}
+
 export const VERIFIER_PLUGIN_DIR = fileURLToPath(new URL('../cursor-plugin', import.meta.url));
 
 export function assertNoForbiddenFlags(args) {

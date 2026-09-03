@@ -257,6 +257,12 @@ base, and one token budget. The engine does not call a planner model.
 
 For a new project, `init` creates starter `plan.md` and `gate.json` files without overwriting
 either. Use `doctor` for prerequisites and opt into real write/read probes with `doctor --deep`.
+Before a long program, run `loop doctor --deep` — plain `doctor` checks sign-in, only `--deep`
+exercises a real seat launch with the run's default model; on a free Cursor plan pass
+`--verifier-model auto` or the reviewer seat refuses every named-model launch. That refusal on a
+conversation's first Cursor call ends it immediately as `verifier-unlaunchable` (converged false,
+nothing written, remedy in `seatOutages.cursor`); an out-of-quota account instead proceeds with
+the seat unavailable and is named in the same summary at the terminal.
 Use `status` or the read-only `dashboard` to observe a run, `publish` only after planner review,
 `prune --dry-run` to inspect scratch retention, and `help` to print the command surface.
 

@@ -17,6 +17,7 @@ import {
   assertUsablePrompt,
   buildCursorArgs,
   buildCursorReviewArgs,
+  classifySeatOutage,
   DEFAULT_PROMPT,
   DEFAULT_VERIFIER_MODEL,
   extractPlanArtifact,
@@ -960,4 +961,53 @@ test('a long review keeps its whole text for the judged parse — no head-slice'
   assert.ok(r.findings.length > 8000, 'the full text is retained');
   assert.match(r.findings, /S1 P0: the tail suggestion survives/);
   assert.match(r.findings, /AGREE: no/);
+});
+
+// ---------------------------------------------------------------------------
+// Seat outage classification. Two very different outages wear the same
+// `ActionRequiredError` coat on the wire, and the shared prefix is exactly what
+// must NOT decide: only the discriminating substring does. Every fixture below
+// is a verbatim capture from a real cursor-agent failure on the peer's machine.
+// ---------------------------------------------------------------------------
+
+test('a free-plan model refusal is config, not quota, and names the flag that fixes it', () => {
+  const outage = classifySeatOutage(
+    'cursor draft seat failed to launch: ActionRequiredError: Named models unavailable Free plans can only use Auto. Switch to Auto or upgrade plans to continue.',
+  );
+  assert.equal(outage.kind, 'config-refusal');
+  assert.match(outage.remedy, /--verifier-model auto/);
+});
+
+test('an exhausted account is quota, not config, and names renewal — never a flag', () => {
+  const outage = classifySeatOutage("ActionRequiredError: You've hit your usage limit");
+  assert.equal(outage.kind, 'quota-exhausted');
+  assert.match(outage.remedy, /renew/i);
+  assert.doesNotMatch(outage.remedy, /--verifier-model/,
+    'a flag cannot buy quota; offering one would send the caller down a dead end');
+  assert.equal(classifySeatOutage('the account is out of usage').kind, 'quota-exhausted');
+});
+
+test('the shared ActionRequiredError prefix alone is an account action, not a diagnosis', () => {
+  const outage = classifySeatOutage('cursor draft seat failed to launch: ActionRequiredError');
+  assert.equal(outage.kind, 'account-action');
+  assert.match(outage.remedy, /doctor --deep/);
+});
+
+test('an unclassifiable failure returns null — no invented remedy', () => {
+  assert.equal(classifySeatOutage('spawn ENOENT'), null);
+  assert.equal(classifySeatOutage(''), null);
+  assert.equal(classifySeatOutage(undefined), null);
+  assert.equal(classifySeatOutage(null), null);
+});
+
+test('the discriminating substring decides, never the shared prefix', () => {
+  // Positive control on the discrimination itself: the same prefix in front of
+  // each text must still reach three different kinds.
+  const prefix = 'cursor review seat failed to launch: ActionRequiredError: ';
+  assert.equal(classifySeatOutage(`${prefix}Named models unavailable`).kind, 'config-refusal');
+  assert.equal(classifySeatOutage(`${prefix}You've hit your usage limit`).kind, 'quota-exhausted');
+  assert.equal(classifySeatOutage(`${prefix}please sign in again`).kind, 'account-action');
+  // A config refusal that never mentions ActionRequiredError is still a config
+  // refusal — the prefix is not load-bearing in either direction.
+  assert.equal(classifySeatOutage('Free plans can only use Auto').kind, 'config-refusal');
 });
