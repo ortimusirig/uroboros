@@ -13,9 +13,9 @@ import {
   resolveExecutorThresholds,
 } from './stall-watchdog.js';
 
-export const DEFAULT_EXECUTOR_MODEL = 'gpt-5.6-sol';
+export const DEFAULT_EXECUTOR_MODEL = 'gpt-6-astra';
 
-export const DEFAULT_EXECUTOR_EFFORT = 'xhigh';
+export const DEFAULT_EXECUTOR_EFFORT = 'high';
 // Enough to carry a stack trace or an API error body; the failing path has no
 // other record of the cause, so this is deliberately generous rather than a
 // token-saving trim.
