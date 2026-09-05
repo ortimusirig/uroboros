@@ -56,8 +56,8 @@ async function runFakeExecutorStream(lines) {
 test('buildCodexArgs pins model, effort, disables MCP, and defaults to workspace-write', async () => {
   // The pin belongs here, spelled out: a test that avoided the literal would stop being
   // able to detect a changed default, which is the only thing this line is for.
-  assert.equal(DEFAULT_EXECUTOR_MODEL, 'gpt-5.6-sol');
-  assert.equal(DEFAULT_EXECUTOR_EFFORT, 'xhigh');
+  assert.equal(DEFAULT_EXECUTOR_MODEL, 'gpt-6-astra');
+  assert.equal(DEFAULT_EXECUTOR_EFFORT, 'high');
   const hadSandboxOverride = Object.hasOwn(process.env, 'URO_CODEX_SANDBOX');
   const sandboxOverride = process.env.URO_CODEX_SANDBOX;
   delete process.env.URO_CODEX_SANDBOX;
