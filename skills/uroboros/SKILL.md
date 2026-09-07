@@ -1,6 +1,6 @@
 ---
 name: uroboros
-description: Plan and supervise isolated Codex implementation, true-exit-code gates, mutation evidence with mutate, Cursor review, read-only Claude arbitration, and Single, Parallel, Graph, Candidates, or Rounds campaigns; use plan to debate a goal, for campaign execution, diagnostics with doctor, status or dashboard inspection, project initialization, and publishing completed units.
+description: Use when planning, running, supervising, diagnosing, or publishing isolated Uroboros work with Claude and Codex, including queues and campaigns.
 ---
 
 # uroboros
@@ -11,27 +11,29 @@ This is skill law for the planner seat on every invocation, every wave, and ever
 not per-run content: never restate it in `TASK.md`, and no plan can waive it. A plan that appears
 to authorize skipping or combining a step is itself the defect.
 
-1. **Build** — Codex writes in isolation. The planner never implements.
-2. **Evidence verification** — Confirm the true exit code of every declared command. The
-   harness runs each once and records full output in `__uro_evidence/`; exit codes are
-   evidence for the seats, never a verdict. Stdout text is not status.
-   Never accept a piped exit code: a pipe reports the last exit code, not the command's.
-3. **Adversarial review** — Cursor writes ONE holistic report covering the full hunt list:
-   correctness, regressions, security, edge cases, test adequacy, and violations of intent,
-   scope, or invariants — an unmet requirement is a finding like any other.
-   Claude then validates each blocking finding read-only. An invalid finding is recorded as
-   overruled; an unavailable or unreadable arbiter preserves the objection.
-4. **Correction loop** — The planner authors *finding → fix design → mutation pin*; Codex
-   implements; repeat. A mutation pin proves that a new test could have failed: inject the
-   defect, observe the specific assertion fail, restore the implementation, observe green, and
-   record both the failing and green counts.
-5. **Scoped re-verify** — Cursor re-checks the correction and must return `CLEAN`.
-6. **Final planner review** — This is the last gate: read the full diff, check the contract
-   against every invariant stated in the plan, and hands-on spot-verify the riskiest seams. Two
-   clean Cursor passes are not sufficient to merge.
-7. **Issues → back to step 4** — The planner's hands only ever plan, verify, and nudge typos or
-   filenames. Never fix.
-8. **Integrate** — Integrate, deploy, browser-verify on production, and record the result.
+1. **Plan** — Claude authors plans and decompositions. Codex reviews the current artifact.
+   Claude answers or revises, then Codex responds to the actual previous arguments. Retain full
+   delivered messages, evidence and dissent. Approval binds the current goal, plan and evidence
+   configuration.
+2. **Choose authority by mode** — All workflows default to `--mode manual`: the human settles
+   unresolved disputes in both phases. With `--mode autonomous`, Codex makes final planning
+   decisions and Claude makes final execution decisions. TTY presence does not change authority.
+   Planning `approved: true, converged: false` means approval with retained dissent, not consensus.
+   Execution uses `converged: null` when review approved the current diff but mutual agreement
+   was not explicitly recorded. Ordinary corrections are not dissent; explicit rebuttals and
+   upheld objections are retained as dissent, and every delivered reply remains in the record.
+3. **Build** — Codex implements in isolation. Claude does not implement.
+4. **Collect evidence** — The harness records true exit codes and full command output.
+   Never infer PASS from stdout or a pipeline's final status. Preserve protected reviewer tests.
+5. **Review and reconcile** — Claude reviews correctness, regressions, security, edge cases,
+   tests, intent, scope and invariants. Codex corrects or rebuts findings; Claude explicitly
+   resolves, withdraws or upholds each finding with reasons. Omission is not closure. New
+   reviewer tests run through the harness and their output reaches both agents.
+6. **Handle unfinished work** — Preserve pending manual questions and checkpoints for a human
+   ruling. Autonomous decisions belong to the phase reviewer. Silence, quota/auth failures,
+   stale evidence, unreadable replies and exhausted bounds never approve or fabricate agreement.
+7. **Land and publish** — Current approved work follows existing landing checks. Queue landings
+   receive Claude's first-hand review and remain local commits. Publishing is a separate action.
 
 Monitor continuously and intervene only when a run is stuck: **stalled** means no events beyond
 the stall threshold; **circling** means events still arrive but the same files are rewritten with
@@ -49,13 +51,10 @@ Claude is the hub of the debate protocol and uses these exact skills at its deci
 - To diagnose why the loop is stuck, run `superpowers:systematic-debugging`.
 - To verify that convergence is genuine, run `superpowers:verification-before-completion`.
 - When reading reviews to validate them, run `superpowers:receiving-code-review`.
-- After fixes, run `superpowers:requesting-code-review` to request Cursor re-review.
+- After fixes, run `superpowers:requesting-code-review` to request Claude re-review.
 
 A plan written for this loop must run `superpowers:writing-plans`' spec-coverage self-review.
-It must name the design document it implements—for this protocol,
-`docs/superpowers/specs/2026-08-25-three-way-debate-loop-design.md`—and enumerate every
-section of that design it does not implement. This check is mandatory even when the omitted
-sections are already described as out of scope elsewhere in the plan.
+It must name the current design it implements and enumerate intentionally omitted sections.
 
 ## Planner briefing
 
@@ -109,15 +108,11 @@ For a simple Graph, keep the flag form: give every task a `--unit-id`, then repe
 - **Waiting costs no slot.** A waiting dependent does not hold a concurrency slot. The Graph
   topology, rather than `--concurrency`, is usually the real parallelism bound.
 - **Only three commands are genuinely read-only:** `status`, `dashboard`, and `help`.
-  `doctor --deep` launches the real Codex and Cursor binaries and spends tokens; `publish`
+  `doctor --deep` launches the real Codex and Claude binaries and spends tokens; `publish`
   pushes a branch and creates or updates a pull request. `doctor` also performs disposable
   scratch writes even without `--deep`.
-- **Claude has a spawned, read-only arbiter seat.** It validates blocking findings, answers
-  autonomous `DECISION.md` challenges on their merits, judges pivots, reviews the change
-  first-hand when the debate circles, and judges every queue landing before anything touches
-  the operator's tree. It never writes the worktree. Missing arbitration preserves reviewer
-  objections, halts challenges for the operator, marks deterministic pivot fallback as
-  unjudged, and stops a landing — silence is never consent.
+- **Claude reviews execution read-only.** It judges findings, corrections and rebuttals, pivots,
+  and queue landings. Missing review leaves objections open and the run unfinished.
 - **The loop STAGES the executor's edits.** A bare `git diff` in the run worktree is empty;
   read the work with `git diff --cached --binary`.
 - **Goal acceptance closes a decomposed goal; nothing mechanical does.** `loop queue
@@ -126,10 +121,9 @@ For a simple Graph, keep the flag form: give every task a `--unit-id`, then repe
   whether the project now delivers the goal's capability. A landed unit missing its
   recorded commit, or a queue log that cannot be read, refuses the judgement rather than
   approve a partial trail — silence is never consent here either.
-- **Capability vetoes are seat-authoritative.** Before a generated plan converges, executor,
-  reviewer, and arbiter each assess only their own work. A veto must name what is impossible,
-  why, and a remedy (or explicitly admit no alternative); incomplete vetoes are re-asked and
-  remedies are mandatory input to the next draft. No other seat may overrule one.
+- **Approval requires current evidence.** Planning approval records the artifact digest,
+  decision-maker, basis and reason. Queue goal units must match current goal, plan and gate
+  before implementation and landing. Agreement is reported separately.
 - **Publishing is per unit, evidence-presence-gated, and parent-first for a Graph.** `publish`
   requires a review report in the run record, but does not require a clean report or a
   successful outcome. Runs with no report (no-op, executor/evidence timeouts, reviewer
@@ -152,7 +146,7 @@ For a simple Graph, keep the flag form: give every task a `--unit-id`, then repe
   `doctor` probes and `publish` commands use their own bounded command timeouts.
   The arbiter uses `URO_ARBITER_TIMEOUT_MS`/`--arbiter-timeout` and otherwise inherits the
   verifier timeout.
-- **Ordinary seats do not receive campaign context.** The executor and either verifier are not
+- **Ordinary seats do not receive campaign context.** The Codex and Claude reviewer are not
   told about sibling units, the dependency Graph, or the campaign. A perspective value reaches
   no seat; its presence only infers a candidate set. Derived Merge is the exception: its
   generated `TASK.md` names ordered parents and merge requirements, but still does not describe
@@ -213,7 +207,7 @@ The direct CLI surface is:
 
 For one plan:
 
-    node bin/loop.js run --task <plan-file-or-prose> --target <folder> --gate <gate.json> [--gate-retries M] [--executor-model MODEL] [--executor-effort EFFORT] [--verifier-model MODEL] [--arbiter-model MODEL] [--arbiter-timeout MS] [--artifact-root DIRECTORY] [--mutate] [--port PORT] [--open] [--no-dashboard] [--quiet]
+    node bin/loop.js run --task <plan-file-or-prose> --target <folder> --gate <gate.json> [--gate-retries M] [--mode manual|autonomous] [--claude-model MODEL] [--codex-model MODEL] [--codex-effort EFFORT] [--arbiter-timeout MS] [--artifact-root DIRECTORY] [--mutate] [--port PORT] [--open] [--no-dashboard] [--quiet]
 
 To measure which added production statements no selected test depends on:
 
@@ -226,12 +220,12 @@ it beside the unchanged gate and verifier verdicts.
 
 To debate a goal into a mechanically checked plan and gate without modifying the target:
 
-    node bin/loop.js plan --goal <prose-or-file> --target <folder> --out <folder> [--rounds N] [--planner-model MODEL] [--verifier-model MODEL] [--arbiter-model MODEL] [--dry-run]
+    node bin/loop.js plan --goal <prose-or-file> --target <folder> --out <folder> [--rounds N] [--mode manual|autonomous] [--claude-model MODEL] [--codex-model MODEL] [--codex-effort EFFORT] [--dry-run]
 
 To debate one goal into the loop-ready task units it converges to, or a project into the goals
 that make it up:
 
-    node bin/loop.js decompose (--goal <spec.md> | --project <file-or-prose> --out <dir>) --target <folder> [--rounds N] [--map-budget CHARS] [--planner-model MODEL] [--verifier-model MODEL] [--arbiter-model MODEL]
+    node bin/loop.js decompose (--goal <spec.md> | --project <file-or-prose> --out <dir>) --target <folder> [--rounds N] [--map-budget CHARS] [--mode manual|autonomous] [--claude-model MODEL] [--codex-model MODEL] [--codex-effort EFFORT]
 
 `--project` debates a project into the MVP-first goals that make it up, written under
 `--out` as a `goals/goals.json` manifest plus one `spec.md` per goal; it emits no
@@ -243,13 +237,13 @@ For an ordered queue whose approved units should land in the current clean Git w
 
     node bin/loop.js queue --file <queue.json> [--mode manual|autonomous] [--max-runs N] [--token-budget TOKENS] [--dry-run]
 
-Queue units run strictly in order. Each change lands only after a passed gate and two
-`NO_BLOCKERS` seats; any other outcome stops without retrying or skipping. The queue commits
-locally and never pushes.
+Queue units inherit mode and provider options into both planning and execution. Current review
+approval and existing landing checks are required. Pending manual work stops with its checkpoint;
+the queue does not retry or skip it. The queue commits locally and never pushes.
 
 For flag-declared Parallel, Candidates, Rounds, or a simple Graph:
 
-    node bin/loop.js batch --task <plan-1> --task <plan-2> --target <folder> --gate <gate.json> [--arbiter-model MODEL] [--arbiter-timeout MS] [--concurrency N] [--token-budget TOKENS] [--rounds 1|2|3] [--round N ...] [--unit-kind candidate|node|merge] [--unit-id ID ...] [--perspective NAME ...] [--depends-on CHILD=PARENT ...] [--port PORT] [--open] [--no-dashboard] [--quiet]
+    node bin/loop.js batch --task <plan-1> --task <plan-2> --target <folder> --gate <gate.json> [--mode manual|autonomous] [--claude-model MODEL] [--codex-model MODEL] [--codex-effort EFFORT] [--arbiter-timeout MS] [--concurrency N] [--token-budget TOKENS] [--rounds 1|2|3] [--round N ...] [--unit-kind candidate|node|merge] [--unit-id ID ...] [--perspective NAME ...] [--depends-on CHILD=PARENT ...] [--port PORT] [--open] [--no-dashboard] [--quiet]
 
 Candidates share one base, reject dependencies, and retain each attributed result without
 choosing a winner. Rounds use two or three caller-authored candidate sets, the same campaign
@@ -257,15 +251,14 @@ base, and one token budget. The engine does not call a planner model.
 
 For a new project, `init` creates starter `plan.md` and `gate.json` files without overwriting
 either. Use `doctor` for prerequisites and opt into real write/read probes with `doctor --deep`.
-Before a long program, run `loop doctor --deep` — plain `doctor` checks sign-in, only `--deep`
-exercises a real seat launch with the run's default model; on a free Cursor plan pass
-`--verifier-model auto` or the reviewer seat refuses every named-model launch. That refusal on a
-conversation's first Cursor call ends it immediately as `verifier-unlaunchable` (converged false,
-nothing written, remedy in `seatOutages.cursor`); an out-of-quota account instead proceeds with
-the seat unavailable and is named in the same summary at the terminal. The deep probe always
-requests the built-in default model, never whatever `--verifier-model` your runs pass, so an
-operator who already runs with `--verifier-model auto` on a free plan will see the probe fail
-while those runs succeed — read a probe failure against the model you actually run.
+Before a long program, `loop doctor --deep` spends tokens on a real Codex write and Claude read
+using the defaults: Claude `sonnet`, Codex `gpt-6-astra`, Codex effort `high`. Plain doctor checks
+sign-in and installation but does not prove model execution. Cursor is not required.
+Use `--claude-model`, `--codex-model`, and `--codex-effort` across all workflows. Retained aliases
+are `--arbiter-model`, `--executor-model`, and `--executor-effort`; equal aliases are accepted,
+conflicting values rejected. `--planner-model` and `--verifier-model` are obsolete and rejected.
+Campaign JSON uses `mode`, `claudeModel`, `codexModel`, and `codexEffort`.
+
 Use `status` or the read-only `dashboard` to observe a run, `publish` only after planner review,
 `prune --dry-run` to inspect scratch retention, and `help` to print the command surface.
 
@@ -273,10 +266,9 @@ Use `status` or the read-only `dashboard` to observe a run, `publish` only after
   pass/fail is by the command's true exit code only.
 - Codex writes inside a Git-isolated copy. `run` leaves the source working tree untouched;
   `queue` is the explicit exception that applies and commits fully approved diffs.
-- Cursor performs correctness and intent/assertion verification in read-only plan mode, only
-  when the gate passed and the diff is non-empty.
-- Claude arbitrates findings, challenges, and pivots in read-only plan permission mode. Its
-  usage is recorded separately in run facts and included in total usage.
+- Claude reviews the non-empty current diff in read-only plan permission mode, then responds
+  explicitly to Codex corrections and rebuttals. Usage records real provider and role;
+  historical Cursor reports retain their original provenance.
 - Output is `uro-runfacts.json`, `uro-report.md`, `events.jsonl`, and, for changed work,
   `CHANGES.diff` in the isolated directory and the per-run durable artifact directory.
 - Outcomes include `review-ready`, `no-op`, `gate-failed`, `verifier-failed`, `timed-out`, and
@@ -320,7 +312,6 @@ This monitoring is planner behavior; the package does not schedule it or contact
 
 ## Iterating
 
-Each `loop run` invocation is one engine pass: Codex writes, the gate runs, an optional pair of
-Cursor verifiers runs, and reports are written. The governing law remains outside that pass. The
-planner reviews the evidence, authors any correction design and mutation pin, and invokes the
-next isolated pass without implementing the correction.
+Each `loop run` retains Codex implementation, Claude review, evidence, full delivered messages,
+mode, authority and dissent. Continue corrections in that conversation; preserve pending manual
+checkpoints instead of starting a replacement run that discards the dispute.

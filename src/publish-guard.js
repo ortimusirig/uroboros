@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { basename, dirname, join, relative } from 'node:path';
 import { HARNESS_ARTIFACTS } from './artifacts.js';
 import { commandExists, spawnCapture } from './spawn.js';
-import { buildCursorArgs } from './verifier.js';
+import { buildClaudeArgs, parseArbiterStream } from './arbiter.js';
 import { readEnv } from './env-compat.js';
 
 export function assembleProseSurface(content) {
@@ -288,42 +288,23 @@ function finalContextualToken(text) {
 }
 
 function parseContextualVerdict(streamText) {
-  let result = null;
-  let assistant = null;
-  let plan = null;
-  for (const line of String(streamText ?? '').split(/\r?\n/)) {
-    if (line.trim() === '') continue;
-    let event;
-    try { event = JSON.parse(line); } catch { continue; }
-    if (event.type === 'result' && !event.is_error && typeof event.result === 'string') {
-      result = event.result;
-    }
-    if (event.type === 'assistant' && Array.isArray(event.message?.content)) {
-      for (const part of event.message.content) {
-        if (part?.type === 'text' && typeof part.text === 'string') assistant = part.text;
-      }
-    }
-    const args = event.tool_call?.createPlanToolCall?.args;
-    if (args && typeof args === 'object' && !Array.isArray(args)) {
-      plan = [args.name, args.overview, args.plan]
-        .filter((value) => typeof value === 'string')
-        .join('\n');
-    }
-  }
-  return finalContextualToken(result)
-    ?? finalContextualToken(assistant)
-    ?? finalContextualToken(plan);
+  const parsed = parseArbiterStream(streamText);
+  if (parsed.verdict !== 'ANSWERED') return null;
+  const tokens = parsed.answer.split(/\r?\n/).map(finalContextualToken).filter(Boolean);
+  if (new Set(tokens).size !== 1) return null;
+  return finalContextualToken(parsed.answer);
 }
 
-async function runCursorContextualVerifier(proseFilePath, runCommand) {
+async function runClaudeContextualVerifier(proseFilePath, runCommand) {
   const proseName = basename(proseFilePath);
   const prompt = `Read ${proseName} and review it for credentials, personal data, customer identity, or non-public internal details. Do not repeat sensitive values. Make the final line exactly CLEAN or exactly CONFIDENTIAL.`;
-  const result = await runCommand('agent', buildCursorArgs({ prompt }), {
+  const result = await runCommand('claude', buildClaudeArgs({ prompt }), {
     cwd: dirname(proseFilePath),
+    input: prompt,
     timeoutMs: 60_000,
   });
   return {
-    verdict: parseContextualVerdict(result?.stdout),
+    verdict: result?.code === 0 && !result?.timedOut ? parseContextualVerdict(result?.stdout) : null,
     text: '',
     code: result?.code,
   };
@@ -390,7 +371,7 @@ export async function guardPublish({
     result.warnings.push(...scanners.warnings);
 
     const verifier = adapters.runVerifier
-      ?? ((path) => runCursorContextualVerifier(path, runCommand));
+      ?? ((path) => runClaudeContextualVerifier(path, runCommand));
     const contextual = await runContextualReview({ proseFilePath, runVerifier: verifier });
     result.findings.push(...contextual.findings);
   } catch {

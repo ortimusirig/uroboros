@@ -120,7 +120,7 @@ test('a deliberately skipped embedding reviewer is not reported as a Claude invo
   const fixture = harness('review-skipped', { adapters: { runReview: null } });
   t.after(() => rmSync(fixture.root, { recursive: true, force: true }));
   const result = await executeRun(fixture.options);
-  assert.equal(result.participation.claude.attempted, 0);
+  assert.equal(Object.hasOwn(result.participation, 'claude'), false);
   assert.equal(result.messages.some((message) => message.speaker === 'claude'), false);
 });
 

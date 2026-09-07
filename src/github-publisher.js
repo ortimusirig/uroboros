@@ -119,8 +119,11 @@ export function buildPullRequestContent({ facts, task }) {
     `- Outcome: ${facts.outcome}`,
     `- Evidence: ${(facts.evidence ?? []).length} command run(s), ${(facts.evidence ?? []).filter((entry) => entry.code !== 0).length} non-zero`,
     `- Review findings (last round): ${review.findings.length} (${review.blocking} blocking)`,
-    `- Executor tokens: ${usageLine(facts.tokens?.executor)}`,
-    `- Verifier tokens: ${usageLine(facts.tokens?.verifier)}`,
+    ...(Array.isArray(facts.participants)
+      ? facts.participants.filter(p => p.usage !== null).map(p => `- ${p.provider} / ${p.phase} / ${p.role} tokens: ${usageLine(p.usage)}`)
+      : [`- Executor tokens: ${usageLine(facts.tokens?.executor)}`, `- Verifier tokens: ${usageLine(facts.tokens?.verifier)}`]),
+    ...(facts.phase ? [`- Phase/mode: ${facts.phase}/${facts.interactionMode}; approved: ${facts.approved}; agreement: ${facts.converged ?? 'not recorded'}`,
+      ...(facts.approval ? [`- Decision: ${facts.approval.decidedBy}; ${facts.approval.basis}; digest ${facts.approval.artifactDigest}; ${facts.approval.reason}`] : [])] : []),
     `- Total tokens: ${usageLine(facts.tokens?.total)}`,
     '',
     `CCC run: ${facts.runId}`,

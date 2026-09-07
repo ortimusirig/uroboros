@@ -14,14 +14,14 @@ Before any network call, the confidentiality guard runs four layers:
 | blocklist | your file, literal substring | yes | yes | yes |
 | gitleaks | pattern scanner | yes | yes | yes |
 | trufflehog | pattern scanner | yes | yes | advisory |
-| contextual review | Cursor `CLEAN`/`CONFIDENTIAL` verdict | yes | no | yes |
+| contextual review | Claude `CLEAN`/`CONFIDENTIAL` verdict | yes | no | yes |
 
-The contextual review is blocking. If Cursor cannot be launched or does not return a usable
-verdict, publishing is refused, so Cursor is a hard publish dependency. `gitleaks` must also
+The contextual review is blocking. If Claude cannot be launched or does not return a usable
+verdict, publishing is refused, so Claude is a required publish dependency. `gitleaks` must also
 be on `PATH`. `trufflehog` is optional: its absence is reported as a warning and its findings
 are advisory. A missing or unusable blocking prerequisite refuses the publish instead of
 silently skipping its check. `doctor` reports scanner and blocklist readiness under optional
-features, while its standard Cursor check covers the contextual-review dependency.
+features, while its standard Claude check covers the contextual-review dependency.
 
 Set `URO_PUBLISH_BLOCKLIST` to a readable, non-empty blocklist kept outside the repository so
 its confidential identifiers cannot themselves be published. The file is newline-delimited
@@ -123,9 +123,7 @@ detects new runs and appended records while open. It never writes an artifact or
 process. The run process imports only the small launcher and starts the server as a detached
 child; it never imports the dashboard server or view code.
 
-When verification runs, Cursor gets separate correctness and intent/assertion-audit turns.
-The correctness review stays in `verifierFindings`; the intent review is retained separately
-in `intentVerifierFindings`. Both are printed in `uro-report.md`, and the overall verdict is
-clean only when both passes return `NO_BLOCKERS`.
-Both turns select the shipped `/uro-verify` skill through `--plugin-dir`; each one-line prompt
-still states its files, audit, and verdict contract if skill loading fails.
+Claude returns one holistic review bundle. The harness materializes the report and protected
+tests and binds their receipt to the current diff. Publication's contextual privacy check uses
+Claude read-only through stdin and requires an explicit successful terminal result ending in
+`CLEAN` or `CONFIDENTIAL`. Failed or empty terminal results cannot borrow earlier assistant text.

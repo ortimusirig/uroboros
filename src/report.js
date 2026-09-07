@@ -5,6 +5,38 @@ import { DEFAULT_EXECUTOR_EFFORT, DEFAULT_EXECUTOR_MODEL } from './executor.js';
 import { DEFAULT_VERIFIER_MODEL } from './verifier.js';
 import { DEFAULT_ARBITER_MODEL } from './arbiter.js';
 import { addUsage, EMPTY_USAGE } from './usage.js';
+import { encodeRecordedText, decodeRecordedText } from './execution-record.js';
+
+export function participantsFromMessages(messages, models = {}) {
+  const participants = new Map();
+  for (const message of messages) {
+    const response = message.response ?? message.transport;
+    if (message.reused || message.skipped || response?.reused || response?.skipped) continue;
+    const provider = message.provider ?? message.speaker;
+    if (!['claude', 'codex'].includes(provider)) continue;
+    const { phase, role } = message;
+    const key = `${provider}/${phase}/${role}`;
+    const entry = participants.get(key) ?? { provider, phase, role, model: models[provider] ?? null,
+      attempted: 0, observed: 0, usageReported: 0, usage: null };
+    entry.attempted += response?.attempts?.length || 1;
+    if (message.content || response?.stdout) entry.observed++;
+    if (response?.usage != null) {
+      entry.usageReported++;
+      entry.usage = addUsage(entry.usage, response.usage);
+    }
+    participants.set(key, entry);
+  }
+  return [...participants.values()];
+}
+
+export function recordedMessage(message) {
+  return { ...message, provider: message.provider ?? message.speaker,
+    recordedContent: message.recordedContent ?? encodeRecordedText(message.content ?? '') };
+}
+
+function messageText(message) {
+  return message.recordedContent ? decodeRecordedText(message.recordedContent).text : message.content ?? '';
+}
 
 export function buildRunFacts({
   runId,
@@ -38,6 +70,8 @@ export function buildRunFacts({
   debate = null,
   skills = null,
   superpowers = null,
+  phase, interactionMode, approved, converged, approval = null, authority,
+  messages, planningMessages = [], dissent = [],
 }) {
   const facts = {
     runId,
@@ -99,6 +133,24 @@ export function buildRunFacts({
     facts.campaignUnitKind = campaignUnitKind;
     if (perspective !== undefined) facts.perspective = perspective;
   }
+  if (phase !== undefined) {
+    Object.assign(facts, { phase, interactionMode, approved, converged, approval, authority,
+      messages: (messages ?? []).map(recordedMessage), planningMessages: planningMessages.map(recordedMessage),
+      dissent: dissent.map(recordedMessage) });
+    facts.participants = participantsFromMessages([...planningMessages, ...(messages ?? [])], {
+      claude: models.claude ?? models.arbiter ?? DEFAULT_ARBITER_MODEL,
+      codex: models.codex ?? models.executor ?? DEFAULT_EXECUTOR_MODEL,
+    });
+    facts.participation = Object.fromEntries([...new Set(facts.participants.map(p => p.provider))].map(provider => {
+      const entries = facts.participants.filter(p => p.provider === provider);
+      return [provider, { attempted: entries.reduce((n, p) => n + p.attempted, 0),
+        observed: entries.reduce((n, p) => n + p.observed, 0), usageReported: entries.reduce((n, p) => n + p.usageReported, 0),
+        roles: [...new Set(entries.map(p => p.role))] }];
+    }));
+    // Old records retain legacy buckets. New records expose only actual roles.
+    facts.tokens = { total: addUsage(EMPTY_USAGE, tokens.total), participants: facts.participants
+      .filter(p => p.usage !== null).map(({ provider, phase, role, usage }) => ({ provider, phase, role, usage })) };
+  }
   if (unitKind !== undefined) facts.unitKind = unitKind;
   if (merge !== undefined) facts.merge = merge;
   if (mutation !== undefined) facts.mutation = mutation;
@@ -136,6 +188,16 @@ function tokenTableRow(label, usage) {
 }
 
 function tokenLines(facts, style) {
+  if (Array.isArray(facts.participants)) {
+    const rows = facts.participants.filter(p => p.usage !== null);
+    return style === 'table' ? [
+      '| Provider / phase / role | Input | Cached input | Output | Reasoning output | Cache write |',
+      '| --- | ---: | ---: | ---: | ---: | ---: |',
+      ...rows.map(p => tokenTableRow(`${p.provider} / ${p.phase} / ${p.role}`, p.usage)),
+      tokenTableRow('Total', facts.tokens?.total),
+    ] : [...rows.map(p => `- **${p.provider} / ${p.phase} / ${p.role}:** ${formatUsage(p.usage)}`),
+      `- **Total:** ${formatUsage(facts.tokens?.total)}`];
+  }
   if (style === 'table') {
     return [
       '| Seat | Input | Cached input | Output | Reasoning output | Cache write |',
@@ -277,6 +339,23 @@ export function buildReportMarkdown(facts, {
       .join('\n') || '(none recorded)',
   ];
   const nonZeroEvidence = (facts.evidence ?? []).filter((entry) => entry.code !== 0);
+  if (facts.phase !== undefined) {
+    md.push('', '## Decision', '',
+      `Phase: ${facts.phase}; mode: ${facts.interactionMode}; authority: ${facts.authority ?? facts.approval?.decidedBy ?? 'not recorded'}`,
+      `Approved: ${facts.approved}; Converged: ${facts.converged === null ? 'not recorded' : facts.converged}`);
+    if (facts.approval) md.push(`Decision: ${facts.approval.decidedBy}; basis: ${facts.approval.basis}; digest: ${facts.approval.artifactDigest}`,
+      facts.approval.reason);
+    md.push('', '## Delivered conversation');
+    for (const message of [...(facts.planningMessages ?? []), ...(facts.messages ?? [])]) {
+      md.push('', `### ${message.provider ?? message.speaker} / ${message.phase} / ${message.role}`, '',
+        ...messageText(message).split('\n').map(line => `> ${line}`));
+    }
+    if (facts.dissent?.length) {
+      md.push('', '## Retained dissent');
+      for (const message of facts.dissent) md.push('', `${message.provider ?? message.speaker} / ${message.role}`,
+        ...messageText(message).split('\n').map(line => `> ${line}`));
+    }
+  }
   if (nonZeroEvidence.length > 0) {
     md.push(``, `## Evidence — commands that exited non-zero`);
     for (const entry of nonZeroEvidence) {

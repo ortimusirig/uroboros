@@ -85,7 +85,7 @@ test('run facts record per-seat verification evidence and distinct versions', as
     'Codex must use its registry rather than receive a plugin directory');
   assert.equal(facts.superpowers.bypassed, false);
   assert.deepEqual(facts.superpowers.seats, { codex: VERIFIED.seats.codex, claude: VERIFIED.seats.claude });
-  assert.equal(facts.participation.claude.attempted, 0, 'configuration is not observed review participation');
+  assert.equal(Object.hasOwn(facts.participation, 'claude'), false, 'configuration is not observed review participation');
   assert.deepEqual(
     Object.fromEntries(Object.entries(facts.superpowers.seats)
       .map(([seat, value]) => [seat, value.version])),

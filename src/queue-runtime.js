@@ -7,6 +7,7 @@ import {
   relative,
   resolve,
 } from 'node:path';
+import { assertCurrentPlanApproval } from './plan.js';
 import { spawnCapture } from './spawn.js';
 import { parseAcceptanceJudgement, parseLandingJudgement, runArbiter } from './arbiter.js';
 
@@ -25,11 +26,16 @@ function messageFrom(result, fallback) {
   return (result?.stderr || result?.stdout || '').trim() || fallback;
 }
 
+function providerFlags({ claudeModel, codexModel, codexEffort }) {
+  return Object.entries({ 'claude-model': claudeModel, 'codex-model': codexModel, 'codex-effort': codexEffort })
+    .flatMap(([flag, value]) => value === undefined ? [] : ['--' + flag, value]);
+}
+
 function oneLine(value) {
   return String(value).replace(/\s+/g, ' ').trim();
 }
 
-export async function launchLoopRun({ unit, target, mode }, {
+export async function launchLoopRun({ unit, target, mode = 'manual', ...models }, {
   runCommand = spawnCapture,
   loopPath = DEFAULT_LOOP_PATH,
   nodePath = process.execPath,
@@ -44,6 +50,7 @@ export async function launchLoopRun({ unit, target, mode }, {
     '--gate', unit.gate,
     '--mode', mode,
     '--no-dashboard',
+    ...providerFlags(models),
   ], {
     cwd: resolvedTarget,
     env: launchEnvironment(env),
@@ -72,7 +79,7 @@ export async function launchLoopRun({ unit, target, mode }, {
   };
 }
 
-export async function launchLoopPlan({ unit, target }, {
+export async function launchLoopPlan({ unit, target, mode = 'manual', ...models }, {
   runCommand = spawnCapture,
   loopPath = DEFAULT_LOOP_PATH,
   nodePath = process.execPath,
@@ -85,10 +92,12 @@ export async function launchLoopPlan({ unit, target }, {
     '--goal', unit.goal,
     '--target', resolvedTarget,
     '--out', unit.out,
+    '--mode', mode,
+    ...providerFlags(models),
   ], {
     cwd: resolvedTarget,
     env: launchEnvironment(env),
-    // Planning heartbeats stream through live, same as runs: the three-way
+    // Planning heartbeats stream through live, same as runs: the two-agent
     // conversation can deliberate for a long time, and silence must mean
     // stopped, not buffered.
     onStderr: (chunk) => { process.stderr.write(chunk); },
@@ -102,13 +111,15 @@ export async function launchLoopPlan({ unit, target }, {
     throw new Error(`loop plan did not return readable results: ${detail}`);
   }
   if (planResult === null || typeof planResult !== 'object' || Array.isArray(planResult)
+    || typeof planResult.approved !== 'boolean'
     || typeof planResult.converged !== 'boolean'
     || !Number.isSafeInteger(planResult.rounds) || planResult.rounds < 0) {
-    throw new Error('loop plan did not return readable results: convergence or rounds is missing');
+    throw new Error('loop plan did not return readable results: approval, convergence or rounds is missing');
   }
-  if (planResult.converged && result.code !== 0) {
-    throw new Error(`loop plan reported convergence but exited ${result.code}`);
+  if (planResult.approved && result.code !== 0) {
+    throw new Error(`loop plan reported approval but exited ${result.code}`);
   }
+  if (planResult.approved) assertCurrentPlanApproval({ unit, result: planResult, mode });
   return { ...planResult, exitCode: result.code };
 }
 

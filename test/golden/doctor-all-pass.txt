@@ -6,17 +6,14 @@ PASS [required] Node version: 24.9.0 meets >=24
 PASS [required] git usable: git version 2.99.0-doctor-stub
 PASS [required] Codex CLI installed: {{CODEX_BIN}} was found; write ability is reported separately
 PASS [required] Codex signed in: `codex login status` exited 0
-PASS [required] Cursor agent installed: {{AGENT_BIN}} was found; read ability is reported separately
-PASS [required] Cursor signed in: `agent status` exited 0
-PASS [required] Claude CLI installed: {{CLAUDE_BIN}} was found; arbitration is read-only
+PASS [required] Claude CLI installed: {{CLAUDE_BIN}} was found; planning and review use read-only inspection
 PASS [required] Claude signed in: `claude auth status` exited 0
 PASS [required] Scratch root location: {{SCRATCH_ROOT}} is outside AppData and OneDrive
 PASS [required] Scratch root writable: {{SCRATCH_ROOT}} accepted a disposable write
 PASS [required] Codex superpowers: Codex: `codex plugin list` reports superpowers@openai-curated  installed, enabled  6.3.0  C:/fake/superpowers; version 6.3.0
-PASS [required] Cursor superpowers: Cursor: .cursor-plugin/plugin.json verified 1 readable skill files at {{SUPERPOWERS_DIR}}; version 6.0.2
 PASS [required] Claude superpowers: Claude: .claude-plugin/plugin.json verified 1 readable skill files at {{SUPERPOWERS_DIR}}; version 6.0.2
 PASS [required] Codex write probe: created ccc-doctor-write.txt with the requested content in a disposable Git repository
-PASS [required] Cursor read probe: returned the unpredictable contents of a scratch file and left the directory unchanged
+PASS [required] Claude read probe: returned the unpredictable contents of a scratch file and left the directory unchanged
 
 Optional features (these do not affect loop health):
 INFO [optional] GitHub publishing: optional; the loop is fully usable without it.

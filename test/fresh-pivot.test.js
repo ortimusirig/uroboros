@@ -226,6 +226,11 @@ test('FRESH replans with ledger-informed candidates, discards failed drafts, and
       facts, events, branchCalls, candidateRequests, selectionRequests,
       executorPlans, reviewBytesAtPivot,
     } = scenario;
+    assert.ok(facts.participation.claude.roles.includes('author'), 'fresh planning authors are actual participants');
+    assert.ok(facts.participation.codex.roles.includes('reviewer'), 'fresh planning reviewers are actual participants');
+    assert.equal(facts.approved, false, 'an unfinished fresh run is not approved');
+    assert.equal(facts.converged, null, 'execution records approval without inventing mutual agreement');
+    assert.equal(facts.approval, null);
     assert.deepEqual(branchCalls, [{
       baseCommit: 'pre-debate-commit',
       branch: 'uro/original-fresh-1',
@@ -311,6 +316,9 @@ test('a non-circling run creates no branch and emits no pivot events', async () 
   const scenario = await runFreshScenario({ clean: true });
   try {
     assert.equal(scenario.facts.outcome, 'review-ready');
+    assert.equal(scenario.facts.approved, true);
+    assert.equal(scenario.facts.converged, null);
+    assert.equal(scenario.facts.approval.decidedBy, 'claude');
     assert.deepEqual(scenario.branchCalls, []);
     assert.equal(scenario.events.some((event) => event.stage === 'pivot'), false);
   } finally { scenario.item.cleanup(); }

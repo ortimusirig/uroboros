@@ -104,7 +104,7 @@ test('Claude cannot overrule its own finding before Codex gets a response turn',
     assert.equal(options.executorCalls(), 2);
     assert.deepEqual(facts.debate.roundHistory[0].acceptedFindingIds, ['F1']);
     assert.deepEqual(facts.debate.resolvedFindingIds, ['F1']);
-    assert.equal(facts.tokens.arbiter.inputTokens, 0);
+    assert.equal(Object.hasOwn(facts.tokens, 'arbiter'), false, 'no invented separate arbiter usage bucket');
   } finally { item.cleanup(); }
 });
 

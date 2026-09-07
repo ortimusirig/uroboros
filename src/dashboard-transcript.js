@@ -77,13 +77,36 @@ function decodeEventText(event, field = 'text') {
   });
 }
 
+function providerLabel(event, fallback) {
+  return event?.provider || event?.speaker
+    ? [event.provider ?? event.speaker, event.phase, event.role].filter(Boolean).join(' / ')
+    : fallback;
+}
+
+function renderConversation(run) {
+  if (!run.decision) return '';
+  const decision = run.decision, approval = decision.approval;
+  const status = decision.approved ? (decision.converged === false ? 'Approved; dissent retained' : 'Approved')
+    : decision.authority === 'human' ? 'Needs human decision' : 'Unapproved';
+  const messages = (run.messages ?? []).map(message => {
+    const text = message.recordedContent ? decodeRecordedText(message.recordedContent).text : message.content ?? '';
+    return '<details><summary>' + escapeHtml(providerLabel(message, 'Agent')) + '</summary><pre>' + escapeHtml(text) + '</pre></details>';
+  }).join('');
+  return '<section class="conversation-decision"><h3>' + escapeHtml(status) + '</h3><p>'
+    + escapeHtml(decision.phase + ' / ' + decision.interactionMode + '; agreement: '
+      + (decision.converged === null ? 'not recorded' : String(decision.converged))) + '</p>'
+    + (approval ? '<p>' + escapeHtml(approval.decidedBy + ' / ' + approval.basis + ' / ' + approval.artifactDigest)
+      + '</p><p>' + escapeHtml(approval.reason) + '</p>' : '')
+    + messages + '</section>';
+}
+
 function renderReasoning(event) {
   const decoded = decodeEventText(event);
   const body = decoded.text === '' ? '<p>Reasoning step completed.</p>'
     : `<pre>${escapeHtml(decoded.text)}</pre>`;
   return '<li class="transcript-row reasoning-row">'
     + renderTime(event)
-    + '<details class="transcript-reasoning muted"><summary>Executor reasoning'
+    + '<details class="transcript-reasoning muted"><summary>' + escapeHtml(providerLabel(event, 'Executor')) + ' reasoning'
     + `${decoded.truncated ? ' · truncated' : ''}</summary>${body}</details></li>`;
 }
 
@@ -92,7 +115,7 @@ function renderAgentMessage(event) {
   const text = decoded.text || '(empty agent message)';
   return '<li class="transcript-row agent-row">'
     + renderTime(event)
-    + '<div class="transcript-agent-message"><strong>Executor</strong>'
+    + '<div class="transcript-agent-message"><strong>' + escapeHtml(providerLabel(event, 'Executor')) + '</strong>'
     + `<pre>${escapeHtml(text)}</pre>`
     + `${decoded.truncated ? '<small>Recorded text was truncated.</small>' : ''}</div></li>`;
 }
@@ -208,7 +231,7 @@ function renderReviewSeat(review, event = {}) {
   return '<li class="transcript-row verifier-row">'
     + renderTime(event)
     + `<div class="transcript-verifier-seat ${reviewClass(review)}" data-verifier-seat="review">`
-    + `<strong>Review</strong><span>${escapeHtml(reviewValue(review))}</span></div></li>`;
+    + `<strong>${escapeHtml(providerLabel(event.provider ? event : review, 'Review'))}</strong><span>${escapeHtml(reviewValue(review))}</span></div></li>`;
 }
 
 function renderVerifierInspector(run) {
@@ -237,6 +260,10 @@ function renderTimeline(run) {
   let renderedGate = false;
   const steps = [];
   for (const event of run.timeline) {
+    if (event.stage === 'plan' && (event.speaker || event.provider) && event.content) {
+      steps.push(renderAgentMessage({ ...event, text: event.content }));
+      continue;
+    }
     if (event.stage === 'gate') {
       if (!renderedGate) {
         renderedGate = true;
@@ -244,7 +271,7 @@ function renderTimeline(run) {
       }
       continue;
     }
-    if (event.stage === 'verify' && event.pass === 'review') {
+    if (event.stage === 'verify' && (event.pass === 'review' || (event.provider === 'claude' && event.role === 'execution-reviewer'))) {
       if (!renderedReview) {
         renderedReview = true;
         steps.push(renderReviewSeat(run.review, event));
@@ -304,7 +331,7 @@ export function renderRunTranscript(run, renderDiff) {
     + '<section class="transcript-pane" aria-label="Live run transcript">'
     + `<header class="run-heading"><div><h2>${escapeHtml(run.title ?? run.runId)}</h2>`
     + `<p>${escapeHtml(run.runId)}</p></div><span class="state ${escapeHtml(run.state)}">`
-    + `${escapeHtml(runStateLabel(run.state))}</span></header>${renderTimeline(run)}</section>`
+    + `${escapeHtml(runStateLabel(run.state))}</span></header>${renderConversation(run)}${renderTimeline(run)}</section>`
     + renderInspector(run, renderDiff) + '</div>';
 }
 

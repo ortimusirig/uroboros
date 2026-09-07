@@ -1,4 +1,3 @@
-import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
 import { StringDecoder } from 'node:string_decoder';
 import { spawnCapture } from './spawn.js';
@@ -7,10 +6,6 @@ import { materializeReviewBundle } from './review.js';
 import { reportEvent } from './events.js';
 import { addUsage, annotateUsageConsistency } from './usage.js';
 import { resolveStageTimeouts } from './timeouts.js';
-import {
-  inspectSuperpowersDirectory,
-  resolveSuperpowersDir,
-} from './superpowers.js';
 import { inspectWorktreeActivity } from './liveness-evidence.js';
 import {
   createProgressWatchdog,
@@ -63,7 +58,6 @@ export function classifySeatOutage(message) {
   return null;
 }
 
-export const VERIFIER_PLUGIN_DIR = fileURLToPath(new URL('../cursor-plugin', import.meta.url));
 
 export function assertNoForbiddenFlags(args) {
   for (const argument of args) {
@@ -96,41 +90,6 @@ export function assertUsablePrompt(prompt) {
   if (prompt.trim() === '') throw new Error('verifier prompt must not be empty');
 }
 
-export function buildCursorArgs({
-  model = DEFAULT_VERIFIER_MODEL,
-  prompt = DEFAULT_PROMPT,
-  env = process.env,
-  home = homedir(),
-  superpowersDir,
-} = {}) {
-  assertUsablePrompt(prompt);
-  const resolvedSuperpowersDir = superpowersDir === undefined
-    ? resolveSuperpowersDir({ seat: 'cursor', env, home })
-    : superpowersDir;
-  if (resolvedSuperpowersDir !== null) {
-    const inspected = inspectSuperpowersDirectory({
-      path: resolvedSuperpowersDir,
-      seat: 'cursor',
-    });
-    if (!inspected.ok) {
-      throw new Error(`Cursor superpowers plugin directory is unusable: ${inspected.reason}`);
-    }
-  }
-  // --trust clears Cursor's "Workspace Trust Required" gate for READING the checkout; without
-  // it the agent exits 1 with no output and every review is UNVERIFIED. It is
-  // NOT one of the forbidden flags (--force/--yolo/-f/--approve-mcps auto-APPROVE actions);
-  // --mode plan keeps the agent read-only regardless. Verified live (exit 0, NO_BLOCKERS).
-  const args = [
-    '-p', prompt, '--output-format', 'stream-json', '--mode', 'plan', '--trust',
-    '--plugin-dir', VERIFIER_PLUGIN_DIR,
-    ...(resolvedSuperpowersDir === null
-      ? []
-      : ['--plugin-dir', resolvedSuperpowersDir]),
-    '--model', model,
-  ];
-  assertNoForbiddenFlags(args);
-  return args;
-}
 
 
 export function extractPlanArtifact(streamText) {

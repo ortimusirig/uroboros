@@ -27,6 +27,38 @@ const content = {
   ],
 };
 
+test('privacy review uses Claude stdin and fails closed on unusable terminal results', async (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'ccc-privacy-terminal-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const blocklist = join(root, 'blocklist.txt');
+  writeFileSync(blocklist, 'secret-never-present');
+  const good = { type: 'result', subtype: 'success', is_error: false, result: 'CLEAN' };
+  for (const [terminal, code, timedOut, expected] of [
+    [good, 0, false, true],
+    [{ ...good, result: 'CONFIDENTIAL' }, 0, false, false],
+    [{ ...good, is_error: true }, 0, false, false],
+    [{ ...good, subtype: 'error_during_execution' }, 0, false, false],
+    [{ ...good, result: '' }, 0, false, false],
+    [{ type: 'result', result: 'CLEAN' }, 0, false, false],
+    [null, 0, false, false], [good, 1, false, false], [good, 0, true, false],
+  ]) {
+    const calls = [];
+    const result = await guardPublish({ runDirectory: root, content,
+      env: { URO_PUBLISH_BLOCKLIST: blocklist }, adapters: {
+        temporaryDirectory: root, readCodeText: () => '', commandExists: async () => false,
+        runCommand: async (bin, args, options) => {
+          calls.push({ bin, args, options });
+          return { code, timedOut, stdout: [JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text: 'CLEAN' }] } }),
+            ...(terminal ? [JSON.stringify(terminal)] : [])].join('\n') };
+        },
+      } });
+    assert.equal(calls[0].bin, 'claude');
+    assert.ok(calls[0].args.includes('--permission-mode'));
+    assert.match(calls[0].options.input, /Read.*ccc-publish-prose/);
+    assert.equal(result.findings.some(f => f.check === 'contextual'), !expected);
+  }
+});
+
 test('the prose surface contains every value publish would send', () => {
   const prose = assembleProseSurface(content);
   for (const needle of ['Title line', 'rationale text', 'finding-A', 'artifact-A', 'finding-B']) {

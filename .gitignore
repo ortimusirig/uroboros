@@ -12,6 +12,9 @@
 # mechanism. If one ever leaks into this tree, `git status` showing it is the desired
 # outcome, not something to suppress.
 
+# Internal implementation briefs and retained test/review logs never ship.
+.superpowers/
+
 # Test scratch directories, if a test ever creates one in-tree.
 .ccc-test-*/
 

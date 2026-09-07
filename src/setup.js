@@ -21,7 +21,7 @@ was made by the CCC setup demo. Do not modify plan.md or gate.json.
 `;
 
 const DEFAULT_BINS = Object.freeze({
-  git: 'git', codex: 'codex', agent: 'agent', claude: 'claude', gh: 'gh', logdy: 'logdy',
+  git: 'git', codex: 'codex', claude: 'claude', gh: 'gh', logdy: 'logdy',
 });
 
 function isPathInside(parent, candidate) {

@@ -103,15 +103,16 @@ async function main() {
         rounds: opts.rounds,
         candidates: opts.candidates,
         pivotCandidates: opts.pivotCandidates,
-        plannerModel: opts.plannerModel,
-        verifierModel: opts.verifierModel,
-        arbiterModel: opts.arbiterModel,
+        interactionMode: opts.interactionMode,
+        claudeModel: opts.claudeModel,
+        codexModel: opts.codexModel,
+        codexEffort: opts.codexEffort,
         dryRun: opts.dryRun,
         runId,
         reporter,
       });
       process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
-      if (!result.dryRun && !result.converged) process.exitCode = 1;
+      if (!result.dryRun && !result.approved) process.exitCode = 1;
     } catch (error) {
       process.stderr.write(`plan failed: ${error.message}\n`);
       process.exitCode = 2;
@@ -131,9 +132,10 @@ async function main() {
           out: opts.out,
           rounds: opts.rounds,
           mapBudget: opts.mapBudget,
-          plannerModel: opts.plannerModel,
-          verifierModel: opts.verifierModel,
-          arbiterModel: opts.arbiterModel,
+          interactionMode: opts.interactionMode,
+          claudeModel: opts.claudeModel,
+          codexModel: opts.codexModel,
+          codexEffort: opts.codexEffort,
           runId,
           reporter,
         })
@@ -142,14 +144,15 @@ async function main() {
           target: opts.target,
           rounds: opts.rounds,
           mapBudget: opts.mapBudget,
-          plannerModel: opts.plannerModel,
-          verifierModel: opts.verifierModel,
-          arbiterModel: opts.arbiterModel,
+          interactionMode: opts.interactionMode,
+          claudeModel: opts.claudeModel,
+          codexModel: opts.codexModel,
+          codexEffort: opts.codexEffort,
           runId,
           reporter,
         });
       process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
-      if (!result.converged) process.exitCode = 1;
+      if (!result.approved) process.exitCode = 1;
     } catch (error) {
       process.stderr.write(`decompose failed: ${error.message}\n`);
       process.exitCode = 2;
@@ -411,13 +414,15 @@ async function main() {
         eventsPath: join(SCRATCH_ROOT, physicalRunIdFor(unitId), 'w', 'events.jsonl'),
         quiet: opts.quiet,
       }),
+      interactionMode: opts.interactionMode,
       runOptions: {
+        mode: opts.interactionMode,
         gateRetries: opts.gateRetries,
         pivotCandidates: opts.pivotCandidates,
-        executorModel: opts.executorModel,
-        executorEffort: opts.executorEffort,
-        verifierModel: opts.verifierModel,
-        arbiterModel: opts.arbiterModel,
+        executorModel: opts.codexModel,
+        executorEffort: opts.codexEffort,
+        verifierModel: opts.claudeModel,
+        arbiterModel: opts.claudeModel,
         artifactRoot: opts.artifactRoot,
         executorTimeout: opts.executorTimeout,
         verifierTimeout: opts.verifierTimeout,
@@ -438,10 +443,10 @@ async function main() {
     target: opts.target,
     gate: opts.gate,
     gateRetries: opts.gateRetries,
-    executorModel: opts.executorModel,
-    executorEffort: opts.executorEffort,
-    verifierModel: opts.verifierModel,
-    arbiterModel: opts.arbiterModel,
+    executorModel: opts.codexModel,
+    executorEffort: opts.codexEffort,
+    verifierModel: opts.claudeModel,
+    arbiterModel: opts.claudeModel,
     pivotCandidates: opts.pivotCandidates,
     artifactRoot: opts.artifactRoot,
     executorTimeout: opts.executorTimeout,

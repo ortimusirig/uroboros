@@ -1656,7 +1656,15 @@ export async function run(opts) {
       mutation = { status: 'error', reason: error instanceof Error ? error.message : String(error) };
     }
   }
+  const planningMessages = pivotHistory.flatMap(pivot => pivot.planning?.messages ?? []);
+  const dissent = executionMessages.filter(message => message.speaker === 'codex'
+    && executorFindingResponses(message.response).some(response => response.disposition === 'dispute'));
+  const approved = outcome === 'review-ready' && executionMessages.some(message => message.speaker === 'claude');
   const facts = buildRunFacts({ runId,
+    phase: 'execution', interactionMode: mode, authority: decisionAuthority({ interactionMode: mode, phase: 'execution' }),
+    messages: executionMessages, planningMessages, dissent, approved, converged: null,
+    approval: approved ? { artifactDigest: reviewDigest(currentDiff), decidedBy: 'claude', basis: 'reviewer',
+      reason: 'The current implementation passed Claude review with all blocking findings explicitly closed.' } : null,
     ...(physicalRunId === runId ? {} : { physicalRunId }),
     target, targetPath: resolve(target),
     dir: iso.dir, isRepo: iso.isRepo,
@@ -1696,14 +1704,7 @@ export async function run(opts) {
   facts.interactionMode = mode;
   facts.phase = 'execution';
   facts.authority = decisionAuthority({ interactionMode: mode, phase: 'execution' });
-  facts.messages = executionMessages;
-  facts.participation = Object.fromEntries(['codex', 'claude'].map((provider) => {
-    const calls = executionMessages.filter((message) => message.speaker === provider);
-    return [provider, { attempted: calls.length, observed: calls.filter((message) =>
-      Boolean(message.content) || Boolean(message.response?.stdout)).length,
-      usageReported: calls.filter((message) => message.response?.usage != null).length,
-      roles: [...new Set(calls.map((message) => message.role))] }];
-  }));
+
   if (outcome === 'needs-decision') {
     currentDiff = await createDiff(iso.dir, merge === undefined ? iso.baseCommit : merge.mergeBase);
     // Task 4 owns durable envelopes and identity validation. Keep the live

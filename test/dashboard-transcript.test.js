@@ -10,6 +10,31 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runInNewContext } from 'node:vm';
+import { encodeRecordedText } from '../src/execution-record.js';
+
+test('dashboard projects and escapes role-bound conversation and separate approval', () => {
+  const root = mkdtempSync(join(tmpdir(), 'uro-two-agent-transcript-'));
+  try {
+    const message = { speaker: 'claude', provider: 'claude', role: 'author', phase: 'planning',
+      content: '<script>retained dissent</script>', recordedContent: encodeRecordedText('<script>retained dissent</script>') };
+    const { directory, worktreeDirectory } = makeRun(root, 'r-new', [event('r-new', 'plan', 'review', {
+      speaker: 'codex', role: 'reviewer', content: '<b>review argument</b>', approved: true, converged: false,
+    })]);
+    writeFileSync(join(worktreeDirectory, 'uro-runfacts.json'), JSON.stringify({ phase: 'planning',
+      interactionMode: 'autonomous', approved: true, converged: false,
+      approval: { decidedBy: 'codex', basis: 'reviewer', reason: '<b>evidence</b>', artifactDigest: 'abc123' },
+      messages: [message], dissent: [message], participants: [{ provider: 'claude', role: 'author', phase: 'planning', usage: null }] }));
+    const snapshot = buildDashboardSnapshot({ runDirectory: directory });
+    assert.equal(snapshot.runs[0].timeline[0].speaker, 'codex');
+    assert.equal(snapshot.runs[0].decision.converged, false);
+    const html = renderDashboardPage(snapshot);
+    assert.match(html, /approved.*dissent retained/i);
+    assert.match(html, /claude.*planning.*author/);
+    assert.match(html, /&lt;script&gt;retained dissent&lt;\/script&gt;/);
+    assert.match(html, /abc123/);
+    assert.doesNotMatch(html, /<script>retained dissent/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
 import { startDashboard } from '../src/dashboard.js';
 import {
   buildDashboardSnapshot,
@@ -36,6 +61,18 @@ function makeRun(root, runId, events, task = '# Task\n\nRender the live transcri
   writeFileSync(join(worktreeDirectory, 'TASK.md'), task);
   return { directory, worktreeDirectory };
 }
+
+test('current Claude review events render provider identity without a legacy pass field', () => {
+  const root = mkdtempSync(join(tmpdir(), 'uro-two-agent-review-'));
+  try {
+    const { directory } = makeRun(root, 'review', [event('review', 'verify', 'finish', {
+      provider: 'claude', role: 'execution-reviewer', code: 0,
+    })]);
+    const snapshot = buildDashboardSnapshot({ runDirectory: directory });
+    assert.equal(snapshot.runs[0].review.provider, 'claude');
+    assert.match(renderDashboardPage(snapshot), /<strong>claude \/ execution-reviewer<\/strong>/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
 
 test('dashboard renders one transcript view with no legacy view tabs', () => {
   const root = mkdtempSync(join(tmpdir(), 'uro-dashboard-transcript-shell-'));

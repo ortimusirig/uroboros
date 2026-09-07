@@ -10,16 +10,14 @@ import { readEnv } from './env-compat.js';
 import { spawnCapture } from './spawn.js';
 
 const DIRECTORY_SEATS = Object.freeze({
-  cursor: Object.freeze({ label: 'Cursor', manifest: '.cursor-plugin' }),
   claude: Object.freeze({ label: 'Claude', manifest: '.claude-plugin' }),
 });
 
-const SEAT_LABELS = Object.freeze({ codex: 'Codex', cursor: 'Cursor', claude: 'Claude' });
-const REQUIRED_SEATS = Object.freeze(Object.keys(SEAT_LABELS));
+const SEAT_LABELS = Object.freeze({ codex: 'Codex', claude: 'Claude' });
+const REQUIRED_SEATS = Object.freeze(['codex', 'claude']);
 
 export const SUPERPOWERS_REMEDIATION = Object.freeze({
   codex: 'Codex: run `codex plugin add superpowers@openai-curated`, then rerun `node bin/loop.js doctor`.',
-  cursor: 'Cursor: run `$env:URO_SUPERPOWERS_DIR=\'<directory-with-.cursor-plugin>\'; node bin/loop.js doctor` in PowerShell, or `export URO_SUPERPOWERS_DIR=\'<directory-with-.cursor-plugin>\'; node bin/loop.js doctor` on POSIX.',
   claude: 'Claude: run `/plugin install superpowers@superpowers-marketplace` inside Claude Code, restart Claude Code, then rerun `node bin/loop.js doctor`.',
 });
 
@@ -136,7 +134,7 @@ export function inspectSuperpowersDirectory({ path, seat }) {
 export function resolveSuperpowersDir({ seat, env, home }) {
   if (seat === 'codex') return null;
   const descriptor = DIRECTORY_SEATS[seat];
-  if (!descriptor) throw new TypeError(`superpowers seat must be codex, cursor, or claude; received ${seat}`);
+  if (!descriptor) throw new TypeError(`superpowers seat must be codex or claude; received ${seat}`);
   const configured = readEnv(env, 'SUPERPOWERS_DIR');
   if (configured !== undefined) {
     const path = isAbsolute(configured) ? resolve(configured) : resolve(home, configured);
@@ -151,7 +149,6 @@ export function resolveSuperpowersDir({ seat, env, home }) {
   const candidates = [
     join(home, '.codex', 'plugins', 'cache'),
     join(home, '.claude', 'plugins', 'cache'),
-    join(home, '.cursor', 'plugins', 'cache'),
   ].flatMap(installedVersions)
     .map((candidate) => ({
       ...candidate,

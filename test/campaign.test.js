@@ -40,6 +40,20 @@ const runCampaign = (options) => executeCampaign({
   ...options,
 });
 
+test('campaign mode and provider options reach child execution and synthesis', async () => {
+  const children = [], synthesis = [];
+  await runCampaign({ campaignId: 'mode-routing', tasks: ['Implement behavior'], target: '.', gate: [],
+    interactionMode: 'autonomous', claudeModel: 'sonnet', codexModel: 'gpt-6-astra', codexEffort: 'high',
+    runUnit: async options => { children.push(options); return { outcome: 'no-op', tokens: { total: { inputTokens: 0, outputTokens: 0 } } }; },
+    plannerSynthesis: request => { synthesis.push(request); return { decision: 'conclude', reasoning: 'Done' }; },
+  });
+  assert.equal(children[0].mode, 'autonomous');
+  assert.equal(children[0].executorModel, 'gpt-6-astra');
+  assert.equal(children[0].verifierModel, 'sonnet');
+  assert.equal(children[0].executorEffort, 'high');
+  assert.equal(synthesis[0].interactionMode, 'autonomous');
+});
+
 const codexUsageSamplePath = fileURLToPath(
   new URL('../fixtures/codex-exec-usage-sample.ndjson', import.meta.url),
 );

@@ -13,7 +13,7 @@ import { dirname, join, resolve } from 'node:path';
 import { buildCodexArgs } from './executor.js';
 import { assertSafeScratchRoot } from './isolation.js';
 import { commandExists, spawnCapture } from './spawn.js';
-import { buildCursorArgs } from './verifier.js';
+import { buildClaudeArgs, parseArbiterStream } from './arbiter.js';
 import { readEnv } from './env-compat.js';
 import {
   SUPERPOWERS_REMEDIATION,
@@ -27,17 +27,6 @@ const PROBE_TIMEOUT_MS = 180_000;
 const WRITE_FILENAME = 'ccc-doctor-write.txt';
 const WRITE_CONTENT = 'URO_DOCTOR_WRITE_OK\n';
 const DEFAULT_ENVIRONMENT = process.env;
-
-export const CURSOR_AGENT_INSTALL_COMMANDS = Object.freeze({
-  win32: "irm 'https://cursor.com/install?win32=true' | iex",
-  other: 'curl https://cursor.com/install -fsS | bash',
-});
-
-export function cursorAgentInstallCommand(platform = process.platform) {
-  return platform === 'win32'
-    ? CURSOR_AGENT_INSTALL_COMMANDS.win32
-    : CURSOR_AGENT_INSTALL_COMMANDS.other;
-}
 
 function spawnCommand(binary, args) {
   return Object.freeze({ type: 'spawn', binary, args: Object.freeze(args) });
@@ -149,24 +138,27 @@ async function probeCodex(bin, gitBin, workspace, { env, spawn = spawnCapture } 
   return { passed: result.code === 0 && !result.timedOut && wroteExpectedFile, result };
 }
 
-async function probeAgent(bin, workspace, { env, home, spawn = spawnCapture } = {}) {
-  const directory = join(workspace, 'cursor-read');
+async function probeClaude(bin, workspace, { env, spawn = spawnCapture } = {}) {
+  const directory = join(workspace, 'claude-read');
   mkdirSync(directory);
   const token = `URO_DOCTOR_READ_${randomUUID()}`;
   const inputPath = join(directory, 'ccc-doctor-read.txt');
   writeFileSync(inputPath, `${token}\n`);
   const prompt = 'Read ccc-doctor-read.txt and return its exact contents. This is a read-only diagnostic; do not create, edit, or delete any file.';
   const before = readdirSync(directory).sort();
-  const result = await spawn(bin, buildCursorArgs({ prompt, env, home }), {
+  const result = await spawn(bin, buildClaudeArgs({ prompt }), {
     cwd: directory,
     env: { ...process.env, ...(env ?? {}) },
+    input: prompt,
     timeoutMs: PROBE_TIMEOUT_MS,
   });
   const after = readdirSync(directory).sort();
   const stayedReadOnly = JSON.stringify(after) === JSON.stringify(before)
     && readFileSync(inputPath, 'utf8') === `${token}\n`;
   return {
-    passed: result.code === 0 && !result.timedOut && result.stdout.includes(token) && stayedReadOnly,
+    passed: result.code === 0 && !result.timedOut
+      && parseArbiterStream(result.stdout).verdict === 'ANSWERED'
+      && parseArbiterStream(result.stdout).answer.trim() === token && stayedReadOnly,
     result,
   };
 }
@@ -182,9 +174,7 @@ async function githubRemote(gitBin, repository) {
   }
 }
 
-const cursorInstallPlatform = process.platform === 'win32' ? 'win32' : 'posix';
-const cursorInstallProse = `run \`${cursorAgentInstallCommand()}\`${process.platform === 'win32' ? ' in Windows PowerShell' : ''}, reopen the terminal, confirm the binary is \`agent\`, and run \`agent login\`.`;
-const deepRerunProse = '`node bin/loop.js doctor --deep` (this spends Codex/Cursor tokens).';
+const deepRerunProse = '`node bin/loop.js doctor --deep` (this spends Codex/Claude tokens).';
 
 export const DOCTOR_CHECKS = Object.freeze([
   Object.freeze({
@@ -298,56 +288,6 @@ export const DOCTOR_CHECKS = Object.freeze([
     },
   }),
   Object.freeze({
-    id: 'cursor-agent-installed',
-    phase: 'prerequisite',
-    kind: 'required',
-    name: 'Cursor agent installed',
-    remediation: remediation(
-      cursorInstallProse,
-      shellCommand(cursorAgentInstallCommand(), cursorInstallPlatform),
-      true,
-    ),
-    probe: async ({ bins, state }) => {
-      const present = await commandExists(bins.agent);
-      state.agentPresent = present;
-      return present
-        ? { status: 'PASS', detail: `${bins.agent} was found; read ability is reported separately` }
-        : {
-            status: 'FAIL',
-            detail: `${bins.agent} was not found on PATH`,
-            reason: 'not-on-path',
-            remediationKey: 'default',
-          };
-    },
-  }),
-  Object.freeze({
-    id: 'cursor-signed-in',
-    phase: 'prerequisite',
-    kind: 'required',
-    name: 'Cursor signed in',
-    remediation: remediation(
-      'run `agent login`; if that does not help, run `agent update` or reinstall the Cursor Agent CLI, then rerun doctor.',
-      spawnCommand('agent', ['login']),
-      false,
-    ),
-    probe: async ({ bins, state }) => {
-      if (!state.agentPresent) {
-        return {
-          status: 'SKIP',
-          detail: 'not checked because the Cursor Agent CLI is not installed yet',
-        };
-      }
-      const status = await signInStatus(bins.agent, ['status']);
-      return status.signedIn
-        ? { status: 'PASS', detail: '`agent status` exited 0' }
-        : {
-            status: 'FAIL',
-            detail: signInFailureDetail('agent status', status),
-            remediationKey: 'default',
-          };
-    },
-  }),
-  Object.freeze({
     id: 'claude-cli-installed',
     phase: 'prerequisite',
     kind: 'required',
@@ -361,7 +301,7 @@ export const DOCTOR_CHECKS = Object.freeze([
       const present = await commandExists(bins.claude);
       state.claudePresent = present;
       return present
-        ? { status: 'PASS', detail: `${bins.claude} was found; arbitration is read-only` }
+        ? { status: 'PASS', detail: `${bins.claude} was found; planning and review use read-only inspection` }
         : {
             status: 'FAIL',
             detail: `${bins.claude} was not found on PATH`,
@@ -523,17 +463,17 @@ export const DOCTOR_CHECKS = Object.freeze([
     },
   }),
   Object.freeze({
-    id: 'cursor-read-probe',
+    id: 'claude-read-probe',
     phase: 'deep',
     kind: 'required',
-    name: 'Cursor read probe',
+    name: 'Claude read probe',
     remediation: remediation(
       deepRerunProse,
       spawnCommand('node', ['bin/loop.js', 'doctor', '--deep']),
       false,
       {
         failed: Object.freeze({
-          prose: 'run `agent login`, disable or repair hooks blocking read tools, then rerun `node bin/loop.js doctor --deep`.',
+          prose: 'run `claude auth login`, check account quota, disable or repair hooks blocking read tools, then rerun `node bin/loop.js doctor --deep`.',
           command: null,
           autoFixable: false,
         }),
@@ -553,7 +493,7 @@ export const DOCTOR_CHECKS = Object.freeze([
           remediationKey: 'default',
         };
       }
-      if (!(state.agentPresent && state.workspace)) {
+      if (!(state.claudePresent && state.workspace)) {
         return {
           status: 'FAIL',
           detail: 'could not run because the agent or scratch storage failed a prerequisite',
@@ -561,7 +501,7 @@ export const DOCTOR_CHECKS = Object.freeze([
         };
       }
       try {
-        const probe = await probeAgent(bins.agent, state.workspace, {
+        const probe = await probeClaude(bins.claude, state.workspace, {
           env: doctorEnvironment(context),
           home: context.home,
           ...(context.spawn === undefined ? {} : { spawn: context.spawn }),
@@ -573,7 +513,7 @@ export const DOCTOR_CHECKS = Object.freeze([
             }
           : {
               status: 'FAIL',
-              detail: `agent exited ${probe.result.code}, did not return the file content, or modified the directory`,
+              detail: `Claude exited ${probe.result.code}, did not return the file content, or modified the directory`,
               remediationKey: 'failed',
             };
       } catch (error) {
@@ -609,11 +549,11 @@ export const DOCTOR_CHECKS = Object.freeze([
         : { status: 'FAIL', detail: verification.evidence, remediationKey: 'default' };
     },
   }),
-  ...['cursor', 'claude'].map((seat) => Object.freeze({
+  ...['claude'].map((seat) => Object.freeze({
     id: `superpowers-${seat}`,
     phase: 'prerequisite',
     kind: 'required',
-    name: `${seat === 'cursor' ? 'Cursor' : 'Claude'} superpowers`,
+    name: 'Claude superpowers',
     remediation: remediation(SUPERPOWERS_REMEDIATION[seat], null, false),
     probe: async (context) => {
       const verification = verifyDirectorySuperpowers({

@@ -1,5 +1,31 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+
+test('all public workflows default to manual and normalize provider options', () => {
+  const commands = [
+    ['plan', '--goal', 'goal.md', '--target', '.', '--out', 'plans'],
+    ['decompose', '--goal', 'goal.md', '--target', '.'],
+    ['run', '--task', 'p', '--target', '.', '--gate', 'g'],
+    ['batch', '--task', 'p', '--target', '.', '--gate', 'g'],
+    ['queue', '--file', 'q.json'],
+  ];
+  for (const command of commands) {
+    assert.equal(parseArgs(command).interactionMode, 'manual');
+    const result = parseArgs([...command, '--mode', 'autonomous', '--claude-model', 'sonnet',
+      '--codex-model', 'gpt-6-astra', '--codex-effort', 'high']);
+    assert.equal(result.interactionMode, 'autonomous');
+    assert.equal(result.claudeModel, 'sonnet');
+    assert.equal(result.codexModel, 'gpt-6-astra');
+    assert.equal(result.codexEffort, 'high');
+    if (command[0] === 'decompose') assert.equal(result.mode, 'goal');
+    assert.throws(() => parseArgs([...command, '--mode', 'automatic']), /manual.*autonomous/);
+    assert.throws(() => parseArgs([...command, '--verifier-model', 'auto']), /obsolete.*claude-model/i);
+    assert.throws(() => parseArgs([...command, '--planner-model', 'x']), /obsolete.*claude-model/i);
+    assert.throws(() => parseArgs([...command, '--claude-model', 'sonnet', '--arbiter-model', 'opus']), /conflict/i);
+    const equal = parseArgs([...command, '--codex-model', 'x', '--executor-model', 'x']);
+    assert.equal(equal.codexModel, 'x');
+  }
+});
 import { spawnSync } from 'node:child_process';
 import { parseArgs } from '../src/args.js';
 import { CLI_COMMANDS } from '../src/cli-help.js';
@@ -28,7 +54,7 @@ import { resolveStageTimeouts } from '../src/timeouts.js';
 test('parses a full run invocation', () => {
   const r = parseArgs(['run', '--task', 'plan.md', '--target', 'C:/proj',
     '--gate', 'gate.json', '--gate-retries', '1', '--executor-model', 'executor-X',
-    '--executor-effort', 'medium', '--verifier-model', 'verifier-Y',
+    '--executor-effort', 'medium', '--claude-model', 'claude-Z',
     '--arbiter-model', 'claude-Z']);
   assert.equal(r.command, 'run');
   assert.equal(r.task, 'plan.md');
@@ -37,7 +63,7 @@ test('parses a full run invocation', () => {
   assert.equal(r.gateRetries, 1);
   assert.equal(r.executorModel, 'executor-X');
   assert.equal(r.executorEffort, 'medium');
-  assert.equal(r.verifierModel, 'verifier-Y');
+  assert.equal(r.claudeModel, 'claude-Z');
   assert.equal(r.arbiterModel, 'claude-Z');
   assert.equal(Object.hasOwn(r, 'quiet'), false,
     'the default parse result keeps its existing shape for callers');
@@ -386,6 +412,7 @@ test('queue defaults to manual mode with unbounded limits', () => {
     command: 'queue',
     file: 'queue.json',
     mode: 'manual',
+    interactionMode: 'manual',
     dryRun: false,
   });
 });
@@ -393,7 +420,7 @@ test('queue defaults to manual mode with unbounded limits', () => {
 test('plan parses its goal, target, output, rounds, model, and dry-run', () => {
   assert.deepEqual(parseArgs([
     'plan', '--goal', 'Improve the parser', '--target', 'repo', '--out', 'generated',
-    '--rounds', '5', '--planner-model', 'gpt-plan', '--dry-run',
+    '--rounds', '5', '--codex-model', 'gpt-plan', '--dry-run',
   ]), {
     command: 'plan',
     goal: 'Improve the parser',
@@ -402,7 +429,8 @@ test('plan parses its goal, target, output, rounds, model, and dry-run', () => {
     rounds: 5,
     candidates: 3,
     pivotCandidates: 3,
-    plannerModel: 'gpt-plan',
+    codexModel: 'gpt-plan',
+    interactionMode: 'manual',
     dryRun: true,
   });
   assert.throws(() => parseArgs(['plan', '--goal', 'x', '--target', 'repo']), /--out/);
@@ -441,6 +469,7 @@ test('queue parses autonomous mode, limits, dry-run, and the goal to accept', ()
     command: 'queue',
     file: 'queue.json',
     mode: 'autonomous',
+    interactionMode: 'autonomous',
     maxRuns: 3,
     tokenBudget: 25000,
     acceptGoalSpec: 'uro-project/goals/G1-first/spec.md',

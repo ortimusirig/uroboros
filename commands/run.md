@@ -1,5 +1,5 @@
 ---
-description: Execute one isolated Codex/evidence/Cursor debate with Claude arbitrating read-only.
+description: Execute isolated Codex implementation and evidence with Claude reviewing read-only.
 disable-model-invocation: true
 ---
 

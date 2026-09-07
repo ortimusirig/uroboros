@@ -1,6 +1,6 @@
 ---
 name: uroboros-setup
-description: 'Bootstrap uroboros installation and setup from zero; use when prerequisites are missing or unproven, or when a uroboros command fails with node: command not found, command not found, executable not found, or a comparable missing-binary error.'
+description: 'Use when uroboros prerequisites are missing or unproven, or a command fails with a missing-binary error.'
 ---
 
 # Bootstrap uroboros
@@ -37,12 +37,7 @@ install and rerun its direct probe.
 | Node | `winget install --id OpenJS.NodeJS.LTS -e --source winget` | `brew install node` | `curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.6/install.sh \| bash`, then `. "$HOME/.nvm/nvm.sh"`, then `nvm install 24` |
 | git | `winget install --id Git.Git -e --source winget` | `brew install git` | Debian/Ubuntu: `sudo apt-get install git`; Fedora: `sudo dnf install git` |
 | Codex CLI | `npm.cmd install -g @openai/codex` | `npm install -g @openai/codex` | `npm install -g @openai/codex` |
-| Cursor CLI | `irm 'https://cursor.com/install?win32=true' \| iex` | `curl https://cursor.com/install -fsS \| bash` | `curl https://cursor.com/install -fsS \| bash` |
 | Claude CLI | `npm.cmd install -g @anthropic-ai/claude-code` | `npm install -g @anthropic-ai/claude-code` | `npm install -g @anthropic-ai/claude-code` |
-
-The Cursor binary required by uroboros is `agent`, not `cursor-agent`. On Windows it may be a
-PowerShell shim that Git Bash or another POSIX shell cannot resolve. If a POSIX-shell probe says it
-is missing, repeat the probe in PowerShell before concluding that the CLI is not installed.
 
 ## Bootstrap prerequisites in order
 
@@ -56,17 +51,12 @@ is missing, repeat the probe in PowerShell before concluding that the CLI is not
    `codex login` in a real terminal and complete its browser flow. This sign-in belongs to the
    operator and Claude cannot perform it. Wait for the operator, then rerun `codex login status`;
    never assume success.
-5. Run `agent --version`. Require exit 0, applying the Windows shell caveat above. If absent,
-   request consent for the platform's Cursor CLI command, reopen the terminal, then re-check.
-6. Run `agent status`. Require exit 0. If it fails, stop and tell the operator to run `agent login`
-   in a real terminal and complete its browser flow. This sign-in belongs to the operator and
-   Claude cannot perform it. Wait for the operator, then rerun `agent status`; never assume success.
-7. Run `claude --version`. Require exit 0. If absent, request consent for the platform's Claude CLI
+5. Run `claude --version`. Require exit 0. If absent, request consent for the platform's Claude CLI
    command, reopen the terminal, then re-check.
-8. Run `claude auth status`. Require exit 0. If it fails, stop and tell the operator to run
+6. Run `claude auth status`. Require exit 0. If it fails, stop and tell the operator to run
    `claude auth login` in a real terminal. This sign-in belongs to the operator; wait for them,
    rerun `claude auth status`, and never assume success.
-9. Choose a short, writable, local scratch root outside AppData and OneDrive: `C:\uro\w` on Windows
+7. Choose a short, writable, local scratch root outside AppData and OneDrive: `C:\uro\w` on Windows
    or `$HOME/uro-w` on macOS/Linux. Ask before creating or configuring it. Run the matching check as
    one unpiped command; each rejects an unsafe path, proves writability, removes its probe, and
    returns a real exit code:
@@ -82,29 +72,39 @@ is missing, repeat the probe in PowerShell before concluding that the CLI is not
 
 A directory existing is never proof that an actor can load it. Verify each mechanism separately:
 
-10. **Codex:** Run `codex plugin list` under the same `CODEX_HOME` used for `codex exec`. Require
+8. **Codex:** Run `codex plugin list` under the same `CODEX_HOME` used for `codex exec`. Require
    the `superpowers@openai-curated` row to say `installed, enabled`, and record the row's version.
    If it says `not installed`, ask consent to run
    `codex plugin add superpowers@openai-curated`, then rerun the direct list probe. Never pass
    `--plugin-dir` to Codex; that flag does not exist for `codex exec`.
-11. **Cursor:** Resolve only a superpowers directory carrying a valid
-   `.cursor-plugin/plugin.json`; require its version and every `skills/*/SKILL.md` to be readable.
-   A higher-version `.codex-plugin`-only directory is ineligible and must not be used as fallback.
-   Point Cursor at the eligible directory for doctor and later runs with
-   `$env:URO_SUPERPOWERS_DIR='<directory-with-.cursor-plugin>'` in PowerShell or
-   `export URO_SUPERPOWERS_DIR='<directory-with-.cursor-plugin>'` on macOS/Linux, then rerun
-   `/uroboros:doctor`.
-12. **Claude:** Require a valid `.claude-plugin/plugin.json`, its version, and readable
+9. **Claude:** Require a valid `.claude-plugin/plugin.json`, its version, and readable
     `skills/*/SKILL.md` files. If absent, tell the operator to run
     `/plugin install superpowers@superpowers-marketplace` inside Claude Code, restart the session,
     and rerun doctor.
 
-All three seats are required. `run`, `batch`, `plan`, and `queue` refuse before agent dispatch if
+Both Claude and Codex are required. Cursor is not a prerequisite. `run`, `batch`, `plan`, and `queue` refuse before agent dispatch if
 any seat is unverified. `URO_REQUIRE_SUPERPOWERS=0` is the deliberate emergency bypass; when used,
 the failed evidence and bypass are retained in run facts and stated in the report.
 
+## Roles, modes, and launch checks
+
+Claude authors plans and decompositions; Codex reviews them. Codex implements; Claude reviews
+the implementation and explicitly resolves open findings after Codex corrections or rebuttals.
+All workflows default to `--mode manual`: unresolved disputes require a human ruling.
+With `--mode autonomous`, Codex has final planning authority and Claude final execution authority.
+A missing, failed, or quota-limited reply leaves work unapproved.
+
+The provider flags are `--claude-model`, `--codex-model`, and `--codex-effort`; defaults are
+Claude `sonnet`, Codex `gpt-6-astra`, and effort `high`. The old planner/verifier model flags
+are obsolete. Use the respective CLI logins above; no new API key is needed.
+
+Plain `doctor` proves installation, sign-in and disposable scratch writes. It does not prove a
+model can execute. `node bin/loop.js doctor --deep` spends Claude/Codex tokens and tests a real
+Codex write plus an unpredictable Claude file read with the default models. Read, auth, quota,
+hook and timeout failures remain failures; skipped deep probes are not passes.
+
 ## Hand off
 
-When all twelve prerequisites are green, restart the Claude Code session. Slash commands do not
+When all nine prerequisites are green, restart the Claude Code session. Slash commands do not
 appear in a session that began before the plugin was installed. In the fresh session, run
 `/uroboros:setup` for the demo pass.

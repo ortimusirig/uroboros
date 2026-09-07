@@ -12,19 +12,13 @@ import {
 import { tmpdir } from 'node:os';
 import { delimiter, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import {
-  CURSOR_AGENT_INSTALL_COMMANDS,
-  cursorAgentInstallCommand,
-} from '../src/doctor.js';
 import { spawnCapture } from '../src/spawn.js';
 import { CLI_COMMANDS } from '../src/cli-help.js';
 import { PLAN_TEMPLATE } from '../src/init.js';
 
 const cli = fileURLToPath(new URL('../bin/loop.js', import.meta.url));
-const setupSkill = fileURLToPath(new URL('../skills/uroboros-setup/SKILL.md', import.meta.url));
 const fakeGit = fileURLToPath(new URL('../fixtures/fake-doctor-git.mjs', import.meta.url));
 const fakeCodex = fileURLToPath(new URL('../fixtures/fake-doctor-codex.mjs', import.meta.url));
-const fakeAgent = fileURLToPath(new URL('../fixtures/fake-doctor-agent.mjs', import.meta.url));
 const fakeClaude = fileURLToPath(new URL('../fixtures/fake-doctor-claude.mjs', import.meta.url));
 const fakeGh = fileURLToPath(new URL('../fixtures/fake-doctor-gh.mjs', import.meta.url));
 const fakeCodexNoWrite = fileURLToPath(new URL('../fixtures/fake-codex.mjs', import.meta.url));
@@ -62,10 +56,10 @@ function isolatedPath(directory) {
 
 function doctorFixture({
   codex = true,
-  agent = true,
+  claude = true,
   gh = false,
   codexScript = fakeCodex,
-  agentScript = fakeAgent,
+  claudeScript = fakeClaude,
 } = {}) {
   mkdirSync(SAFE_TEST_ROOT, { recursive: true });
   const root = mkdtempSync(join(SAFE_TEST_ROOT, 'ccc-first-run-'));
@@ -74,7 +68,7 @@ function doctorFixture({
   const superpowers = join(root, 'superpowers');
   mkdirSync(bins);
   mkdirSync(repository);
-  for (const manifest of ['.cursor-plugin', '.claude-plugin']) {
+  for (const manifest of ['.claude-plugin']) {
     mkdirSync(join(superpowers, manifest), { recursive: true });
     writeFileSync(join(superpowers, manifest, 'plugin.json'), JSON.stringify({
       name: 'superpowers', version: '6.0.2',
@@ -84,8 +78,7 @@ function doctorFixture({
   writeFileSync(join(superpowers, 'skills', 'using-superpowers', 'SKILL.md'), '# test skill\n');
   writeFakeBin(bins, 'git', fakeGit);
   if (codex) writeFakeBin(bins, 'codex', codexScript);
-  if (agent) writeFakeBin(bins, 'agent', agentScript);
-  writeFakeBin(bins, 'claude', fakeClaude);
+  if (claude) writeFakeBin(bins, 'claude', claudeScript);
   if (gh) writeFakeBin(bins, 'gh', fakeGh);
   const pathKey = Object.keys(process.env).find((key) => key.toLowerCase() === 'path') ?? 'PATH';
   return {
@@ -157,48 +150,23 @@ test('doctor reports a missing required binary with an actionable command and ex
   }
 });
 
-test('doctor gives the official platform-specific Cursor install command and skips sign-in when absent', async () => {
-  const fixture = doctorFixture({ agent: false });
+test('doctor gives the Claude install remedy and skips sign-in when absent', async () => {
+  const fixture = doctorFixture({ claude: false });
   try {
     const result = await invokeDoctor(fixture);
     assert.notEqual(result.code, 0);
-    assert.match(result.stdout, /FAIL \[required\] Cursor agent installed: agent was not found on PATH/);
-    assert.ok(result.stdout.includes(cursorAgentInstallCommand()),
-      'the doctor remedy must contain the shared install command for this platform');
-    // Positive control for the mapping itself. The assertion above compares doctor output
-    // against the same helper doctor calls, so an inverted win32/other mapping would agree
-    // with it and still pass. Pin each platform to a literal marker so inversion fails.
-    assert.match(cursorAgentInstallCommand('win32'), /^irm /,
-      'Windows must be given the PowerShell installer');
-    assert.match(cursorAgentInstallCommand('linux'), /^curl /,
-      'Linux must be given the curl installer');
-    assert.match(cursorAgentInstallCommand('darwin'), /^curl /,
-      'macOS must be given the curl installer');
-    assert.notEqual(CURSOR_AGENT_INSTALL_COMMANDS.win32, CURSOR_AGENT_INSTALL_COMMANDS.other,
-      'the two platform commands must be distinct or the mapping is untestable');
-    assert.match(result.stdout, /binary is `agent`/);
-    assert.match(result.stdout, /`agent login`/);
-    assert.match(result.stdout, /SKIP \[required\] Cursor signed in:.*CLI is not installed yet/);
-    assert.doesNotMatch(result.stdout, /FAIL \[required\] Cursor signed in:/,
-      'a missing CLI has one install failure, not a duplicate sign-in failure');
-
-    const documentation = readFileSync(setupSkill, 'utf8').replaceAll('\\|', '|');
-    for (const command of Object.values(CURSOR_AGENT_INSTALL_COMMANDS)) {
-      assert.ok(documentation.includes(command),
-        `setup skill must contain the shared command: ${command}`);
-    }
-  } finally {
-    rmSync(fixture.root, { recursive: true, force: true });
-  }
+    assert.match(result.stdout, /FAIL \[required\] Claude CLI installed: claude was not found on PATH/);
+    assert.match(result.stdout, /npm install -g @anthropic-ai\/claude-code/);
+    assert.match(result.stdout, /SKIP \[required\] Claude signed in:.*CLI is not installed yet/);
+  } finally { rmSync(fixture.root, { recursive: true, force: true }); }
 });
 
-test('doctor requires all three free local sign-in checks, with passing positive controls', async () => {
+test('doctor requires both free local sign-in checks, with passing positive controls', async () => {
   const fixture = doctorFixture();
   try {
     const signedIn = await invokeDoctor(fixture);
     assert.equal(signedIn.code, 0, `${signedIn.stderr}\n${signedIn.stdout}`);
     assert.match(signedIn.stdout, /PASS \[required\] Codex signed in: `codex login status` exited 0/);
-    assert.match(signedIn.stdout, /PASS \[required\] Cursor signed in: `agent status` exited 0/);
     assert.match(signedIn.stdout, /PASS \[required\] Claude signed in: `claude auth status` exited 0/);
 
     fixture.env.URO_FAKE_CODEX_SIGNED_IN = 'no';
@@ -207,27 +175,14 @@ test('doctor requires all three free local sign-in checks, with passing positive
     assert.match(codexSignedOut.stdout, /FAIL \[required\] Codex signed in: `codex login status` exited 1/);
     assert.match(codexSignedOut.stdout, /run `codex login`/);
     assert.match(codexSignedOut.stdout, /update or reinstall the Codex CLI/);
-    assert.match(codexSignedOut.stdout, /PASS \[required\] Cursor signed in/,
-      'positive control: Cursor can still pass while Codex is signed out');
     assert.match(codexSignedOut.stdout, /PASS \[required\] Claude signed in/,
       'positive control: Claude can still pass while Codex is signed out');
 
     delete fixture.env.URO_FAKE_CODEX_SIGNED_IN;
-    fixture.env.URO_FAKE_AGENT_SIGNED_IN = 'no';
-    const cursorSignedOut = await invokeDoctor(fixture);
-    assert.notEqual(cursorSignedOut.code, 0);
-    assert.match(cursorSignedOut.stdout, /PASS \[required\] Codex signed in/,
-      'positive control: Codex can still pass while Cursor is signed out');
-    assert.match(cursorSignedOut.stdout, /FAIL \[required\] Cursor signed in: `agent status` exited 1/);
-    assert.match(cursorSignedOut.stdout, /run `agent login`/);
-    assert.match(cursorSignedOut.stdout, /run `agent update` or reinstall the Cursor Agent CLI/);
-
-    delete fixture.env.URO_FAKE_AGENT_SIGNED_IN;
     fixture.env.URO_FAKE_CLAUDE_SIGNED_IN = 'no';
     const claudeSignedOut = await invokeDoctor(fixture);
     assert.notEqual(claudeSignedOut.code, 0);
     assert.match(claudeSignedOut.stdout, /PASS \[required\] Codex signed in/);
-    assert.match(claudeSignedOut.stdout, /PASS \[required\] Cursor signed in/);
     assert.match(claudeSignedOut.stdout,
       /FAIL \[required\] Claude signed in: `claude auth status` exited 1/);
     assert.match(claudeSignedOut.stdout, /run `claude auth login`/);
@@ -246,10 +201,9 @@ test('plain doctor invokes only local status commands and never model probes', a
     const invocations = readFileSync(invocationsPath, 'utf8').trim().split(/\r?\n/).map(JSON.parse);
     assert.deepEqual(invocations, [
       { cli: 'codex', args: ['login', 'status'] },
-      { cli: 'agent', args: ['status'] },
       { cli: 'claude', args: ['auth', 'status'] },
       { cli: 'codex', args: ['plugin', 'list'] },
-    ], 'default doctor must never invoke Codex exec, Cursor -p, or Claude -p model forms');
+    ], 'default doctor must never invoke Codex exec or Claude -p model forms');
   } finally {
     rmSync(fixture.root, { recursive: true, force: true });
   }
@@ -261,9 +215,9 @@ test('doctor marks token-using probes SKIP, never PASS, unless --deep is selecte
     const result = await invokeDoctor(fixture);
     assert.equal(result.code, 0, `${result.stderr}\n${result.stdout}`);
     assert.match(result.stdout, /SKIP \[required\] Codex write probe:.*not performed/);
-    assert.match(result.stdout, /SKIP \[required\] Cursor read probe:.*not performed/);
+    assert.match(result.stdout, /SKIP \[required\] Claude read probe:.*not performed/);
     assert.match(result.stdout, /doctor --deep/);
-    assert.doesNotMatch(result.stdout, /PASS \[required\] (?:Codex write|Cursor read) probe/,
+    assert.doesNotMatch(result.stdout, /PASS \[required\] (?:Codex write|Claude read) probe/,
       'a skipped probe must remain distinguishable from a passed probe');
     assert.match(result.stdout, /Loop core health: HEALTHY .*sign-ins were verified/);
     assert.match(result.stdout, /Deep readiness: UNKNOWN .*sign-in was verified.*remain unproven until `--deep`.*SKIPPED, not passed/);
@@ -278,7 +232,7 @@ test('doctor deep probes pass with local stubs, clean scratch, and ignore missin
     const result = await invokeDoctor(fixture, '--deep');
     assert.equal(result.code, 0, `${result.stderr}\n${result.stdout}`);
     assert.match(result.stdout, /PASS \[required\] Codex write probe: created ccc-doctor-write[.]txt/);
-    assert.match(result.stdout, /PASS \[required\] Cursor read probe: returned the unpredictable contents/);
+    assert.match(result.stdout, /PASS \[required\] Claude read probe: returned the unpredictable contents/);
     assert.match(result.stdout, /FAIL \[optional\] GitHub CLI installed/);
     assert.match(result.stdout, /FAIL \[optional\] GitHub authentication/);
     assert.match(result.stdout, /FAIL \[optional\] GitHub remote/);
@@ -296,21 +250,21 @@ test('doctor deep probes pass with local stubs, clean scratch, and ignore missin
   }
 });
 
-test('doctor deep probes fail when Codex does not write or Cursor cannot read', async () => {
+test('doctor deep probes fail when Codex does not write or Claude cannot read', async () => {
   const noWrite = doctorFixture({ codexScript: fakeCodexNoWrite });
-  const blockedRead = doctorFixture({ agentScript: fakeAgentBlocked });
+  const blockedRead = doctorFixture({ claudeScript: fakeAgentBlocked });
   try {
     const codexResult = await invokeDoctor(noWrite, '--deep');
     assert.notEqual(codexResult.code, 0);
     assert.match(codexResult.stdout, /FAIL \[required\] Codex write probe: Codex exited 0 or did not create the requested file/);
-    assert.match(codexResult.stdout, /PASS \[required\] Cursor read probe/,
+    assert.match(codexResult.stdout, /PASS \[required\] Claude read probe/,
       'positive control: the independent read probe still ran');
 
     const agentResult = await invokeDoctor(blockedRead, '--deep');
     assert.notEqual(agentResult.code, 0);
     assert.match(agentResult.stdout, /PASS \[required\] Codex write probe/,
       'positive control: the independent write probe still ran');
-    assert.match(agentResult.stdout, /FAIL \[required\] Cursor read probe: agent exited 1/);
+    assert.match(agentResult.stdout, /FAIL \[required\] Claude read probe: Claude exited 1/);
   } finally {
     rmSync(noWrite.root, { recursive: true, force: true });
     rmSync(blockedRead.root, { recursive: true, force: true });

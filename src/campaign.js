@@ -10,6 +10,7 @@ import {
   DEFAULT_TOKEN_BUDGET,
   MAX_CONCURRENCY,
   MAX_ROUNDS,
+  normalizeProviderOptions,
   normalizeUnits,
   positiveInteger,
   validateCandidateSet,
@@ -833,6 +834,7 @@ async function runCampaignRound(options) {
     try {
       const proposed = typeof plannerSynthesis === 'function'
         ? await plannerSynthesis({
+            interactionMode: options.interactionMode,
             campaignId,
             round,
             reviews: plannerReviews.map((review) => ({ ...review })),
@@ -1045,10 +1047,16 @@ export async function runCampaign(options) {
     bypassed: requirement.bypassed,
     seats: requirement.verification.seats,
   };
-  options = {
-    ...options,
-    superpowers,
-    runOptions: { ...options.runOptions, superpowers, env: environment },
+  // Internal runOptions retain transport names; public declarations use provider names.
+  const { verifierModel: _internalReviewerModel, ...providerRunOptions } = options.runOptions ?? {};
+  const providers = normalizeProviderOptions({ ...providerRunOptions, ...options,
+    mode: options.interactionMode ?? options.mode ?? options.runOptions?.mode });
+  options = { ...options, superpowers, interactionMode: providers.interactionMode,
+    runOptions: { ...options.runOptions, superpowers, env: environment, mode: providers.interactionMode,
+      ...(providers.codexModel === undefined ? {} : { executorModel: providers.codexModel }),
+      ...(providers.codexEffort === undefined ? {} : { executorEffort: providers.codexEffort }),
+      ...(providers.claudeModel === undefined ? {} : { arbiterModel: providers.claudeModel, verifierModel: providers.claudeModel }),
+    },
   };
   const configuration = iterativeConfiguration(options);
   const firstDeclaration = configuration.declarations?.[0];
@@ -1171,6 +1179,7 @@ export async function runCampaign(options) {
       let proposed = configuration.declarations?.[round];
       if (proposed === undefined && options.nextRound !== undefined) {
         proposed = await options.nextRound({
+          interactionMode: options.interactionMode,
           campaignId,
           round,
           result: grouped,

@@ -9,9 +9,6 @@ FAIL [required] git usable: ccc-doctor-golden-missing-git-7e57 was not found on 
 FAIL [required] Codex CLI installed: ccc-doctor-golden-missing-codex-7e57 was not found on PATH
   Next: run `npm install -g @openai/codex`, then run `codex` in a terminal to sign in.
 SKIP [required] Codex signed in: not checked because the Codex CLI is not installed yet
-FAIL [required] Cursor agent installed: ccc-doctor-golden-missing-agent-7e57 was not found on PATH
-  Next: {{CURSOR_INSTALL_PROSE}}
-SKIP [required] Cursor signed in: not checked because the Cursor Agent CLI is not installed yet
 FAIL [required] Claude CLI installed: ccc-doctor-golden-missing-claude-7e57 was not found on PATH
   Next: run `npm install -g @anthropic-ai/claude-code`, then run `claude auth login`.
 SKIP [required] Claude signed in: not checked because the Claude CLI is not installed yet
@@ -21,13 +18,11 @@ FAIL [required] Scratch root writable: not tested because the configured path is
   Next: set `URO_SCRATCH_ROOT` to a writable local path outside AppData and OneDrive, then rerun doctor.
 FAIL [required] Codex superpowers: Codex: cannot verify superpowers because the Codex CLI is not installed
   Next: Codex: run `codex plugin add superpowers@openai-curated`, then rerun `node bin/loop.js doctor`.
-FAIL [required] Cursor superpowers: Cursor: no superpowers directory with a valid .cursor-plugin manifest and readable skills was found
-  Next: Cursor: run `$env:URO_SUPERPOWERS_DIR='<directory-with-.cursor-plugin>'; node bin/loop.js doctor` in PowerShell, or `export URO_SUPERPOWERS_DIR='<directory-with-.cursor-plugin>'; node bin/loop.js doctor` on POSIX.
 FAIL [required] Claude superpowers: Claude: no superpowers directory with a valid .claude-plugin manifest and readable skills was found
   Next: Claude: run `/plugin install superpowers@superpowers-marketplace` inside Claude Code, restart Claude Code, then rerun `node bin/loop.js doctor`.
 FAIL [required] Codex write probe: could not run because Codex, git, or scratch storage failed a prerequisite
   Next: fix the failed prerequisite above, then rerun `node bin/loop.js doctor --deep`.
-FAIL [required] Cursor read probe: could not run because the agent or scratch storage failed a prerequisite
+FAIL [required] Claude read probe: could not run because the agent or scratch storage failed a prerequisite
   Next: fix the failed prerequisite above, then rerun `node bin/loop.js doctor --deep`.
 
 Optional features (these do not affect loop health):

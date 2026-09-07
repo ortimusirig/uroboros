@@ -5,7 +5,7 @@ import {
   statSync,
 } from 'node:fs';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
-import { assertPlanOutputAvailable, resolveGoal } from './plan.js';
+import { assertCurrentPlanApproval, assertPlanOutputAvailable, resolveGoal } from './plan.js';
 
 const QUEUE_UNIT_KEYS = new Set(['name', 'task', 'gate', 'goal', 'out']);
 const QUEUE_MODES = new Set(['manual', 'autonomous']);
@@ -283,6 +283,7 @@ export async function runQueue({
   file,
   target,
   mode = 'manual',
+  claudeModel, codexModel, codexEffort,
   maxRuns,
   tokenBudget,
   acceptGoalSpec,
@@ -368,17 +369,17 @@ export async function runQueue({
     let implementationUnit = unit;
     try {
       if (unit.kind === 'goal') {
-        planResult = await launchPlan({ unit, target: resolve(target) });
+        planResult = await launchPlan({ unit, target: resolve(target), mode, claudeModel, codexModel, codexEffort });
         // The taxi meter runs whether or not you arrive: planning spend counts
         // on every path, not only when a unit lands.
         const planTokenReading = factTokens(planResult);
         if (planTokenReading.valid) totalTokens = addTokens(totalTokens, planTokenReading.tokens);
         planTokens = planTokenReading.valid ? planTokenReading.tokens : zeroTokens;
-        if (planResult?.converged !== true) {
+        if (planResult?.approved !== true) {
           const durationMs = Math.max(0, now() - startedAt);
-          const reason = `plan did not converge: ${planResult?.reason ?? 'unknown reason'}`;
+          const reason = `plan was not approved: ${planResult?.reason ?? 'unknown reason'}`;
           stop = {
-            kind: 'plan-not-converged',
+            kind: 'plan-not-approved',
             unit: unit.name,
             unitIndex: unit.index,
             reason,
@@ -389,7 +390,13 @@ export async function runQueue({
             name: unit.name,
             runId: null,
             planRounds: planResult?.rounds ?? null,
-            planConverged: false,
+            planConverged: planResult?.converged === true,
+            planApproval: planResult?.approval ?? null,
+            planApproved: false,
+            interactionMode: mode,
+            pendingDecision: planResult?.pendingDecision ?? null,
+            checkpointState: planResult?.checkpointState ?? null,
+            queueContext: { file: queue.path, unitIndex: unit.index, goal: unit.goal, out: unit.out, target: resolve(target), mode },
             planOutcome: planResult?.reason ?? 'unknown',
             implementationOutcome: null,
             tokens: planTokens,
@@ -400,14 +407,16 @@ export async function runQueue({
           });
           break;
         }
+        assertCurrentPlanApproval({ unit, result: planResult, mode });
         implementationUnit = {
           ...unit,
+          approval: planResult.approval,
           task: planResult.planPath ?? join(unit.out, 'plan.md'),
           gate: planResult.gatePath ?? join(unit.out, 'gate.json'),
         };
         allowedQueuePaths.push(implementationUnit.task, implementationUnit.gate);
       }
-      launch = await launchRun({ unit: implementationUnit, target: resolve(target), mode });
+      launch = await launchRun({ unit: implementationUnit, target: resolve(target), mode, claudeModel, codexModel, codexEffort });
       facts = await readRunFacts(launch);
     } catch (error) {
       const durationMs = Math.max(0, now() - startedAt);
@@ -436,6 +445,9 @@ export async function runQueue({
         ...(unit.kind === 'goal' ? {
           planRounds: planResult?.rounds ?? null,
           planConverged: planResult?.converged === true,
+        planApproved: planResult?.approved === true,
+        planApproval: planResult?.approval ?? null,
+        interactionMode: mode,
           planOutcome: planResult?.reason ?? null,
           implementationOutcome: null,
         } : {}),
@@ -490,6 +502,7 @@ export async function runQueue({
       }
       if (landingJudgement.approved === true) {
         try {
+          if (unit.kind === 'goal') assertCurrentPlanApproval({ unit, result: planResult, mode });
           landing = await landDiff({
             target: resolve(target),
             diffPath: join(launch.runDirectory, 'CHANGES.diff'),
@@ -567,6 +580,9 @@ export async function runQueue({
       ...(unit.kind === 'goal' ? {
         planRounds: planResult?.rounds ?? null,
         planConverged: planResult?.converged === true,
+        planApproved: planResult?.approved === true,
+        planApproval: planResult?.approval ?? null,
+        interactionMode: mode,
         planOutcome: planResult?.reason ?? null,
         implementationOutcome: facts?.outcome ?? null,
       } : {}),

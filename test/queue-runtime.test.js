@@ -13,6 +13,68 @@ import {
   readRunFacts,
 } from '../src/queue-runtime.js';
 import { EMPTY_USAGE } from '../src/usage.js';
+import { runQueue } from '../src/queue.js';
+import { planningArtifactDigest } from '../src/conversation.js';
+
+test('a real queue passes mode and models to both children and accepts artifact-bound dissent', async () => {
+  const fixture = scratch();
+  try {
+    const file = join(fixture.directory, 'queue.json');
+    const out = join(fixture.directory, 'plans');
+    writeFileSync(file, JSON.stringify([{ goal: 'Improve parser', out }]));
+    const calls = [];
+    const runCommand = async (_bin, args) => {
+      calls.push(args);
+      if (args[1] === 'plan') {
+        mkdirSync(out);
+        writeFileSync(join(out, 'plan.md'), '# Plan\n');
+        writeFileSync(join(out, 'gate.json'), '{}\n');
+        return { code: 0, stdout: JSON.stringify({ approved: true, converged: false, rounds: 2,
+          approval: { artifactDigest: planningArtifactDigest('Improve parser', { plan: '# Plan\n', gate: {} }),
+            decidedBy: 'codex', basis: 'reviewer', reason: 'Dissent resolved on evidence' } }) };
+      }
+      return { code: 1, stdout: JSON.stringify({ runId: 'r1', dir: fixture.directory }) };
+    };
+    const runtime = { runCommand, loopPath: 'loop.js' };
+    const result = await runQueue({ file, target: fixture.directory, mode: 'autonomous',
+      claudeModel: 'sonnet', codexModel: 'gpt-6-astra', codexEffort: 'high', dependencies: {
+        assertCleanTarget: async () => {},
+        launchPlan: request => launchLoopPlan(request, runtime),
+        launchRun: request => launchLoopRun(request, runtime),
+        readRunFacts: async () => ({ runId: 'r1', outcome: 'needs-decision', tokens: { total: { inputTokens: 1, outputTokens: 1 } } }),
+      } });
+    assert.equal(calls.length, 2, result.stop?.reason);
+    for (const args of calls) {
+      assert.equal(args[args.indexOf('--mode') + 1], 'autonomous');
+      assert.equal(args[args.indexOf('--claude-model') + 1], 'sonnet');
+      assert.equal(args[args.indexOf('--codex-model') + 1], 'gpt-6-astra');
+      assert.equal(args[args.indexOf('--codex-effort') + 1], 'high');
+    }
+  } finally { fixture.cleanup(); }
+});
+
+test('queue plan boundary rejects stale goal, plan, gate and missing approvals', async () => {
+  for (const mutation of ['goal', 'plan', 'gate', 'approval']) {
+    const fixture = scratch();
+    try {
+      const goal = join(fixture.directory, 'goal.md');
+      const out = join(fixture.directory, 'out');
+      mkdirSync(out);
+      writeFileSync(goal, 'Original goal');
+      writeFileSync(join(out, 'plan.md'), '# Plan\n');
+      writeFileSync(join(out, 'gate.json'), '{}');
+      const approval = { artifactDigest: planningArtifactDigest('Original goal', { plan: '# Plan\n', gate: {} }),
+        decidedBy: 'codex', basis: 'reviewer', reason: 'Approved' };
+      if (mutation === 'goal') writeFileSync(goal, 'Changed goal');
+      if (mutation === 'plan') writeFileSync(join(out, 'plan.md'), '# Changed\n');
+      if (mutation === 'gate') writeFileSync(join(out, 'gate.json'), '{"commands":[]}');
+      await assert.rejects(launchLoopPlan({ unit: { goal, out }, target: fixture.directory, mode: 'autonomous' }, {
+        runCommand: async () => ({ code: 0, stdout: JSON.stringify({ approved: true, converged: false, rounds: 2,
+          ...(mutation === 'approval' ? {} : { approval }) }) }),
+      }), /approval.*(stale|missing|current|digest)/i);
+    } finally { fixture.cleanup(); }
+  }
+});
 
 function scratch() {
   const directory = mkdtempSync(join(process.cwd(), '.ccc-test-queue-runtime-'));
@@ -56,7 +118,7 @@ test('the production launcher composes loop run and accepts facts from a stoppin
     'the launcher must forward the child heartbeat as it arrives');
   assert.equal(calls[0].options.cwd, resolve('C:/repo'));
   assert.equal(calls[0].options.env.CODEX_HOME, env.CODEX_HOME);
-  assert.equal(calls[0].options.env.PATH, process.env.PATH);
+  assert.equal(calls[0].options.env[Object.keys(process.env).find(key => key.toLowerCase() === 'path') ?? 'PATH'], process.env[Object.keys(process.env).find(key => key.toLowerCase() === 'path') ?? 'PATH']);
   assert.deepEqual(result, {
     runId: 'run-17',
     runDirectory: 'C:/scratch/run-17/w',
@@ -71,7 +133,7 @@ test('the production plan launcher composes loop plan and accepts non-convergenc
     calls.push({ bin, args, options });
     return {
       code: 1,
-      stdout: JSON.stringify({ converged: false, rounds: 3, reason: 'rounds-exhausted' }),
+      stdout: JSON.stringify({ approved: false, converged: false, rounds: 3, reason: 'rounds-exhausted' }),
       stderr: '',
     };
   };
@@ -82,11 +144,11 @@ test('the production plan launcher composes loop plan and accepts non-convergenc
 
   assert.deepEqual(calls[0].args, [
     'C:/tools/loop.js', 'plan', '--goal', 'Improve the parser',
-    '--target', resolve('C:/repo'), '--out', 'C:/plans/x',
+    '--target', resolve('C:/repo'), '--out', 'C:/plans/x', '--mode', 'manual',
   ]);
   assert.equal(calls[0].options.cwd, resolve('C:/repo'));
   assert.equal(calls[0].options.env.CODEX_HOME, env.CODEX_HOME);
-  assert.equal(calls[0].options.env.PATH, process.env.PATH);
+  assert.equal(calls[0].options.env[Object.keys(process.env).find(key => key.toLowerCase() === 'path') ?? 'PATH'], process.env[Object.keys(process.env).find(key => key.toLowerCase() === 'path') ?? 'PATH']);
   assert.equal(result.converged, false);
   assert.equal(result.exitCode, 1);
 });

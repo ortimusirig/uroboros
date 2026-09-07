@@ -79,7 +79,7 @@ test('package and skill identifiers are uroboros and shipped text has no stale i
 
   const shippableTextRoots = [
     'package.json', 'README.md', 'PORTING.md', 'bin', 'src',
-    'fixtures', 'test', 'docs', 'cursor-plugin', 'commands', 'skills', '.claude-plugin',
+    'fixtures', 'test', 'docs', 'commands', 'skills', '.claude-plugin',
   ];
   if (existsSync(installerPath)) shippableTextRoots.push('install.mjs');
   const checked = shippableTextRoots

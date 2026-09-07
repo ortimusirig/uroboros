@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { assertNoForbiddenFlags, buildCursorArgs, classifySeatOutage,
+import { assertNoForbiddenFlags, classifySeatOutage,
   extractPlanArtifact, parseVerdict, parseVerdictDetail } from '../src/verifier.js';
 
 // Historical Cursor streams remain readable after the active transport migration.
@@ -38,9 +38,6 @@ test('parseVerdict still returns a bare verdict string', () => {
   assert.equal(typeof parseVerdict('{"type":"result","result":"NO_BLOCKERS"}'), 'string');
 });
 
-test('forbidden write flags never appear', () => {
-  assert.doesNotMatch(buildCursorArgs({}).join(' '), /--force|--yolo|(^| )-f( |$)|--approve-mcps/);
-});
 
 test('assertNoForbiddenFlags throws on a write flag', () => {
   assert.throws(() => assertNoForbiddenFlags(['-p', '--force']), /force/);

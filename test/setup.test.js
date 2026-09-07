@@ -110,7 +110,7 @@ test('setup remediation installs into the same Codex registry environment it pro
 
     assert.equal(result.ok, true);
     assert.equal(remediationOptions.env.CODEX_HOME, env.CODEX_HOME);
-    assert.equal(remediationOptions.env.PATH, process.env.PATH,
+    assert.equal(remediationOptions.env[Object.keys(process.env).find(key => key.toLowerCase() === 'path') ?? 'PATH'], process.env[Object.keys(process.env).find(key => key.toLowerCase() === 'path') ?? 'PATH'],
       'the install override must retain the PATH needed to launch Codex');
   } finally {
     rmSync(root, { recursive: true, force: true });

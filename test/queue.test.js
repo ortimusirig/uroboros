@@ -10,6 +10,7 @@ import {
 } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
 import test from 'node:test';
+import { planningArtifactDigest } from '../src/conversation.js';
 import { runQueue } from '../src/queue.js';
 
 function makeFixture(count = 3) {
@@ -129,7 +130,12 @@ test('a goal unit converges its plan before launching and landing implementation
   const runtime = fakeRuntime([reviewReady('run-goal')], {
     launchPlan: async (request) => {
       planLaunches.push(request);
+      mkdirSync(request.unit.out, { recursive: true });
+      writeFileSync(join(request.unit.out, 'plan.md'), '# Plan\n');
+      writeFileSync(join(request.unit.out, 'gate.json'), '{}\n');
       return {
+        approved: true, approval: { decidedBy: 'codex', basis: 'consensus', reason: 'Both agree',
+          artifactDigest: planningArtifactDigest(request.unit.goal, { plan: '# Plan\n', gate: {} }) },
         converged: true, rounds: 2, reason: 'converged',
         planPath: join(request.unit.out, 'plan.md'),
         gatePath: join(request.unit.out, 'gate.json'),
@@ -174,7 +180,7 @@ test('a non-converged goal plan stops before implementation starts', async () =>
       },
     });
     assert.equal(runLaunches, 0);
-    assert.equal(result.stop.kind, 'plan-not-converged');
+    assert.equal(result.stop.kind, 'plan-not-approved');
     const log = readLog(fixture.logPath)[0];
     assert.equal(log.planRounds, 3);
     assert.equal(log.planConverged, false);

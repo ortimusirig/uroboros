@@ -9,7 +9,6 @@ const VERIFIED_SUPERPOWERS = Object.freeze({
   ok: true,
   seats: Object.freeze({
     codex: Object.freeze({ seat: 'codex', verified: true, evidence: 'registry', version: '6.3.0', path: null, remediation: 'Codex fix' }),
-    cursor: Object.freeze({ seat: 'cursor', verified: true, evidence: 'manifest', version: '6.0.2', path: 'C:/cursor', remediation: 'Cursor fix' }),
     claude: Object.freeze({ seat: 'claude', verified: true, evidence: 'manifest', version: '6.0.2', path: 'C:/claude', remediation: 'Claude fix' }),
   }),
 });
@@ -34,7 +33,7 @@ test('fails when target does not exist', async () => {
   const gate = mkdtempSync(join(tmpdir(), 'g-'));
   writeFileSync(join(gate, 'gate.json'), '[]');
   const r = await preflight({ target: 'C:/does/not/exist/xyz', gate: join(gate, 'gate.json'),
-    scratchRoot: 'C:/ccc/w', bins: { git: process.execPath, codex: process.execPath, agent: process.execPath } });
+    scratchRoot: 'C:/ccc/w', bins: { git: process.execPath, codex: process.execPath, claude: process.execPath } });
   assert.equal(r.ok, false);
   assert.match(r.reason, /target/i);
 });
@@ -44,7 +43,7 @@ test('fails when scratch root is under AppData', async () => {
   writeFileSync(join(d, 'gate.json'), '[]');
   const r = await preflight({ target: d, gate: join(d, 'gate.json'),
     scratchRoot: 'C:/Users/x/AppData/Local/ccc',
-    bins: { git: process.execPath, codex: process.execPath, agent: process.execPath } });
+    bins: { git: process.execPath, codex: process.execPath, claude: process.execPath } });
   assert.equal(r.ok, false);
   assert.match(r.reason, /AppData/i);
 });
@@ -53,7 +52,7 @@ test('passes when everything resolves', async () => {
   const d = mkdtempSync(join(tmpdir(), 'p-'));
   writeFileSync(join(d, 'gate.json'), '[]');
   const r = await preflight({ target: d, gate: join(d, 'gate.json'), scratchRoot: 'C:/ccc/w',
-    bins: { git: process.execPath, codex: process.execPath, agent: process.execPath } });
+    bins: { git: process.execPath, codex: process.execPath, claude: process.execPath } });
   assert.equal(r.ok, true);
   assert.equal(r.reason, null);
 });
@@ -64,7 +63,7 @@ test('fails before binary probes when a path-like task file is missing', async (
   writeFileSync(join(d, 'gate.json'), '[]');
   const r = await preflight({ task: missing, target: d, gate: join(d, 'gate.json'),
     scratchRoot: 'C:/ccc/w',
-    bins: { git: 'not-needed', codex: 'not-needed', agent: 'not-needed' } });
+    bins: { git: 'not-needed', codex: 'not-needed', claude: 'not-needed' } });
   assert.equal(r.ok, false);
   assert.match(r.reason, /task file not found/i);
   assert.ok(r.reason.includes(missing), 'the diagnostic must name the missing task path');
@@ -79,7 +78,7 @@ test('batch preflight validates every task before probing binaries', async () =>
     target: d,
     gate: join(d, 'gate.json'),
     scratchRoot: 'C:/ccc/w',
-    bins: { git: 'not-needed', codex: 'not-needed', agent: 'not-needed' },
+    bins: { git: 'not-needed', codex: 'not-needed', claude: 'not-needed' },
   });
   assert.equal(r.ok, false);
   assert.ok(r.reason.includes(missing));
@@ -90,7 +89,7 @@ test('preflight rejects a missing corrected run and accepts an existing run dire
   const scratchRoot = makeScratch();
   const gate = join(d, 'gate.json');
   writeFileSync(gate, '[]');
-  const bins = { git: process.execPath, codex: process.execPath, agent: process.execPath };
+  const bins = { git: process.execPath, codex: process.execPath, claude: process.execPath };
   try {
     const missing = await preflight({
       task: 'A valid inline task.', target: d, gate, scratchRoot,
@@ -142,7 +141,7 @@ test('preflight accepts an injected passing verifier probe', async () => {
   let probed = null;
   const r = await preflight({
     target: d, gate: join(d, 'gate.json'), scratchRoot: 'C:/ccc/w',
-    bins: { git: process.execPath, codex: process.execPath, agent: process.execPath },
+    bins: { git: process.execPath, codex: process.execPath, claude: process.execPath },
     probeVerifier: async ({ bin }) => {
       probed = bin;
       return { ok: true, reason: null };
@@ -163,10 +162,10 @@ test('run and batch preflight reject an unverified seat before work can start', 
     ok: false,
     seats: {
       ...VERIFIED_SUPERPOWERS.seats,
-      cursor: {
-        seat: 'cursor', verified: false, evidence: 'Cursor missing .cursor-plugin',
+      claude: {
+        seat: 'claude', verified: false, evidence: 'Claude missing .claude-plugin',
         version: null, path: null,
-        remediation: 'Cursor: URO_SUPERPOWERS_DIR=<directory-with-.cursor-plugin>',
+        remediation: 'Claude: URO_SUPERPOWERS_DIR=<directory-with-.claude-plugin>',
       },
     },
   };
@@ -177,14 +176,14 @@ test('run and batch preflight reject an unverified seat before work can start', 
         target: d,
         gate,
         scratchRoot: 'C:/ccc/w',
-        bins: { git: 'git', codex: 'codex', agent: 'agent' },
+        bins: { git: 'git', codex: 'codex', claude: 'claude' },
         checkCommand: async () => true,
         probeVerifier: async () => ({ ok: true, reason: null }),
         verifySuperpowers: async () => failed,
       });
       if (result.ok) calls.push('executor');
       assert.equal(result.ok, false);
-      assert.match(result.reason, /Cursor.*[.]cursor-plugin/i);
+      assert.match(result.reason, /Claude.*[.]claude-plugin/i);
     }
     assert.deepEqual(calls, [], 'neither run nor batch can dispatch an executor after failure');
   } finally {
@@ -209,7 +208,7 @@ test('URO_REQUIRE_SUPERPOWERS=0 explicitly bypasses a failed preflight and recor
   try {
     const result = await preflight({
       task: 'Run deliberately.', target: d, gate, scratchRoot: 'C:/ccc/w',
-      bins: { git: 'git', codex: 'codex', agent: 'agent' },
+      bins: { git: 'git', codex: 'codex', claude: 'claude' },
       checkCommand: async () => true,
       probeVerifier: async () => ({ ok: true, reason: null }),
       verifySuperpowers: async () => failed,

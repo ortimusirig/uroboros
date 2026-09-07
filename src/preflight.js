@@ -20,7 +20,7 @@ function isDirectory(path) {
 export const VERIFIER_PROBE_ARGS = Object.freeze(['--version']);
 
 export async function probeVerifierLiveness({
-  bin = 'agent',
+  bin = 'claude',
   spawn = spawnCapture,
   timeoutMs = 10_000,
 } = {}) {
@@ -61,7 +61,7 @@ export async function preflight({
   gate,
   scratchRoot,
   correctsRunId,
-  bins = { git: 'git', codex: 'codex', agent: 'agent' },
+  bins = { git: 'git', codex: 'codex', claude: 'claude' },
   probeVerifier = probeVerifierLiveness,
   skipVerifierProbe = false,
   checkCommand = commandExists,
@@ -94,15 +94,15 @@ export async function preflight({
   if (!skipVerifierProbe) {
     let probe;
     try {
-      probe = await probeVerifier({ bin: bins.agent });
+      probe = await probeVerifier({ bin: bins.claude });
     } catch (error) {
-      return fail(`verifier liveness probe failed for ${bins.agent}: tried `
-        + `"${bins.agent} ${VERIFIER_PROBE_ARGS.join(' ')}"; `
+      return fail(`verifier liveness probe failed for ${bins.claude}: tried `
+        + `"${bins.claude} ${VERIFIER_PROBE_ARGS.join(' ')}"; `
         + `${error?.message ?? String(error)}`);
     }
     if (!probe?.ok) {
-      return fail(probe?.reason ?? `verifier liveness probe failed for ${bins.agent}: tried `
-        + `"${bins.agent} ${VERIFIER_PROBE_ARGS.join(' ')}"`);
+      return fail(probe?.reason ?? `verifier liveness probe failed for ${bins.claude}: tried `
+        + `"${bins.claude} ${VERIFIER_PROBE_ARGS.join(' ')}"`);
     }
   }
   let verification;

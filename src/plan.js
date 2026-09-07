@@ -66,6 +66,28 @@ export function resolveGoal(goal, { baseDirectory = process.cwd() } = {}) {
   return { source: null, text: goal };
 }
 
+/** Trust boundary for written planning artifacts consumed by queue children. */
+export function assertCurrentPlanApproval({ unit, result, mode = 'manual' }) {
+  const approval = result?.approval;
+  if (result?.approved !== true || !approval || typeof approval.reason !== 'string' || !approval.reason.trim()
+    || !['consensus', 'reviewer', 'human'].includes(approval.basis)
+    || !['codex', 'human'].includes(approval.decidedBy)
+    || (approval.basis === 'reviewer' && (mode !== 'autonomous' || approval.decidedBy !== 'codex'))
+    || (approval.basis === 'human' && (mode !== 'manual' || approval.decidedBy !== 'human'))) {
+    throw new Error('plan approval is missing a current authorized decision');
+  }
+  const planPath = join(unit.out, 'plan.md'), gatePath = join(unit.out, 'gate.json');
+  if ((result.planPath && resolve(result.planPath) !== resolve(planPath))
+    || (result.gatePath && resolve(result.gatePath) !== resolve(gatePath))) {
+    throw new Error('plan approval does not identify the current output paths');
+  }
+  const digest = planningArtifactDigest(resolveGoal(unit.goal).text, {
+    plan: readFileSync(planPath, 'utf8'), gate: JSON.parse(readFileSync(gatePath, 'utf8')),
+  });
+  if (approval.artifactDigest !== digest) throw new Error('plan approval digest is stale for the current goal, plan or gate');
+  return { ...approval };
+}
+
 function writableAncestor(path) {
   let current = resolve(path);
   while (!existsSync(current)) {
