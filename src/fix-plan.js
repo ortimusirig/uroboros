@@ -71,7 +71,7 @@ export function buildFixPlan({
     '',
     String(originalTask),
     '',
-    '## Validated Findings',
+    '## Open review findings — answer or correct each',
     '',
     ...acceptedFindings.map(
       (finding) => `- ${finding.id} (${finding.severity}): ${finding.description}`,
@@ -95,7 +95,7 @@ export function buildFixPlan({
 
   lines.push(
     '',
-    "## Cursor's Tests",
+    "## Claude's Tests",
     '',
     'Do NOT modify or delete files under __uro_review/.',
     '',
@@ -105,4 +105,15 @@ export function buildFixPlan({
   );
 
   return `${lines.join('\n')}\n`;
+}
+
+export function executorFindingResponses(result) {
+  let value = result;
+  if (!Array.isArray(value?.findingResponses)) {
+    try { value = JSON.parse(String(result?.lastMessage ?? '').trim().replace(/^```json\s*|\s*```$/g, '')); }
+    catch { return []; }
+  }
+  return (value?.findingResponses ?? []).filter((item) => typeof item?.id === 'string'
+    && ['addressed', 'dispute'].includes(item.disposition)
+    && typeof item.reason === 'string' && item.reason.trim());
 }

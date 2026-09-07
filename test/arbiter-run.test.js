@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { run } from '../src/run.js';
 
 
@@ -22,7 +23,7 @@ const blocking = [
 ].join('\n');
 
 function fixture() {
-  const root = mkdtempSync(join(process.cwd(), '.arbiter-run-'));
+  const root = mkdtempSync(join(tmpdir(), 'arbiter-run-'));
   const work = join(root, 'work');
   const scratch = join(root, 'scratch');
   mkdirSync(work);
@@ -35,10 +36,12 @@ function verifierSequence(rounds) {
   let round = 0;
   return async ({ cwd }) => {
     const findings = rounds[round++] ?? '';
-    mkdirSync(join(cwd, '__uro_review'), { recursive: true });
+    mkdirSync(join(cwd, '__uro_review/tests'), { recursive: true });
+    if (findings) writeFileSync(join(cwd, '__uro_review/tests/f1.test.js'), '// independent proof\n');
     writeFileSync(join(cwd, '__uro_review', 'REVIEW.md'),
       findings === '' ? 'Reviewed. No findings this round.\n' : findings);
-    return { launchFailed: false, timedOut: false };
+    return { launchFailed: false, timedOut: false,
+      dispositions: findings === '' && round > 1 ? [{ id: 'F1', status: 'resolved', reason: 'Codex corrected the reported behavior and evidence now covers it.' }] : [] };
   };
 }
 
@@ -66,6 +69,7 @@ function baseOptions(item, overrides = {}) {
     target: item.work,
     gate: [],
     gateRetries: 0,
+    mode: 'autonomous',
     scratchRoot: item.scratch,
     runId: `arbiter-${Math.random()}`,
     superpowers: SUPERPOWERS,
@@ -75,7 +79,7 @@ function baseOptions(item, overrides = {}) {
   };
 }
 
-test('all findings overruled converges without another executor pass', async () => {
+test('Claude cannot overrule its own finding before Codex gets a response turn', async () => {
   const item = fixture();
   try {
     const options = baseOptions(item, {
@@ -97,10 +101,10 @@ test('all findings overruled converges without another executor pass', async () 
     });
     const facts = await run(options);
     assert.equal(facts.outcome, 'review-ready');
-    assert.equal(options.executorCalls(), 1);
-    assert.deepEqual(facts.debate.roundHistory[0].rejectedFindingIds, ['F1']);
-    assert.equal(facts.tokens.arbiter.inputTokens, 7);
-    assert.equal(facts.tokens.total.inputTokens, 7);
+    assert.equal(options.executorCalls(), 2);
+    assert.deepEqual(facts.debate.roundHistory[0].acceptedFindingIds, ['F1']);
+    assert.deepEqual(facts.debate.resolvedFindingIds, ['F1']);
+    assert.equal(facts.tokens.arbiter.inputTokens, 0);
   } finally { item.cleanup(); }
 });
 
@@ -151,7 +155,7 @@ test('an uncapped debate runs past two rounds and a judged amend can converge', 
   } finally { item.cleanup(); }
 });
 
-test('unavailable pivot arbitration records fallback as unjudged and the ladder terminates', async () => {
+test('unavailable Claude pivot judgment stops without inventing an authority ruling', async () => {
   const item = fixture();
   try {
     const options = baseOptions(item, {
@@ -176,15 +180,9 @@ test('unavailable pivot arbitration records fallback as unjudged and the ladder 
     });
     const facts = await run(options);
     assert.equal(facts.outcome, 'needs-pivot');
-    assert.equal(facts.debate.roundsRun, 5);
-    assert.deepEqual(facts.debate.pivotHistory.map(({ decision, unjudged }) => ({
-      decision, unjudged,
-    })), [
-      { decision: 'amend', unjudged: true },
-      { decision: 'fresh', unjudged: true },
-      { decision: 'conclude', unjudged: true },
-    ]);
-    assert.equal(facts.debate.pivotHistory[1].selectedCandidateId, 'candidate-1');
+    assert.equal(facts.debate.roundsRun, 3);
+    assert.deepEqual(facts.debate.pivotHistory, []);
+    assert.equal(facts.debate.stopReason, 'reviewer-unavailable');
   } finally { item.cleanup(); }
 });
 
@@ -247,7 +245,7 @@ test('autonomous challenges use arbiter merits and unavailable arbitration needs
         assert.equal(facts.outcome, 'review-ready');
         assert.equal(facts.decision.answers[0].answer, 'B');
       } else {
-        assert.equal(facts.outcome, 'needs-decision');
+        assert.equal(facts.outcome, 'needs-pivot');
         assert.equal(calls, 1);
       }
     } finally { item.cleanup(); }

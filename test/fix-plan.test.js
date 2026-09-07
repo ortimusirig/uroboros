@@ -88,7 +88,7 @@ test('buildFixPlan produces markdown with validated findings section', () => {
   });
 
   assert.equal(typeof plan, 'string');
-  assert.match(plan, /## Validated Findings/);
+  assert.match(plan, /## Open review findings/);
   assert.match(plan, /F1.*blocking/);
   assert.match(plan, /F2.*suggestion/);
   assert.match(plan, /Division by zero/);

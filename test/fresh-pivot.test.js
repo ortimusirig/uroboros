@@ -36,6 +36,7 @@ function fixture(name) {
 }
 
 const proofBytes = Buffer.from([0, 1, 2, 13, 10, 255, 42]);
+const executableProof = Buffer.from("import assert from 'node:assert/strict'; assert.ok(true);\n");
 const eventBytes = Buffer.from('{"stage":"debate","type":"pivot"}\n');
 const reviewText = [
   '## F1',
@@ -101,6 +102,7 @@ async function runFreshScenario({ allCandidatesFail = false, clean = false } = {
   let reviewBytesAtPivot;
   const facts = await run({
     task: 'Implement the approved behavior.',
+    mode: 'autonomous',
     target: item.target,
     gate: [],
     gateRetries: 0,
@@ -136,7 +138,7 @@ async function runFreshScenario({ allCandidatesFail = false, clean = false } = {
         const reviewDir = join(cwd, '__uro_review', 'tests');
         mkdirSync(reviewDir, { recursive: true });
         writeFileSync(join(cwd, '__uro_review', 'REVIEW.md'), reviewText);
-        writeFileSync(join(reviewDir, 'f1.test.js'), proofBytes);
+        writeFileSync(join(reviewDir, 'f1.test.js'), executableProof);
         return { launchFailed: false, timedOut: false };
       },
       captureWorktreeSnapshot: async () => ({}),
@@ -177,6 +179,7 @@ async function runFreshScenario({ allCandidatesFail = false, clean = false } = {
         return {
           plan: `fresh ${request.candidateId} plan\n`,
           gate: [],
+          agree: true, readable: true, content: 'AGREE: yes',
           usage: {
             inputTokens: request.candidateIndex,
             cachedInputTokens: 0,
@@ -199,6 +202,9 @@ async function runFreshScenario({ allCandidatesFail = false, clean = false } = {
           },
         };
       },
+      reviewPlanCandidate: async (request) => ({
+        agree: true, readable: true, content: 'AGREE: yes', artifactDigest: request.artifactDigest,
+      }),
     },
   });
   return {
@@ -224,8 +230,8 @@ test('FRESH replans with ledger-informed candidates, discards failed drafts, and
       baseCommit: 'pre-debate-commit',
       branch: 'uro/original-fresh-1',
     }]);
-    assert.deepEqual(reviewBytesAtPivot, proofBytes);
-    assert.deepEqual(readFileSync(join(facts.dir, '__uro_review', 'tests', 'f1.test.js')), proofBytes);
+    assert.deepEqual(reviewBytesAtPivot, executableProof);
+    assert.deepEqual(readFileSync(join(facts.dir, '__uro_review', 'tests', 'f1.test.js')), executableProof);
     assert.equal(candidateRequests.length, 3);
     assert.equal(new Set(candidateRequests.map((request) => request.perspective)).size, 3);
     // Both verifier seats found this assertion vacuous, and a counterfactual
@@ -272,7 +278,7 @@ test('FRESH replans with ledger-informed candidates, discards failed drafts, and
       'the post-FRESH finding must extend, not reset, the ledger');
     // Candidates 1 and 3 drafted (usage 1 + 3) plus selection (5). Candidate 2's
     // draft threw, so it has no usage to count — a failed draft costs nothing.
-    assert.equal(facts.tokens.executor.inputTokens, 9,
+    assert.equal(facts.tokens.planning.inputTokens, 9,
       'candidate drafting and selection must count against the run budget');
     for (const pair of [
       'pivot/replan_start', 'pivot/candidate', 'pivot/selected',

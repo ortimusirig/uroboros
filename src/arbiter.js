@@ -58,21 +58,24 @@ function readableText(streamText) {
     if (item.type === 'result') {
       resultSeen = true;
       resultUsable = item.is_error !== true && typeof item.result === 'string';
-      result = resultUsable ? item.result : '';
+      result = typeof item.result === 'string' ? item.result : '';
       usage = normalizeClaudeUsage(item.usage);
     }
   }
   // A real but empty/error result must not be replaced with stale assistant prose.
-  const answer = resultSeen ? (resultUsable ? result : '') : assistant;
-  return { answer: answer.trim(), usage };
+  const answer = resultSeen ? result : assistant;
+  return { answer, usage, resultSeen, resultUsable };
 }
 
 export function parseArbiterStream(streamText) {
   const parsed = readableText(streamText);
   return {
-    verdict: parsed.answer === '' ? ARBITER_UNVERIFIED : 'ANSWERED',
+    verdict: !parsed.answer.trim() || (parsed.resultSeen && !parsed.resultUsable)
+      ? ARBITER_UNVERIFIED : 'ANSWERED',
     answer: parsed.answer,
     usage: parsed.usage,
+    resultSeen: parsed.resultSeen,
+    resultUsable: parsed.resultUsable,
   };
 }
 
@@ -149,9 +152,9 @@ export function seatReviewBlock(label, review) {
 
 export function buildArbiterPrompt(request = {}) {
   const common = [
-    '# Claude arbiter seat',
+    '# Claude execution reviewer',
     'You are read-only. Do not create, edit, or delete files and do not run a gate.',
-    'Judge independently on the merits. Return exactly one JSON object and no prose.',
+    'Judge on the merits as the execution reviewer. You are the final execution authority in autonomous mode; unresolved manual disputes belong to the human. Return exactly one JSON object and no prose.',
   ];
   if (request.type === 'finding') {
     return [...common,
@@ -206,6 +209,10 @@ export function buildArbiterPrompt(request = {}) {
   if (request.type === 'pivot') {
     return [...common,
       'Choose how to respond to deterministic evidence that the debate is circling.',
+      `MESSAGES ${compact(request.messages ?? [])}`,
+      `EVIDENCE ${compact(request.evidence ?? [])}`,
+      `ORIGINAL_REQUIREMENTS ${String(request.originalRequirements ?? '')}`,
+      `CURRENT_DIFF ${String(request.diff ?? '')}`,
       'Schema: {"decision":"amend|fresh|conclude","reason":"brief merits"}.',
       `LEDGER ${compact(request.ledger)}`,
       `RECURRING ${compact(request.recurringFindings ?? [])}`,
@@ -434,22 +441,27 @@ export async function runArbiter({
   runId,
   spawnProcess,
   killProcessTree,
+  stage = 'arbiter',
+  role = request?.phase === 'planning' || ['draft', 'propose'].includes(request?.type)
+    ? 'planning-author' : 'execution-reviewer',
+  ...transportOptions
 } = {}) {
   const resolvedTimeoutMs = timeoutMs === undefined
     ? resolveStageTimeouts(env).arbiter
     : timeoutMs;
   const args = buildClaudeArgs({ prompt, model });
-  reportEvent(reporter, runId, 'arbiter', 'start', {
-    bin, args, model, judgement: request?.type,
+  reportEvent(reporter, runId, stage, 'start', {
+    bin, args, model, judgement: request?.type, provider: 'claude', role,
   });
   let captured;
   try {
     captured = await spawnCapture(bin, args, {
+      ...transportOptions,
       cwd,
       input: prompt,
       env: { ...process.env, ...env },
       timeoutMs: resolvedTimeoutMs,
-      timeoutSetting: 'URO_ARBITER_TIMEOUT_MS',
+      timeoutSetting: stage === 'verify' ? 'URO_VERIFIER_TIMEOUT_MS' : 'URO_ARBITER_TIMEOUT_MS',
       spawnProcess,
       killProcessTree,
     });
@@ -457,6 +469,9 @@ export async function runArbiter({
     const failed = annotateUsageConsistency({
       verdict: ARBITER_UNVERIFIED,
       answer: '',
+      stdout: '',
+      stderr: error instanceof Error ? error.message : String(error),
+      provider: 'claude', role,
       // The process never launched at all: nothing was accounted, never a
       // fake zero.
       usage: null,
@@ -464,7 +479,8 @@ export async function runArbiter({
       timedOut: false,
       error: error instanceof Error ? error.message : String(error),
     });
-    reportEvent(reporter, runId, 'arbiter', 'finish', {
+    reportEvent(reporter, runId, stage, 'finish', {
+      provider: 'claude', role,
       code: null, verdict: ARBITER_UNVERIFIED, launchFailed: true,
       timedOut: false, judgement: request?.type,
     });
@@ -473,17 +489,19 @@ export async function runArbiter({
   const parsed = parseArbiterStream(captured.stdout);
   const result = annotateUsageConsistency({
     ...parsed,
+    provider: 'claude', role,
+    stdout: captured.stdout,
+    stderr: captured.stderr,
     launchFailed: captured.code !== 0 || captured.timedOut,
     timedOut: captured.timedOut,
     timeoutMs: captured.timeoutMs,
     exitCode: captured.code,
-    ...(captured.code === 0 ? {} : { stderr: captured.stderr.slice(-1000) }),
   });
   if (result.launchFailed) {
     result.verdict = ARBITER_UNVERIFIED;
-    result.answer = '';
   }
-  reportEvent(reporter, runId, 'arbiter', 'finish', {
+  reportEvent(reporter, runId, stage, 'finish', {
+    provider: 'claude', role,
     code: captured.code,
     verdict: result.verdict,
     timedOut: captured.timedOut,

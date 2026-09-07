@@ -52,15 +52,15 @@ import {
   PIVOT_AMEND,
   PIVOT_CONCLUDE,
   PIVOT_FRESH,
-  shouldPivot,
 } from './debate.js';
-import { detectReview, REVIEW_DIR } from './review.js';
-import { buildFixPlan, validateFindings } from './fix-plan.js';
+import { assertReviewDestination, detectReview, materializeReviewBundle, reviewDigest, REVIEW_DIR } from './review.js';
+import { buildFixPlan, executorFindingResponses } from './fix-plan.js';
+import { decisionAuthority } from './decision-policy.js';
+import { planningArtifactDigest } from './conversation.js';
 import {
   ARBITER_UNVERIFIED,
   buildArbiterPrompt,
   DEFAULT_ARBITER_MODEL,
-  parseIndependentReview,
   parsePivotJudgement,
   runArbiter as realArbiter,
 } from './arbiter.js';
@@ -283,7 +283,7 @@ function planWithDecision(plan, questions, resolution) {
     const lines = [
       `### ${question.id}`,
       '',
-      `Question: ${question.question}`,
+      `Question: ${question.question ?? question.text}`,
       `Answer: ${answer?.answer ?? '(no answer provided)'}`,
     ];
     if (answer?.assumption) lines.push(`Assumption: ${answer.assumption}`);
@@ -292,7 +292,7 @@ function planWithDecision(plan, questions, resolution) {
     }
     return lines.join('\n');
   });
-  return `${basePlan}\n\n## Decision — resolved autonomously\n\n${pairs.join('\n\n')}` +
+  return `${basePlan}\n\n## Recorded decision\n\n${pairs.join('\n\n')}` +
     '\n\nProceed with the original task above, incorporating these decisions.';
 }
 
@@ -305,20 +305,7 @@ function validatedResolution(questions, resolution) {
   )));
   if (answers.some((answer) => answer === undefined)) return null;
 
-  const hasAuthorityQuestion = questions.some((question) => question.kind === 'authority');
-  if (!hasAuthorityQuestion) return { answers };
-  const operatorAbsent = resolution?.escalation === 'operator-absent'
-    && resolution?.presenceEvidence?.ttyAttached === false
-    && resolution?.presenceEvidence?.invocation === 'non-interactive'
-    && typeof resolution?.reasoning === 'string'
-    && resolution.reasoning.trim() !== '';
-  if (!operatorAbsent) return null;
-  return {
-    answers,
-    escalation: 'operator-absent',
-    presenceEvidence: resolution.presenceEvidence,
-    reasoning: resolution.reasoning.trim(),
-  };
+  return { answers };
 }
 
 const APPROVAL_REQUEST = /(?:^|[.!?]\s+|\n\s*)(?:please\s+)?approve\s+(?:this|the)\s+(?:design|plan|proposal|approach)(?=\s*(?:[,.!?;:]|$|\band\b|\bso\b|\bbefore\b))/i;
@@ -331,7 +318,22 @@ function executorRequestedApproval(result) {
   return messages.some((message) => typeof message === 'string' && APPROVAL_REQUEST.test(message));
 }
 
+// Called only after Task 4 validates the durable envelope/workspace. This entry
+// point attaches to the saved controller state; it never invokes isolation.
+export async function continueExecution({ checkpointState, humanRuling, adapters = {}, reporter, env }) {
+  const state = JSON.parse(JSON.stringify(checkpointState));
+  if (state?.version !== 1 || state.phase !== 'execution' || state.interactionMode !== 'manual'
+    || !state.workspace?.dir || !state.decision?.questions?.length) throw new Error('invalid execution continuation');
+  const resolution = validatedResolution(state.decision.questions, humanRuling);
+  if (!resolution) throw new Error('manual continuation requires answers to every pending question');
+  return run({ ...state.options, task: state.originalPlan, gate: state.commands, runId: state.runId,
+    merge: state.mergeState?.merge,
+    mode: state.interactionMode, adapters, reporter, ...(env ? { env } : {}),
+    continuation: state, humanRuling: { ...humanRuling, answers: resolution.answers }, verifierProbeCompleted: true });
+}
+
 export async function run(opts) {
+  const continuation = opts.continuation ?? null;
   const startedAt = new Date();
   const {
     task, target, gate, gateRetries, scratchRoot, runId,
@@ -341,7 +343,7 @@ export async function run(opts) {
     executorModel = DEFAULT_EXECUTOR_MODEL,
     executorEffort = DEFAULT_EXECUTOR_EFFORT,
     verifierModel = DEFAULT_VERIFIER_MODEL,
-    verifierBin = 'agent', verifierProbeCompleted = false,
+    verifierBin = 'claude', verifierProbeCompleted = false,
     arbiterModel = DEFAULT_ARBITER_MODEL,
     arbiterBin = 'claude',
     mode = 'manual', decisionResolver, challengeRounds = 2,
@@ -372,7 +374,6 @@ export async function run(opts) {
   const isolateRun = adapters.isolate ?? isolate;
   const createDiff = adapters.diffText ?? diffText;
   const detectDebateCircling = adapters.detectCircling ?? detectCircling;
-  const selectPivot = adapters.shouldPivot ?? shouldPivot;
   const createFreshBranch = adapters.createFreshPivotBranch
     ?? adapters.createFreshBranch
     ?? createFreshPivotBranch;
@@ -395,8 +396,9 @@ export async function run(opts) {
         env: runEnvironment,
         home: opts.home ?? homedir(),
         codexBin: opts.codexBin ?? 'codex',
+        requiredSeats: ['codex', 'claude'],
       });
-  const superpowersRequirement = applySuperpowersRequirement(verification, runEnvironment);
+  const superpowersRequirement = applySuperpowersRequirement(verification, runEnvironment, { requiredSeats: ['codex', 'claude'] });
   if (!superpowersRequirement.ok) {
     throw new Error(`superpowers preflight failed: ${superpowersRequirement.reason}`);
   }
@@ -406,18 +408,18 @@ export async function run(opts) {
     bypassed: superpowersRequirement.bypassed,
     seats: verifiedSeats,
   };
-  const cursorSuperpowersDir = verifiedSeats.cursor.verified
-    ? verifiedSeats.cursor.path
+  const claudeSuperpowersDir = verifiedSeats.claude?.verified
+    ? verifiedSeats.claude.path
     : null;
   const productionLivenessJudge = adapters.runExecutor === undefined;
   const livenessJudgeConfigured = typeof adapters.judgeLiveness === 'function'
     || productionLivenessJudge;
   let judgeLiveness = adapters.judgeLiveness ?? null;
   const maxDebateRounds = resolveDebateRounds(runEnvironment, debateRounds);
-  const originalPlan = resolveTask(task);
-  let plan = originalPlan;
-  const commands = Array.isArray(gate) ? gate : JSON.parse(readFileSync(gate, 'utf8'));
-  const stageTimeouts = resolveStageTimeouts(opts.env ?? process.env, opts);
+  const originalPlan = continuation?.originalPlan ?? resolveTask(task);
+  let plan = continuation?.plan ?? originalPlan;
+  const commands = structuredClone(continuation?.commands ?? (Array.isArray(gate) ? gate : JSON.parse(readFileSync(gate, 'utf8'))));
+  const stageTimeouts = continuation?.stageTimeouts ?? resolveStageTimeouts(opts.env ?? process.env, opts);
   const probeVerifier = adapters.probeVerifier
     ?? (adapters.runExecutor === undefined ? probeVerifierLiveness : null);
   if (!verifierProbeCompleted && probeVerifier) {
@@ -430,26 +432,28 @@ export async function run(opts) {
   // but without a reporter the run allocates no event watchdog or restart controller.
   let watchdog = null;
   let eventReporter = reporter;
-  let stallConfig = null;
+  let stallConfig = continuation?.supervision?.stallConfig ?? null;
   const executorThresholds = {
     ...resolveExecutorThresholds(opts.env ?? process.env),
+    ...(continuation?.supervision?.executorThresholds ?? {}),
     ...(opts.stallThresholdMs === undefined ? {} : { thresholdMs: opts.stallThresholdMs }),
     ...(opts.progressThresholdMs === undefined
       ? {} : { progressThresholdMs: opts.progressThresholdMs }),
   };
   let activeExecutor = null;
-  let stallRestartCount = 0;
-  let stallRecords = null;
-  let livenessChecks = null;
+  let stallRestartCount = continuation?.supervision?.stallRestartCount ?? 0;
+  let stallRecords = continuation?.supervision?.stallRecords ?? null;
+  let livenessChecks = continuation?.supervision?.livenessChecks ?? null;
   if (typeof reporter === 'function') {
     stallConfig = {
       ...resolveStallConfig(opts.env ?? process.env),
+      ...(continuation?.supervision?.stallConfig ?? {}),
       ...executorThresholds,
       ...(opts.stallPolicy === undefined ? {} : { policy: opts.stallPolicy }),
       ...(opts.stallRestartLimit === undefined ? {} : { restartLimit: opts.stallRestartLimit }),
     };
-    stallRecords = [];
-    livenessChecks = [];
+    stallRecords ??= [];
+    livenessChecks ??= [];
     watchdog = createGapWatchdog({
       reporter,
       runId,
@@ -487,7 +491,7 @@ export async function run(opts) {
 
   const runMarker = createRunMarker({ scratchRoot, runId, target });
   try {
-  const iso = await isolateRun({
+  const iso = continuation?.workspace ?? await isolateRun({
     target,
     runId,
     physicalRunId,
@@ -503,7 +507,9 @@ export async function run(opts) {
   // Execution evidence, kept whole: every command run in this worktree writes
   // its complete output to __uro_evidence/ for the seats to read; the facts
   // carry excerpts plus paths. Records, never verdicts.
-  const evidence = createEvidenceWriter({ dir: iso.dir });
+  const resumedEvidence = continuation?.evidence ?? [];
+  const newEvidence = createEvidenceWriter({ dir: iso.dir, round: (continuation?.debateRound ?? 0) + 1 });
+  const evidence = { ...newEvidence, records: () => [...resumedEvidence, ...newEvidence.records()] };
   if (judgeLiveness === null && productionLivenessJudge) {
     judgeLiveness = createLivenessJudge({
       cwd: iso.dir,
@@ -512,10 +518,10 @@ export async function run(opts) {
       env: runEnvironment,
     });
   }
-  const mergeConflicts = [];
-  const mergeResolutions = [];
-  let mergeProgress = null;
-  let activeConflict = null;
+  const mergeConflicts = continuation?.mergeState?.mergeConflicts ?? [];
+  const mergeResolutions = continuation?.mergeState?.mergeResolutions ?? [];
+  let mergeProgress = continuation?.mergeState?.mergeProgress ?? null;
+  let activeConflict = continuation?.mergeState?.activeConflict ?? null;
   let observedAdvanceMerge;
   if (merge !== undefined) observedAdvanceMerge = async (options) => {
     reportEvent(eventReporter, runId, 'merge', 'start', {
@@ -549,40 +555,59 @@ export async function run(opts) {
     if (!merge.testCounts || !Number.isSafeInteger(merge.testCounts.required)) {
       throw new Error('merge unit requires derived test counts');
     }
-    mergeProgress = await observedAdvanceMerge({
+    if (!continuation) mergeProgress = await observedAdvanceMerge({
       cwd: iso.dir,
       parents: merge.parents,
       unitId: runId,
     });
-    activeConflict = mergeProgress.conflict;
-    if (activeConflict) mergeConflicts.push(activeConflict);
-    plan = buildMergeTask(originalPlan, merge, activeConflict);
+    if (!continuation) {
+      activeConflict = mergeProgress.conflict;
+      if (activeConflict) mergeConflicts.push(activeConflict);
+      plan = buildMergeTask(originalPlan, merge, activeConflict);
+    }
   }
-  const iterations = [];
+  const iterations = continuation?.iterations ?? [];
   let activeBranch = iso.branch;
-  let freshPivotCount = 0;
+  let freshPivotCount = continuation?.freshPivotCount ?? 0;
   // The pessimistic default is a crashed executor: nothing else has happened
   // yet. There is no gate verdict to default to any more.
   let outcome = 'executor-failed';
-  let executorUsage = EMPTY_USAGE;
-  let verifierUsage = EMPTY_USAGE;
-  let arbiterUsage = EMPTY_USAGE;
-  const usageChecks = [];
-  const timeoutEvents = [];
-  let executorLaunchCount = 0;
+  let executorUsage = continuation?.tokens?.executor ?? EMPTY_USAGE;
+  let verifierUsage = continuation?.tokens?.verifier ?? EMPTY_USAGE;
+  let arbiterUsage = continuation?.tokens?.arbiter ?? EMPTY_USAGE;
+  let planningUsage = continuation?.tokens?.planning ?? EMPTY_USAGE;
+  const usageChecks = continuation?.usageChecks ?? [];
+  const timeoutEvents = continuation?.timeoutEvents ?? [];
+  let executorLaunchCount = continuation?.executorLaunchCount ?? 0;
   let noOpReason;
   const debateLedger = new DebateLedger();
-  const debateRoundHistory = [];
-  const independentReviews = [];
-  let latestIndependentReview = null;
-  let debateCirclingDetected = false;
-  let debatePivotCount = 0;
-  let finalPivotDecision = null;
-  const pivotHistory = [];
+  const debateRoundHistory = continuation?.debate?.roundHistory ?? [];
+  for (const savedRound of debateRoundHistory) debateLedger.record(savedRound.round, savedRound.acceptedFindingIds ?? []);
+  let debateCirclingDetected = continuation?.debate?.circlingDetected ?? false;
+  let debatePivotCount = continuation?.debate?.pivotCount ?? 0;
+  let finalPivotDecision = continuation?.debate?.finalPivotDecision ?? null;
+  const pivotHistory = continuation?.debate?.pivotHistory ?? [];
   let debateStopReason = 'not-started';
-  const accumulatedReviewTests = new Set();
-  const reviewerRestorations = [];
-  const executorRestorations = [];
+  const accumulatedReviewTests = new Set(continuation?.reviewerTests ?? []);
+  const executionMessages = continuation?.messages ?? [];
+  const openFindings = new Map((continuation?.openFindings ?? []).map((finding) => [finding.id, finding]));
+  const resolvedFindingIds = new Set(continuation?.resolvedFindingIds ?? []);
+  let evidenceTestDigest = continuation?.evidenceTestDigest ?? reviewDigest('[]');
+  let checkpointStage = 'executor-challenge';
+  let currentDiff = '';
+  let currentDebateRound = continuation?.debateRound ?? 0;
+  let planningCheckpoint = continuation?.planningCheckpoint ?? null;
+  const reviewerRestorations = continuation?.reviewProtection?.reviewerRestorations ?? [];
+  const executorRestorations = continuation?.reviewProtection?.executorRestorations ?? [];
+  if (continuation) {
+    executionMessages.push({ speaker: 'human', role: 'decision-authority', phase: 'execution',
+      turn: executionMessages.length + 1, response: opts.humanRuling, content: JSON.stringify(opts.humanRuling) });
+    plan = planWithDecision(plan, continuation.decision.questions, opts.humanRuling)
+      + '\n\nContinue from the existing implementation and evidence. Address this human ruling and the open findings.\n'
+      + JSON.stringify([...openFindings.values()]);
+    const decisionPath = join(iso.dir, 'DECISION.md');
+    if (existsSync(decisionPath)) unlinkSync(decisionPath);
+  }
 
   const recordExecutorTimeout = (exec, iteration, attempt) => {
     if (!exec.timedOut) return;
@@ -614,7 +639,7 @@ export async function run(opts) {
     }
   };
 
-  let n = 1;
+  let n = continuation ? continuation.iteration + 1 : 1;
   const observeUsage = (result, context) => {
     const annotated = annotateUsageConsistency(result);
     const consistency = annotated?.usageConsistency ?? checkUsageConsistency(result?.usage);
@@ -622,6 +647,8 @@ export async function run(opts) {
     return annotated;
   };
   const arbitrate = async (request) => {
+    request = { ...request, originalRequirements: originalPlan, interactionMode: mode,
+      messages: [...executionMessages], evidence: request.evidence ?? evidence.records() };
     if (typeof runArbiterSeat !== 'function') {
       return { verdict: ARBITER_UNVERIFIED, answer: '', unavailable: true };
     }
@@ -629,6 +656,7 @@ export async function run(opts) {
     if (injected) {
       reportEvent(eventReporter, runId, 'arbiter', 'start', {
         bin: arbiterBin, model: arbiterModel, judgement: request.type,
+        provider: 'claude', role: 'execution-reviewer',
       });
     }
     let result;
@@ -656,6 +684,9 @@ export async function run(opts) {
       result = observeUsage(result, { seat: 'arbiter', judgement: request.type, iteration: n });
       arbiterUsage = addUsage(arbiterUsage, result.usage);
     }
+    executionMessages.push({ speaker: 'claude', role: 'execution-reviewer', phase: 'execution',
+      turn: executionMessages.length + 1, judgement: request.type,
+      response: result, content: result?.answer ?? JSON.stringify(result) });
     if (result?.timedOut) {
       timeoutEvents.push({
         stage: 'arbiter', judgement: request.type, iteration: n,
@@ -740,6 +771,9 @@ export async function run(opts) {
       }
       iterationExecutorUsage = addUsage(iterationExecutorUsage, result.usage);
       executorUsage = addUsage(executorUsage, result.usage);
+      executionMessages.push({ speaker: 'codex', role: 'implementation-author', phase: 'execution',
+        turn: executionMessages.length + 1, iteration: n, attempt,
+        response: result, content: result.lastMessage ?? '' });
       recordExecutorTimeout(result, n, attempt);
       if (!slot?.restartEvent) return result;
 
@@ -755,8 +789,8 @@ export async function run(opts) {
   };
 
   let exec;
-  let conflictingIntent = false;
-  let mergePreparationFailure = null;
+  let conflictingIntent = continuation?.mergeState?.conflictingIntent ?? false;
+  let mergePreparationFailure = continuation?.mergeState?.mergePreparationFailure ?? null;
   while (true) {
     exec = await executePlan(plan);
     if (exec.timedOut || !activeConflict) break;
@@ -833,13 +867,13 @@ export async function run(opts) {
   }
   let retries = 0;
   let executorTimedOut = Boolean(exec.timedOut);
-  let challengeRound = 0;
+  let challengeRound = continuation?.challengeRound ?? 0;
   let decision = null;
-  let resolvedDecision = null;
-  let assumedDecision = null;
+  let resolvedDecision = continuation ? { ...continuation.decision, ...opts.humanRuling, answeredBy: 'human' } : null;
+  let assumedDecision = continuation?.assumedDecision ?? null;
   const effectiveDecisionResolver = decisionResolver
     ?? (mode === 'autonomous'
-      ? createAutonomousDecisionResolver({ arbiter: arbitrate })
+      ? createAutonomousDecisionResolver({ reviewer: arbitrate, phase: 'execution', interactionMode: mode })
       : null);
   const routeChallenges = async () => {
     while (!executorTimedOut && !conflictingIntent && mergePreparationFailure === null) {
@@ -858,8 +892,9 @@ export async function run(opts) {
       });
       if (mode !== 'autonomous'
         || typeof effectiveDecisionResolver !== 'function'
-        || challengeRound >= maxChallengeRounds) {
-        decision = { questions: challenge.questions, mode, challengeRound };
+        || challengeRound > maxChallengeRounds) {
+        decision = { questions: challenge.questions, mode, challengeRound,
+          ...(mode === 'autonomous' ? { unavailable: true, reason: 'challenge-limit' } : {}) };
         break;
       }
 
@@ -870,10 +905,10 @@ export async function run(opts) {
       });
       const validated = validatedResolution(challenge.questions, resolution);
       if (validated === null) {
-        decision = { questions: challenge.questions, mode, challengeRound };
+        decision = { questions: challenge.questions, mode, challengeRound, unavailable: true, reason: 'reviewer-unavailable' };
         break;
       }
-      const answeredBy = 'planner';
+      const answeredBy = 'claude';
       const answers = validated.answers;
       resolvedDecision = {
         questions: challenge.questions,
@@ -966,8 +1001,8 @@ export async function run(opts) {
     debateStopReason = 'conflicting-intent';
     iterations.push(iter);
   } else if (decision !== null) {
-    outcome = 'needs-decision';
-    debateStopReason = 'needs-decision';
+    outcome = decision.unavailable ? 'needs-pivot' : 'needs-decision';
+    debateStopReason = decision.reason ?? 'needs-decision';
     iterations.push(iter);
   } else if (gateResult?.results?.some((result) => result.timedOut)) {
     // A hung command is a liveness matter, not a debatable result.
@@ -996,6 +1031,7 @@ export async function run(opts) {
       return value;
     };
     let diff = await refreshDiff();
+    currentDiff = diff;
     if (diff.trim() === '') {
       // A non-zero exit with no diff is a crashed/aborted executor, not a legitimate no-op.
       outcome = Number.isInteger(iter.executor.exitCode) && iter.executor.exitCode !== 0
@@ -1010,21 +1046,9 @@ export async function run(opts) {
       }
       iterations.push(iter);
     } else {
-      // When a command exited non-zero the reviewer is told so, in one
-      // argv-safe line, and asked to judge whether the exit indicts the change
-      // or the command itself. Evidence in front of the seats, never a rule.
-      const gateNote = () => {
-        const failed = gateResult?.results?.find((result) => result.code !== 0);
-        if (!failed) return '';
-        const tail = String(failed?.outputTail ?? '')
-          .replace(/["\r\n]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 160);
-        return ` EVIDENCE: ${failed?.bin ?? 'command'} exited ${failed?.code ?? 'non-zero'}.`
-          + (tail ? ` Tail: ${tail}.` : '')
-          + ' Judge whether that exit indicts the change or the command itself; full output is in __uro_evidence/.';
-      };
-      let debateRound = 0;
+      let debateRound = continuation?.debateRound ?? 0;
       while (true) {
-        const consumedBeforeRound = addUsage(addUsage(executorUsage, verifierUsage), arbiterUsage);
+        const consumedBeforeRound = addUsage(addUsage(addUsage(executorUsage, verifierUsage), arbiterUsage), planningUsage);
         if (tokenBudget !== undefined
           && consumedBeforeRound.inputTokens + consumedBeforeRound.outputTokens >= tokenBudget) {
           outcome = 'needs-pivot';
@@ -1032,6 +1056,7 @@ export async function run(opts) {
           break;
         }
         debateRound++;
+        currentDebateRound = debateRound;
         evidence.setRound(debateRound);
         let reviewer = { launchFailed: false, timedOut: false, skipped: true };
         if (runReview !== null) {
@@ -1051,19 +1076,54 @@ export async function run(opts) {
                   reviewerRestorations.push({ debateRound, paths: [...paths] });
                 }
               },
-              operation: () => runReview({
+              operation: async () => {
+                const request = { originalRequirements: originalPlan, approvedPlan: originalPlan,
+                  currentPlan: plan, diff, diffDigest: reviewDigest(diff), round: debateRound,
+                  interactionMode: mode, evidence: gateResult?.results ?? [],
+                  evidenceReferences: evidence.records(), messages: [...executionMessages],
+                  openFindings: [...openFindings.values()], decisions: resolvedDecision };
+                // A successful injected legacy writer still must create a report
+                // in THIS invocation. Restore the prior artifacts on failure.
+                assertReviewDestination(iso.dir, 'REVIEW.md');
+                const snapshot = await captureReviewSnapshot({ cwd: iso.dir });
+                const reportPath = join(iso.dir, REVIEW_DIR, 'REVIEW.md');
+                if (existsSync(reportPath)) unlinkSync(reportPath);
+                let response;
+                try {
+                  response = await runReview({
                 cwd: iso.dir,
                 bin: verifierBin,
                 model: verifierModel,
-                prompt: REVIEW_PROMPT + gateNote(),
-                superpowersDir: cursorSuperpowersDir,
+                prompt: REVIEW_PROMPT + '\n\nCURRENT REVIEW REQUEST\n' + JSON.stringify(request),
+                request,
+                round: debateRound,
+                diffDigest: request.diffDigest,
                 env: runEnvironment,
                 timeoutMs: stageTimeouts.verifier,
                 reporter: eventReporter,
                 runId,
                 pass: 'review',
                 onLiveness: () => watchdog?.touch('verify'),
-              }),
+                  });
+                  if (adapters.runReview && !response?.artifact && !response?.launchFailed
+                    && !response?.timedOut && !response?.artifactFailed && existsSync(reportPath)) {
+                    const detected = detectReview({ dir: iso.dir });
+                    const bundle = { version: 1, report: readFileSync(reportPath, 'utf8'),
+                      tests: (detected.testFiles ?? []).map((path) => ({
+                        path: path.slice(REVIEW_DIR.length + 1), content: readFileSync(join(iso.dir, path), 'utf8') })),
+                      dispositions: response?.dispositions ?? [] };
+                    response = { ...response, answer: response?.answer ?? JSON.stringify(bundle),
+                      artifact: await materializeReviewBundle({ cwd: iso.dir, bundle, round: debateRound, diffDigest: request.diffDigest }) };
+                  }
+                  if (!response?.artifact || response?.launchFailed || response?.timedOut || response?.artifactFailed) {
+                    await restoreReviewSnapshot({ snapshot });
+                  }
+                  return response;
+                } catch (error) {
+                  await restoreReviewSnapshot({ snapshot });
+                  throw error;
+                }
+              },
             });
             reviewer = protectedReview.result ?? reviewer;
           } catch (error) {
@@ -1092,6 +1152,9 @@ export async function run(opts) {
           }
         }
         iter.reviewer = reviewer;
+        if (!reviewer.skipped) executionMessages.push({ speaker: 'claude', role: 'execution-reviewer', phase: 'execution',
+          turn: executionMessages.length + 1, round: debateRound, diffDigest: reviewDigest(diff),
+          response: reviewer, content: reviewer.answer ?? reviewer.findings ?? reviewer.error ?? '' });
         const findings = collectReviewFindings(iso.dir);
         const blockingFindings = findings.filter((finding) => finding.severity === 'blocking');
         const suggestionFindings = findings.filter((finding) => finding.severity === 'suggestion');
@@ -1114,7 +1177,8 @@ export async function run(opts) {
         iterations.push(iter);
 
         const reviewMissing = runReview !== null && !reviewer.launchFailed
-          && !reviewer.timedOut && !detectReview({ dir: iso.dir }).reviewed;
+          && !reviewer.timedOut && (!reviewer.artifact || reviewer.artifactFailed
+            || !detectReview({ dir: iso.dir, artifact: reviewer.artifact, round: debateRound, diffDigest: reviewDigest(diff) }).reviewed);
         if (reviewer.timedOut || reviewer.launchFailed || reviewMissing) {
           outcome = reviewer.timedOut ? 'timed-out' : 'verifier-failed';
           debateStopReason = reviewer.timedOut
@@ -1125,46 +1189,80 @@ export async function run(opts) {
           break;
         }
 
-        const validation = blockingFindings.length === 0
-          ? { accepted: [], rejected: [], judgements: [] }
-          : await validateFindings(blockingFindings, {
-              arbiter: arbitrate,
-              diff,
-              plan,
-              reporter: eventReporter,
-              runId,
-              debateRound,
-            });
-        const acceptedFindingIds = validation.accepted;
-        const acceptedIdSet = new Set(acceptedFindingIds);
-        const acceptedFindings = blockingFindings.filter((finding) => acceptedIdSet.has(finding.id));
+        for (const finding of blockingFindings) {
+          const previous = openFindings.get(finding.id);
+          openFindings.set(finding.id, { ...finding,
+            introducedAt: previous?.introducedAt ?? executionMessages.length,
+            ...(previous?.disposition ? { disposition: previous.disposition } : {}) });
+          resolvedFindingIds.delete(finding.id);
+        }
+        const testDigest = reviewDigest(JSON.stringify([...accumulatedReviewTests].sort().map(
+          (path) => [path, reviewDigest(readFileSync(join(iso.dir, path)))],
+        )));
+        const newTestEvidence = testDigest !== evidenceTestDigest;
+        if (newTestEvidence) {
+          gateResult = await runGate({
+            onEvidence: (entry) => evidence.write(entry), commands: gateCommands(), cwd: iso.dir,
+            timeoutMs: stageTimeouts.gate, reporter: eventReporter, runId, attempt: 1, captureTestCount,
+          });
+          evidenceTestDigest = testDigest;
+          iter.gate = gateResult;
+          recordGateTimeout(gateResult, n, 1);
+          if (gateResult?.results?.some((result) => result.timedOut)) {
+            outcome = 'timed-out'; debateStopReason = 'evidence-timed-out'; break;
+          }
+        }
+        const dispositions = reviewer.artifact?.dispositions ?? [];
+        const dispositionIds = dispositions.map((item) => item?.id);
+        const appliedDispositions = [];
+        let disputed = [];
+        for (const disposition of dispositions) {
+          const finding = openFindings.get(disposition?.id);
+          if (!finding || dispositionIds.filter((id) => id === disposition.id).length !== 1
+            || !['resolved', 'withdrawn', 'upheld'].includes(disposition.status)
+            || typeof disposition.reason !== 'string' || !disposition.reason.trim()) continue;
+          const reply = executionMessages.slice(finding.introducedAt).findLast(
+            (message) => message.speaker === 'codex' && !message.response?.timedOut
+              && (!Number.isInteger(message.response?.exitCode) || message.response.exitCode === 0),
+          );
+          // A fresh test changes the evidence. Neither an old response nor a
+          // disposition written before this test ran can close the finding.
+          if (!reply || newTestEvidence) continue;
+          finding.disposition = { ...disposition, round: debateRound, diffDigest: reviewDigest(diff) };
+          appliedDispositions.push(finding.disposition);
+          if (disposition.status === 'upheld') {
+            if (executorFindingResponses(reply.response).some(
+              (item) => item.id === finding.id && item.disposition === 'dispute',
+            )) disputed.push(finding);
+          } else {
+            openFindings.delete(finding.id);
+            resolvedFindingIds.add(finding.id);
+          }
+        }
+        const acceptedFindings = [...openFindings.values()];
+        const acceptedFindingIds = acceptedFindings.map((finding) => finding.id);
+        const validation = { accepted: acceptedFindingIds, rejected: [] };
         roundRecord.acceptedFindingIds = [...acceptedFindingIds];
-        roundRecord.rejectedFindingIds = [...validation.rejected];
-        roundRecord.arbiterJudgements = (validation.judgements ?? []).map((item) => ({ ...item }));
+        roundRecord.rejectedFindingIds = [];
+        roundRecord.dispositions = appliedDispositions;
         debateLedger.record(debateRound, acceptedFindingIds);
         const circling = detectDebateCircling(debateLedger);
 
-        if (acceptedFindings.length === 0) {
-          const allBlockingOverruled = blockingFindings.length > 0;
-          if (!allBlockingOverruled && accumulatedReviewTests.size > 0) {
-            // The reviewer's own tests run once more as closing evidence — the
-            // seats asked for them, so their final state belongs on the record.
-            // Whatever they exited, nothing branches: the record speaks.
-            gateResult = await runGate({
-              onEvidence: (entry) => evidence.write(entry),
-              commands: gateCommands(), cwd: iso.dir, timeoutMs: stageTimeouts.gate,
-              reporter: eventReporter, runId, attempt: 1,
-              captureTestCount,
-            });
-            iter.gate = gateResult;
-            recordGateTimeout(gateResult, n, 1);
-          }
+        if (mode === 'manual' && disputed.length > 0) {
+          checkpointStage = 'execution-dispute';
+          decision = { mode, phase: 'execution', authority: 'human',
+            questions: disputed.map((finding) => ({ id: finding.id,
+              text: finding.description, reviewerPosition: finding.disposition.reason,
+              options: ['Require a correction', 'Accept Codex rebuttal', 'Clarify requirements'],
+              diffDigest: reviewDigest(diff) })) };
+          outcome = 'needs-decision'; debateStopReason = 'needs-decision'; break;
+        }
+        if (acceptedFindings.length === 0 && !newTestEvidence) {
           outcome = 'review-ready';
           debateStopReason = 'converged';
           reportEvent(eventReporter, runId, 'debate', 'converged', {
-            debateRound,
-            resolvedFindingIds: [...debateLedger.resolvedFindings()],
-            overruledFindingIds: [...validation.rejected],
+            debateRound, provider: 'claude', role: 'execution-reviewer',
+            resolvedFindingIds: [...resolvedFindingIds],
             suggestionFindingIds: suggestionFindings.map((finding) => finding.id),
           });
           break;
@@ -1179,40 +1277,22 @@ export async function run(opts) {
         let freshPlan = null;
         if (circling) {
           debateCirclingDetected = true;
+          if (mode === 'manual') {
+            checkpointStage = 'execution-pivot';
+            decision = { mode, phase: 'execution', authority: 'human',
+              questions: [{ id: 'pivot', text: 'The execution debate remains unresolved. Choose a correction, fresh plan, or stop.',
+                openFindingIds: [...openFindings.keys()], diffDigest: reviewDigest(diff) }] };
+            outcome = 'needs-decision'; debateStopReason = 'needs-decision'; break;
+          }
           const stuckFindingIds = [...debateLedger.stuckFindings()];
           reportEvent(eventReporter, runId, 'debate', 'circling', {
             debateRound,
             stuckFindingIds,
           });
-          // The debate has gone on for some time without progress — the measured
-          // signal, not a round count. Claude now stops refereeing the other
-          // seats' claims and reads TASK.md and the diff itself, producing its
-          // own findings and a stance: are the recurring objections real, or is
-          // the executor's defence right? That first-hand view informs the pivot.
-          const independent = parseIndependentReview(await arbitrate({
-            type: 'review',
-            task: originalPlan,
-            diff,
-            findings: acceptedFindings,
-            evidence: (gateResult?.results ?? []).filter((result) => result.code !== 0),
-          }));
-          if (independent.verdict === 'answered') {
-            latestIndependentReview = independent;
-            independentReviews.push({ debateRound, ...independent });
-            reportEvent(eventReporter, runId, 'debate', 'independent_review', {
-              debateRound,
-              stance: independent.stance,
-              findingIds: independent.findings.map((finding) => finding.id),
-            });
-          } else {
-            independentReviews.push({ debateRound, unjudged: true });
-            reportEvent(eventReporter, runId, 'debate', 'independent_review', {
-              debateRound, unjudged: true,
-            });
-          }
           const pivotJudgement = parsePivotJudgement(await arbitrate({
             type: 'pivot',
-            independentReview: independent.verdict === 'answered' ? independent : null,
+            messages: executionMessages, evidence: gateResult?.results ?? [],
+            diff, originalRequirements: originalPlan, interactionMode: mode,
             ledger: Array.from({ length: debateLedger.currentRound }, (_, index) => ({
               round: index + 1,
               findingIds: debateLedger.round(index + 1),
@@ -1224,9 +1304,10 @@ export async function run(opts) {
             plan,
           }));
           const unjudged = pivotJudgement.verdict !== 'answered';
-          const pivotDecision = unjudged
-            ? selectPivot(debatePivotCount)
-            : pivotJudgement.decision;
+          if (unjudged || !pivotJudgement.reason?.trim()) {
+            outcome = 'needs-pivot'; debateStopReason = 'reviewer-unavailable'; break;
+          }
+          const pivotDecision = pivotJudgement.decision;
           if (![PIVOT_AMEND, PIVOT_FRESH, PIVOT_CONCLUDE].includes(pivotDecision)) {
             throw new Error(`invalid debate pivot decision: ${pivotDecision}`);
           }
@@ -1247,7 +1328,7 @@ export async function run(opts) {
             })),
             allFindingIds: [...debateLedger.allFindings()],
             recurredFindingIds: [...debateLedger.stuckFindings()],
-            resolvedFindingIds: [...debateLedger.resolvedFindings()],
+            resolvedFindingIds: [...resolvedFindingIds],
           };
           const pivotRecord = {
             decision: pivotDecision,
@@ -1278,18 +1359,6 @@ export async function run(opts) {
               candidateCount: pivotCandidates,
               recurringFindingIds: ledgerAtPivot.recurredFindingIds,
             });
-            const branchResult = await createFreshBranch({
-              cwd: iso.dir,
-              baseCommit: iso.baseCommit,
-              branch: freshBranch,
-              captureSnapshot: adapters.captureReviewSnapshot ?? captureReviewSnapshot,
-              restoreSnapshot: adapters.restoreReviewSnapshot ?? restoreReviewSnapshot,
-            });
-            activeBranch = branchResult?.branch ?? freshBranch;
-            pivotRecord.branch = activeBranch;
-            pivotRecord.branchPoint = branchResult?.branchPoint ?? iso.baseCommit;
-            pivotRecord.reviewPaths = branchResult?.reviewPaths ?? [...accumulatedReviewTests].sort();
-
             const injectedCandidateDraft = adapters.draftPlanCandidate
               ?? adapters.planDraft
               ?? (adapters.runExecutor === undefined
@@ -1300,11 +1369,14 @@ export async function run(opts) {
               target: iso.dir,
               count: pivotCandidates,
               mode: 'fresh',
+              interactionMode: mode,
               round: debateRound,
               ledger: ledgerAtPivot,
               failedPlan: plan,
               pivot: 'Start from the pre-debate snapshot with a genuinely different implementation strategy.',
-              plannerModel: executorModel,
+              claudeModel: arbiterModel,
+              codexModel: executorModel,
+              codexEffort: executorEffort,
               timeoutMs: stageTimeouts.executor,
               gateTimeout: stageTimeouts.gate,
               runId,
@@ -1313,25 +1385,10 @@ export async function run(opts) {
               ...((adapters.selectPlanCandidate ?? adapters.selectCandidate) === undefined
                 ? {}
                 : { select: adapters.selectPlanCandidate ?? adapters.selectCandidate }),
+              ...(adapters.reviewPlanCandidate === undefined ? {} : { review: adapters.reviewPlanCandidate }),
             });
-            for (const [candidateIndex, candidate] of (generated?.candidates ?? []).entries()) {
-              if (candidate?.usage === undefined) continue;
-              const observed = observeUsage(
-                { usage: candidate.usage },
-                {
-                  seat: 'executor', pass: 'pivot-plan', iteration: n,
-                  candidateId: candidate.id ?? `candidate-${candidateIndex + 1}`,
-                },
-              );
-              executorUsage = addUsage(executorUsage, observed.usage);
-            }
-            if (generated?.selectionUsage !== undefined) {
-              const observed = observeUsage(
-                { usage: generated.selectionUsage },
-                { seat: 'executor', pass: 'pivot-selection', iteration: n },
-              );
-              executorUsage = addUsage(executorUsage, observed.usage);
-            }
+            pivotRecord.planning = generated;
+            planningUsage = addUsage(planningUsage, generated?.tokens?.total);
             const normalizedCandidates = (generated?.candidates ?? []).map((candidate, index) => ({
               ...candidate,
               id: candidate.id ?? `candidate-${index + 1}`,
@@ -1341,13 +1398,18 @@ export async function run(opts) {
                 failures: candidate.failures ?? [],
               },
             }));
-            let selectedCandidate = generated?.selected ?? null;
-            if (selectedCandidate === null && generated?.selectedCandidateId) {
+            planningCheckpoint = generated?.checkpointState ?? null;
+            const approved = generated?.approved === true && generated?.approval?.artifactDigest
+              && generated.approval.artifactDigest === generated.artifactDigest
+              && generated.selected && planningArtifactDigest(originalPlan,
+                { plan: generated.selected.plan, gate: generated.selected.gate }) === generated.artifactDigest;
+            let selectedCandidate = approved ? generated?.selected ?? null : null;
+            if (approved && selectedCandidate === null && generated?.selectedCandidateId) {
               selectedCandidate = normalizedCandidates.find(
                 (candidate) => candidate.id === generated.selectedCandidateId,
               ) ?? null;
             }
-            if (selectedCandidate === null && typeof generated?.plan === 'string') {
+            if (approved && selectedCandidate === null && typeof generated?.plan === 'string') {
               selectedCandidate = {
                 id: generated.selectedCandidateId ?? 'candidate-1',
                 perspective: generated.perspective ?? 'selected fresh perspective',
@@ -1356,11 +1418,6 @@ export async function run(opts) {
                 gateResult: generated.planGate ?? { passed: true, failures: [] },
               };
               if (normalizedCandidates.length === 0) normalizedCandidates.push(selectedCandidate);
-            }
-            if (selectedCandidate !== null) {
-              selectedCandidate = normalizedCandidates.find(
-                (candidate) => candidate.id === selectedCandidate.id,
-              ) ?? selectedCandidate;
             }
             const selectedId = selectedCandidate?.id ?? null;
             const candidateFacts = normalizedCandidates.map((candidate) => (
@@ -1393,6 +1450,17 @@ export async function run(opts) {
               break;
             }
             pivotRecord.exhausted = false;
+            const branchResult = await createFreshBranch({
+              cwd: iso.dir, baseCommit: iso.baseCommit, branch: freshBranch,
+              captureSnapshot: adapters.captureReviewSnapshot ?? captureReviewSnapshot,
+              restoreSnapshot: adapters.restoreReviewSnapshot ?? restoreReviewSnapshot,
+            });
+            activeBranch = branchResult?.branch ?? freshBranch;
+            pivotRecord.branch = activeBranch;
+            pivotRecord.branchPoint = branchResult?.branchPoint ?? iso.baseCommit;
+            pivotRecord.reviewPaths = branchResult?.reviewPaths ?? [...accumulatedReviewTests].sort();
+            commands.splice(0, commands.length, ...selectedCandidate.gate);
+            evidenceTestDigest = '';
             freshPlan = selectedCandidate.plan;
             reportEvent(eventReporter, runId, 'pivot', 'selected', {
               debateRound,
@@ -1412,29 +1480,24 @@ export async function run(opts) {
         }
 
         let fixPlan = freshPlan ?? buildFixPlan({
-          findings: blockingFindings,
+          findings: acceptedFindings,
           accepted: validation.accepted,
           rejected: validation.rejected,
           originalTask: originalPlan,
         });
+        if (!fixPlan) fixPlan = originalPlan + '\n\nRead the new reviewer test evidence and answer Claude before it judges closure.';
+        fixPlan += '\n\n## Execution review conversation\n' + JSON.stringify(executionMessages)
+          + '\n\n## Current command evidence\n' + JSON.stringify(gateResult?.results ?? [])
+          + '\nFull command output references: ' + JSON.stringify(evidence.records())
+          + '\nAnswer each open finding with reasoning. You may correct it or dispute it. '
+          + 'In your final answer include JSON {"findingResponses":[{"id":"F1","disposition":"addressed|dispute","reason":"your reasoning"}]}. '
+          + 'Do not modify or delete __uro_review/. Preserve the original product intent.';
         if (amendPlan) fixPlan = amendFixPlanWithLedger(fixPlan, debateLedger);
         // A non-zero exit is part of the argument now, so the fix plan carries
         // it: Codex may fix the code, or defend it and name the command as the
         // defect — the reviewers see the same evidence and judge.
         if ((gateResult.results ?? []).some((result) => result.code !== 0)) {
           fixPlan = planWithGateFailure(fixPlan, gateResult);
-        }
-        if (latestIndependentReview !== null) {
-          fixPlan = [
-            fixPlan,
-            '',
-            '## Claude independent review (read the change itself)',
-            `Stance: ${latestIndependentReview.stance}`,
-            ...latestIndependentReview.findings.map(
-              (finding) => `- ${finding.id} ${finding.severity}: ${finding.text}`,
-            ),
-            latestIndependentReview.reasoning,
-          ].join('\n');
         }
         plan = fixPlan;
         n++;
@@ -1468,8 +1531,8 @@ export async function run(opts) {
           break;
         }
         if (decision !== null) {
-          outcome = 'needs-decision';
-          debateStopReason = 'needs-decision';
+          outcome = decision.unavailable ? 'needs-pivot' : 'needs-decision';
+          debateStopReason = decision.reason ?? 'needs-decision';
           iterations.push(iter);
           break;
         }
@@ -1485,6 +1548,7 @@ export async function run(opts) {
         // arbiter's pivot, the token budget, or the round bound — never a rule
         // about an exit code.
         diff = await refreshDiff();
+        currentDiff = diff;
         if (diff.trim() === '') {
           outcome = Number.isInteger(iter.executor.exitCode) && iter.executor.exitCode !== 0
             ? 'executor-failed'
@@ -1501,7 +1565,8 @@ export async function run(opts) {
     executor: executorUsage,
     verifier: verifierUsage,
     arbiter: arbiterUsage,
-    total: addUsage(addUsage(executorUsage, verifierUsage), arbiterUsage),
+    ...(planningUsage.inputTokens || planningUsage.outputTokens ? { planning: planningUsage } : {}),
+    total: addUsage(addUsage(addUsage(executorUsage, verifierUsage), arbiterUsage), planningUsage),
   };
   const usageConsistency = summarizeUsageConsistency(usageChecks);
   const blockingOccurrences = new Map();
@@ -1533,21 +1598,22 @@ export async function run(opts) {
     recurredFindingIds: [...observedOccurrences.entries()]
       .filter(([, count]) => count > 1)
       .map(([findingId]) => findingId),
-    resolvedFindingIds: [...debateLedger.resolvedFindings()],
+    resolvedFindingIds: [...resolvedFindingIds],
     stuckFindingIds: [...debateLedger.stuckFindings()],
     circlingDetected: debateCirclingDetected,
-    independentReviews: independentReviews.map((item) => ({ ...item })),
+    independentReviews: [],
     pivotCount: debatePivotCount,
     finalPivotDecision,
     pivotHistory: pivotHistory.map((item) => ({ ...item })),
     stopReason: debateStopReason,
+    openFindings: [...openFindings.values()],
     ledger: {
       rounds: ledgerHistory,
       allFindingIds: [...debateLedger.allFindings()],
       recurredFindingIds: [...blockingOccurrences.entries()]
         .filter(([, count]) => count > 1)
         .map(([findingId]) => findingId),
-      resolvedFindingIds: [...debateLedger.resolvedFindings()],
+      resolvedFindingIds: [...resolvedFindingIds],
       stuckFindingIds: [...debateLedger.stuckFindings()],
     },
   };
@@ -1621,11 +1687,52 @@ export async function run(opts) {
       verifier: verifierModel,
       arbiter: arbiterModel,
     },
-    skills: cursorSuperpowersDir,
+    skills: claudeSuperpowersDir,
     superpowers,
   });
-  if (outcome === 'needs-decision') facts.decision = decision;
+  if (decision !== null) facts.decision = decision;
   else if (resolvedDecision !== null) facts.decision = resolvedDecision;
+  if (tokens.planning) facts.tokens.planning = tokens.planning;
+  facts.interactionMode = mode;
+  facts.phase = 'execution';
+  facts.authority = decisionAuthority({ interactionMode: mode, phase: 'execution' });
+  facts.messages = executionMessages;
+  facts.participation = Object.fromEntries(['codex', 'claude'].map((provider) => {
+    const calls = executionMessages.filter((message) => message.speaker === provider);
+    return [provider, { attempted: calls.length, observed: calls.filter((message) =>
+      Boolean(message.content) || Boolean(message.response?.stdout)).length,
+      usageReported: calls.filter((message) => message.response?.usage != null).length,
+      roles: [...new Set(calls.map((message) => message.role))] }];
+  }));
+  if (outcome === 'needs-decision') {
+    currentDiff = await createDiff(iso.dir, merge === undefined ? iso.baseCommit : merge.mergeBase);
+    // Task 4 owns durable envelopes and identity validation. Keep the live
+    // controller state here instead of reconstructing it from report summaries.
+    facts.checkpointState = {
+      version: 1, phase: 'execution', stage: checkpointStage, runId,
+      interactionMode: mode, authority: 'human',
+      workspace: { ...iso, targetPath: resolve(target), branch: activeBranch,
+        diff: currentDiff, diffDigest: reviewDigest(currentDiff) },
+      originalPlan, plan, originalCommands: continuation?.originalCommands ?? (Array.isArray(gate) ? gate : JSON.parse(readFileSync(gate, 'utf8'))),
+      commands, contentDigests: { requirements: reviewDigest(originalPlan), plan: reviewDigest(plan),
+        gate: reviewDigest(JSON.stringify(commands)), diff: reviewDigest(currentDiff) },
+      iteration: n, debateRound: currentDebateRound, challengeRound, exec, iter, gateResult,
+      iterations, decision, resolvedDecision, assumedDecision,
+      messages: executionMessages, openFindings: [...openFindings.values()],
+      resolvedFindingIds: [...resolvedFindingIds], evidence: evidence.records(), evidenceTestDigest,
+      reviewerTests: [...accumulatedReviewTests], reviewerArtifact: iter?.reviewer?.artifact ?? null,
+      tokens, usageChecks, timeoutEvents, executorLaunchCount, iterationExecutorUsage,
+      debate, planningCheckpoint, freshPivotCount, stageTimeouts,
+      mergeState: { merge, mergeProgress, activeConflict, mergeConflicts, mergeResolutions,
+        conflictingIntent, mergePreparationFailure },
+      supervision: { stallConfig, executorThresholds, stallRestartCount, stallRecords, livenessChecks },
+      reviewProtection: { reviewerRestorations, executorRestorations },
+      options: { target, scratchRoot, artifactRoot: opts.artifactRoot, baseRef, branch, branchName, gateRetries,
+        correctsRunId, campaignId, campaignBase, round, unitId, campaignUnitKind, perspective, unitKind,
+        captureTestCount, executorModel, executorEffort, verifierModel, verifierBin, arbiterModel, arbiterBin,
+        challengeRounds, debateRounds: maxDebateRounds, tokenBudget, pivotCandidates, superpowers },
+    };
+  }
   if (assumedDecision !== null) {
     facts.assumedDecision = assumedDecision;
     facts.escalation = 'operator-absent';
