@@ -104,6 +104,23 @@ test('required credential redaction is visible as incomplete context without mut
   assert.equal(entry.content, 'Use Authorization: Bearer secret-session-token');
 });
 
+test('quoted authorization assignments are redacted as incomplete context', () => {
+  const contents = [
+    'authorization = "Bearer synthetic-assignment-value"',
+    '{"authorization": "Bearer synthetic-json-value"}',
+  ];
+
+  for (const content of contents) {
+    const entry = requirement({ content });
+    const value = snapshot({ entries: [entry] });
+    const serialized = JSON.stringify(value);
+    assert.doesNotMatch(serialized, /synthetic-(?:assignment|json)-value/);
+    assert.match(serialized, /\[REDACTED\]/);
+    assert.equal(value.completeness.complete, false);
+    assert.equal(entry.content, content);
+  }
+});
+
 test('every required material collection propagates incomplete context', () => {
   const incompleteEvidence = snapshot({
     evidence: [{

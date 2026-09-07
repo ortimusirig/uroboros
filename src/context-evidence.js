@@ -36,9 +36,10 @@ function canonical(value) {
 
 function redactString(value) {
   let result = value;
-  result = result.replace(/(authorization\s*:\s*bearer\s+)[^\s,;]+/gi, '$1[REDACTED]');
-  result = result.replace(/((?:password|passwd|secret|token|api[-_]?key)\s*[=:]\s*)[^\s,;]+/gi,
-    '$1[REDACTED]');
+  result = result.replace(
+    /((?:"|')?(?:password|passwd|secret|token|api[-_]?key|authorization|cookie|credential)(?:"|')?\s*[=:]\s*)(?:(["'])(.*?)\2|([^,;}\r\n]+))/gi,
+    (_match, prefix, quote) => `${prefix}${quote ? `${quote}[REDACTED]${quote}` : '[REDACTED]'}`,
+  );
   result = result.replace(/\b(?:sk|gh[opusr]|github_pat)-[A-Za-z0-9_-]{8,}\b/g, '[REDACTED]');
   return { value: result, redacted: result !== value };
 }

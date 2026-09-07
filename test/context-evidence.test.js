@@ -299,3 +299,23 @@ test('code evidence containing a credential is refused before any durable copy i
     rmSync(base, { recursive: true, force: true });
   }
 });
+
+test('code evidence refuses quoted authorization assignments before durable capture', () => {
+  const sources = [
+    'export const authorization = "Bearer synthetic-assignment-value";\n',
+    'export const settings = {"authorization": "Bearer synthetic-json-value"};\n',
+  ];
+
+  for (const source of sources) {
+    const { base, root, directory } = fixture();
+    try {
+      writeFileSync(join(root, 'src', 'feature.js'), source);
+      assert.throws(() => captureEvidence({
+        projectId: 'p1', root, directory, evidence: codeEvidence(),
+      }), /credential|sensitive/i);
+      assert.equal(existsSync(directory) ? readdirSync(directory).length : 0, 0);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  }
+});
