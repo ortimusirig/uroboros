@@ -134,15 +134,37 @@ function safeDestination(cwd, path) {
 
 export function assertReviewDestination(cwd, path) { return safeDestination(cwd, path); }
 
+// Keep the historical reader permissive, but never materialize an ambiguous
+// model-authored finding: repeated fields must not replace a blocking claim.
+function validateStructuredReport(report) {
+  const ids = new Set();
+  let fields = null;
+  for (const line of report.split(/\r?\n/)) {
+    const heading = /^\s*##\s+(F\d+)\s*$/i.exec(line);
+    if (heading) {
+      const id = heading[1].toUpperCase();
+      if (ids.has(id)) throw new Error('duplicate finding ID in review report');
+      ids.add(id);
+      fields = new Set();
+    } else if (/^\s*##\s+F\d+/i.test(line)) {
+      throw new Error('invalid finding heading in review report');
+    } else {
+      const field = /^\s*(Severity|Category|Description|Test)\s*:/i.exec(line);
+      if (!field) continue;
+      const key = field[1].toLowerCase();
+      if (!fields || fields.has(key)) throw new Error('duplicate or orphan field in review report');
+      fields.add(key);
+    }
+  }
+  if (ids.size !== (parseReview(report) ?? []).length) throw new Error('invalid structured review report');
+}
+
 export async function materializeReviewBundle({ cwd, bundle, round = 1, diffDigest = '' }) {
   if (typeof bundle === 'string') bundle = JSON.parse(bundle.trim().replace(/^```json\s*|\s*```$/g, ''));
   if (!bundle || (bundle.version !== undefined && bundle.version !== 1)
     || typeof bundle.report !== 'string' || !bundle.report.trim()
     || !Array.isArray(bundle.tests ?? [])) throw new Error('invalid review bundle');
-  const findingHeaders = bundle.report.match(/^\s*##\s+F\d+\s*$/gim) ?? [];
-  if (findingHeaders.length !== (parseReview(bundle.report) ?? []).length) {
-    throw new Error('invalid structured review report');
-  }
+  validateStructuredReport(bundle.report);
   const tests = bundle.tests ?? [];
   if (tests.length > 100) throw new Error('too many review test files');
   const files = new Map();

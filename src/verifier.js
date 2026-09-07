@@ -283,6 +283,13 @@ export function deriveVerdictFromEvidence(evidence) {
   const assistant = candidates.assistant ?? {};
   const plan = candidates.plan ?? {};
 
+  if (evidence?.policy === 'claude-terminal') {
+    const verdict = !evidence.termination && result.present && result.usable
+      ? finalLineVerdict(result.text ?? '') : null;
+    return { verdict: verdict ?? 'UNVERIFIED', source: verdict ? 'result' : 'none',
+      judgedText: result.text ?? '', judgedTextTruncated: result.truncated === true };
+  }
+
   const resultVerdict = result.present && result.usable
     ? finalLineVerdict(result.text ?? '')
     : null;
@@ -599,19 +606,28 @@ async function runVerifierAttempt({
         clearTimer,
       },
     });
+  } catch (error) {
+    const diagnostic = error instanceof Error ? error.message : String(error);
+    r = { code: null, stdout: '', stderr: diagnostic, error: diagnostic,
+      timedOut: false, timeoutMs: resolvedTimeoutMs };
   } finally {
     if (!r) progress?.dispose();
   }
   observer.finish();
   const detail = parseVerdictDetail(r.stdout);
+  const parsedClaude = parseArbiterStream(r.stdout);
   // Keep termination in the raw verdict evidence. The completed Claude result
   // check below overrides even a clean marker when the transport failed.
   const terminationReason = r.timedOut
     ? (r.timeoutReason ?? { kind: 'deadline' })
     : (r.code !== 0 ? { kind: 'exit', code: r.code } : null);
-  const evidenceWithTermination = terminationReason
-    ? { ...detail.evidence, termination: terminationReason }
-    : detail.evidence;
+  const evidenceWithTermination = { ...detail.evidence, policy: 'claude-terminal',
+    candidates: { ...detail.evidence.candidates, result: {
+      ...detail.evidence.candidates.result, usable: parsedClaude.resultUsable,
+      ...retainVerdictText(parsedClaude.answer, FINDINGS_LIMIT),
+    } },
+    ...(terminationReason ? { termination: terminationReason } : {}),
+  };
   const derived = deriveVerdictFromEvidence(evidenceWithTermination);
   const evidence = {
     ...evidenceWithTermination,
@@ -619,15 +635,14 @@ async function runVerifierAttempt({
     judgedText: derived.judgedText,
     judgedTextTruncated: derived.judgedTextTruncated,
   };
-  const { text, planText } = detail;
+  const { planText } = detail;
   const { verdict, source } = derived;
   const exitCode = r.code;
   // A seat that started talking and then died is not a seat that reviewed. This
   // once tested only for stream activity, so a single assistant chunk emitted
   // before the CLI aborted (quota exhaustion, killed process) made it false and
-  // the stderr carrying the actual cause was discarded as though the review had
-  // run. Key it on whether a verdict was derivable — `source === 'none'`.
-  const parsedClaude = parseArbiterStream(r.stdout);
+  // discarded the stderr carrying the actual cause. Process failure is distinct
+  // from a successfully completed call with an unusable conclusion.
   const launchFailed = r.timedOut || exitCode !== 0;
   const usage = parsedClaude.usage;
   // A verdict without its reasoning is not actionable: report the findings on the
@@ -649,7 +664,7 @@ async function runVerifierAttempt({
         // head-slice silently ate everything after 4000 characters — the
         // judged input must be complete. Excerpting belongs at persistence
         // sites, none of which retain this field any more.
-        findings: text.trim(),
+        findings: parsedClaude.answer.trim(),
         verdictSource: source,
         plan: evidence.candidates.plan.present ? planText : null,
         verdictEvidence: evidence,
@@ -657,11 +672,8 @@ async function runVerifierAttempt({
       };
   const result = annotateVerifierConsistency(annotateUsageConsistency(unannotatedResult));
   Object.assign(result, { provider: 'claude', role: 'execution-reviewer',
-    stdout: r.stdout, stderr: r.stderr, answer: parsedClaude.answer });
-  if (launchFailed || !parsedClaude.resultSeen || !parsedClaude.resultUsable) {
-    result.verdict = 'UNVERIFIED';
-    result.verdictSource = 'none';
-  }
+    stdout: r.stdout, stderr: r.stderr, answer: parsedClaude.answer,
+    ...(r.error ? { error: r.error } : {}) });
   progress?.observe({ runId, stage: 'verify', type: 'finish', pass, code: exitCode });
   progress?.dispose();
   reportEvent(reporter, runId, 'verify', 'finish', {

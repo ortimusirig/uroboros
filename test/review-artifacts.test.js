@@ -14,6 +14,21 @@ function fixture(t) {
   return cwd;
 }
 
+for (const [name, report] of [
+  ['conflicting severity', '## F1\nSeverity: blocking\nDescription: Bug\nTest: __uro_review/tests/f1.js\nSeverity: suggestion'],
+  ['duplicate description', '## F1\nSeverity: blocking\nDescription: Bug\nDescription: Excused\nTest: __uro_review/tests/f1.js'],
+  ['duplicate test', '## F1\nSeverity: blocking\nDescription: Bug\nTest: __uro_review/tests/f1.js\nTest: missing'],
+  ['duplicate category casing', '## F1\nSeverity: suggestion\nDescription: Bug\nCategory: correctness\ncategory: security'],
+  ['duplicate identical field', '## F1\nSeverity: blocking\nSeverity: blocking\nDescription: Bug\nTest: __uro_review/tests/f1.js'],
+  ['duplicate normalized ID', '## F1\nSeverity: blocking\nDescription: Bug\nTest: __uro_review/tests/f1.js\n## f1\nSeverity: suggestion\nDescription: Not a bug'],
+  ['invalid finding heading', '## F1 extra\nSeverity: blocking\nDescription: Bug\nTest: __uro_review/tests/f1.js'],
+]) test(`${name} is rejected before any review artifacts are written`, async t => {
+  const cwd = fixture(t);
+  await assert.rejects(() => artifacts.materializeReviewBundle({ cwd, bundle: { ...bundle, report,
+    tests: [{ path: 'tests/f1.js', content: 'throw new Error("proof")' }] } }), /report/);
+  assert.equal(existsSync(join(cwd, '__uro_review')), false);
+});
+
 test('review bundle materializes sanctioned artifacts with round and diff binding', async (t) => {
   const cwd = fixture(t);
   assert.equal(typeof artifacts.materializeReviewBundle, 'function');

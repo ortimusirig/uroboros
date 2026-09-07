@@ -35,7 +35,7 @@ test('Claude arbiter arguments are headless and read-only', () => {
 
 test('arbiter stream parsing distinguishes a readable result from no answer', () => {
   const readable = parseArbiterStream(`${JSON.stringify({
-    type: 'result',
+    type: 'result', subtype: 'success', is_error: false,
     result: '{"verdict":"valid"}',
     usage: { input_tokens: 3, cache_read_input_tokens: 2, output_tokens: 1 },
   })}\n`);
@@ -66,7 +66,7 @@ test('arbiter stream parsing distinguishes a readable result from no answer', ()
 
 test('arbiter stream parsing reports a genuinely zero usage as accounted, not absent', () => {
   const zero = parseArbiterStream(`${JSON.stringify({
-    type: 'result', result: '{"verdict":"valid"}', usage: { input_tokens: 0, output_tokens: 0 },
+    type: 'result', subtype: 'success', is_error: false, result: '{"verdict":"valid"}', usage: { input_tokens: 0, output_tokens: 0 },
   })}\n`);
   assert.deepEqual(zero.usage, EMPTY_USAGE);
 });
@@ -120,7 +120,7 @@ test('an arbiter finish event carries a genuine zero tokens field when the resul
   });
   await new Promise((resolve) => setImmediate(resolve));
   child.stdout.emit('data', Buffer.from(`${JSON.stringify({
-    type: 'result', result: '{"verdict":"valid"}',
+    type: 'result', subtype: 'success', is_error: false, result: '{"verdict":"valid"}',
     usage: { input_tokens: 0, output_tokens: 0 },
   })}\n`));
   child.emit('close', 0, null);
@@ -174,7 +174,7 @@ test('runArbiter is injectable and records a readable judgement without launchin
   });
   await new Promise((resolve) => setImmediate(resolve));
   child.stdout.emit('data', Buffer.from(`${JSON.stringify({
-    type: 'result',
+    type: 'result', subtype: 'success', is_error: false,
     result: '{"verdict":"valid"}',
     usage: { input_tokens: 2, output_tokens: 1 },
   })}\n`));
@@ -213,7 +213,7 @@ test('the arbiter prompt never rides in argv, whatever its size', async () => {
     prompt: huge,
     spawnProcess: () => {
       setImmediate(() => {
-        child.stdout.emit('data', Buffer.from(`${JSON.stringify({ type: 'result', result: '{"verdict":"valid"}' })}
+        child.stdout.emit('data', Buffer.from(`${JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: '{"verdict":"valid"}' })}
 `));
         child.emit('close', 0);
       });

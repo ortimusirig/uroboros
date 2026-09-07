@@ -108,6 +108,20 @@ test('Claude cannot overrule its own finding before Codex gets a response turn',
   } finally { item.cleanup(); }
 });
 
+test('a conflicting review severity cannot let the execution controller close a blocker', async () => {
+  const item = fixture();
+  try {
+    const facts = await run(baseOptions(item, { adapters: {
+      captureWorktreeSnapshot: async ({ cwd }) => ({ cwd }),
+      restoreWorktreeSnapshot: async () => ({ restoredPaths: [] }),
+      runReview: verifierSequence([blocking + '\nSeverity: suggestion']),
+    } }));
+    assert.equal(facts.outcome, 'verifier-failed');
+    assert.deepEqual(facts.debate.resolvedFindingIds, []);
+    assert.match(facts.messages.find(message => message.speaker === 'claude').content, /review report/);
+  } finally { item.cleanup(); }
+});
+
 test('valid and unavailable judgements preserve findings and drive or retain fix work', async () => {
   for (const available of [true, false]) {
     const item = fixture();

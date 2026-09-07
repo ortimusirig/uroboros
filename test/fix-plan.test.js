@@ -1,6 +1,20 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildFixPlan, validateFindings } from '../src/fix-plan.js';
+import { buildFixPlan, validateFindings, executorFindingResponses } from '../src/fix-plan.js';
+
+for (const response of [{}, 'dispute', null, 3, true]) {
+  test(`findingResponses ${JSON.stringify(response)} cannot crash or manufacture a rebuttal`, () => {
+    assert.deepEqual(executorFindingResponses({ lastMessage: JSON.stringify({ findingResponses: response }) }), []);
+    assert.deepEqual(executorFindingResponses({ findingResponses: response }), []);
+  });
+}
+test('malformed finding replies are ignored while valid replies remain evidence', () => {
+  assert.deepEqual(executorFindingResponses({ lastMessage: '{bad' }), []);
+  assert.deepEqual(executorFindingResponses({ lastMessage: 'null' }), []);
+  const valid = { id: 'F1', disposition: 'dispute', reason: 'Outside original requirements.' };
+  assert.deepEqual(executorFindingResponses({ lastMessage: JSON.stringify({ findingResponses: [null, {},
+    { ...valid, reason: '' }, { ...valid, disposition: 'resolved' }, valid] }) }), [valid]);
+});
 
 // --- validateFindings ---
 

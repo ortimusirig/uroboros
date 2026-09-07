@@ -57,7 +57,8 @@ function readableText(streamText) {
     }
     if (item.type === 'result') {
       resultSeen = true;
-      resultUsable = item.is_error !== true && typeof item.result === 'string';
+      resultUsable = item.subtype === 'success' && item.is_error === false
+        && typeof item.result === 'string' && item.result.trim() !== '';
       result = typeof item.result === 'string' ? item.result : '';
       usage = normalizeClaudeUsage(item.usage);
     }
@@ -70,7 +71,7 @@ function readableText(streamText) {
 export function parseArbiterStream(streamText) {
   const parsed = readableText(streamText);
   return {
-    verdict: !parsed.answer.trim() || (parsed.resultSeen && !parsed.resultUsable)
+    verdict: !parsed.resultSeen || !parsed.resultUsable
       ? ARBITER_UNVERIFIED : 'ANSWERED',
     answer: parsed.answer,
     usage: parsed.usage,

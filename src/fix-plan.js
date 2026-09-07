@@ -113,7 +113,8 @@ export function executorFindingResponses(result) {
     try { value = JSON.parse(String(result?.lastMessage ?? '').trim().replace(/^```json\s*|\s*```$/g, '')); }
     catch { return []; }
   }
-  return (value?.findingResponses ?? []).filter((item) => typeof item?.id === 'string'
+  if (!Array.isArray(value?.findingResponses)) return [];
+  return value.findingResponses.filter((item) => typeof item?.id === 'string'
     && ['addressed', 'dispute'].includes(item.disposition)
     && typeof item.reason === 'string' && item.reason.trim());
 }

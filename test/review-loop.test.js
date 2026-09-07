@@ -162,6 +162,24 @@ test('omitting a prior blocker never manufactures closure', async (t) => {
   assert.equal(facts.debate.openFindings[0].id, 'F1');
 });
 
+for (const shape of [{}, 'dispute', null]) test(`malformed Codex replies ${JSON.stringify(shape)} preserve the open issue and complete checkpoint`, async t => {
+  const raw = JSON.stringify({ findingResponses: shape });
+  const requests = [];
+  const fixture = harness('malformed-reply', { options: { debateRounds: 3 }, adapters: {
+    runExecutor: async () => ({ exitCode: 0, changedFiles: ['implementation.js'], lastMessage: raw }),
+    runReview: async options => { requests.push(options.request); return currentReview(options, {
+      findings: blocker, tests: [proof], dispositions: [{ id: 'F1', status: 'upheld', reason: 'The test still proves this defect.' }] }); },
+  } });
+  t.after(() => rmSync(fixture.root, { recursive: true, force: true }));
+  const result = await executeRun(fixture.options);
+  assert.notEqual(result.outcome, 'review-ready');
+  assert.deepEqual(result.debate.resolvedFindingIds, []);
+  assert.equal(result.debate.openFindings[0].id, 'F1');
+  assert.ok(result.messages.some(message => message.speaker === 'codex' && message.content === raw));
+  assert.ok(requests[1].messages.some(message => message.speaker === 'codex' && message.content === raw));
+  assert.equal(result.checkpointState.openFindings[0].id, 'F1');
+});
+
 test('new reviewer test output reaches Codex and Claude before closure', async (t) => {
   const executorPrompts = [], reviewRequests = [];
   const fixture = harness('review-evidence-delivery', { adapters: {

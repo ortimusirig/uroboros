@@ -29,6 +29,79 @@ const success = (result) => ({ type: 'result', subtype: 'success', is_error: fal
 const reviewBundle = JSON.stringify({ version: 1, report: 'Reviewed required behavior. No findings.',
   tests: [{ path: 'tests/f1.test.js', content: 'console.log("independent test");\n' }] });
 
+for (const [name, terminal, want] of [
+  ['empty', '', 'UNVERIFIED'],
+  ['inconclusive', 'I could not finish checking the implementation.', 'UNVERIFIED'],
+  ['contrary', 'The change is broken.\nISSUES', 'ISSUES'],
+  ['clean', 'Checked every required behavior.\nNO_BLOCKERS', 'NO_BLOCKERS'],
+]) test(`active Claude verification uses the ${name} terminal conclusion, not earlier assistant approval`, async () => {
+  const events = [];
+  const fixture = captureFixture([{ type: 'assistant', message: { content: [{ type: 'text', text: 'NO_BLOCKERS' }] } }, success(terminal)]);
+  const result = await runVerifier({ cwd: process.cwd(), bin: process.execPath, spawnProcess: fixture.spawnProcess,
+    reporter: event => events.push(event), runId: 'terminal' });
+  assert.equal(result.verdict, want);
+  assert.equal(result.verdictSource, want === 'UNVERIFIED' ? 'none' : 'result');
+  assert.equal(result.answer, terminal);
+  assert.equal(result.findings, terminal.trim());
+  assert.ok(result.stdout.includes('NO_BLOCKERS'));
+  assert.equal(events.findLast(event => event.type === 'finish').verdict, want);
+  assert.equal(result.verdictConsistency.status, 'consistent');
+});
+
+for (const [name, change] of [
+  ['error subtype without error flag', { subtype: 'error_max_turns', is_error: undefined }],
+  ['conflicting error subtype', { subtype: 'error_max_turns', is_error: false }],
+  ['missing success flag', { is_error: undefined }],
+  ['missing subtype', { subtype: undefined }],
+  ['nonboolean error flag', { is_error: 'false' }],
+]) for (const [seat, adapter, answer] of [['verifier', runVerifier, 'NO_BLOCKERS'], ['arbiter', runArbiter, '{"verdict":"valid"}'], ['review', runReviewPass, reviewBundle]]) {
+  test(`${seat} rejects ${name} while retaining the terminal answer`, async (t) => {
+    const cwd = mkdtempSync(join(tmpdir(), 'uro-terminal-schema-'));
+    t.after(() => rmSync(cwd, { recursive: true, force: true }));
+    const fixture = captureFixture([success(answer), { ...success(answer), ...change }]);
+    const result = await adapter({ cwd, bin: process.execPath, prompt: 'Review this request.', spawnProcess: fixture.spawnProcess });
+    assert.equal(result.verdict, 'UNVERIFIED');
+    assert.equal(result.answer, answer);
+    assert.equal(existsSync(join(cwd, '__uro_review')), false);
+  });
+}
+
+test('synchronous verifier launch errors return two bounded structured attempts with no invented usage', async () => {
+  let calls = 0;
+  const events = [];
+  const result = await runVerifier({ cwd: process.cwd(), bin: process.execPath,
+    reporter: event => events.push(event), runId: 'throwing-verifier',
+    spawnProcess: () => { throw new Error(`probe launch exception ${++calls}`); } });
+  assert.equal(calls, 2);
+  assert.equal(result.verdict, 'UNVERIFIED');
+  assert.equal(result.launchFailed, true);
+  assert.equal(result.usage, null);
+  assert.deepEqual(result.attempts.map(attempt => attempt.stderr), ['probe launch exception 1', 'probe launch exception 2']);
+  assert.ok(result.attempts.every(attempt => attempt.usage === null && attempt.exitCode === null && !attempt.timedOut));
+  assert.equal(events.filter(event => event.type === 'retry').length, 1);
+  assert.equal(events.filter(event => event.type === 'finish' && event.verdict === 'UNVERIFIED').length, 2);
+});
+
+test('shared Claude arbitration cannot judge from assistant text without a terminal result', async () => {
+  const answer = '{"verdict":"invalid","reason":"unfinished opinion"}';
+  const fixture = captureFixture([{ type: 'assistant', message: { content: [{ type: 'text', text: answer }] } }]);
+  const result = await runArbiter({ cwd: process.cwd(), bin: process.execPath, prompt: 'Judge this finding.', spawnProcess: fixture.spawnProcess });
+  assert.equal(result.verdict, 'UNVERIFIED');
+  assert.equal(result.answer, answer);
+  assert.equal(parseFindingJudgement(result).verdict, 'UNVERIFIED');
+});
+
+test('a synchronous launch refusal can recover on its single retry', async () => {
+  let calls = 0;
+  const fixture = captureFixture([success('NO_BLOCKERS')]);
+  const result = await runVerifier({ cwd: process.cwd(), bin: process.execPath,
+    spawnProcess: (...args) => { if (++calls === 1) throw new Error('transient spawn refusal'); return fixture.spawnProcess(...args); } });
+  assert.equal(calls, 2);
+  assert.equal(result.verdict, 'NO_BLOCKERS');
+  assert.equal(result.attempts[0].usage, null);
+  assert.equal(result.usage.inputTokens, 12);
+});
+
 test('production Claude review uses stdin, read-only transport and harness materialization', async (t) => {
   const cwd = mkdtempSync(join(tmpdir(), 'uro-claude-review-'));
   t.after(() => rmSync(cwd, { recursive: true, force: true }));
