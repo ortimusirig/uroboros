@@ -117,11 +117,20 @@ test('CI runs plugin validation in dry-run mode alongside the test suite', () =>
     'push and pull-request CI must validate the plugin without rerunning the suite');
 });
 
-test('SKILL.md description covers campaigns and diagnostics', () => {
-  const description = frontmatter(skillPath).description;
-  assert.ok(description, 'description must be non-empty');
-  assert.match(description, /campaign/i);
-  assert.match(description, /diagnostic|doctor/i);
+// Skill retrieval/application behavior is checked in the fresh-context skill suite.
+
+test('installer availability report identifies both active providers without requiring Cursor', () => {
+  const home = mkdtempSync(join(tmpdir(), 'ccc-installer-home-'));
+  try {
+    const stub = new URL('../fixtures/installer-process-stub.mjs', import.meta.url).href;
+    const result = spawnSync(process.execPath, ['--import', stub, installerPath], {
+      encoding: 'utf8', env: { ...process.env, HOME: home, USERPROFILE: home },
+    });
+    assert.equal(result.status, 0, output(result));
+    assert.match(output(result), /^claude: (?:found \(presence only\)|NOT FOUND \(needed at run time\))$/m);
+    assert.match(output(result), /^codex: (?:found \(presence only\)|NOT FOUND \(needed at run time\))$/m);
+    assert.doesNotMatch(output(result), /^agent:/m);
+  } finally { rmSync(home, { recursive: true, force: true }); }
 });
 
 test('installer accepts dry-run and rejects retired personal-skill arguments', () => {

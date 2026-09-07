@@ -95,7 +95,7 @@ test('direct verifier launches honor the operator liveness threshold from their 
     const child = fakeChild();
     const kills = [];
     const pending = runVerifier({
-      cwd: tmpdir(), bin: process.execPath, extraArgv: ['unused'], superpowersDir: null,
+      cwd: tmpdir(), bin: process.execPath, superpowersDir: null,
       env: { URO_STALL_THRESHOLD_MS: '25' },
       runId: 'environment-liveness', pass: 'correctness',
       progressThresholdMs: 250,
@@ -150,7 +150,7 @@ test('a chatty verifier runs beyond the former ten-minute default without being 
     const kills = [];
     const events = [];
     const pending = runVerifier({
-      cwd: tmpdir(), bin: process.execPath, extraArgv: ['unused'], superpowersDir: null,
+      cwd: tmpdir(), bin: process.execPath, superpowersDir: null,
       reporter: (event) => events.push(event), runId: 'long-verifier', pass: 'correctness',
       livenessThresholdMs: 5 * 60 * 1000,
       progressThresholdMs: 5 * 60 * 1000,
@@ -168,7 +168,7 @@ test('a chatty verifier runs beyond the former ten-minute default without being 
     assert.ok(events.some((event) => event.type === 'stalled' && event.tier === 'progress'));
 
     child.stdout.emit('data', Buffer.from(
-      '{"type":"result","is_error":false,"result":"NO_BLOCKERS"}\n',
+      '{"type":"result","subtype":"success","is_error":false,"result":"NO_BLOCKERS"}\n',
     ));
     child.emit('close', 0, null);
     const result = await pending;
@@ -209,7 +209,7 @@ for (const pass of ['correctness', 'intent']) {
       const child = fakeChild();
       const kills = [];
       const pending = runVerifier({
-        cwd: tmpdir(), bin: process.execPath, extraArgv: ['unused'], superpowersDir: null,
+        cwd: tmpdir(), bin: process.execPath, superpowersDir: null,
         runId: `silent-${pass}`, pass, livenessThresholdMs: 40,
         progressThresholdMs: 400,
         ...injectedSeat(clock, child, kills),
@@ -231,25 +231,25 @@ for (const pass of ['correctness', 'intent']) {
     });
 }
 
-test('a verifier killed after parsing a verdict marker keeps that verdict', async () => {
+test('a verifier killed after a terminal marker cannot claim a successful invocation', async () => {
   const clock = controlledClock();
   const child = fakeChild();
   const kills = [];
   const pending = runVerifier({
-    cwd: tmpdir(), bin: process.execPath, extraArgv: ['unused'], superpowersDir: null,
+    cwd: tmpdir(), bin: process.execPath, superpowersDir: null,
     runId: 'verdict-before-silence', pass: 'correctness', livenessThresholdMs: 30,
     progressThresholdMs: 300,
     ...injectedSeat(clock, child, kills),
   });
   await started();
   child.stdout.emit('data', Buffer.from(
-    '{"type":"result","is_error":false,"result":"NO_BLOCKERS"}\n',
+    '{"type":"result","subtype":"success","is_error":false,"result":"NO_BLOCKERS"}\n',
   ));
   clock.advance(30);
   const result = await pending;
 
   assert.equal(result.timedOut, true);
-  assert.equal(result.verdict, 'NO_BLOCKERS');
+  assert.equal(result.verdict, 'UNVERIFIED');
 });
 
 for (const seat of ['executor', 'verifier']) {
@@ -258,7 +258,7 @@ for (const seat of ['executor', 'verifier']) {
     const child = fakeChild();
     const kills = [];
     const common = {
-      cwd: tmpdir(), bin: process.execPath, extraArgv: ['unused'], timeoutMs: 25,
+      cwd: tmpdir(), bin: process.execPath, timeoutMs: 25,
       livenessThresholdMs: 250, progressThresholdMs: 250,
       ...injectedSeat(clock, child, kills),
     };
@@ -296,14 +296,14 @@ test('positive control: quickly completed seats keep their normal outcomes', asy
   const verifierChild = fakeChild();
   const verifierKills = [];
   const verifierPending = runVerifier({
-    cwd: tmpdir(), bin: process.execPath, extraArgv: ['unused'], superpowersDir: null,
+    cwd: tmpdir(), bin: process.execPath, superpowersDir: null,
     runId: 'quick-verifier', pass: 'intent', livenessThresholdMs: 50,
     progressThresholdMs: 50,
     ...injectedSeat(verifierClock, verifierChild, verifierKills),
   });
   await started();
   verifierChild.stdout.emit('data', Buffer.from(
-    '{"type":"result","is_error":false,"result":"NO_BLOCKERS"}\n',
+    '{"type":"result","subtype":"success","is_error":false,"result":"NO_BLOCKERS"}\n',
   ));
   verifierChild.emit('close', 0, null);
   const verifier = await verifierPending;

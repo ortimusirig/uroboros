@@ -316,9 +316,9 @@ test('a non-circling run creates no branch and emits no pivot events', async () 
   const scenario = await runFreshScenario({ clean: true });
   try {
     assert.equal(scenario.facts.outcome, 'review-ready');
-    assert.equal(scenario.facts.approved, true);
+    assert.equal(scenario.facts.approved, false, 'skipped review is not actual approval');
     assert.equal(scenario.facts.converged, null);
-    assert.equal(scenario.facts.approval.decidedBy, 'claude');
+    assert.equal(scenario.facts.approval, null);
     assert.deepEqual(scenario.branchCalls, []);
     assert.equal(scenario.events.some((event) => event.stage === 'pivot'), false);
   } finally { scenario.item.cleanup(); }

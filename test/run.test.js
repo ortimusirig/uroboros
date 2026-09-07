@@ -137,9 +137,9 @@ test('debate fix rounds accumulate usage and model overrides reach both agents a
   const cliOpts = parseArgs(['run', '--task', 'do the task', '--target', makeTarget(),
     '--gate', 'unused-gate.json', '--gate-retries', '1',
     '--executor-model', 'executor-override', '--executor-effort', 'medium',
-    '--verifier-model', 'verifier-override']);
+    '--claude-model', 'reviewer-override']);
   const facts = await run({
-    ...cliOpts, gate: [],
+    ...cliOpts, verifierModel: cliOpts.claudeModel, gate: [],
     scratchRoot: scr, runId: 'usage-models',
     adapters: {
       runExecutor: async (opts) => {
@@ -168,20 +168,21 @@ test('debate fix rounds accumulate usage and model overrides reach both agents a
     assert.equal(call.effort, 'medium');
   }
   assert.equal(verifierCalls.length, 2, 'two rounds, one reviewer each');
-  for (const call of verifierCalls) assert.equal(call.model, 'verifier-override');
+  for (const call of verifierCalls) assert.equal(call.model, 'reviewer-override');
   assert.deepEqual(verifierCalls.map((call) => call.request.round), [1, 2]);
   assert.deepEqual(facts.model, {
-    executor: 'executor-override', executorEffort: 'medium', verifier: 'verifier-override',
-    arbiter: DEFAULT_ARBITER_MODEL,
+    executor: 'executor-override', executorEffort: 'medium', verifier: 'reviewer-override',
+    arbiter: 'reviewer-override',
   });
   assert.deepEqual(facts.iterations[0].executorUsage, executorUsages[0]);
   assert.deepEqual(facts.iterations[1].executorUsage, executorUsages[1]);
   assert.deepEqual(facts.tokens, {
-    executor: { inputTokens: 30, cachedInputTokens: 15, outputTokens: 5,
-      reasoningOutputTokens: 3, cacheWriteTokens: 1 },
-    verifier: { inputTokens: 36, cachedInputTokens: 18, outputTokens: 28,
-      reasoningOutputTokens: 0, cacheWriteTokens: 10 },
-    arbiter: EMPTY_USAGE,
+    participants: [
+      { provider: 'codex', phase: 'execution', role: 'implementation-author',
+        usage: { inputTokens: 30, cachedInputTokens: 15, outputTokens: 5, reasoningOutputTokens: 3, cacheWriteTokens: 1 } },
+      { provider: 'claude', phase: 'execution', role: 'execution-reviewer',
+        usage: { inputTokens: 36, cachedInputTokens: 18, outputTokens: 28, reasoningOutputTokens: 0, cacheWriteTokens: 10 } },
+    ],
     total: { inputTokens: 66, cachedInputTokens: 33, outputTokens: 33,
       reasoningOutputTokens: 3, cacheWriteTokens: 11 },
   });
@@ -252,7 +253,7 @@ test('omitted model flags travel through the CLI path to both agents and run-fac
   const cliOpts = parseArgs(['run', '--task', 'do the task', '--target', makeTarget(),
     '--gate', 'unused-gate.json']);
   const facts = await run({
-    ...cliOpts, gate: [], scratchRoot: scr, runId: 'default-models',
+    ...cliOpts, verifierModel: cliOpts.claudeModel, gate: [], scratchRoot: scr, runId: 'default-models',
     adapters: {
       runExecutor: async (opts) => {
         executorCalls.push(opts);

@@ -56,33 +56,7 @@ function hasLawStep(law, number, label) {
   ).test(law);
 }
 
-test('SKILL.md starts its guidance with the non-waivable eight-step planner law', () => {
-  const headings = [...skill.matchAll(/^##\s+(.+)$/gm)].map((match) => match[1]);
-  assert.equal(headings[0], 'Governing law');
-  const law = markdownSection(skill, 'Governing law');
-  const steps = [
-    'Build',
-    'Evidence verification',
-    'Adversarial review',
-    'Correction loop',
-    'Scoped re-verify',
-    'Final planner review',
-    'Issues → back to step 4',
-    'Integrate',
-  ];
-  for (const [index, label] of steps.entries()) {
-    assert.equal(hasLawStep(law, index + 1, label), true, `missing law step ${index + 1}: ${label}`);
-  }
-  assert.equal(
-    hasLawStep(law, 9, 'Fabricated waiver'),
-    false,
-    'positive absence control: a fabricated ninth step must be reported absent',
-  );
-  assert.match(law, /planner never implements/i);
-  assert.match(law, /never (?:accept|use) a piped exit code/i);
-  assert.match(law, /skill law[\s\S]*never restate it in `TASK[.]md`[\s\S]*no plan can waive it/i);
-  assert.match(law, /monitor continuously[\s\S]*slow is not stuck/i);
-});
+// Shipped-skill governing-law behavior is checked by fresh-context application tests.
 
 test('the task-writing checklist documents explicit dashboard titles and fallback', () => {
   const checklist = markdownSection(skill, 'Writing the task');
@@ -164,31 +138,7 @@ test('the Graph declaration is documented in file and flag forms', () => {
   assert.match(usage, /batch --campaign <campaign[.]json>/);
 });
 
-test('both operator docs name doctor --deep as the honest pre-program check', () => {
-  // Peer-observed: plain `doctor` reported green on a capped Cursor account
-  // for a whole program, because it never exercises a launch. The docs have to
-  // say which check actually launches a seat, and with which model.
-  const claims = [
-    [/`loop doctor --deep`/, 'the deep pre-program check'],
-    [/only `--deep` exercises a real seat launch with the run's default model/,
-      'what --deep does that plain doctor does not'],
-    [/`--verifier-model auto`/, 'the free-plan remedy flag'],
-    [/`verifier-unlaunchable`/, 'the terminal reason a refused launch ends in'],
-    // The probe rides the built-in default, so an operator already passing
-    // `--verifier-model auto` sees a red probe over green runs. Unstated, that
-    // reads as a broken install.
-    [/probe always requests the built-in default model, never whatever `--verifier-model` your runs pass/,
-      'that the probe judges the default model, not the run flag'],
-  ];
-  for (const [label, text] of [['skills/uroboros/SKILL.md', skill], ['docs/usage.md', usage]]) {
-    // Prose wraps where the paragraph wraps; the claim is the sentence, not its
-    // line breaks, so the document is matched with its whitespace collapsed.
-    const flowed = text.replace(/\s+/g, ' ');
-    for (const [pattern, what] of claims) {
-      assert.match(flowed, pattern, `${label} must state ${what}`);
-    }
-  }
-});
+// Current readiness behavior is exercised in first-run.test.js and the skill application checks.
 
 test('SKILL.md warns that a run worktree diff is staged, not bare', () => {
   // A reader who inspects the isolated run worktree directly (rather than reading

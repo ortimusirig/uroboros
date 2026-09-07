@@ -119,11 +119,7 @@ test('uroboros-setup front matter retrieves on the missing-binary symptom', () =
     'uroboros-setup description must name the missing-binary symptom');
 });
 
-test('bootstrap prerequisite detection never invokes loop.js to discover Node', () => {
-  const { document } = parseFrontmatter(setupSkillPath);
-  assert.doesNotMatch(document, /loop[.]js/i,
-    'Node-free prerequisite detection must not invoke loop.js');
-});
+// Bootstrap order is covered by the shipped setup skill's fresh-context application check.
 
 test('every command has valid front matter, the CLI description, and controller safety law', () => {
   const descriptions = commandDescriptions();

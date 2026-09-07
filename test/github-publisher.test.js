@@ -1,4 +1,6 @@
 import { test } from 'node:test';
+import { spawnSync } from 'node:child_process';
+import { guardPublish } from '../src/publish-guard.js';
 import assert from 'node:assert/strict';
 import { HARNESS_ARTIFACTS } from '../src/artifacts.js';
 import {
@@ -27,7 +29,6 @@ const fakeGh = fileURLToPath(new URL('../fixtures/fake-gh.mjs', import.meta.url)
 const fakePublishGuardTool = fileURLToPath(
   new URL('../fixtures/fake-publish-guard-tool.mjs', import.meta.url),
 );
-const fakePublishGuardBinDirectory = fileURLToPath(new URL('../fixtures/', import.meta.url));
 const repositoryRoot = fileURLToPath(new URL('../', import.meta.url));
 
 function factsFixture(baseCommit) {
@@ -148,25 +149,39 @@ function fakeGhEnvironment(root, overrides = {}) {
       `#!/bin/sh\nexec ${shellQuote(process.execPath)} ${shellQuote(fakeGh)} "$@"\n`,
     );
     chmodSync(executable, 0o755);
-    for (const tool of ['gitleaks', 'trufflehog', 'agent']) {
-      const toolPath = join(shims, tool);
-      writeFileSync(
-        toolPath,
-        `#!/bin/sh\nexec ${shellQuote(process.execPath)} ${shellQuote(fakePublishGuardTool)} ${tool} "$@"\n`,
-      );
-      chmodSync(toolPath, 0o755);
-    }
   }
   const pathKey = Object.keys(process.env).find((key) => key.toLowerCase() === 'path') ?? 'PATH';
-  const guardBinDirectory = process.platform === 'win32'
-    ? fakePublishGuardBinDirectory
+  // Do not inherit an operator provider installation. Every executable reachable by
+  // the guard is a local fixture; git is the one explicitly resolved real tool.
+  const gitProbe = spawnSync(process.platform === 'win32' ? 'where.exe' : 'which', ['git'], { encoding: 'utf8' });
+  assert.equal(gitProbe.status, 0, gitProbe.stderr);
+  const gitPath = gitProbe.stdout.trim().split(/\r?\n/)[0];
+  for (const tool of ['git', 'gitleaks', 'trufflehog', 'claude', 'codex', 'agent']) {
+    const toolPath = join(shims, tool + (process.platform === 'win32' ? '.cmd' : ''));
+    const command = tool === 'git'
+      ? (process.platform === 'win32' ? '"' + gitPath + '"' : shellQuote(gitPath))
+      : (process.platform === 'win32'
+        ? '"' + process.execPath + '" "' + fakePublishGuardTool + '" ' + tool
+        : shellQuote(process.execPath) + ' ' + shellQuote(fakePublishGuardTool) + ' ' + tool);
+    writeFileSync(toolPath, process.platform === 'win32'
+      ? '@echo off\r\n' + command + ' %*\r\n'
+      : '#!/bin/sh\nexec ' + command + ' "$@"\n');
+    if (process.platform !== 'win32') chmodSync(toolPath, 0o755);
+  }
+  if (process.platform !== 'win32') {
+    const resolver = join(shims, 'which');
+    writeFileSync(resolver, '#!/bin/sh\nif [ -x ' + shellQuote(shims) + '/"$1" ]; then printf "%s\\n" ' + shellQuote(shims) + '/"$1"; else exit 1; fi\n');
+    chmodSync(resolver, 0o755);
+  }
+  const isolatedPath = process.platform === 'win32'
+    ? shims + delimiter + join(process.env.SystemRoot ?? 'C:/Windows', 'System32')
     : shims;
   return {
     executable,
     statePath,
     env: {
       ...process.env,
-      [pathKey]: `${guardBinDirectory}${delimiter}${shims}${delimiter}${process.env[pathKey] ?? ''}`,
+      [pathKey]: isolatedPath,
       URO_FAKE_GH_STATE: statePath,
       URO_GH_BIN: executable,
       URO_PUBLISH_BLOCKLIST: blocklistPath,
@@ -174,6 +189,19 @@ function fakeGhEnvironment(root, overrides = {}) {
     },
   };
 }
+
+test('publisher guard fails closed when its isolated Claude fixture is missing', async (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'ccc-github-test-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const fake = fakeGhEnvironment(root);
+  const options = { runDirectory: root, content: { body: 'Harmless fixture prose' }, env: fake.env,
+    adapters: { readCodeText: () => '' } };
+  assert.equal((await guardPublish(options)).ok, true);
+  rmSync(join(root, 'bin', process.platform === 'win32' ? 'claude.cmd' : 'claude'));
+  const unavailable = await guardPublish(options);
+  assert.equal(unavailable.ok, false);
+  assert.ok(unavailable.findings.some(finding => finding.check === 'contextual'));
+});
 
 const noOpPush = async () => 'b'.repeat(40);
 

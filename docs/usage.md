@@ -1,5 +1,21 @@
 # Usage
 
+## Updating an existing installation
+
+For an existing installation, run these in a terminal:
+
+```sh
+claude plugin marketplace update uroboros
+claude plugin update uroboros@uroboros
+```
+
+Then restart Claude Code (or run `/reload-plugins` in the active session). For a
+non-user installation, pass the matching `--scope` to the plugin update command.
+Explicit plugin versions control update detection; changed commits with an unchanged
+version can be skipped. See [Claude Code version management](https://code.claude.com/docs/en/plugins-reference#version-management).
+These are documented update instructions, not a claim that a live update was tested.
+
+
 ## Sequential queues
 
 `loop queue --file <path>` reads a JSON list whose units contain either

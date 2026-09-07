@@ -34,6 +34,20 @@ Run these two commands inside Claude Code (not a terminal):
 
 No clone or local installer is needed to use the plugin.
 
+For an existing installation, run these in a terminal:
+
+```sh
+claude plugin marketplace update uroboros
+claude plugin update uroboros@uroboros
+```
+
+Then restart Claude Code (or run `/reload-plugins` in the active session). For a
+non-user installation, pass the matching `--scope` to the plugin update command.
+Explicit plugin versions control update detection; changed commits with an unchanged
+version can be skipped. See [Claude Code version management](https://code.claude.com/docs/en/plugins-reference#version-management).
+These are documented update instructions, not a claim that a live update was tested.
+
+
 ## First run
 
 Plugin slash commands do not register in a Claude Code session that was already running when
@@ -125,9 +139,9 @@ loop queue --file queue.json --mode autonomous --max-runs 3 --token-budget 50000
 ```
 
 For goal units Claude authors and Codex reviews the exact goal, plan and gate artifact.
-Early-release checkpoint: integration verification is incomplete. The latest full suite
-reported 1026 passing and 18 failing tests; follow-up fixes and a clean verification run
-are still pending. Do not treat this checkpoint as fully verified.
+Integration verification: the follow-up full suite passed 1041 tests with zero failures.
+That run preceded the final installer availability fix and version/update documentation;
+those narrow changes have separate targeted checks. Independent review remains pending.
 
 Release limitation: manual disputes preserve state and stop, but durable `loop resume`
 is not available yet; it is follow-up work. Use explicit `--mode autonomous` for unattended

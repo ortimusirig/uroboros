@@ -146,12 +146,14 @@ test('real setup CLI is headless-safe on a failing required check', async (t) =>
   const shims = join(root, 'bin');
   mkdirSync(operatorDirectory);
   mkdirSync(shims);
-  for (const name of ['git', 'codex', 'agent']) writePassingBin(shims, name);
+  for (const name of ['git', 'codex', 'claude']) writePassingBin(shims, name);
   const pathKey = Object.keys(process.env)
     .find((key) => key.toLowerCase() === 'path') ?? 'PATH';
   const env = {
     ...process.env,
-    [pathKey]: `${shims}${delimiter}${process.env[pathKey] ?? ''}`,
+    [pathKey]: process.platform === 'win32'
+      ? shims + delimiter + join(process.env.SystemRoot ?? 'C:/Windows', 'System32')
+      : shims,
   };
   try {
     const result = await spawnCapture(process.execPath, [

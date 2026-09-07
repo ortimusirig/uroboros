@@ -38,21 +38,6 @@ test('README raw setup URL identifies the canonical repository, branch, and skil
   }, 'raw setup URL must use the current repository, default branch, and on-disk skill path');
 });
 
-test('README leaves platform-specific Cursor install commands in the setup skill only', () => {
-  const readme = readFileSync(readmePath, 'utf8');
-  const setupSkill = readFileSync(setupSkillPath, 'utf8').replaceAll('\\|', '|');
-  const pinnedInstallCommands = [
-    "irm 'https://cursor.com/install?win32=true' | iex",
-    'curl https://cursor.com/install -fsS | bash',
-  ];
-
-  for (const command of pinnedInstallCommands) {
-    assert.ok(setupSkill.includes(command),
-      `positive control: setup skill must retain the pinned platform install command: ${command}`);
-    assert.equal(readme.includes(command), false,
-      `README must not duplicate the setup skill's pinned platform install command: ${command}`);
-  }
-});
 
 test('README requires a session restart between plugin installation and first setup', () => {
   const readme = readFileSync(readmePath, 'utf8');

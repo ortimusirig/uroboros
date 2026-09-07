@@ -240,7 +240,7 @@ function runSelfTest(cwd) {
 
 function reportCliAvailability() {
   const probe = process.platform === 'win32' ? 'where' : 'which';
-  for (const bin of ['git', 'codex', 'agent', 'gh']) {
+  for (const bin of ['git', 'codex', 'claude', 'gh']) {
     const result = spawnSync(probe, [bin], { encoding: 'utf8' });
     const missing = bin === 'gh'
       ? 'NOT FOUND (needed only for explicit publish)'
