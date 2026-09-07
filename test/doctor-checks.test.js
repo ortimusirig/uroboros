@@ -104,6 +104,43 @@ function createFailingFixture() {
   };
 }
 
+test('doctor requires only Claude and Codex binaries and plugins', async () => {
+  const fixture = createPassingFixture();
+  try {
+    fixture.bins.agent = 'missing-cursor-must-not-be-probed';
+    rmSync(join(fixture.superpowers, '.cursor-plugin'), { recursive: true });
+    const result = await runDoctor({ bins: fixture.bins, scratchRoot: fixture.scratchRoot,
+      repository: fixture.repository });
+    assert.equal(result.ok, true);
+    assert.doesNotMatch(result.output, /Cursor/);
+  } finally { rmSync(fixture.root, { recursive: true, force: true }); }
+});
+
+test('Claude deep read requires a successful terminal read and an unchanged workspace', async () => {
+  for (const fault of [null, 'error', 'empty', 'assistant-only', 'write', 'quota', 'hook']) {
+    const root = mkdtempSync(join(tmpdir(), 'doctor-claude-read-'));
+    try {
+      const outcome = await doctorCheck('claude-read-probe').probe({
+        bins: { claude: 'claude' }, deep: true, state: { claudePresent: true, workspace: root },
+        spawn: async (bin, args, options) => {
+          assert.equal(bin, 'claude');
+          assert.match(options.input, /ccc-doctor-read.txt/);
+          assert.equal(args[args.indexOf('--model') + 1], 'sonnet');
+          const token = readFileSync(join(options.cwd, 'ccc-doctor-read.txt'), 'utf8');
+          if (fault === 'write') writeFileSync(join(options.cwd, 'oops.txt'), 'changed');
+          const assistant = JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text: token }] } });
+          return { code: fault === 'quota' || fault === 'hook' ? 1 : 0, timedOut: false,
+            stderr: fault ?? '', stdout: assistant + '\n' + (fault === 'assistant-only' ? '' : JSON.stringify({
+              type: 'result', subtype: fault === 'error' ? 'error' : 'success', is_error: false,
+              result: fault === 'empty' ? '' : token,
+            })) };
+        },
+      });
+      assert.equal(outcome.status, fault ? 'FAIL' : 'PASS', fault);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  }
+});
+
 function golden(name, replacements) {
   const path = fileURLToPath(new URL(`./golden/${name}`, import.meta.url));
   let expected = readFileSync(path, 'utf8');
@@ -141,20 +178,17 @@ function doctorCheck(id) {
   return check;
 }
 
-test('doctor registry has every prerequisite id and exactly four auto-fixable checks', () => {
+test('doctor registry has every prerequisite id and exactly three auto-fixable checks', () => {
   const requiredPrerequisiteIds = [
     'node-version',
     'git-usable',
     'codex-cli-installed',
     'codex-signed-in',
-    'cursor-agent-installed',
-    'cursor-signed-in',
     'claude-cli-installed',
     'claude-signed-in',
     'scratch-root-location',
     'scratch-root-writable',
     'superpowers-codex',
-    'superpowers-cursor',
     'superpowers-claude',
   ];
   assert.ok(DOCTOR_CHECKS.length > 0, 'the registry must not be empty');
@@ -187,7 +221,7 @@ test('doctor registry has every prerequisite id and exactly four auto-fixable ch
   }
   assert.deepEqual(
     DOCTOR_CHECKS.filter((check) => check.remediation.autoFixable).map((check) => check.id).sort(),
-    ['codex-cli-installed', 'cursor-agent-installed', 'scratch-root-writable', 'superpowers-codex'],
+    ['codex-cli-installed', 'scratch-root-writable', 'superpowers-codex'],
   );
   assert.ok(
     DOCTOR_CHECKS.filter((check) => check.kind === 'optional')
@@ -232,10 +266,9 @@ test('publish guard blocklist fails when URO_PUBLISH_BLOCKLIST is unset', async 
   assert.match(outcome.detail, /publish refuses/);
 });
 
-test('superpowers doctor checks verify all three seats and make each one required', async () => {
+test('superpowers doctor checks verify both seats and make each one required', async () => {
   const root = mkdtempSync(join(tmpdir(), 'uro-superpowers-doctor-'));
   const codexCheck = doctorCheck('superpowers-codex');
-  const cursorCheck = doctorCheck('superpowers-cursor');
   const claudeCheck = doctorCheck('superpowers-claude');
   const emptyHome = join(root, 'empty-home');
   const configured = join(root, 'configured-superpowers');
@@ -255,22 +288,17 @@ test('superpowers doctor checks verify all three seats and make each one require
         stdout: 'superpowers@openai-curated  installed, enabled  3fdeeb49  C:/plugin\n',
       }),
     });
-    const cursor = await cursorCheck.probe({
-      env: { URO_SUPERPOWERS_DIR: configured }, home: emptyHome, bins: {},
-    });
     const claude = await claudeCheck.probe({
       env: { URO_SUPERPOWERS_DIR: configured }, home: emptyHome, bins: {},
     });
 
     assert.equal(codex.status, 'PASS');
-    assert.equal(cursor.status, 'PASS');
     assert.equal(claude.status, 'PASS');
     assert.deepEqual(
-      [codexCheck, cursorCheck, claudeCheck].map((check) => check.kind),
-      ['required', 'required', 'required'],
+      [codexCheck, claudeCheck].map((check) => check.kind),
+      ['required', 'required'],
     );
     assert.match(codex.detail, /installed, enabled.*3fdeeb49/i);
-    assert.match(cursor.detail, /Cursor.*6[.]0[.]2/i);
     assert.match(claude.detail, /Claude.*6[.]0[.]2/i);
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -295,13 +323,10 @@ test('each failing superpowers doctor check names its seat and exact remediation
           stdout: 'superpowers@openai-curated  not installed  C:/plugin\n',
         }),
       }),
-      doctorCheck('superpowers-cursor').probe({
-        env: { URO_SUPERPOWERS_DIR: codexOnly }, home: root, bins: {},
-      }),
       doctorCheck('superpowers-claude').probe({ env: {}, home: root, bins: {} }),
     ]);
 
-    for (const [index, seat] of ['Codex', 'Cursor', 'Claude'].entries()) {
+    for (const [index, seat] of ['Codex', 'Claude'].entries()) {
       const check = doctorCheck(`superpowers-${seat.toLowerCase()}`);
       assert.equal(outcomes[index].status, 'FAIL');
       assert.match(outcomes[index].detail, new RegExp(seat, 'i'));
@@ -309,10 +334,6 @@ test('each failing superpowers doctor check names its seat and exact remediation
     }
     assert.match(doctorCheck('superpowers-codex').remediation.prose,
       /codex plugin add superpowers@openai-curated/);
-    assert.match(doctorCheck('superpowers-cursor').remediation.prose,
-      /URO_SUPERPOWERS_DIR=.*[.]cursor-plugin/);
-    assert.match(outcomes[1].detail, /[.]cursor-plugin/,
-      'a Codex-only directory must fail Cursor verification at the manifest boundary');
     assert.match(doctorCheck('superpowers-claude').remediation.prose,
       /plugin install superpowers@superpowers-marketplace/);
   } finally {
@@ -321,7 +342,7 @@ test('each failing superpowers doctor check names its seat and exact remediation
 });
 
 test('a failed required superpowers seat makes doctor unhealthy', async () => {
-  const checks = ['superpowers-codex', 'superpowers-cursor', 'superpowers-claude'];
+  const checks = ['superpowers-codex', 'superpowers-claude'];
   for (const failedId of checks) {
     const seatChecks = checks.map((id) => ({
       id,
@@ -383,7 +404,7 @@ test('doctor remediation uses the same Codex registry environment it probed', as
     });
 
     assert.equal(remediationOptions.env.CODEX_HOME, env.CODEX_HOME);
-    assert.equal(remediationOptions.env.PATH, process.env.PATH);
+    assert.equal(remediationOptions.env[Object.keys(process.env).find(key => key.toLowerCase() === 'path') ?? 'PATH'], process.env[Object.keys(process.env).find(key => key.toLowerCase() === 'path') ?? 'PATH']);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -407,8 +428,8 @@ test('doctor deep seat probes keep registry overrides and the inherited launch e
     if (bin === 'codex') {
       writeFileSync(join(options.cwd, 'ccc-doctor-write.txt'), 'URO_DOCTOR_WRITE_OK\n');
     }
-    const stdout = bin === 'agent'
-      ? readFileSync(join(options.cwd, 'ccc-doctor-read.txt'), 'utf8')
+    const stdout = bin === 'claude'
+      ? JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: readFileSync(join(options.cwd, 'ccc-doctor-read.txt'), 'utf8') })
       : '';
     return { code: 0, timedOut: false, stdout, stderr: '' };
   };
@@ -420,17 +441,17 @@ test('doctor deep seat probes keep registry overrides and the inherited launch e
       env,
       spawn,
     });
-    const cursor = await doctorCheck('cursor-read-probe').probe({
-      bins: { agent: 'agent' },
+    const claude = await doctorCheck('claude-read-probe').probe({
+      bins: { claude: 'claude' },
       deep: true,
-      state: { agentPresent: true, workspace: root },
+      state: { claudePresent: true, workspace: root },
       env,
       home: root,
       spawn,
     });
 
     assert.equal(codex.status, 'PASS');
-    assert.equal(cursor.status, 'PASS');
+    assert.equal(claude.status, 'PASS');
 
     // loop mutate found this: deleting initializeProbeRepository from
     // probeCodex left the whole suite green. The write probe runs Codex inside
@@ -446,9 +467,9 @@ test('doctor deep seat probes keep registry overrides and the inherited launch e
       'the probe repository must stage its seed file');
     assert.ok(gitCalls.some((args) => args.includes('commit')),
       'the probe repository must have a commit, not an unborn branch');
-    for (const call of calls.filter(({ bin }) => bin === 'codex' || bin === 'agent')) {
+    for (const call of calls.filter(({ bin }) => bin === 'codex' || bin === 'claude')) {
       assert.equal(call.options.env.CODEX_HOME, env.CODEX_HOME);
-      assert.equal(call.options.env.PATH, process.env.PATH);
+      assert.equal(call.options.env[Object.keys(process.env).find(key => key.toLowerCase() === 'path') ?? 'PATH'], process.env[Object.keys(process.env).find(key => key.toLowerCase() === 'path') ?? 'PATH']);
     }
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -582,7 +603,7 @@ test('optional publish guard failures do not affect core health, while required 
     assert.match(healthy.output, /FAIL \[optional\] Publish guard trufflehog/);
     assertMatchingLeadingAndTrailingVerdicts(
       healthy.output,
-      'Loop core health: HEALTHY (all performed required checks passed; Codex, Cursor, and Claude sign-ins were verified).',
+      'Loop core health: HEALTHY (all performed required checks passed; Codex and Claude sign-ins were verified).',
     );
 
     const unhealthy = await runDoctor({
@@ -658,13 +679,9 @@ test('doctor all-fail output is byte-identical to its committed golden', async (
       bins: fixture.bins,
       home: fixture.root,
     });
-    const cursorInstallProse = process.platform === 'win32'
-      ? "run `irm 'https://cursor.com/install?win32=true' | iex` in Windows PowerShell, reopen the terminal, confirm the binary is `agent`, and run `agent login`."
-      : 'run `curl https://cursor.com/install -fsS | bash`, reopen the terminal, confirm the binary is `agent`, and run `agent login`.';
     const expected = golden('doctor-all-fail.txt', {
       SCRATCH_ROOT: resolve(fixture.scratchRoot),
       REPOSITORY: resolve(fixture.repository),
-      CURSOR_INSTALL_PROSE: cursorInstallProse,
     });
     assert.equal(result.ok, false);
     assertGoldenEquality(result.output, expected);
@@ -673,7 +690,7 @@ test('doctor all-fail output is byte-identical to its committed golden', async (
   }
 });
 
-test('the deep cursor probe launches the model the runs use, not the account default', async () => {
+test('the deep Claude probe launches the model the runs use, not the account default', async () => {
   // Peer-verified on this exact machine: a probe that names no model rides
   // whatever the Cursor account defaults to and reports PASS, while every real
   // run asks for DEFAULT_VERIFIER_MODEL and is refused ("Named models
@@ -694,21 +711,21 @@ test('the deep cursor probe launches the model the runs use, not the account def
     return {
       code: 0,
       timedOut: false,
-      stdout: readFileSync(join(options.cwd, 'ccc-doctor-read.txt'), 'utf8'),
+      stdout: JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: readFileSync(join(options.cwd, 'ccc-doctor-read.txt'), 'utf8') }),
       stderr: '',
     };
   };
   try {
-    const cursor = await doctorCheck('cursor-read-probe').probe({
-      bins: { agent: 'agent' },
+    const claude = await doctorCheck('claude-read-probe').probe({
+      bins: { claude: 'claude' },
       deep: true,
-      state: { agentPresent: true, workspace: root },
+      state: { claudePresent: true, workspace: root },
       env: { URO_SUPERPOWERS_DIR: plugin },
       home: root,
       spawn,
     });
-    assert.equal(cursor.status, 'PASS');
-    const launches = calls.filter(({ bin }) => bin === 'agent');
+    assert.equal(claude.status, 'PASS');
+    const launches = calls.filter(({ bin }) => bin === 'claude');
     assert.equal(launches.length, 1, 'positive control: the deep probe must actually launch the agent');
     const args = launches[0].args;
     const modelIndex = args.indexOf('--model');

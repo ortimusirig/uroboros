@@ -149,7 +149,7 @@ test('runExecutor launches Codex under the environment whose registry was verifi
   await pending;
 
   assert.equal(spawnOptions.env.CODEX_HOME, env.CODEX_HOME);
-  assert.equal(spawnOptions.env.PATH, process.env.PATH,
+  assert.equal(spawnOptions.env[Object.keys(process.env).find(key => key.toLowerCase() === 'path') ?? 'PATH'], process.env[Object.keys(process.env).find(key => key.toLowerCase() === 'path') ?? 'PATH'],
     'a registry override must not remove the PATH needed to launch Codex');
 });
 

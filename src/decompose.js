@@ -1,73 +1,16 @@
-// src/decompose.js
-// Tiers 1 and 2 of the decomposition spine.
-//
-// Tier 1: ONE project converges into an MVP-first, dependency-ordered manifest
-// of goals (goals.json plus one spec.md per goal). Tier 2: ONE goal converges
-// into the task units the existing loop already executes — this tier IS the
-// planning conversation for its tasks, emitting every task's plan.md and
-// gate.json directly, so nothing is re-planned per task and no goal-sized run
-// ever exists.
-//
-// The conversation itself lives in conversation.js and is shared with `loop
-// plan`. What is tier-specific and lives here, once per tier: what a request
-// looks like, what a valid proposal is, and what converging writes. Both
-// tiers share the tagged-artifact parser, the write-once-with-rollback
-// writer, and the request/seat-wiring/strategy shape; only the prompts, the
-// artifact contract and the writer's field names differ.
+// Goal and project tiers share Claude authorship and Codex review; each tier
+// retains its own artifact schema, validation, and write-once rollback.
 import { randomUUID } from 'node:crypto';
-import {
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  rmdirSync,
-  statSync,
-  unlinkSync,
-  writeFileSync,
-} from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import {
-  dirname, isAbsolute, join, resolve,
-} from 'node:path';
-import {
-  ARBITER_UNVERIFIED,
-  buildArbiterPrompt,
-  DEFAULT_ARBITER_MODEL,
-  runArbiter,
-  SEAT_STATE_LAW,
-  seatReviewBlock,
-  seatReviewContext,
-} from './arbiter.js';
-import {
-  CONVERSATION_DNA,
-  parseSeatReview,
-  RepairableArtifactError,
-  runConversation,
-  seatLaunchFailure,
-  STANCE_REPAIR_CLOSING,
-  STANCE_REPAIR_OPENING,
-  stanceRepairLines,
-  unavailableSeatReview,
-} from './conversation.js';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
+import { CONVERSATION_DNA, RepairableArtifactError, runConversation, stanceRepairLines } from './conversation.js';
+import { decisionAuthority } from './decision-policy.js';
 import { reportEvent } from './events.js';
-import { runExecutor } from './executor.js';
-import { productionCapability, withSeatWorkspace } from './plan.js';
+import { createPlanningSeats, planningPreflight } from './plan.js';
 import { buildRepoMap, DEFAULT_MAP_BUDGET } from './repo-map.js';
-import {
-  applySuperpowersRequirement,
-  verifySuperpowersSeats,
-} from './superpowers.js';
 import { resolveStageTimeouts } from './timeouts.js';
-import { assertUsablePrompt, runVerifier } from './verifier.js';
 
-// Cursor takes its prompt on argv, where a newline is not a line break, so the
-// standing law travels flattened into those single-line prompts — everything
-// else Cursor reads travels as files in its seat workspace.
-const ONE_LINE_CONVERSATION_DNA = CONVERSATION_DNA.replace(/\n/g, ' ');
-
-// The fractal incremental law at tier 2, quoted verbatim from the design spec
-// into every seat's prompt. Seat judgement is the only thing that enforces it:
-// no parser here measures incrementality, and a seat that believes an increment
-// is not self-contained raises it as an ordinary S<id> suggestion.
 const TIER2_INCREMENTAL_LAW = 'every task is a self-contained increment of the GOAL — runnable and testable alone, exactly one capability';
 
 // The fractal incremental law at tier 1, quoted verbatim from the design spec.
@@ -439,16 +382,6 @@ function artifactText(value) {
   return null;
 }
 
-// A storm draft is raw material for the proposing seat, not a written artifact:
-// it is carried verbatim and never parsed into structure. Only a seat that
-// produced no text at all has nothing to contribute. Tier-agnostic — both
-// tiers' `parseDraft` is this same function.
-function parseStormDraft(value) {
-  const text = artifactText(value);
-  if (text === null || text.trim() === '') throw new Error('the seat returned no decomposition');
-  return { text };
-}
-
 /**
  * The proposal contract. An artifact that ARRIVED but does not parse is
  * repairable and goes back verbatim; an answer with no artifact in it at all is
@@ -502,7 +435,7 @@ function goalDraftingPrompt({
     `# ${seat} goal decomposition seat`,
     '',
     'Work only as a planner. Explore the target for real evidence, but do not modify any file.',
-    'You are one of three seats decomposing the SAME goal independently. Draft from your own reading of the repository; do not imagine what the other seats might write.',
+    'You are Claude, the author of this goal decomposition. Codex independently reviews your proposal.',
     `Break this goal into the tasks that achieve it, obeying the tier-2 incremental law verbatim: "${TIER2_INCREMENTAL_LAW}".`,
     'A task you cannot state as exactly one capability is two tasks. Declare each task\'s dependencies; no task may depend on a later one, and two tasks may never depend on each other.',
     '',
@@ -524,67 +457,7 @@ function goalDraftingPrompt({
   ].join('\n');
 }
 
-function goalProposePrompt({
-  goalSpec, constitution, repoMap, drafts, feedback, questions, previousProposal,
-}) {
-  return [
-    CONVERSATION_DNA,
-    '',
-    '# Claude goal decomposition proposal seat',
-    '',
-    'You are read-only. Do not create, edit, or delete files and do not run a gate.',
-    'Three seats decomposed this goal independently. Collate them into ONE decomposition: keep the strongest split, graft the better tasks from the others, and resolve their disagreements by judgement stated in the task plans themselves.',
-    `The tier-2 incremental law, verbatim: "${TIER2_INCREMENTAL_LAW}".`,
-    '',
-    goalContext({ goalSpec, constitution, repoMap }),
-    '',
-    ...(drafts ?? []).flatMap((draft) => [
-      `## Decomposition from the ${draft.seat} seat`,
-      String(draft.text ?? '(this seat produced no decomposition)'),
-      '',
-    ]),
-    ...(previousProposal ? ['Previous proposal:', previousProposal, ''] : []),
-    ...(feedback ? ['Required corrections:', feedback, ''] : []),
-    ...((questions ?? []).length > 0 ? [
-      'Open questions from the reviewing seats. Answer each explicitly inside the task plans, or revise the decomposition so the question does not arise:',
-      ...questions.map((question) => `- ${question.seat} ${question.id}: ${question.text}`),
-      '',
-    ] : []),
-    `Each "## T<n>" section is that task's complete plan.md and must contain headings named ${TASK_HEADINGS}.`,
-    'Every cited path and line must already exist in the target; verify each citation by reading before citing.',
-    GATE_IS_EVIDENCE,
-    TAGGED_ARTIFACT_SHAPE,
-  ].join('\n');
-}
 
-// The agreement seat has the final say on this goal's decomposition, so it
-// gets the same standing context every other seat gets — the constitution
-// (when the operator has one) and the repo-map ration — not goalSpec alone.
-function goalAgreementPrompt({
-  goalSpec, constitution, repoMap, proposal, reviews,
-}) {
-  return [
-    CONVERSATION_DNA,
-    '',
-    '# Claude arbiter seat',
-    'You are read-only. Do not create, edit, or delete files and do not run a gate.',
-    'Judge independently on the merits. Return exactly one JSON object and no prose.',
-    "You are the final arbiter of this goal's decomposition. Two seats have reviewed it against the goal specification; their responses are below, verbatim, severities included. No severity blocks by rule — weigh everything by judgement.",
-    `The tier-2 incremental law, verbatim: "${TIER2_INCREMENTAL_LAW}".`,
-    'Converge only when these tasks genuinely achieve THIS goal, each task is a self-contained increment of it, and both seats have said AGREE: yes. If either seat disagrees, or you are not satisfied, do not converge; say what must change.',
-    SEAT_STATE_LAW,
-    'Schema: {"converged":true,"reason":"brief merits"} or {"converged":false,"reason":"...","feedback":"exact corrections for the next proposal"}.',
-    goalContext({ goalSpec, constitution, repoMap }),
-    `TASKS ${proposal}`,
-    seatReviewBlock('CODEX_REVIEW', reviews?.codex),
-    seatReviewBlock('CURSOR_REVIEW', reviews?.cursor),
-  ].join('\n\n');
-}
-
-// The review contract is the planning contract, pinned to THIS goal spec.
-// Codex reads its prompt on stdin, so the artifacts travel as themselves rather
-// than flattened onto one line. Shared by both tiers; only the final sentence
-// is tier-specific, so it is the one parameter.
 function reviewResponseContract(agreementMeans) {
   return [
     'Respond in exactly this structure and nothing else:',
@@ -622,138 +495,6 @@ function goalReviewPrompt({
   ].join('\n');
 }
 
-async function productionGoalDraft(request) {
-  const result = await runExecutor({
-    plan: request.input,
-    cwd: request.target,
-    model: request.plannerModel,
-    sandbox: request.sandbox,
-    timeoutMs: request.timeoutMs,
-    runId: request.runId,
-    attempt: request.round,
-    env: request.env,
-  });
-  if (result.exitCode !== 0 || result.timedOut) {
-    throw new Error(`goal decomposition seat exited ${result.exitCode}${result.timedOut ? ' after timing out' : ''}`);
-  }
-  return { text: String(result.lastMessage ?? ''), usage: result.usage };
-}
-
-// Cursor's argv prompt must satisfy assertUsablePrompt — one line, no double
-// quotes — because cursor-agent receives it on the Windows command line. Seat
-// instructions need both (JSON artifact examples, laws quoted verbatim), so
-// the full body travels as INSTRUCTIONS.md inside the seat workspace and argv
-// carries only the pointer. The 2026-09-02 dogfood decompose run showed what
-// happens otherwise: every Cursor call was refused before launch and a
-// three-seat debate silently ran with two.
-export async function cursorSeatCall({
-  files, instructions, target, verifierModel, timeoutMs, env, home, superpowersDir,
-  verify = runVerifier,
-}) {
-  return withSeatWorkspace(files, async (workspace) => {
-    writeFileSync(join(workspace, 'INSTRUCTIONS.md'), `${instructions(workspace).join('\n')}\n`);
-    const prompt = `Read ${join(workspace, 'INSTRUCTIONS.md')} and obey it completely; it is your entire seat instruction for this round.`;
-    assertUsablePrompt(prompt);
-    return verify({
-      cwd: target, prompt, model: verifierModel, timeoutMs, pass: 'plan', env, home, superpowersDir,
-    });
-  });
-}
-
-async function productionGoalCursorDraft({
-  goalSpec, constitution, repoMap, target, round, verifierModel, timeoutMs,
-  env, home, superpowersDir, feedback, failedTasks,
-}) {
-  const result = await cursorSeatCall({
-    files: {
-      'GOAL_SPEC.md': `${goalSpec}\n`,
-      'REPO_MAP.md': `${repoMap}\n`,
-      ...(constitution ? { 'CONSTITUTION.md': `${constitution}\n` } : {}),
-      ...(feedback ? { 'FEEDBACK.md': `${feedback}\n` } : {}),
-      ...(failedTasks ? { 'DISCARDED_TASKS.md': `${failedTasks}\n` } : {}),
-    },
-    instructions: (workspace) => [
-      ONE_LINE_CONVERSATION_DNA,
-      '# Cursor goal decomposition seat',
-      'You are one of three seats decomposing the same goal independently. Draft from your own reading of the repository.',
-      `Read the goal specification from ${join(workspace, 'GOAL_SPEC.md')} and the repository survey from ${join(workspace, 'REPO_MAP.md')} (a ration, not a wall: read any file directly).`,
-      ...(constitution ? [`Obey the standing project rules in ${join(workspace, 'CONSTITUTION.md')}.`] : []),
-      `Break that goal into the tasks that achieve it, obeying the tier-2 incremental law verbatim: "${TIER2_INCREMENTAL_LAW}". A task you cannot state as exactly one capability is two tasks.`,
-      'Declare each task\'s dependencies; no task may depend on a later one, and two tasks may never depend on each other.',
-      ...(feedback ? [`Apply the required corrections in ${join(workspace, 'FEEDBACK.md')}.`] : []),
-      ...(failedTasks ? [`${join(workspace, 'DISCARDED_TASKS.md')} holds a discarded split; choose a genuinely different one.`] : []),
-      `This is decomposition round ${round}.`,
-      `Each "## T<n>" section is that task's complete plan.md and must contain headings named ${TASK_HEADINGS}.`,
-      'Every cited path and line must already exist in the target; verify each citation by reading before citing.',
-      GATE_IS_EVIDENCE,
-      'Reply in plain chat text, not a plan tool artifact. If your client renders a plan tool anyway, ALSO print both tagged artifacts as chat text — the tags are the only thing read.',
-      'Return exactly <TASKS_JSON>[{"id":"T1","name":"T1-<slug>","dependsOn":[],"gate":[{"bin":"...","args":["..."]}]}]</TASKS_JSON> then <TASKS_MD>## T1: <title> ...</TASKS_MD> and no prose outside them. Every id in TASKS_JSON needs exactly one matching "## T<n>:" section in TASKS_MD.',
-    ],
-    target, verifierModel, timeoutMs, env, home, superpowersDir,
-  });
-  if (result.launchFailed || result.timedOut) throw new Error(seatLaunchFailure('cursor draft', result));
-  return { text: `${result.findings ?? ''}\n${result.plan ?? ''}`, usage: result.usage };
-}
-
-async function productionGoalCodexReview({
-  goalSpec, constitution, repoMap, tasks, round, target, plannerModel, timeoutMs, runId, env,
-  repairContent,
-}) {
-  const result = await runExecutor({
-    plan: goalReviewPrompt({
-      seat: 'Codex', goalSpec, constitution, repoMap, tasks, round, repairContent,
-    }),
-    cwd: target,
-    model: plannerModel,
-    sandbox: 'read-only',
-    timeoutMs,
-    runId,
-    env,
-  });
-  if (result.exitCode !== 0 || result.timedOut) {
-    return { agree: false, readable: false, suggestions: [], questions: [], content: '', unavailable: true, usage: result.usage };
-  }
-  return { ...parseSeatReview(result.lastMessage), usage: result.usage };
-}
-
-async function productionGoalCursorReview({
-  goalSpec, constitution, repoMap, tasks, round, target, verifierModel, timeoutMs,
-  env, home, superpowersDir, repairContent,
-}) {
-  const result = await cursorSeatCall({
-    files: {
-      'GOAL_SPEC.md': `${goalSpec}\n`,
-      'REPO_MAP.md': `${repoMap}\n`,
-      'PROPOSED_TASKS.md': `${tasks}\n`,
-      ...(constitution ? { 'CONSTITUTION.md': `${constitution}\n` } : {}),
-      // The seat's own unreadable answer, verbatim: it goes back on disk rather
-      // than in the prompt because argv is where long text dies on Windows.
-      ...(repairContent ? { 'PREVIOUS_ANSWER.md': `${repairContent}\n` } : {}),
-    },
-    instructions: (workspace) => [
-      ONE_LINE_CONVERSATION_DNA,
-      '# Cursor goal decomposition review seat',
-      `Read the goal specification from ${join(workspace, 'GOAL_SPEC.md')}, the proposed decomposition from ${join(workspace, 'PROPOSED_TASKS.md')}, and the repository survey from ${join(workspace, 'REPO_MAP.md')} (a ration, not a wall: read any file directly).`,
-      ...(constitution ? [`The standing project rules are in ${join(workspace, 'CONSTITUTION.md')}.`] : []),
-      'Judge independently whether those tasks achieve the goal; explore the target repository for real evidence.',
-      `The tier-2 incremental law, verbatim: "${TIER2_INCREMENTAL_LAW}". A task you believe is not a self-contained increment is a suggestion (S<id>), never a refusal.`,
-      'Your review is of THIS decomposition only: every AGREE, suggestion, and question must be about these tasks as they address that goal specification. Repository exploration is evidence about this decomposition, never a licence to review other features or files on their own.',
-      `ROUND ${round}.`,
-      'Respond in plain chat text,',
-      ...reviewResponseContract(TIER2_AGREEMENT_MEANS),
-      ...(repairContent ? [
-        STANCE_REPAIR_OPENING,
-        `Your previous answer is in ${join(workspace, 'PREVIOUS_ANSWER.md')}, verbatim and complete.`,
-        ...STANCE_REPAIR_CLOSING,
-      ] : []),
-    ],
-    target, verifierModel, timeoutMs, env, home, superpowersDir,
-  });
-  // The launch stderr travels on the row: without it a review-only outage has
-  // no text to classify, and a capped account reads as an anonymous absence.
-  if (result.launchFailed || result.timedOut) return unavailableSeatReview(result);
-  return { ...parseSeatReview(`${result.findings ?? ''}\n${result.plan ?? ''}`), usage: result.usage };
-}
 
 export function validateDecomposeGoalRequest({ goalSpecPath, target }) {
   if (typeof goalSpecPath !== 'string' || goalSpecPath.trim() === '') {
@@ -785,240 +526,6 @@ export function validateDecomposeGoalRequest({ goalSpecPath, target }) {
   };
 }
 
-/**
- * Tier 2: one goal, three seats, one converged set of task units on disk.
- *
- * The wrapper owns what is tier-specific — validation, the superpowers preflight,
- * seat wiring, the prompts, the artifact contract, and the writer. Everything
- * else (the rounds, the ledger, circling, the pivot, capability vetoes, the usage
- * meter, the event stream, and the five terminal reasons) is the shared
- * conversation engine, identical to `loop plan`'s.
- */
-export async function runDecomposeGoal({
-  goalSpecPath,
-  target,
-  rounds,
-  mapBudget = DEFAULT_MAP_BUDGET,
-  plannerModel,
-  verifierModel,
-  arbiterModel = DEFAULT_ARBITER_MODEL,
-  executorTimeout = resolveStageTimeouts().executor,
-  verifierTimeout = resolveStageTimeouts().verifier,
-  arbiterTimeout = resolveStageTimeouts().arbiter,
-  runId = `decompose-goal-${randomUUID()}`,
-  reporter,
-  env = process.env,
-  home = homedir(),
-  superpowers,
-  adapters = {},
-} = {}) {
-  if (rounds !== undefined && (!Number.isSafeInteger(rounds) || rounds < 1)) {
-    throw new TypeError('rounds must be a positive integer');
-  }
-  const verifySuperpowers = adapters.verifySuperpowers ?? verifySuperpowersSeats;
-  const verification = superpowers?.seats
-    ? { ok: Object.values(superpowers.seats).every((seat) => seat.verified === true), seats: superpowers.seats }
-    : await verifySuperpowers({ env, home });
-  const requirement = applySuperpowersRequirement(verification, env);
-  if (!requirement.ok) throw new Error(`superpowers preflight failed: ${requirement.reason}`);
-  const verifiedSeats = requirement.verification.seats;
-  const cursorSuperpowersDir = verifiedSeats.cursor.verified ? verifiedSeats.cursor.path : null;
-  const request = validateDecomposeGoalRequest({ goalSpecPath, target });
-  reportEvent(reporter, runId, 'plan', 'start', {
-    tier: 'goal',
-    target: request.target,
-    goalSpec: request.goalSpecPath,
-    out: request.tasksDir,
-    rounds,
-    mapBudget,
-    constitution: request.constitution !== '',
-  });
-
-  // Built once for the whole conversation: the engine's prompt builders are
-  // synchronous, and a survey rebuilt per round would ration nothing while
-  // costing a `git ls-files` every time. It rations INPUT context only, and it
-  // declares its own omissions — the seats can always read past it.
-  const repoMap = await buildRepoMap({ target: request.target, budget: mapBudget });
-  const context = {
-    goalSpec: request.goalSpec,
-    constitution: request.constitution,
-    repoMap,
-  };
-
-  // Seat wiring. Injecting `draft` marks a hermetic test: production seats then
-  // stay out unless explicitly supplied, so a unit test can never launch a CLI.
-  const draftCodex = adapters.draft ?? productionGoalDraft;
-  const hermetic = adapters.draft !== undefined;
-  const draftCursor = adapters.cursorDraft ?? (hermetic ? null : productionGoalCursorDraft);
-  const reviewCursor = adapters.review ?? (hermetic ? null : productionGoalCursorReview);
-  const reviewCodex = adapters.codexReview ?? (hermetic ? null : productionGoalCodexReview);
-  const runArbiterSeat = adapters.runArbiter ?? (hermetic ? null : runArbiter);
-  const checkCapability = adapters.checkCapability
-    ?? adapters.capabilityCheck
-    ?? (hermetic || adapters.review !== undefined ? null : productionCapability);
-
-  // Every tier-2 judgement Claude makes is built here, so the standing law and
-  // THIS goal's specification reach the drafting, proposing and agreement
-  // prompts the same way they reach the other two seats. The pivot judgement is
-  // tier-agnostic and keeps the arbiter's own prompt.
-  const tier2Prompt = (arbiterRequest) => {
-    if (arbiterRequest?.type === 'draft') {
-      return goalDraftingPrompt({ seat: 'Claude', ...context, ...arbiterRequest });
-    }
-    if (arbiterRequest?.type === 'propose') {
-      return goalProposePrompt({ ...context, ...arbiterRequest });
-    }
-    if (arbiterRequest?.type === 'agreement') {
-      return goalAgreementPrompt({ ...context, ...arbiterRequest });
-    }
-    return `${CONVERSATION_DNA}\n\n${buildArbiterPrompt(arbiterRequest)}`;
-  };
-
-  const arbitrate = async (arbiterRequest) => {
-    if (typeof runArbiterSeat !== 'function') {
-      return { verdict: ARBITER_UNVERIFIED, unavailable: true };
-    }
-    const injected = adapters.runArbiter !== undefined;
-    if (injected) reportEvent(reporter, runId, 'arbiter', 'start', {
-      model: arbiterModel, judgement: arbiterRequest?.type,
-    });
-    let result;
-    try {
-      result = await runArbiterSeat({
-        cwd: request.target,
-        request: arbiterRequest,
-        prompt: tier2Prompt(arbiterRequest),
-        model: arbiterModel,
-        timeoutMs: arbiterTimeout,
-        runId,
-        env,
-        reporter: injected ? undefined : reporter,
-      });
-    } catch {
-      result = { verdict: ARBITER_UNVERIFIED };
-    }
-    if (injected) reportEvent(reporter, runId, 'arbiter', 'finish', {
-      verdict: result?.verdict ?? (result ? 'ANSWERED' : ARBITER_UNVERIFIED),
-      judgement: arbiterRequest?.type,
-    });
-    return result;
-  };
-
-  // The capability seats are launched by this tier, so the tier — not the
-  // engine — carries their models, timeouts and directories.
-  const capabilityContext = {
-    target: request.target,
-    plannerModel,
-    verifierModel,
-    arbiterModel,
-    executorTimeout,
-    verifierTimeout,
-    arbiterTimeout,
-    runId,
-    env,
-    home,
-    superpowersDir: cursorSuperpowersDir,
-  };
-
-  const result = await runConversation({
-    runId,
-    reporter,
-    rounds,
-    tier: 'goal',
-    seats: {
-      draftCodex,
-      draftCursor,
-      reviewCodex,
-      reviewCursor,
-      arbitrate,
-      checkCapability: typeof checkCapability === 'function'
-        ? (seatRequest) => checkCapability({ ...capabilityContext, ...seatRequest })
-        : null,
-    },
-    strategy: {
-      draftRequest: ({ round, feedback, failedPlan }) => ({
-        codexInput: {
-          input: goalDraftingPrompt({
-            seat: 'Codex', ...context, round, feedback, failedTasks: failedPlan,
-          }),
-          goalSpec: request.goalSpec,
-          target: request.target,
-          round,
-          plannerModel,
-          sandbox: 'read-only',
-          timeoutMs: executorTimeout,
-          runId,
-          env,
-        },
-        cursorRequest: {
-          ...context,
-          target: request.target,
-          round,
-          verifierModel,
-          timeoutMs: verifierTimeout,
-          runId,
-          env,
-          home,
-          superpowersDir: cursorSuperpowersDir,
-          feedback,
-          failedTasks: failedPlan,
-        },
-        claudeRequest: {
-          type: 'draft', round, feedback, failedTasks: failedPlan,
-        },
-      }),
-      parseDraft: parseStormDraft,
-      parseProposal: parseTaskProposal,
-      // What this tier's proposal READS AS: the seat's own artifact text,
-      // carried verbatim rather than re-rendered from items and sections. The
-      // next proposal, the pivot judgement and a FRESH re-storm all answer what
-      // was actually said.
-      proposalText: (proposal) => proposal.text,
-      proposeRequest: ({ drafts, feedback, questions, previousProposal }) => ({
-        type: 'propose',
-        drafts: drafts.map(({ seat, text }) => ({ seat, text })),
-        feedback,
-        questions,
-        previousProposal,
-      }),
-      reviewRequests: ({ round, proposal }) => ({
-        codex: {
-          ...context, tasks: proposal.text, round,
-          target: request.target, plannerModel, timeoutMs: executorTimeout, runId, env,
-        },
-        cursor: {
-          ...context, tasks: proposal.text, round,
-          target: request.target, verifierModel, timeoutMs: verifierTimeout,
-          env, home, superpowersDir: cursorSuperpowersDir,
-        },
-      }),
-      // The engine owns the bound (exactly one re-ask per seat per round); the
-      // tier owns the transport — the same review request, plus the seat's own
-      // unparseable answer travelling back to it verbatim.
-      reviewRepairRequest: ({ request: reviewRequest, content }) => ({
-        ...reviewRequest, repairContent: content,
-      }),
-      agreementRequest: ({ proposal, reviews }) => ({
-        type: 'agreement',
-        proposal: proposal.text,
-        reviews: {
-          codex: seatReviewContext(reviews.codex),
-          cursor: seatReviewContext(reviews.cursor),
-        },
-      }),
-      capabilityPlanText: (proposal) => proposal.text,
-      writeConverged: (proposal) => writeTier2Artifacts(request.goalDir, proposal),
-    },
-  });
-  return {
-    ...result,
-    target: request.target,
-    goalSpecPath: request.goalSpecPath,
-    goalDir: request.goalDir,
-    out: request.tasksDir,
-  };
-}
-
 function projectContext({ project, constitution, repoMap }) {
   return [
     '# PROJECT.md — the project being decomposed, verbatim',
@@ -1039,7 +546,7 @@ function projectDraftingPrompt({
     `# ${seat} project decomposition seat`,
     '',
     'Work only as a planner. Explore the target for real evidence, but do not modify any file.',
-    'You are one of three seats decomposing the SAME project independently. Draft from your own reading of the repository; do not imagine what the other seats might write.',
+    'You are Claude, the author of this project decomposition. Codex independently reviews your proposal.',
     `Break this project into the goals that achieve it, obeying the tier-1 incremental law verbatim: "${TIER1_INCREMENTAL_LAW}".`,
     'Declare each goal\'s dependencies; no goal may depend on a later one, and two goals may never depend on each other.',
     '',
@@ -1059,62 +566,6 @@ function projectDraftingPrompt({
   ].join('\n');
 }
 
-function projectProposePrompt({
-  project, constitution, repoMap, drafts, feedback, questions, previousProposal,
-}) {
-  return [
-    CONVERSATION_DNA,
-    '',
-    '# Claude project decomposition proposal seat',
-    '',
-    'You are read-only. Do not create, edit, or delete files and do not run a gate.',
-    'Three seats decomposed this project independently. Collate them into ONE decomposition: keep the strongest split, graft the better goals from the others, and resolve their disagreements by judgement stated in the goal specs themselves.',
-    `The tier-1 incremental law, verbatim: "${TIER1_INCREMENTAL_LAW}".`,
-    '',
-    projectContext({ project, constitution, repoMap }),
-    '',
-    ...(drafts ?? []).flatMap((draft) => [
-      `## Decomposition from the ${draft.seat} seat`,
-      String(draft.text ?? '(this seat produced no decomposition)'),
-      '',
-    ]),
-    ...(previousProposal ? ['Previous proposal:', previousProposal, ''] : []),
-    ...(feedback ? ['Required corrections:', feedback, ''] : []),
-    ...((questions ?? []).length > 0 ? [
-      'Open questions from the reviewing seats. Answer each explicitly inside the goal specs, or revise the decomposition so the question does not arise:',
-      ...questions.map((question) => `- ${question.seat} ${question.id}: ${question.text}`),
-      '',
-    ] : []),
-    'Each "## G<n>" section is that goal\'s complete spec.md.',
-    'Every cited path and line must already exist in the target; verify each citation by reading before citing.',
-    GOALS_TAGGED_ARTIFACT_SHAPE,
-  ].join('\n');
-}
-
-// The agreement seat has the final say on this project's decomposition, so it
-// gets the same standing context every other seat gets — the constitution
-// (when the operator has one) and the repo-map ration — not the project
-// statement alone.
-function projectAgreementPrompt({
-  project, constitution, repoMap, proposal, reviews,
-}) {
-  return [
-    CONVERSATION_DNA,
-    '',
-    '# Claude arbiter seat',
-    'You are read-only. Do not create, edit, or delete files and do not run a gate.',
-    'Judge independently on the merits. Return exactly one JSON object and no prose.',
-    "You are the final arbiter of this project's decomposition. Two seats have reviewed it against the project statement; their responses are below, verbatim, severities included. No severity blocks by rule — weigh everything by judgement.",
-    `The tier-1 incremental law, verbatim: "${TIER1_INCREMENTAL_LAW}".`,
-    'Converge only when these goals genuinely achieve THIS project, each goal is a self-contained increment of it ordered MVP-first, and both seats have said AGREE: yes. If either seat disagrees, or you are not satisfied, do not converge; say what must change.',
-    SEAT_STATE_LAW,
-    'Schema: {"converged":true,"reason":"brief merits"} or {"converged":false,"reason":"...","feedback":"exact corrections for the next proposal"}.',
-    projectContext({ project, constitution, repoMap }),
-    `GOALS ${proposal}`,
-    seatReviewBlock('CODEX_REVIEW', reviews?.codex),
-    seatReviewBlock('CURSOR_REVIEW', reviews?.cursor),
-  ].join('\n\n');
-}
 
 function projectReviewPrompt({
   seat, project, constitution, repoMap, goals, round, repairContent,
@@ -1139,114 +590,6 @@ function projectReviewPrompt({
   ].join('\n');
 }
 
-async function productionProjectDraft(request) {
-  const result = await runExecutor({
-    plan: request.input,
-    cwd: request.target,
-    model: request.plannerModel,
-    sandbox: request.sandbox,
-    timeoutMs: request.timeoutMs,
-    runId: request.runId,
-    attempt: request.round,
-    env: request.env,
-  });
-  if (result.exitCode !== 0 || result.timedOut) {
-    throw new Error(`project decomposition seat exited ${result.exitCode}${result.timedOut ? ' after timing out' : ''}`);
-  }
-  return { text: String(result.lastMessage ?? ''), usage: result.usage };
-}
-
-async function productionProjectCursorDraft({
-  project, constitution, repoMap, target, round, verifierModel, timeoutMs,
-  env, home, superpowersDir, feedback, failedGoals,
-}) {
-  const result = await cursorSeatCall({
-    files: {
-      'PROJECT.md': `${project}\n`,
-      'REPO_MAP.md': `${repoMap}\n`,
-      ...(constitution ? { 'CONSTITUTION.md': `${constitution}\n` } : {}),
-      ...(feedback ? { 'FEEDBACK.md': `${feedback}\n` } : {}),
-      ...(failedGoals ? { 'DISCARDED_GOALS.md': `${failedGoals}\n` } : {}),
-    },
-    instructions: (workspace) => [
-      ONE_LINE_CONVERSATION_DNA,
-      '# Cursor project decomposition seat',
-      'You are one of three seats decomposing the same project independently. Draft from your own reading of the repository.',
-      `Read the project statement from ${join(workspace, 'PROJECT.md')} and the repository survey from ${join(workspace, 'REPO_MAP.md')} (a ration, not a wall: read any file directly).`,
-      ...(constitution ? [`Obey the standing project rules in ${join(workspace, 'CONSTITUTION.md')}.`] : []),
-      `Break that project into the goals that achieve it, obeying the tier-1 incremental law verbatim: "${TIER1_INCREMENTAL_LAW}".`,
-      'Declare each goal\'s dependencies; no goal may depend on a later one, and two goals may never depend on each other.',
-      ...(feedback ? [`Apply the required corrections in ${join(workspace, 'FEEDBACK.md')}.`] : []),
-      ...(failedGoals ? [`${join(workspace, 'DISCARDED_GOALS.md')} holds a discarded split; choose a genuinely different one.`] : []),
-      `This is decomposition round ${round}.`,
-      'Each "## G<n>" section is that goal\'s complete spec.md.',
-      'Every cited path and line must already exist in the target; verify each citation by reading before citing.',
-      'Reply in plain chat text, not a plan tool artifact. If your client renders a plan tool anyway, ALSO print both tagged artifacts as chat text — the tags are the only thing read.',
-      'Return exactly <GOALS_JSON>[{"id":"G1","slug":"<slug>","statement":"...","capability":"...","dependsOn":[],"rationale":"..."}]</GOALS_JSON> then <GOALS_MD>## G1: <title> ...</GOALS_MD> and no prose outside them. Every id in GOALS_JSON needs exactly one matching "## G<n>:" section in GOALS_MD.',
-    ],
-    target, verifierModel, timeoutMs, env, home, superpowersDir,
-  });
-  if (result.launchFailed || result.timedOut) throw new Error(seatLaunchFailure('cursor draft', result));
-  return { text: `${result.findings ?? ''}\n${result.plan ?? ''}`, usage: result.usage };
-}
-
-async function productionProjectCodexReview({
-  project, constitution, repoMap, goals, round, target, plannerModel, timeoutMs, runId, env,
-  repairContent,
-}) {
-  const result = await runExecutor({
-    plan: projectReviewPrompt({
-      seat: 'Codex', project, constitution, repoMap, goals, round, repairContent,
-    }),
-    cwd: target,
-    model: plannerModel,
-    sandbox: 'read-only',
-    timeoutMs,
-    runId,
-    env,
-  });
-  if (result.exitCode !== 0 || result.timedOut) {
-    return { agree: false, readable: false, suggestions: [], questions: [], content: '', unavailable: true, usage: result.usage };
-  }
-  return { ...parseSeatReview(result.lastMessage), usage: result.usage };
-}
-
-async function productionProjectCursorReview({
-  project, constitution, repoMap, goals, round, target, verifierModel, timeoutMs,
-  env, home, superpowersDir, repairContent,
-}) {
-  const result = await cursorSeatCall({
-    files: {
-      'PROJECT.md': `${project}\n`,
-      'REPO_MAP.md': `${repoMap}\n`,
-      'PROPOSED_GOALS.md': `${goals}\n`,
-      ...(constitution ? { 'CONSTITUTION.md': `${constitution}\n` } : {}),
-      ...(repairContent ? { 'PREVIOUS_ANSWER.md': `${repairContent}\n` } : {}),
-    },
-    instructions: (workspace) => [
-      ONE_LINE_CONVERSATION_DNA,
-      '# Cursor project decomposition review seat',
-      `Read the project statement from ${join(workspace, 'PROJECT.md')}, the proposed decomposition from ${join(workspace, 'PROPOSED_GOALS.md')}, and the repository survey from ${join(workspace, 'REPO_MAP.md')} (a ration, not a wall: read any file directly).`,
-      ...(constitution ? [`The standing project rules are in ${join(workspace, 'CONSTITUTION.md')}.`] : []),
-      'Judge independently whether those goals achieve the project and are ordered MVP-first; explore the target repository for real evidence.',
-      `The tier-1 incremental law, verbatim: "${TIER1_INCREMENTAL_LAW}". A goal you believe is not a self-contained increment is a suggestion (S<id>), never a refusal.`,
-      'Your review is of THIS decomposition only: every AGREE, suggestion, and question must be about these goals as they address that project statement. Repository exploration is evidence about this decomposition, never a licence to review other features or files on their own.',
-      `ROUND ${round}.`,
-      'Respond in plain chat text,',
-      ...reviewResponseContract(TIER1_AGREEMENT_MEANS),
-      ...(repairContent ? [
-        STANCE_REPAIR_OPENING,
-        `Your previous answer is in ${join(workspace, 'PREVIOUS_ANSWER.md')}, verbatim and complete.`,
-        ...STANCE_REPAIR_CLOSING,
-      ] : []),
-    ],
-    target, verifierModel, timeoutMs, env, home, superpowersDir,
-  });
-  // The launch stderr travels on the row: without it a review-only outage has
-  // no text to classify, and a capped account reads as an anonymous absence.
-  if (result.launchFailed || result.timedOut) return unavailableSeatReview(result);
-  return { ...parseSeatReview(`${result.findings ?? ''}\n${result.plan ?? ''}`), usage: result.usage };
-}
 
 export function validateDecomposeProjectRequest({ project, target, out }) {
   if (typeof out !== 'string' || out.trim() === '') {
@@ -1276,218 +619,59 @@ export function validateDecomposeProjectRequest({ project, target, out }) {
   };
 }
 
-/**
- * Tier 1: one project, three seats, one converged MVP-first goal manifest on
- * disk. Same shape as runDecomposeGoal one level up the spine — the wrapper
- * owns what is tier-specific (validation, the superpowers preflight, seat
- * wiring, the prompts, the artifact contract, and the writer). Everything
- * else is the shared conversation engine, identical to tier 2's.
- */
-export async function runDecomposeProject({
-  project,
-  target,
-  out,
-  rounds,
-  mapBudget = DEFAULT_MAP_BUDGET,
-  plannerModel,
-  verifierModel,
-  arbiterModel = DEFAULT_ARBITER_MODEL,
+async function runDecomposition(kind, {
+  goalSpecPath, project, target, out, rounds, interactionMode = 'manual',
+  mapBudget = DEFAULT_MAP_BUDGET, claudeModel, codexModel, codexEffort,
+  plannerModel, verifierModel, arbiterModel,
   executorTimeout = resolveStageTimeouts().executor,
-  verifierTimeout = resolveStageTimeouts().verifier,
   arbiterTimeout = resolveStageTimeouts().arbiter,
-  runId = `decompose-project-${randomUUID()}`,
-  reporter,
-  env = process.env,
-  home = homedir(),
-  superpowers,
-  adapters = {},
+  runId = `decompose-${kind}-${randomUUID()}`, reporter,
+  env = process.env, home = homedir(), superpowers, adapters = {},
 } = {}) {
-  if (rounds !== undefined && (!Number.isSafeInteger(rounds) || rounds < 1)) {
-    throw new TypeError('rounds must be a positive integer');
+  decisionAuthority({ interactionMode, phase: 'planning' });
+  if (plannerModel !== undefined || verifierModel !== undefined) {
+    throw new TypeError('plannerModel/verifierModel are ambiguous; use claudeModel or codexModel');
   }
-  const verifySuperpowers = adapters.verifySuperpowers ?? verifySuperpowersSeats;
-  const verification = superpowers?.seats
-    ? { ok: Object.values(superpowers.seats).every((seat) => seat.verified === true), seats: superpowers.seats }
-    : await verifySuperpowers({ env, home });
-  const requirement = applySuperpowersRequirement(verification, env);
-  if (!requirement.ok) throw new Error(`superpowers preflight failed: ${requirement.reason}`);
-  const verifiedSeats = requirement.verification.seats;
-  const cursorSuperpowersDir = verifiedSeats.cursor.verified ? verifiedSeats.cursor.path : null;
-  const request = validateDecomposeProjectRequest({ project, target, out });
+  if (rounds !== undefined && (!Number.isSafeInteger(rounds) || rounds < 1)) throw new TypeError('rounds must be a positive integer');
+  await planningPreflight({ adapters, superpowers, env, home });
+  const isGoal = kind === 'goal';
+  const request = isGoal ? validateDecomposeGoalRequest({ goalSpecPath, target })
+    : validateDecomposeProjectRequest({ project, target, out });
   reportEvent(reporter, runId, 'plan', 'start', {
-    tier: 'project',
-    target: request.target,
-    out: request.out,
-    rounds,
-    mapBudget,
-    constitution: request.constitution !== '',
+    tier: kind, target: request.target, out: request.out ?? request.tasksDir, rounds, mapBudget, interactionMode,
   });
-
-  // Built once for the whole conversation, exactly like tier 2's: the prompt
-  // builders are synchronous, and a survey rebuilt per round would ration
-  // nothing while costing a `git ls-files` every time.
   const repoMap = await buildRepoMap({ target: request.target, budget: mapBudget });
-  const context = {
-    project: request.project,
-    constitution: request.constitution,
-    repoMap,
-  };
-
-  // Seat wiring, identical pattern to tier 2: injecting `draft` marks a
-  // hermetic test, so production seats stay out unless explicitly supplied.
-  const draftCodex = adapters.draft ?? productionProjectDraft;
-  const hermetic = adapters.draft !== undefined;
-  const draftCursor = adapters.cursorDraft ?? (hermetic ? null : productionProjectCursorDraft);
-  const reviewCursor = adapters.review ?? (hermetic ? null : productionProjectCursorReview);
-  const reviewCodex = adapters.codexReview ?? (hermetic ? null : productionProjectCodexReview);
-  const runArbiterSeat = adapters.runArbiter ?? (hermetic ? null : runArbiter);
-
-  // Every tier-1 judgement Claude makes is built here, so the standing law and
-  // THIS project's statement reach the drafting, proposing and agreement
-  // prompts the same way they reach the other two seats.
-  const tier1Prompt = (arbiterRequest) => {
-    if (arbiterRequest?.type === 'draft') {
-      return projectDraftingPrompt({ seat: 'Claude', ...context, ...arbiterRequest });
-    }
-    if (arbiterRequest?.type === 'propose') {
-      return projectProposePrompt({ ...context, ...arbiterRequest });
-    }
-    if (arbiterRequest?.type === 'agreement') {
-      return projectAgreementPrompt({ ...context, ...arbiterRequest });
-    }
-    return `${CONVERSATION_DNA}\n\n${buildArbiterPrompt(arbiterRequest)}`;
-  };
-
-  const arbitrate = async (arbiterRequest) => {
-    if (typeof runArbiterSeat !== 'function') {
-      return { verdict: ARBITER_UNVERIFIED, unavailable: true };
-    }
-    const injected = adapters.runArbiter !== undefined;
-    if (injected) reportEvent(reporter, runId, 'arbiter', 'start', {
-      model: arbiterModel, judgement: arbiterRequest?.type,
-    });
-    let result;
-    try {
-      result = await runArbiterSeat({
-        cwd: request.target,
-        request: arbiterRequest,
-        prompt: tier1Prompt(arbiterRequest),
-        model: arbiterModel,
-        timeoutMs: arbiterTimeout,
-        runId,
-        env,
-        reporter: injected ? undefined : reporter,
-      });
-    } catch {
-      result = { verdict: ARBITER_UNVERIFIED };
-    }
-    if (injected) reportEvent(reporter, runId, 'arbiter', 'finish', {
-      verdict: result?.verdict ?? (result ? 'ANSWERED' : ARBITER_UNVERIFIED),
-      judgement: arbiterRequest?.type,
-    });
-    return result;
-  };
-
+  const requirements = isGoal
+    ? { goalSpec: request.goalSpec, constitution: request.constitution }
+    : { project: request.project, constitution: request.constitution };
+  const context = { ...requirements, repoMap };
   const result = await runConversation({
-    runId,
-    reporter,
-    rounds,
-    tier: 'project',
-    seats: {
-      draftCodex,
-      draftCursor,
-      reviewCodex,
-      reviewCursor,
-      arbitrate,
-      // Capability vetoes are a task-level judgement (can a seat execute THIS
-      // concrete plan?); a goal is deliberative, not a technical commitment,
-      // so tier 1 never wires the seat that would ask it — the spec reserves
-      // capability vetoes for tier-2 convergence only.
-      checkCapability: null,
-    },
+    runId, reporter, rounds, tier: kind, requirements, interactionMode,
+    seats: createPlanningSeats({
+      target: request.target, claudeModel: claudeModel ?? arbiterModel, codexModel, codexEffort,
+      executorTimeout, arbiterTimeout, runId, env, reporter, adapters,
+      authorPrompt: r => (isGoal ? goalDraftingPrompt : projectDraftingPrompt)({
+        ...context, ...r, seat: 'Claude',
+      }),
+      reviewPrompt: r => (isGoal ? goalReviewPrompt : projectReviewPrompt)({
+        ...context, ...r, seat: 'Codex',
+      }),
+    }),
     strategy: {
-      draftRequest: ({ round, feedback, failedPlan }) => ({
-        codexInput: {
-          input: projectDraftingPrompt({
-            seat: 'Codex', ...context, round, feedback, failedGoals: failedPlan,
-          }),
-          project: request.project,
-          target: request.target,
-          round,
-          plannerModel,
-          sandbox: 'read-only',
-          timeoutMs: executorTimeout,
-          runId,
-          env,
-        },
-        cursorRequest: {
-          ...context,
-          target: request.target,
-          round,
-          verifierModel,
-          timeoutMs: verifierTimeout,
-          runId,
-          env,
-          home,
-          superpowersDir: cursorSuperpowersDir,
-          feedback,
-          failedGoals: failedPlan,
-        },
-        claudeRequest: {
-          type: 'draft', round, feedback, failedGoals: failedPlan,
-        },
-      }),
-      parseDraft: parseStormDraft,
-      parseProposal: parseGoalProposal,
-      // What this tier's proposal READS AS: the seat's own artifact text,
-      // carried verbatim — same rule as tier 2.
-      proposalText: (proposal) => proposal.text,
-      proposeRequest: ({ drafts, feedback, questions, previousProposal }) => ({
-        type: 'propose',
-        drafts: drafts.map(({ seat, text }) => ({ seat, text })),
-        feedback,
-        questions,
-        previousProposal,
-      }),
-      reviewRequests: ({ round, proposal }) => ({
-        codex: {
-          ...context, goals: proposal.text, round,
-          target: request.target, plannerModel, timeoutMs: executorTimeout, runId, env,
-        },
-        cursor: {
-          ...context, goals: proposal.text, round,
-          target: request.target, verifierModel, timeoutMs: verifierTimeout,
-          env, home, superpowersDir: cursorSuperpowersDir,
-        },
-      }),
-      // Exactly one re-ask per seat per round, worded by this tier: the seat's
-      // own unparseable answer goes back to it verbatim, nothing else changes.
-      reviewRepairRequest: ({ request: reviewRequest, content }) => ({
-        ...reviewRequest, repairContent: content,
-      }),
-      agreementRequest: ({ proposal, reviews }) => ({
-        type: 'agreement',
-        proposal: proposal.text,
-        reviews: {
-          codex: seatReviewContext(reviews.codex),
-          cursor: seatReviewContext(reviews.cursor),
-        },
-      }),
-      // Never null-checked by name — the engine only asks whether this
-      // returned a value at all — but null, always, is what makes tier 1
-      // skip capabilityVetoes entirely (see checkCapability above).
-      capabilityPlanText: () => null,
-      writeConverged: (proposal) => writeTier1Artifacts(
-        request.out,
-        { text: request.project, source: request.projectSource },
-        proposal,
-      ),
+      parseProposal: isGoal ? parseTaskProposal : parseGoalProposal,
+      proposalText: proposal => proposal.text,
+      reviewRequests: ({ proposal, round }) => ({ codex: {
+        ...context, [isGoal ? 'tasks' : 'goals']: proposal.text, round,
+      } }),
+      writeConverged: proposal => isGoal
+        ? writeTier2Artifacts(request.goalDir, proposal)
+        : writeTier1Artifacts(request.out, { text: request.project, source: request.projectSource }, proposal),
     },
   });
-  return {
-    ...result,
-    target: request.target,
-    out: request.out,
-    projectSource: request.projectSource,
-  };
+  return { ...result, target: request.target, out: request.out ?? request.tasksDir,
+    ...(isGoal ? { goalSpecPath: request.goalSpecPath, goalDir: request.goalDir }
+      : { projectSource: request.projectSource }) };
 }
+
+export function runDecomposeGoal(options) { return runDecomposition('goal', options); }
+export function runDecomposeProject(options) { return runDecomposition('project', options); }

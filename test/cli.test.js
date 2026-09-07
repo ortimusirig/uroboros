@@ -53,9 +53,9 @@ function cliFixture() {
   const shims = join(scratchRoot, 'cli-bin');
   mkdirSync(shims);
   writeFakeBin(shims, 'codex', fakeCodex);
-  writeFakeBin(shims, 'agent', fakeAgent, ['clean']);
+  writeFakeBin(shims, 'claude', fakeAgent, ['clean']);
   const superpowers = join(root, 'superpowers');
-  for (const manifest of ['.cursor-plugin', '.claude-plugin']) {
+  for (const manifest of ['.claude-plugin']) {
     mkdirSync(join(superpowers, manifest), { recursive: true });
     writeFileSync(join(superpowers, manifest, 'plugin.json'), JSON.stringify({
       name: 'superpowers', version: '6.0.2',

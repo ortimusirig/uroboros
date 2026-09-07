@@ -264,8 +264,9 @@ function digestRunDirectory(runDirectory) {
     if (event.stage === 'debate' && Number.isSafeInteger(event.debateRound)) {
       eventDebateRoundCount = Math.max(eventDebateRoundCount, event.debateRound);
     }
-    if (event.stage === 'verify' && event.type === 'finish' && event.pass === 'review') {
+    if (event.stage === 'verify' && event.type === 'finish' && (event.pass === 'review' || (event.provider === 'claude' && event.role === 'execution-reviewer'))) {
       review = {
+        provider: event.provider ?? null, role: event.role ?? null,
         reported: false,
         code: event.code ?? null,
         timedOut: event.timedOut === true,
@@ -317,6 +318,7 @@ function digestRunDirectory(runDirectory) {
     currentType: lastEvent?.type ?? null,
     lastEventTs: lastEvent?.ts ?? null,
     timeline: events.map((event) => ({
+      ...Object.fromEntries(['provider', 'speaker', 'role', 'phase', 'interactionMode', 'approved', 'converged', 'approval', 'artifactDigest', 'reason', 'content', 'stance', 'dissent', 'messages'].filter(key => event[key] !== undefined).map(key => [key, event[key]])),
       ts: event.ts ?? null,
       stage: event.stage ?? 'unknown',
       type: event.type ?? 'unknown',
@@ -355,6 +357,10 @@ function digestRunDirectory(runDirectory) {
       askedBy: typeof event.askedBy === 'string' ? event.askedBy : null,
       answeredBy: typeof event.answeredBy === 'string' ? event.answeredBy : null,
     })),
+    decision: facts?.phase === undefined ? null : Object.fromEntries(['phase', 'interactionMode', 'authority', 'approved', 'converged', 'approval'].map(key => [key, facts[key] ?? null])),
+    participants: facts?.participants ?? null,
+    messages: [...(facts?.planningMessages ?? []), ...(facts?.messages ?? [])],
+    dissent: facts?.dissent ?? [],
     review: completedReview,
     gateCommands,
     gateResult,

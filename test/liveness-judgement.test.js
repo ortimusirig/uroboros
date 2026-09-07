@@ -369,7 +369,7 @@ test('the production fresh judge is read-only, bounded, and receives verbatim ev
     ['-s', 'read-only']);
   assert.equal(calls[0].opts.timeoutMs, DEFAULT_LIVENESS_JUDGE_TIMEOUT_MS);
   assert.equal(calls[0].opts.env.CODEX_HOME, env.CODEX_HOME);
-  assert.equal(calls[0].opts.env.PATH, process.env.PATH);
+  assert.equal(calls[0].opts.env[Object.keys(process.env).find(key => key.toLowerCase() === 'path') ?? 'PATH'], process.env[Object.keys(process.env).find(key => key.toLowerCase() === 'path') ?? 'PATH']);
   assert.match(calls[0].opts.input, /waiting on child \\"alpha\\"/);
   assert.deepEqual(result, {
     status: 'working', reasoning: 'The worker child is live.', nextIntervalMs: 90,

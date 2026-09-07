@@ -7,7 +7,7 @@
     {
       "name": "uroboros",
       "source": "./",
-      "description": "Plan and supervise isolated Codex implementation, true-exit-code gates, Cursor review, and multi-plan campaigns."
+      "description": "Plan and supervise isolated Codex implementation, true-exit-code gates, Claude review, and multi-plan campaigns."
     }
   ]
 }

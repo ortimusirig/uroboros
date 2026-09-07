@@ -1,4 +1,4 @@
-import { appendFileSync } from 'node:fs';
+import { appendFileSync, readFileSync } from 'node:fs';
 
 const args = process.argv.slice(2);
 if (process.env.URO_FAKE_DOCTOR_INVOCATIONS) {
@@ -13,6 +13,9 @@ if (args[0] === 'auth' && args[1] === 'status') {
   } else {
     process.stdout.write('Logged in\n');
   }
+} else if (args.includes('-p')) {
+  const content = readFileSync('ccc-doctor-read.txt', 'utf8');
+  process.stdout.write(JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: content }) + '\n');
 } else {
   process.stderr.write(`unexpected fake Claude arguments: ${args.join(' ')}\n`);
   process.exitCode = 2;

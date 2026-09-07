@@ -1,6 +1,7 @@
 import { parseArgs as nodeParseArgs } from 'node:util';
 import { CLI_COMMANDS } from './cli-help.js';
 import {
+  normalizeProviderOptions,
   DEFAULT_CONCURRENCY,
   DEFAULT_ROUNDS,
   DEFAULT_TOKEN_BUDGET,
@@ -15,6 +16,11 @@ import { parseTimeoutMs } from './timeouts.js';
 const EXECUTOR_EFFORTS = new Set([
   'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra',
 ]);
+const PROVIDER_FLAGS = Object.fromEntries(['mode', 'claude-model', 'codex-model', 'codex-effort', 'executor-model', 'executor-effort', 'arbiter-model', 'planner-model', 'verifier-model'].map(key => [key, { type: 'string' }]));
+function providerValues(values) {
+  return normalizeProviderOptions(Object.fromEntries(Object.entries(values)
+    .map(([key, value]) => [key.replace(/-([a-z])/g, (_, letter) => letter.toUpperCase()), value])));
+}
 const RUN_MODES = new Set(['manual', 'autonomous']);
 const MAX_PLAN_CANDIDATES = 5;
 const UNIT_KIND_SET = new Set(UNIT_KINDS);
@@ -26,6 +32,11 @@ const STAGE_TIMEOUT_FLAGS = new Set([
 // parseArgs derives node:util's option table from it, so tests can enumerate the real flags
 // without maintaining a second list that can drift.
 export const BATCH_FLAG_DEFINITIONS = Object.freeze({
+  mode: Object.freeze({ type: 'string', scope: 'campaign' }),
+  'claude-model': Object.freeze({ type: 'string', scope: 'campaign' }),
+  'codex-model': Object.freeze({ type: 'string', scope: 'campaign' }),
+  'codex-effort': Object.freeze({ type: 'string', scope: 'campaign' }),
+  'planner-model': Object.freeze({ type: 'string', scope: 'campaign' }),
   campaign: Object.freeze({ type: 'string', scope: 'selector' }),
   task: Object.freeze({ type: 'string', multiple: true, scope: 'campaign' }),
   target: Object.freeze({ type: 'string', scope: 'campaign' }),
@@ -241,6 +252,7 @@ export function parseArgs(argv) {
     const { values } = nodeParseArgs({
       args: argv.slice(1),
       options: {
+        ...PROVIDER_FLAGS,
         file: { type: 'string' },
         mode: { type: 'string' },
         'max-runs': { type: 'string' },
@@ -258,6 +270,7 @@ export function parseArgs(argv) {
     }
     return {
       command,
+      ...providerValues(values),
       file: values.file,
       mode,
       ...(values['max-runs'] === undefined ? {} : {
@@ -274,6 +287,7 @@ export function parseArgs(argv) {
     const { values } = nodeParseArgs({
       args: argv.slice(1),
       options: {
+        ...PROVIDER_FLAGS,
         goal: { type: 'string' },
         target: { type: 'string' },
         out: { type: 'string' },
@@ -293,6 +307,7 @@ export function parseArgs(argv) {
     }
     return {
       command,
+      ...providerValues(values),
       goal: values.goal,
       target: values.target,
       out: values.out,
@@ -313,6 +328,7 @@ export function parseArgs(argv) {
     const { values } = nodeParseArgs({
       args: argv.slice(1),
       options: {
+        ...PROVIDER_FLAGS,
         goal: { type: 'string' },
         project: { type: 'string' },
         target: { type: 'string' },
@@ -340,6 +356,7 @@ export function parseArgs(argv) {
     }
     return {
       command,
+      ...providerValues(values),
       mode: hasGoal ? 'goal' : 'project',
       ...(hasGoal ? { goal: values.goal } : { project: values.project }),
       target: values.target,
@@ -425,6 +442,7 @@ export function parseArgs(argv) {
   const { values } = nodeParseArgs({
     args: normalizeNegativeTimeoutArguments(argv.slice(1)),
     options: command === 'batch' ? BATCH_PARSE_OPTIONS : {
+      ...PROVIDER_FLAGS,
       task: { type: 'string' },
       target: { type: 'string' },
       gate: { type: 'string' },
@@ -467,7 +485,8 @@ export function parseArgs(argv) {
   for (const req of ['task', 'target', 'gate']) {
     if (!values[req]) throw new Error(`missing required option: --${req}`);
   }
-  const executorEffort = values['executor-effort'];
+  const providers = providerValues(values);
+  const executorEffort = providers.codexEffort;
   validateExecutorEffort(executorEffort);
   if (command === 'run') {
     if (values.mode !== undefined && !RUN_MODES.has(values.mode)) {
@@ -479,11 +498,12 @@ export function parseArgs(argv) {
       target: values.target,
       gate: values.gate,
       gateRetries: clampInt(values['gate-retries'], 2, 0, 3),
+      ...providers,
+      mode: providers.interactionMode,
       correctsRunId: values.corrects,
-      executorModel: values['executor-model'],
+      executorModel: providers.codexModel,
       executorEffort,
-      verifierModel: values['verifier-model'],
-      arbiterModel: values['arbiter-model'],
+      arbiterModel: providers.claudeModel,
       ...(values['pivot-candidates'] === undefined ? {} : {
         pivotCandidates: strictInt(
           values['pivot-candidates'], undefined, 1, MAX_PLAN_CANDIDATES,
@@ -618,11 +638,12 @@ export function parseArgs(argv) {
         values['pivot-candidates'], undefined, 1, MAX_PLAN_CANDIDATES,
       ),
     }),
-    executorModel: values['executor-model'],
+    executorModel: providers.codexModel,
     executorEffort,
-    verifierModel: values['verifier-model'],
-    arbiterModel: values['arbiter-model'],
+    arbiterModel: providers.claudeModel,
     ...(values['artifact-root'] === undefined ? {} : { artifactRoot: values['artifact-root'] }),
+    ...providers,
+    mode: providers.interactionMode,
     concurrency: strictInt(values.concurrency, DEFAULT_CONCURRENCY, 1, MAX_CONCURRENCY),
     tokenBudget: strictInt(
       values['token-budget'], DEFAULT_TOKEN_BUDGET, 1, Number.MAX_SAFE_INTEGER,

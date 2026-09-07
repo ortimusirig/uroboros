@@ -15,8 +15,6 @@ const cliPath = fileURLToPath(new URL('../bin/loop.js', import.meta.url));
 const runPath = fileURLToPath(new URL('../src/run.js', import.meta.url));
 const dashboardLauncherPath = fileURLToPath(new URL('../src/dashboard-launcher.js', import.meta.url));
 const logdyConfigPath = fileURLToPath(new URL('../docs/optional-tools/logdy-run-events.json', import.meta.url));
-const verifierPluginManifestPath = fileURLToPath(new URL('../cursor-plugin/.cursor-plugin/plugin.json', import.meta.url));
-const verifierSkillPath = fileURLToPath(new URL('../cursor-plugin/skills/uro-verify/SKILL.md', import.meta.url));
 // Literal prefixes passed to mkdtempSync(join(tmpdir(), ...)) across test/. Node
 // appends six alphanumerics, so only these concurrent fixtures are exempt when a
 // constrained runner redirects os.tmpdir() into this checkout.
@@ -82,8 +80,8 @@ function assertPayloadIncludesEveryShippableTopLevelEntry() {
   assert.ok(payload.includes('LICENSE'), 'PAYLOAD must include LICENSE');
   assert.ok(payload.includes('docs'),
     'PAYLOAD must include docs; an existing but unlisted tree is silently omitted');
-  assert.ok(payload.includes('cursor-plugin'),
-    'PAYLOAD must include the Cursor verifier plugin; an unlisted skill is not installed');
+  assert.ok(payload.includes('skills'), 'the current Claude workflow skills must be installed');
+  assert.equal(payload.includes('cursor-plugin'), false, 'retired plugin assets are not installed');
 
   // Harness artifacts are generated into a run's directory, not shipped. Derived from
   // run.js so a newly added artifact cannot be excluded from the diff but still
@@ -104,8 +102,12 @@ function assertPayloadIncludesEveryShippableTopLevelEntry() {
   const temporaryTestDirectory = (entry) => entry.isDirectory()
     && [...temporaryFixturePrefixes].some((prefix) => entry.name.startsWith(prefix)
       && /^[A-Za-z0-9]{6}$/.test(entry.name.slice(prefix.length)));
+  // Git/npm carry files, not empty retired directories left by read-only sync metadata.
+  const retired = join(root, 'cursor-plugin');
+  if (existsSync(retired)) assert.equal(readdirSync(retired, { recursive: true, withFileTypes: true })
+    .some(entry => !entry.isDirectory()), false, 'retired plugin must contain no files');
   const shippable = readdirSync(root, { withFileTypes: true })
-    .filter((entry) => !temporaryTestDirectory(entry))
+    .filter((entry) => entry.name !== 'cursor-plugin' && !temporaryTestDirectory(entry))
     .map((entry) => entry.name)
     .filter((name) => !name.startsWith('.')
       && !repositoryOnly.has(name)
@@ -168,29 +170,6 @@ test('run imports only the dashboard launcher, never the server or view', () => 
   assert.match(cli,
     /opts[.]command === 'dashboard'[\s\S]*await import\('\.\.\/src\/dashboard[.]js'\)/,
     'the explicit dashboard command must keep lazily loading the server');
-});
-
-test('the shipped uro-verify skill carries the strict verdict and assertion-audit contracts', () => {
-  assert.ok(existsSync(verifierPluginManifestPath), 'the local Cursor plugin manifest must exist');
-  assert.ok(existsSync(verifierSkillPath), 'the uro-verify SKILL.md must exist');
-  const manifest = JSON.parse(readFileSync(verifierPluginManifestPath, 'utf8'));
-  const skill = readFileSync(verifierSkillPath, 'utf8');
-
-  assert.equal(manifest.name, 'uro-verify');
-  assert.match(skill, /^---\r?\nname: uro-verify\r?\n[\s\S]*?\r?\n---\r?\n/,
-    'the skill must have valid uro-verify YAML frontmatter');
-  assert.match(skill,
-    /## Verdict contract — mandatory[\s\S]*final non-empty line must be exactly\s+`NO_BLOCKERS` or exactly `ISSUES`, alone on its own line/,
-    'the contract must require an authoritative bare token on the final line');
-  assert.match(skill,
-    /Wrong — concludes in prose and never emits the token:[\s\S]*I don't see blocking bugs/,
-    'the observed missing-token failure must be shown as wrong');
-  assert.match(skill,
-    /Wrong — puts a token inside a sentence instead of on the final line:[\s\S]*Non-blocking notes \(not ISSUES\)/,
-    'the observed token-in-prose failure must be shown as wrong');
-  assert.match(skill,
-    /## Intent audit[\s\S]*does everything `TASK[.]md` asked[\s\S]*Would it still pass if the feature under test were broken[\s\S]*positive control proving the check could[\s\S]*correct and incorrect implementations produce identical results[\s\S]*process[.]cwd\(\)[\s\S]*artifacts written only after the gate/,
-    'the skill must carry the full intent and assertion-audit checklist');
 });
 
 test('the optional Logdy layout is valid JSON with explicit event columns', () => {

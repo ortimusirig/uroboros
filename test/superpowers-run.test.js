@@ -84,11 +84,12 @@ test('run facts record per-seat verification evidence and distinct versions', as
   assert.equal(Object.hasOwn(executorCalls[0], 'superpowersDir'), false,
     'Codex must use its registry rather than receive a plugin directory');
   assert.equal(facts.superpowers.bypassed, false);
-  assert.deepEqual(facts.superpowers.seats, VERIFIED.seats);
+  assert.deepEqual(facts.superpowers.seats, { codex: VERIFIED.seats.codex, claude: VERIFIED.seats.claude });
+  assert.equal(Object.hasOwn(facts.participation, 'claude'), false, 'configuration is not observed review participation');
   assert.deepEqual(
     Object.fromEntries(Object.entries(facts.superpowers.seats)
       .map(([seat, value]) => [seat, value.version])),
-    { codex: '6.3.0', cursor: '6.0.2', claude: '6.0.1' },
+    { codex: '6.3.0', claude: '6.0.1' },
   );
 });
 
@@ -99,10 +100,10 @@ test('run refuses an unverified seat before isolation or executor dispatch', asy
     ok: false,
     seats: {
       ...VERIFIED.seats,
-      cursor: {
-        seat: 'cursor', verified: false, evidence: 'Cursor has no .cursor-plugin manifest',
+      claude: {
+        seat: 'claude', verified: false, evidence: 'Claude has no .claude-plugin manifest',
         version: null, path: null,
-        remediation: 'Cursor: URO_SUPERPOWERS_DIR=<directory-with-.cursor-plugin>',
+        remediation: 'Claude: URO_SUPERPOWERS_DIR=<directory-with-.claude-plugin>',
       },
     },
   };
@@ -115,7 +116,7 @@ test('run refuses an unverified seat before isolation or executor dispatch', asy
       runExecutor: async () => { executorCalls++; return {}; },
       runVerifier: async () => ({}),
     },
-  }), /Cursor.*[.]cursor-plugin/i);
+  }), /Claude.*[.]claude-plugin/i);
   assert.equal(isolateCalls, 0);
   assert.equal(executorCalls, 0);
 });

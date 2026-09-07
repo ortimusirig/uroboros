@@ -9,6 +9,48 @@ import { DEFAULT_VERIFIER_MODEL } from '../src/verifier.js';
 import { DEFAULT_ARBITER_MODEL } from '../src/arbiter.js';
 import { EMPTY_USAGE } from '../src/usage.js';
 
+test('new facts retain provider roles, approval and dissent without phantom usage rows', () => {
+  const messages = [
+    { speaker: 'claude', role: 'author', phase: 'planning', content: 'I retain my concern', transport: { usage: null } },
+    { speaker: 'codex', role: 'reviewer', phase: 'planning', content: 'Approved on evidence', transport: { usage: { inputTokens: 7, outputTokens: 3 } } },
+  ];
+  const fresh = buildRunFacts({ runId: 'decision', iterations: [], phase: 'planning', interactionMode: 'autonomous',
+    approved: true, converged: false, approval: { artifactDigest: 'digest-123', decidedBy: 'codex', basis: 'reviewer', reason: 'Evidence answers the concern' },
+    messages, dissent: [messages[0]], models: { claude: 'sonnet', codex: 'gpt-6-astra' } });
+  assert.equal(fresh.approval.artifactDigest, 'digest-123');
+  assert.deepEqual(fresh.participants.map(p => [p.provider, p.phase, p.role, p.usage]), [
+    ['claude', 'planning', 'author', null], ['codex', 'planning', 'reviewer', { ...EMPTY_USAGE, inputTokens: 7, outputTokens: 3 }],
+  ]);
+  const markdown = buildReportMarkdown(fresh);
+  assert.match(markdown, /Approved: true.*Converged: false/);
+  assert.match(markdown, /codex.*planning.*reviewer/);
+  assert.match(markdown, /I retain my concern/);
+  assert.match(markdown, /digest-123/);
+  assert.doesNotMatch(markdown, /\*\*(Executor|Verifier|Arbiter):/);
+  assert.equal(Object.hasOwn(fresh.tokens, 'arbiter'), false);
+});
+
+test('execution unknown agreement and skipped review do not invent consensus or a provider', () => {
+  const current = buildRunFacts({ runId: 'no-op', iterations: [], outcome: 'no-op',
+    phase: 'execution', interactionMode: 'manual', approved: false, converged: null,
+    messages: [{ speaker: 'codex', phase: 'execution', role: 'executor', content: 'No change necessary' }] });
+  assert.equal(current.converged, null);
+  assert.equal(current.approved, false);
+  assert.deepEqual(current.participants.map(p => p.provider), ['codex']);
+  assert.match(buildReportMarkdown(current), /Converged: not recorded/);
+});
+test('participant aggregation does not charge reused or skipped receipts', () => {
+  const usage = { inputTokens: 7, outputTokens: 3 };
+  const message = { speaker: 'claude', phase: 'planning', role: 'author', content: 'Candidate',
+    transport: { usage } };
+  const current = buildRunFacts({ runId: 'receipts', iterations: [], phase: 'execution',
+    planningMessages: [message, { ...message, reused: true },
+      { speaker: 'codex', phase: 'planning', role: 'reviewer', skipped: true }] });
+  assert.equal(current.participants.length, 1);
+  assert.equal(current.participants[0].attempted, 1);
+  assert.equal(current.participants[0].usage.inputTokens, 7);
+});
+
 const facts = buildRunFacts({
   runId: 'r1', target: 'C:/proj', dir: 'C:/ccc/w', isRepo: false, branch: 'ccc/r1',
   iterations: [{ n: 1, changedFiles: ['a.py'], lastMessage: 'did it',

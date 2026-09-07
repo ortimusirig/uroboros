@@ -12,9 +12,10 @@ import {
 } from 'node:fs';
 import { join, parse } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { homedir } from 'node:os';
 import { pruneScratch } from '../src/prune.js';
 
-const TEST_ROOT = fileURLToPath(new URL('../.ccc-test-prune/', import.meta.url));
+const TEST_ROOT = join(process.env.URO_TEST_SCRATCH_ROOT ?? (process.platform === 'win32' ? 'C:/ccc-test' : join(homedir(), '.ccc-test')), 'prune');
 
 function temporaryScratch(prefix = 'root-') {
   mkdirSync(TEST_ROOT, { recursive: true });

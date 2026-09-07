@@ -1,5 +1,16 @@
 import { test } from 'node:test';
+import { spawn } from 'node:child_process';
 import assert from 'node:assert/strict';
+
+test('new planning events name actual speakers and distinguish approval from agreement', () => {
+  const line = formatEventSummary(createEvent({ runId: 'r', stage: 'plan', type: 'finish', fields: {
+    approved: true, converged: false, interactionMode: 'autonomous', reason: 'approved',
+    approval: { decidedBy: 'codex', basis: 'reviewer', artifactDigest: 'abc', reason: 'Evidence' } } }));
+  assert.match(line, /approved=true.*converged=false.*codex/);
+  const review = detailFor({ stage: 'plan', type: 'review', speaker: 'codex', role: 'reviewer', stance: 'disagree' });
+  assert.match(review, /codex.*reviewer.*disagree/);
+  assert.doesNotMatch(review, /cursor/);
+});
 import {
   appendFileSync,
   existsSync,
@@ -419,7 +430,8 @@ test('stage transitions and executor file changes reach the reporter in order', 
         }),
         runGate: realGate,
         runReview: (opts) => realReviewPass({
-          ...opts, bin: process.execPath, extraArgv: [fakeAgent, 'clean'],
+          ...opts, bin: process.execPath,
+          spawnProcess: (_bin, args, options) => spawn(process.execPath, [fakeAgent, 'clean', ...args], options),
         }),
       },
     });
@@ -435,8 +447,8 @@ test('stage transitions and executor file changes reach the reporter in order', 
       'gate/finish',
       'diff/start',
       'diff/finish',
-      'verify/start:review',
-      'verify/finish:review',
+      'verify/start',
+      'verify/finish',
       'debate/round',
       'debate/converged',
       'report/start',
@@ -658,7 +670,8 @@ test('fully exercised runs have exact pair equality with both event vocabularies
           }),
           runGate: realGate,
           runReview: (opts) => realReviewPass({
-            ...opts, bin: process.execPath, extraArgv: [fakeAgent, 'clean'],
+            ...opts, bin: process.execPath,
+          spawnProcess: (_bin, args, options) => spawn(process.execPath, [fakeAgent, 'clean', ...args], options),
           }),
         },
       },
@@ -750,21 +763,13 @@ test('fully exercised runs have exact pair equality with both event vocabularies
 
     planTarget = mkdtempSync(join(process.cwd(), '.ccc-test-event-plan-'));
     await runPlan({
-      goal: 'Exercise plan event conformance',
+      goal: 'Exercise plan event conformance', candidates: 1,
       target: planTarget,
       out: join(planTarget, 'generated'),
       reporter: (event) => planEvents.push(event),
       adapters: {
-        draft: async () => ({ plan: 'event conformance\n', gate: [] }),
-        cursorDraft: async () => ({ plan: 'cursor conformance\n', gate: [] }),
-        codexReview: async () => 'AGREE: yes',
-        review: async () => 'AGREE: yes',
-        runArbiter: async ({ request }) => {
-          if (request.type === 'draft') return { plan: 'claude conformance\n', gate: [] };
-          if (request.type === 'propose') return { plan: 'event conformance\n', gate: [] };
-          if (request.type === 'agreement') return { converged: true, reason: 'conformance' };
-          return { verdict: 'UNVERIFIED' };
-        },
+        author: async () => ({ plan: 'event conformance\n', gate: [], content: 'AGREE: yes' }),
+        reviewer: async request => ({ content: 'AGREE: yes', artifactDigest: request.artifactDigest }),
       },
     });
 
@@ -777,6 +782,10 @@ test('fully exercised runs have exact pair equality with both event vocabularies
       // whatever stage last emitted (the debate/stalled crash regression);
       // none of them can fire in a healthy conformance run.
       ...stalledFamily,
+      'decision/assumed': 'Historical operator-absence decisions remain readable; current autonomous decisions do not impersonate human assumptions.',
+      'plan/storm': 'Historical three-seat event retained for old records; current two-agent planning emits proposal/review.',
+      'plan/round': 'Historical planning round summary retained for old records; current messages carry round identity.',
+      'plan/converged': 'Historical convergence terminal retained for old records; current planning emits approval separately.',
       // The healthy conformance run finishes before its first deadline needs an extension.
       'executor/extended': 'Requires a healthy executor to outlive its configured deadline.',
       // Scope violations are exercised with injected file mutation in review-protection.test.js.
@@ -798,7 +807,7 @@ test('fully exercised runs have exact pair equality with both event vocabularies
     });
     assert.equal(Object.keys(stalledFamily).length, EVENT_STAGES.length,
       'every stage must carry a silence pair — the watchdog arms for any of them');
-    assert.equal(Object.keys(deliberatelyUncovered).length, Object.keys(stalledFamily).length + 8,
+    assert.equal(Object.keys(deliberatelyUncovered).length, Object.keys(stalledFamily).length + 12,
       'the deliberately-uncovered ratchet must not grow without an explicit test change');
     assert.ok(Object.values(deliberatelyUncovered).every((reason) => reason.length >= 24),
       'every allowlisted pair must carry a substantive reason');

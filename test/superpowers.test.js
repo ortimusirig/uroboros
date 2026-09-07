@@ -26,10 +26,10 @@ function writePlugin(path, manifest, version) {
 test('resolveSuperpowersDir honours an existing URO_SUPERPOWERS_DIR', () => {
   const home = temporaryHome();
   const configured = join(home, 'configured-superpowers');
-  writePlugin(configured, '.cursor-plugin', '6.4.0');
+  writePlugin(configured, '.claude-plugin', '6.4.0');
   try {
     assert.equal(
-      resolveSuperpowersDir({ seat: 'cursor', env: { URO_SUPERPOWERS_DIR: configured }, home }),
+      resolveSuperpowersDir({ seat: 'claude', env: { URO_SUPERPOWERS_DIR: configured }, home }),
       resolve(configured),
     );
   } finally {
@@ -43,7 +43,7 @@ test('resolveSuperpowersDir rejects a configured path that does not exist', () =
   try {
     assert.throws(
       () => resolveSuperpowersDir({
-        seat: 'cursor', env: { URO_SUPERPOWERS_DIR: missing }, home,
+        seat: 'claude', env: { URO_SUPERPOWERS_DIR: missing }, home,
       }),
       (error) => error instanceof Error
         && error.message.includes('URO_SUPERPOWERS_DIR')
@@ -57,7 +57,7 @@ test('resolveSuperpowersDir rejects a configured path that does not exist', () =
 test('resolveSuperpowersDir returns null when no configured or cached install exists', () => {
   const home = temporaryHome();
   try {
-    assert.equal(resolveSuperpowersDir({ seat: 'cursor', env: {}, home }), null);
+    assert.equal(resolveSuperpowersDir({ seat: 'claude', env: {}, home }), null);
   } finally {
     rmSync(home, { recursive: true, force: true });
   }
@@ -83,50 +83,50 @@ test('resolveSuperpowersDir selects the highest eligible version for the request
   }
 });
 
-test('Cursor resolves a lower compatible version instead of a higher Codex-only version', () => {
+test('Claude resolves a lower compatible version instead of a higher Codex-only version', () => {
   const home = temporaryHome();
-  const cursor = join(
+  const claude = join(
     home, '.claude', 'plugins', 'cache', 'superpowers-marketplace', 'superpowers', '6.0.2',
   );
   const codex = join(
     home, '.codex', 'plugins', 'cache', 'openai-curated-remote', 'superpowers', '6.3.0',
   );
-  writePlugin(cursor, '.cursor-plugin', '6.0.2');
+  writePlugin(claude, '.claude-plugin', '6.0.2');
   writePlugin(codex, '.codex-plugin', '6.3.0');
   try {
-    assert.equal(resolveSuperpowersDir({ seat: 'cursor', env: {}, home }), resolve(cursor));
+    assert.equal(resolveSuperpowersDir({ seat: 'claude', env: {}, home }), resolve(claude));
   } finally {
     rmSync(home, { recursive: true, force: true });
   }
 });
 
-test('Cursor never falls back to a Codex-only plugin directory', () => {
+test('Claude never falls back to a Codex-only plugin directory', () => {
   const home = temporaryHome();
   const codex = join(
     home, '.codex', 'plugins', 'cache', 'openai-curated-remote', 'superpowers', '6.3.0',
   );
   writePlugin(codex, '.codex-plugin', '6.3.0');
   try {
-    assert.equal(resolveSuperpowersDir({ seat: 'cursor', env: {}, home }), null);
-    const verification = verifyDirectorySuperpowers({ seat: 'cursor', env: {}, home });
+    assert.equal(resolveSuperpowersDir({ seat: 'claude', env: {}, home }), null);
+    const verification = verifyDirectorySuperpowers({ seat: 'claude', env: {}, home });
     assert.equal(verification.verified, false);
-    assert.match(verification.evidence, /Cursor/i);
-    assert.match(verification.remediation, /Cursor/i);
+    assert.match(verification.evidence, /Claude/i);
+    assert.match(verification.remediation, /Claude/i);
   } finally {
     rmSync(home, { recursive: true, force: true });
   }
 });
 
-test('a configured Cursor directory without a valid .cursor-plugin manifest is rejected', () => {
+test('a configured Claude directory without a valid .claude-plugin manifest is rejected', () => {
   const home = temporaryHome();
   const configured = join(home, 'codex-only-superpowers');
   writePlugin(configured, '.codex-plugin', '6.3.0');
   try {
     assert.throws(
       () => resolveSuperpowersDir({
-        seat: 'cursor', env: { URO_SUPERPOWERS_DIR: configured }, home,
+        seat: 'claude', env: { URO_SUPERPOWERS_DIR: configured }, home,
       }),
-      /Cursor.*[.]cursor-plugin/i,
+      /Claude.*[.]claude-plugin/i,
     );
   } finally {
     rmSync(home, { recursive: true, force: true });
@@ -192,9 +192,6 @@ test('the hard requirement treats an omitted seat as unverified', () => {
     seats: {
       codex: {
         seat: 'codex', verified: true, evidence: 'Codex verified', remediation: 'unused',
-      },
-      cursor: {
-        seat: 'cursor', verified: true, evidence: 'Cursor verified', remediation: 'unused',
       },
     },
   };

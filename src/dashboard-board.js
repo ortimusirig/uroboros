@@ -129,6 +129,9 @@ function renderCard(run) {
     + renderMetric('review', 'Review', reviewValue(run.review), {
       tone: reviewTone(run.review), verifierSeat: 'review',
     })
+    + (run.decision ? renderMetric('decision', 'Decision', run.decision.approved
+      ? (run.decision.converged === false ? 'Approved; dissent retained' : 'Approved')
+      : run.decision.authority === 'human' ? 'Needs human decision' : 'Unapproved') : '')
     + rounds
     + renderMetric('elapsed', 'Elapsed', elapsed(run.startTs, run.endTs))
     + renderMetric('tokens', 'Tokens', tokenTotal.toLocaleString('en-US'))

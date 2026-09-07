@@ -5,14 +5,16 @@
 `loop queue --file <path>` reads a JSON list whose units contain either
 `{ task, gate, name? }` or `{ goal, out, name? }`, and runs them one at a time against the
 current working directory. Paths in the list are resolved relative to the queue file. A goal
-unit runs `loop plan` first and starts implementation only after the plan debate converges.
+unit runs `loop plan` first and starts implementation only after approval bound to the current goal, plan bytes, and parsed gate.
 This `goal` unit kind still works but is legacy: prefer `loop decompose --goal` to convert
 a goal spec into task units directly, then queue those. On large repositories, use `loop decompose --goal` instead of goal units: the measured record on a ~1,700-file tree is 0-for-7 for goal-sized runs and 5-for-6 landed for decomposed task units.
 Run `loop queue --file queue.json --dry-run` before an unattended session to validate every
 input and goal output path without launching an agent.
 
-The default mode is `manual`. `--mode autonomous` is passed to each `loop run`, so the
-planner can resolve executor challenges. A unit lands only when its debate converged
+Manual disputes preserve state and stop. Durable `loop resume` is not available in this
+release; continuation tooling is follow-up work. Do not treat re-running a stopped task as resume.
+
+The default mode is `manual`. `--mode autonomous` is passed to both planning and execution. A unit lands only after actual Claude review approval
 (outcome `review-ready`) AND Claude, reading the final diff first-hand at landing time,
 records its approval. Any other outcome, a refusal, or an unreachable final review stops
 the queue with the judgement in `queue-log.jsonl`; nothing is retried or skipped.
@@ -58,12 +60,12 @@ file re-executes units that already landed against a worktree where their diff i
 already applied, and typically fails with "applied diff touched no paths".
 
 ```
-node bin/loop.js run --task <plan-file-or-prose> --target <folder> --gate <gate.json> [--gate-retries M] [--pivot-candidates N] [--executor-model MODEL] [--executor-effort EFFORT] [--verifier-model MODEL] [--arbiter-model MODEL] [--arbiter-timeout MS] [--artifact-root DIRECTORY] [--mutate] [--port PORT] [--open] [--no-dashboard] [--quiet]
+node bin/loop.js run --task <plan-file-or-prose> --target <folder> --gate <gate.json> [--gate-retries M] [--pivot-candidates N] [--mode manual|autonomous] [--claude-model MODEL] [--codex-model MODEL] [--codex-effort EFFORT] [--arbiter-timeout MS] [--artifact-root DIRECTORY] [--mutate] [--port PORT] [--open] [--no-dashboard] [--quiet]
 node bin/loop.js mutate --target <folder> [--base REF] [--tests COMMAND] [--dry-run]
-node bin/loop.js plan --goal <prose-or-file> --target <folder> --out <folder> [--rounds N] [--candidates N] [--pivot-candidates N] [--planner-model MODEL] [--verifier-model MODEL] [--arbiter-model MODEL] [--dry-run]
-node bin/loop.js decompose (--goal <spec.md> | --project <file-or-prose> --out <dir>) --target <folder> [--rounds N] [--map-budget CHARS] [--planner-model MODEL] [--verifier-model MODEL] [--arbiter-model MODEL]
+node bin/loop.js plan --goal <prose-or-file> --target <folder> --out <folder> [--rounds N] [--candidates N] [--pivot-candidates N] [--mode manual|autonomous] [--claude-model MODEL] [--codex-model MODEL] [--codex-effort EFFORT] [--dry-run]
+node bin/loop.js decompose (--goal <spec.md> | --project <file-or-prose> --out <dir>) --target <folder> [--rounds N] [--map-budget CHARS] [--mode manual|autonomous] [--claude-model MODEL] [--codex-model MODEL] [--codex-effort EFFORT]
 node bin/loop.js queue --file <queue.json> [--accept-goal <spec.md>] [--mode <manual|autonomous>] [--max-runs N] [--token-budget TOKENS] [--dry-run]
-node bin/loop.js batch --task <plan-1> --task <plan-2> --target <folder> --gate <gate.json> [--gate-retries M] [--pivot-candidates N] [--executor-model MODEL] [--executor-effort EFFORT] [--verifier-model MODEL] [--arbiter-model MODEL] [--arbiter-timeout MS] [--artifact-root DIRECTORY] [--concurrency N] [--token-budget TOKENS] [--rounds N] [--round N ...] [--unit-kind KIND] [--unit-id ID ...] [--perspective NAME ...] [--depends-on CHILD=PARENT ...] [--port PORT] [--open] [--no-dashboard] [--quiet]
+node bin/loop.js batch --task <plan-1> --task <plan-2> --target <folder> --gate <gate.json> [--gate-retries M] [--pivot-candidates N] [--mode manual|autonomous] [--claude-model MODEL] [--codex-model MODEL] [--codex-effort EFFORT] [--arbiter-timeout MS] [--artifact-root DIRECTORY] [--concurrency N] [--token-budget TOKENS] [--rounds N] [--round N ...] [--unit-kind KIND] [--unit-id ID ...] [--perspective NAME ...] [--depends-on CHILD=PARENT ...] [--port PORT] [--open] [--no-dashboard] [--quiet]
 node bin/loop.js batch --campaign <campaign.json> [--arbiter-timeout MS] [--artifact-root DIRECTORY] [--port PORT] [--open] [--no-dashboard] [--quiet]
 node bin/loop.js status <run-or-campaign-directory>
 node bin/loop.js dashboard [<run-directory>] [--scratch-root <directory>] [--port <port>]
@@ -82,16 +84,19 @@ The corresponding plugin commands are `/uroboros:run`, `/uroboros:mutate`, `/uro
 `/uroboros:setup`, `/uroboros:init`, and `/uroboros:help`. Install them with
 `/plugin marketplace add <absolute-clone-path>` and `/plugin install uroboros@uroboros`.
 
-`loop plan` runs a three-way STORM read-only against the target: Codex, Cursor and Claude
-draft from the same raw goal, Claude collates one proposal, and both other seats review it
-with structured suggestions. It writes `plan.md` and
-`gate.json` under `--out` only after convergence; exhaustion and pivot conclusion write neither.
+`loop plan` uses Claude as author and Codex as independent read-only reviewer. Both
+receive the same goal and repository context. Agreement and approval are separate: manual
+mode preserves unresolved disagreement for human authority; autonomous mode lets Codex
+approve the exact current artifacts with recorded rationale while dissent remains visible.
+Queues verify that approval still matches the current goal, exact plan bytes, and parsed gate
+before execution and landing. `approved: true` can coexist with `converged: false`.
+
 Initial planning generates three distinct-perspective candidates and selects among the plans
 that drafted successfully; no mechanical gate judges a plan, the seats do. Use `--candidates 1` for the previous single-draft behavior. A FRESH
 pivot uses the same process with the debate ledger and defaults to three candidates; configure
 that count with `--pivot-candidates` (1–5).
 
-`loop decompose` runs the same three-seat debate one level up or down the decomposition
+`loop decompose` runs the same two-agent planning conversation one level up or down the decomposition
 spine. `--goal <spec.md> --target <folder>` debates one goal spec directly into the
 loop-ready task units (`plan.md`/`gate.json` pairs plus a `queue.json`) it converges to,
 written beside the goal spec under a `tasks/` directory — this mode is live. Only this
@@ -105,17 +110,9 @@ reach its task units. In both modes, `--map-budget` bounds the characters spent 
 repo map handed to the seats (default 12000); values below the builder-derived
 `MINIMUM_MAP_BUDGET` floor (currently 951 characters) are rejected with guidance to raise it.
 
-Before a long program, run `loop doctor --deep` — plain `doctor` checks sign-in, only
-`--deep` exercises a real seat launch with the run's default model; on a free Cursor plan
-pass `--verifier-model auto` or the reviewer seat refuses every named-model launch. A
-conversation whose first Cursor call is refused that way ends immediately as
-`verifier-unlaunchable`, converged false and nothing written, with the remedy in
-`seatOutages.cursor`; a Cursor account that is merely out of quota proceeds with the seat
-unavailable and is named in the same summary at whatever terminal the run reaches.
-The deep probe always requests the built-in default model, never whatever `--verifier-model`
-your runs pass, so an operator who already runs with `--verifier-model auto` on a free plan
-will see the probe fail while those runs succeed — read a probe failure against the model you
-actually run.
+Before a long program, run `loop doctor --deep`. Plain `doctor` checks local sign-in
+without model calls. `--deep` spends tokens on an isolated Codex write probe and a Claude
+read probe using the default models. No Cursor installation or account is required.
 
 A fresh `--out` written inside `--target` leaves its plan/gate/queue files untracked, so
 commit them (or keep `--out` outside the target) before `loop queue`, which requires a
@@ -136,10 +133,10 @@ mutation seat does not alter the already-observed run outcome.
 
 `init` never overwrites `plan.md` or `gate.json`. It detects a `package.json` test script;
 otherwise it emits a valid, runnable placeholder command list with an explicit comment telling
-you to replace it. `doctor` runs Node, Git, PATH, local Codex/Cursor/Claude sign-in, scratch-safety,
-scratch-writability, Codex registry, Cursor `.cursor-plugin`, and Claude `.claude-plugin` checks
-by default without spending agent tokens. All three superpowers checks are required. The Codex
-write and Cursor read probes spend real agent tokens, so they are marked `SKIP` until `--deep` is supplied.
+you to replace it. `doctor` runs Node, Git, PATH, local Codex/Claude sign-in, scratch-safety,
+scratch-writability, Codex registry and Claude `.claude-plugin` checks
+by default without spending agent tokens. Both superpowers checks are required. The Codex
+write and Claude read probes spend real agent tokens, so they are marked `SKIP` until `--deep` is supplied.
 Every probe uses and cleans its own disposable scratch directory; neither the target nor a run
 directory is modified.
 
@@ -151,13 +148,20 @@ directory is modified.
 | `--gate-retries` | no | 2 | 0–3 |
 | `--pivot-candidates` | no | 3 | 1–5 fresh-plan candidates |
 | `--corrects` | no | none | records that this run's plan corrects the named prior run; display only |
-| `--executor-model` | no | launch-module default | Codex model ID |
-| `--executor-effort` | no | launch-module default | `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, or `ultra` |
-| `--verifier-model` | no | launch-module default | Cursor model ID |
-| `--arbiter-model` | no | `sonnet` | read-only Claude arbiter model ID |
+| `--mode` | no | `manual` | `manual` or `autonomous`; all run, plan, decompose, queue, and batch paths |
+| `--claude-model` | no | `sonnet` | Claude author in planning; reviewer in execution |
+| `--codex-model` | no | `gpt-6-astra` | Codex reviewer in planning; writer in execution |
+| `--codex-effort` | no | `high` | `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, or `ultra` |
 | `--arbiter-timeout` | no | verifier timeout | per-judgement Claude elapsed timeout in milliseconds |
 | `--artifact-root` | no | `<scratchRoot>/artifacts` | durable per-run records and `index.jsonl` |
 | `--quiet` | no | false | suppress stderr event summaries; `events.jsonl` is still written |
+
+Legacy `--executor-model`, `--executor-effort`, and `--arbiter-model` remain aliases for
+`--codex-model`, `--codex-effort`, and `--claude-model`. Equal duplicate values are accepted;
+conflicting values are rejected. `--planner-model` and `--verifier-model` are rejected with
+migration guidance, including their camelCase campaign-file fields. Campaign files use
+`mode`, `claudeModel`, `codexModel`, and `codexEffort`. Decomposition's goal/project
+selector is separate from its `interactionMode`.
 
 `batch` accepts one or more repeated `--task` options. The target, gate, retry, and model
 options have exactly the same meaning they do for `run`; every task gets its own isolated
@@ -259,7 +263,7 @@ error; multi-word inline prose is used verbatim.
 
 | Outcome | Meaning | Exit |
 |---|---|---|
-| `review-ready` | the debate converged: findings closed, diff produced | 0 |
+| `review-ready` | current Claude review approved: blocking findings closed, diff produced | 0 |
 | `no-op` | executor changed nothing | 0 |
 | `verifier-failed` | the reviewer failed to launch, timed out, or wrote no report | 4 |
 | `timed-out` | the final executor, evidence, or reviewer stage exceeded its deadline | 5 |
@@ -277,7 +281,10 @@ become a success.
 
 ## Iterating
 
-One `loop run` invocation debates until the reviews converge or the pivot ladder stops it.
+One `loop run` invocation continues until the current review approves or the pivot ladder stops it.
+Execution records use `converged: null` when no explicit mutual-agreement signal was recorded;
+review approval does not claim consensus. No-op/skipped review does not fabricate reviewer participation.
+Complete replies are retained, and only explicit rebuttals or held objections are labeled dissent.
 Structured blocking review findings are converted into executor work, followed by another
 evidence run and the reviewer's next report. `URO_DEBATE_ROUNDS` is an optional operator cap; the tool supplies no
 round limit of its own. On FRESH, the run creates a branch at the pre-debate commit, restores
@@ -285,8 +292,8 @@ the accumulated `__uro_review/` tests byte-for-byte, generates ledger-informed S
 executes only the selected plan. The ledger is not reset. `needs-pivot` returns
 control only when the arbiter concludes or no viable FRESH plan survives.
 
-Claude is spawned read-only to validate each blocking finding, answer autonomous challenges,
-and judge pivots from the ledger and attempted remedies. Invalid findings are retained as
+Codex writes the implementation and Claude reviews it independently, read-only. Claude answers
+autonomous challenges and judges pivots from the ledger and attempted remedies. Invalid findings are retained as
 overruled evidence. If Claude is unavailable, findings remain blocking, challenges stop with
 `needs-decision`, and the deterministic pivot ladder is explicitly recorded as unjudged.
 
@@ -341,8 +348,8 @@ embedded Obsidian Bases campaign table.
 ## Configuration
 
 - **Superpowers prerequisite:** Codex must report `superpowers@openai-curated` as
-  `installed, enabled`; Cursor and Claude must resolve compatible manifests with readable skills.
-  Set `URO_SUPERPOWERS_DIR` to the directory-based plugin used by Cursor and Claude when cache
+  `installed, enabled`; Claude must resolve a compatible manifest with readable skills.
+  Set `URO_SUPERPOWERS_DIR` to the directory-based plugin used by Claude when cache
   discovery is insufficient. Set `URO_REQUIRE_SUPERPOWERS=0` only for a deliberate degraded run;
   run facts retain per-seat evidence and versions, and the report states the bypass.
 - **Scratch root** defaults to `C:/uro/w` on Windows and `~/.uro/w` elsewhere. Override with
@@ -355,7 +362,7 @@ embedded Obsidian Bases campaign table.
 - **Executor elapsed timeout:** none by default. Set `URO_EXECUTOR_TIMEOUT_MS` or pass
   `--executor-timeout` to impose an operator-owned millisecond limit.
 - **Verifier elapsed timeout:** none by default. Set `URO_VERIFIER_TIMEOUT_MS` or pass
-  `--verifier-timeout` to impose an operator-owned millisecond limit on each Cursor pass.
+  `--verifier-timeout` to impose an operator-owned millisecond limit on each Claude review pass.
 - **Arbiter elapsed timeout:** inherits the verifier timeout by default. Set
   `URO_ARBITER_TIMEOUT_MS` or pass `--arbiter-timeout` to bound each read-only Claude judgement.
 - **Gate timeout:** 60 minutes per command by default (chosen to accommodate slow test

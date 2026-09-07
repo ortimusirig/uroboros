@@ -8,13 +8,9 @@ import {
 import { fixFailedCheck, selectedRemediation } from './remediation.js';
 
 const DEFAULT_BINS = Object.freeze({
-  git: 'git', codex: 'codex', agent: 'agent', claude: 'claude', gh: 'gh', logdy: 'logdy',
+  git: 'git', codex: 'codex', claude: 'claude', gh: 'gh', logdy: 'logdy',
 });
 
-export {
-  CURSOR_AGENT_INSTALL_COMMANDS,
-  cursorAgentInstallCommand,
-} from './doctor-checks.js';
 
 function statusLine(status, kind, name, detail, next) {
   return [
@@ -101,11 +97,11 @@ export async function runDoctor({
   } else if (deep) {
     healthVerdict = 'Loop health: HEALTHY (all required checks, including the write/read probes, passed).';
   } else {
-    healthVerdict = 'Loop core health: HEALTHY (all performed required checks passed; Codex, Cursor, and Claude sign-ins were verified).';
+    healthVerdict = 'Loop core health: HEALTHY (all performed required checks passed; Codex and Claude sign-ins were verified).';
   }
   detailLines.push('', healthVerdict);
   if (!requiredFailed && !deep) {
-    detailLines.push('Deep readiness: UNKNOWN (sign-in was verified, but Codex write and Cursor read remain unproven until `--deep`; those probes were SKIPPED, not passed).');
+    detailLines.push('Deep readiness: UNKNOWN (sign-in was verified, but Codex write and Claude read remain unproven until `--deep`; those probes were SKIPPED, not passed).');
   }
   detailLines.push('GitHub publishing and Logdy are optional; the loop is fully usable without them.');
   const lines = ['uroboros doctor', healthVerdict, ...detailLines];

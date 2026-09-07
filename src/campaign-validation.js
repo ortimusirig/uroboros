@@ -11,6 +11,32 @@ export const CAMPAIGN_SHAPES = Object.freeze([
 
 const KINDS = new Set(UNIT_KINDS);
 
+// Shared by CLI and campaign declarations so aliases cannot silently diverge.
+export function normalizeProviderOptions(options = {}) {
+  for (const key of ['plannerModel', 'verifierModel']) {
+    if (options[key] !== undefined) throw new Error(`${key} is obsolete; use --claude-model / claudeModel and --codex-model / codexModel`);
+  }
+  const interactionMode = options.interactionMode ?? options.mode ?? 'manual';
+  if (!['manual', 'autonomous'].includes(interactionMode)) {
+    throw new Error(`invalid --mode: ${interactionMode}; expected manual or autonomous`);
+  }
+  const result = { interactionMode };
+  for (const [canonical, alias] of [['claudeModel', 'arbiterModel'], ['codexModel', 'executorModel'], ['codexEffort', 'executorEffort']]) {
+    if (options[canonical] !== undefined && options[alias] !== undefined && options[canonical] !== options[alias]) {
+      throw new Error(`conflicting ${canonical} and ${alias}; specify one value`);
+    }
+    const value = options[canonical] ?? options[alias];
+    if (value !== undefined) {
+      if (typeof value !== 'string' || value.trim() === '') throw new TypeError(`${canonical} must be a non-empty string`);
+      result[canonical] = value;
+    }
+  }
+  if (result.codexEffort !== undefined && !['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'].includes(result.codexEffort)) {
+    throw new Error(`invalid --codex-effort / --executor-effort: ${result.codexEffort}`);
+  }
+  return result;
+}
+
 export function positiveInteger(value, name, maximum = Number.MAX_SAFE_INTEGER) {
   if (!Number.isSafeInteger(value) || value < 1 || value > maximum) {
     throw new TypeError(`${name} must be an integer between 1 and ${maximum}`);

@@ -21,7 +21,10 @@ export async function executeQueueCommand(options, {
   return runQueueFn({
     file: options.file,
     target,
-    mode: options.mode,
+    mode: options.interactionMode ?? options.mode,
+    claudeModel: options.claudeModel,
+    codexModel: options.codexModel,
+    codexEffort: options.codexEffort,
     ...(options.maxRuns === undefined ? {} : { maxRuns: options.maxRuns }),
     ...(options.tokenBudget === undefined ? {} : { tokenBudget: options.tokenBudget }),
     ...(options.acceptGoalSpec === undefined ? {} : { acceptGoalSpec: options.acceptGoalSpec }),

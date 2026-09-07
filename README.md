@@ -6,7 +6,7 @@
 
 [![tests](https://github.com/ortimusirig/uroboros/actions/workflows/tests.yml/badge.svg)](https://github.com/ortimusirig/uroboros/actions/workflows/tests.yml) [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) ![node](https://img.shields.io/badge/node-%3E%3D24-brightgreen) ![runtime dependencies](https://img.shields.io/badge/runtime%20dependencies-0-brightgreen)
 
-Codex writes in a git-isolated copy, every declared command runs once with its full output kept as evidence, Cursor reviews the change read-only, and a spawned read-only Claude seat arbitrates findings, reviews first-hand when the debate circles, and judges every landing.
+Claude authors plans and Codex reviews them. Codex implements in a Git-isolated workspace; Claude reviews the implementation, answering Codex corrections and rebuttals. The harness retains command evidence, complete delivered messages, decisions and dissent.
 
 ### If you are an AI agent setting this up for someone
 
@@ -16,9 +16,9 @@ truth for the bootstrap procedure. If this README is all you have, fetch the ski
 
 Expected order:
 
-1. Verify Node 24 or newer, git, the Codex CLI, the Cursor CLI, the Claude CLI, and superpowers in all three seats.
+1. Verify Node 24 or newer, git, the Codex CLI, the Claude CLI, and superpowers in both agents.
 2. With the operator's consent, install anything missing.
-3. Have the operator complete the three browser sign-ins.
+3. Have the operator complete the two CLI sign-ins.
 4. Install the plugin.
 5. Restart the Claude Code session so its slash commands register.
 6. Run the demo pass.
@@ -51,30 +51,28 @@ project of yours.
 
 Re-running `setup` is safe: it re-checks and skips whatever is already green.
 
-**Three things nothing can do for you: signing in to Codex, Cursor, and Claude.** These are
+**Sign in to Codex and Claude using their respective CLIs.** These are
 interactive browser flows owned by those CLIs. In a terminal with a TTY, `setup` waits while the
 operator completes them and then re-checks. Inside Claude Code there is no TTY, so `setup`
 reports its `NEEDS:` summary and exits non-zero; complete the sign-ins in a terminal, then run
 `/uroboros:setup` again.
 
 If you would rather look before anything touches your machine, `/uroboros:doctor` runs the
-same checks, changes nothing, and spends no agent tokens. Add `--fix` to have it offer the
+same checks, performs disposable scratch writes, and spends no agent tokens. Add `--fix` to have it offer the
 same consented installs, or `--deep` to spend a few tokens proving the signed-in Codex CLI
-can actually write and the signed-in Cursor CLI can actually read.
+can actually write and the signed-in Claude CLI can actually read.
 
 ## What you need
 
-**Node 24+, git, the Codex CLI, Cursor Agent CLI, and Claude CLI, with every seat signed
-in under its own account, plus superpowers verified separately for Codex, Cursor, and Claude.**
+**Node 24+, git, the Codex CLI and Claude CLI, with every seat signed
+in under its own account, plus superpowers verified separately for Codex and Claude.**
 `setup` and `doctor` check all of these and name what is missing,
 so you should not need this section — it is here for doing it yourself, or for when something
 went wrong.
 
-One detail that catches people out: the Cursor binary is `agent`, not `cursor-agent`. Follow the
-[bootstrap skill](skills/uroboros-setup/SKILL.md) for installation and remediation details.
+Follow the [bootstrap skill](skills/uroboros-setup/SKILL.md) for installation and remediation.
 
-Codex loads superpowers from its registry; Cursor receives only a directory carrying a valid
-`.cursor-plugin` manifest; Claude requires `.claude-plugin` plus readable skills. A run does not
+Codex loads superpowers from its registry; Claude requires `.claude-plugin` plus readable skills. A run does not
 install any of them. `URO_REQUIRE_SUPERPOWERS=0` is an explicit bypass for deliberate degraded
 runs, and the bypass is recorded in run facts and the report.
 
@@ -95,7 +93,7 @@ One `loop run` is one pass:
 ```
 plan.md ──► Codex writes (isolated copy) ──► commands run once (evidence) ──► debate ──► report
                                                                         │
-                Cursor writes one review report ──► findings ──► Claude judges ──► fix / pivot
+                Claude reviews ──► findings ──► Codex corrects/rebuts ──► Claude responds
 ```
 
 Above one plan, `loop decompose` builds the hierarchy that feeds the loop: a project
@@ -126,18 +124,33 @@ Each unit carries either `task` plus `gate`, or `goal` plus `out`:
 loop queue --file queue.json --mode autonomous --max-runs 3 --token-budget 50000
 ```
 
-For a goal unit, `loop plan` runs a three-way STORM: Codex, Cursor and Claude each draft
-independently from the same raw goal, Claude collates them into one proposal, and both other
-seats review it — structured suggestions carrying P0/P1/P2 priorities that nothing mechanical
-acts on. A plan converges only when all three seats actually agree, with Claude as the final
-arbiter; nothing mechanical judges a plan. Implementation never starts unless that plan
-converges.
+For goal units Claude authors and Codex reviews the exact goal, plan and gate artifact.
+Early-release checkpoint: integration verification is incomplete. The latest full suite
+reported 1026 passing and 18 failing tests; follow-up fixes and a clean verification run
+are still pending. Do not treat this checkpoint as fully verified.
+
+Release limitation: manual disputes preserve state and stop, but durable `loop resume`
+is not available yet; it is follow-up work. Use explicit `--mode autonomous` for unattended
+reviewer decisions. The default remains manual.
+
+The default `--mode manual` sends unresolved disputes to the human. With `--mode autonomous`,
+Codex makes final planning decisions and Claude final execution decisions. Queues inherit that
+mode in both children. Current artifact approval permits execution, including reviewer approval
+with retained dissent (`approved: true, converged: false`). Execution records `converged: null`
+when mutual agreement was not recorded; current reviewer approval is reported separately.
+Missing, malformed or quota-failed replies never approve.
+
+Use `--claude-model sonnet --codex-model gpt-6-astra --codex-effort high` (defaults).
+The executor/arbiter aliases remain with conflict detection. `--planner-model` and
+`--verifier-model` are obsolete and rejected; campaign JSON uses `mode`, `claudeModel`,
+`codexModel` and `codexEffort`.
+
 Wherever an approach is being chosen — the initial plan, and again when the arbiter decides an
 approach is dead rather than merely wrong — several candidates are drafted from deliberately
 distinct declared perspectives and one is selected, so the loop compares approaches instead of
 polishing the first one it thought of. A dead plan is replaced, not abandoned.
-The queue stops on the first non-approved result. A change lands only when the debate
-converged with every blocking finding resolved AND Claude, reading the diff first-hand at
+The queue stops on the first non-approved result. A change lands only when Claude approved the current diff
+with every blocking finding resolved AND Claude, reading the diff first-hand at
 landing time, approves it; a refusal or an unreachable final review always stops the queue
 with the judgement recorded. Each landed unit is committed locally, nothing is pushed, and
 `queue-log.jsonl` is appended beside the queue file. Use `--dry-run` to validate and
@@ -158,7 +171,7 @@ Three separate failure modes get three separate seats:
   round, whatever its neighbours exited; full stdout/stderr land in `__uro_evidence/` and
   the exit codes travel to the seats as recorded evidence. No exit code passes or fails a
   change — what a non-zero exit MEANS is the seats' question.
-- **Cursor reviews holistically and writes only its own tests.** One review pass reads
+- **Claude reviews holistically; the harness writes its returned tests.** One review pass reads
   TASK.md and the diff and reports correctness AND intent findings in a single
   `__uro_review/REVIEW.md` — an unmet requirement is a finding like any other. It may write
   into `__uro_review/` and nowhere else — the worktree is snapshotted around the review and
@@ -241,8 +254,6 @@ recording each command run, and the review's findings in `debate.roundHistory`.
 
 ## Known gotchas
 
-- **Cursor needs `--trust`** to clear its workspace-trust gate. Without it, it exits 1 with
-  empty output and every review silently falls back to `ISSUES`. Already on the launch line.
 - **Never pass `--ignore-user-config` to Codex.** It discards the project trust registry and
   Codex silently goes read-only — it appears to work and writes nothing.
 - **Do not check this repository out under `AppData`.** The scratch-root guard refuses paths
@@ -281,7 +292,7 @@ node --test
 ```
 
 The test suite has zero runtime dependencies and no build step. `fixtures/` holds real captured
-`codex` and `cursor-agent` NDJSON streams so the parsers are tested against actual vendor
+Codex/Claude test streams and historical Cursor NDJSON records so the parsers are tested against actual vendor
 output rather than invented shapes.
 
 See [PORTING.md](PORTING.md) for moving this to another machine.

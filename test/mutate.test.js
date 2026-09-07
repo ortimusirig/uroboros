@@ -188,7 +188,7 @@ test('the mutation judge keeps the verified Codex registry and inherited launch 
 
   await judge({ statements: [] });
   assert.equal(launchOptions.env.CODEX_HOME, env.CODEX_HOME);
-  assert.equal(launchOptions.env.PATH, process.env.PATH);
+  assert.equal(launchOptions.env[Object.keys(process.env).find(key => key.toLowerCase() === 'path') ?? 'PATH'], process.env[Object.keys(process.env).find(key => key.toLowerCase() === 'path') ?? 'PATH']);
 });
 
 test('a red baseline stops before grouping or mutation and explains why', async () => {

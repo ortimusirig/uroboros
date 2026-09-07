@@ -16,6 +16,7 @@ import {
   resolveDebateRounds,
 } from '../src/run.js';
 import { VERIFIED_SUPERPOWERS, withVerifiedSuperpowers } from '../fixtures/verified-superpowers.mjs';
+import { planningArtifactDigest } from '../src/conversation.js';
 import { PIVOT_CONCLUDE, PIVOT_FRESH } from '../src/debate.js';
 import { EMPTY_USAGE } from '../src/usage.js';
 import { DEFAULT_ARBITER_MODEL } from '../src/arbiter.js';
@@ -53,6 +54,12 @@ const writingExecutor = async ({ cwd }) => {
 };
 const noopExecutor = async () => ({ changedFiles: [], lastMessage: 'nothing to do' });
 const freshPlanningAdapters = {
+  runPlanCandidateSet: async ({ goal }) => {
+    const proposal = { plan: 'Approved fresh implementation.', gate: [] };
+    const digest = planningArtifactDigest(goal, proposal);
+    return { approved: true, artifactDigest: digest, approval: { artifactDigest: digest },
+      candidates: [{ id: 'candidate-1', ...proposal }], selected: { id: 'candidate-1', ...proposal } };
+  },
   draftPlanCandidate: async ({ candidateId }) => ({
     plan: `Fresh implementation plan from ${candidateId}.\n`,
     gate: [],
@@ -105,8 +112,9 @@ test('one holistic review report carries correctness and intent findings into th
   assert.match(facts.baseCommit, /^[0-9a-f]{40,64}$/);
   assert.equal(facts.branch, 'uro/f1');
   assert.equal(reviewCalls.length, 1, 'one seat, one report');
-  assert.equal(reviewCalls[0].prompt, REVIEW_PROMPT,
-    'a clean evidence trail appends nothing to the review prompt');
+  assert.equal(reviewCalls[0].request.originalRequirements, 'do the task');
+  assert.match(reviewCalls[0].request.diff, /new.txt/);
+  assert.match(JSON.stringify(reviewCalls[0].request.messages), /wrote new.txt/);
   rmSync(scr, { recursive: true, force: true });
 });
 
@@ -161,8 +169,7 @@ test('debate fix rounds accumulate usage and model overrides reach both agents a
   }
   assert.equal(verifierCalls.length, 2, 'two rounds, one reviewer each');
   for (const call of verifierCalls) assert.equal(call.model, 'verifier-override');
-  assert.deepEqual(verifierCalls.map((call) => call.prompt),
-    [REVIEW_PROMPT, REVIEW_PROMPT]);
+  assert.deepEqual(verifierCalls.map((call) => call.request.round), [1, 2]);
   assert.deepEqual(facts.model, {
     executor: 'executor-override', executorEffort: 'medium', verifier: 'verifier-override',
     arbiter: DEFAULT_ARBITER_MODEL,
@@ -260,16 +267,15 @@ test('omitted model flags travel through the CLI path to both agents and run-fac
   assert.equal(executorCalls[0].effort, DEFAULT_EXECUTOR_EFFORT);
   assert.equal(Object.hasOwn(executorCalls[0], 'superpowersDir'), false);
   assert.deepEqual(verifierCalls.map((call) => call.model), [DEFAULT_VERIFIER_MODEL]);
-  assert.deepEqual(verifierCalls.map((call) => call.superpowersDir),
-    [VERIFIED_SUPERPOWERS.seats.cursor.path]);
+  assert.deepEqual(verifierCalls.map((call) => call.bin), ['claude']);
   assert.deepEqual(facts.model, {
     executor: DEFAULT_EXECUTOR_MODEL,
     executorEffort: DEFAULT_EXECUTOR_EFFORT,
     verifier: DEFAULT_VERIFIER_MODEL,
     arbiter: DEFAULT_ARBITER_MODEL,
   });
-  assert.equal(facts.skills, VERIFIED_SUPERPOWERS.seats.cursor.path);
-  assert.deepEqual(facts.superpowers, VERIFIED_SUPERPOWERS);
+  assert.equal(facts.skills, VERIFIED_SUPERPOWERS.seats.claude.path);
+  assert.deepEqual(Object.keys(facts.superpowers.seats).sort(), ['claude', 'codex']);
   rmSync(scr, { recursive: true, force: true });
 });
 
@@ -353,7 +359,7 @@ test('the first call is verbatim and a fix round carries the failing evidence', 
         executorPlans.push(opts.plan);
         return writingExecutor(opts);
       },
-      runGate: async () => gateCall++ === 0
+      runGate: async () => gateCall++ <= 1
         ? { passed: false, results: [failure] }
         : { passed: true, results: [] },
       // The fix round is driven by a finding; the failing command travels with it.
@@ -389,6 +395,8 @@ test('each fix round receives only the immediately preceding failing evidence', 
   };
   const gateResults = [
     { passed: false, results: [firstFailure] },
+    { passed: false, results: [firstFailure] },
+    { passed: false, results: [secondFailure] },
     { passed: false, results: [secondFailure] },
     { passed: true, results: [] },
   ];
@@ -683,19 +691,19 @@ test('autonomous mode resolves a sentinel challenge and reruns the executor', as
   assert.equal(executorPlans[0], `${EXECUTOR_PREAMBLE}\n\ndo the task`);
   assert.ok(executorPlans[1].startsWith(`${EXECUTOR_PREAMBLE}\n\ndo the task`),
     'the challenge rerun must retain the same framed plan');
-  assert.match(executorPlans[1], /## Decision — resolved autonomously/);
+  assert.match(executorPlans[1], /## Recorded decision/);
   assert.match(executorPlans[1], /Answer: Follow the existing convention\./);
   assert.equal(readFileSync(join(facts.dir, 'TASK.md'), 'utf8'), executorPlans[1]);
   assert.equal(existsSync(join(facts.dir, 'DECISION.md')), false);
   const resolved = events.find((event) => (
     event.stage === 'decision' && event.type === 'resolved'
   ));
-  assert.equal(resolved.answeredBy, 'planner');
-  assert.equal(facts.decision.answeredBy, 'planner');
+  assert.equal(resolved.answeredBy, 'claude');
+  assert.equal(facts.decision.answeredBy, 'claude');
   rmSync(scr, { recursive: true, force: true });
 });
 
-test('an authority answer is rejected while operator-presence evidence is present', async () => {
+test('autonomous authority does not change when a TTY is present', async () => {
   const scr = scratch();
   let executorCalls = 0;
   const facts = await run({
@@ -718,13 +726,14 @@ test('an authority answer is rejected while operator-presence evidence is presen
     },
   });
 
-  assert.equal(facts.outcome, 'needs-decision');
-  assert.equal(executorCalls, 1);
-  assert.equal(facts.decision.questions[0].kind, 'authority');
+  assert.equal(facts.outcome, 'needs-pivot');
+  assert.equal(executorCalls, 3);
+  assert.equal(facts.authority, 'claude');
+  assert.equal(facts.debate.stopReason, 'challenge-limit');
   rmSync(scr, { recursive: true, force: true });
 });
 
-test('an authority question with no TTY is recorded as an operator-absent assumption', async () => {
+test('autonomous authority uses reviewer merits without inventing an operator-absent assumption', async () => {
   const scr = scratch();
   const events = [];
   let executorCalls = 0;
@@ -761,22 +770,9 @@ test('an authority question with no TTY is recorded as an operator-absent assump
 
   assert.equal(facts.outcome, 'review-ready');
   assert.equal(executorCalls, 2);
-  assert.equal(facts.decision.escalation, 'operator-absent');
-  assert.equal(facts.escalation, 'operator-absent');
-  assert.equal(facts.decision.answeredBy, 'planner');
-  assert.deepEqual(facts.decision.presenceEvidence, presenceEvidence);
-  assert.equal(facts.decision.reasoning, reasoning);
-  const assumed = events.find((event) => (
-    event.stage === 'decision' && event.type === 'assumed'
-  ));
-  assert.deepEqual(assumed.questions, facts.decision.questions);
-  assert.deepEqual(assumed.answers, facts.decision.answers);
-  assert.deepEqual(assumed.presenceEvidence, presenceEvidence);
-  assert.equal(assumed.reasoning, reasoning);
-  const report = readFileSync(join(facts.dir, 'uro-report.md'), 'utf8');
-  assert.match(report, /This was decided without you/);
-  assert.ok(report.indexOf('This was decided without you') < report.indexOf('## What changed'));
-  assert.match(report, /TTY attached: no; invocation: non-interactive/);
+  assert.equal(facts.decision.answeredBy, 'claude');
+  assert.equal(facts.escalation, undefined);
+  assert.equal(events.some((event) => event.type === 'assumed'), false);
   rmSync(scr, { recursive: true, force: true });
 });
 
@@ -802,10 +798,10 @@ test('challenge-round exhaustion halts instead of starting another executor', as
     },
   });
 
-  assert.equal(facts.outcome, 'needs-decision');
-  assert.equal(facts.decision.challengeRound, 2);
-  assert.equal(executorCalls, 2);
-  assert.equal(resolverCalls, 1);
+  assert.equal(facts.outcome, 'needs-pivot');
+  assert.equal(facts.decision.challengeRound, 3);
+  assert.equal(executorCalls, 3);
+  assert.equal(resolverCalls, 2);
   rmSync(scr, { recursive: true, force: true });
 });
 
@@ -827,7 +823,7 @@ test('a resolver returning no answers halts without rerunning the executor', asy
     },
   });
 
-  assert.equal(facts.outcome, 'needs-decision');
+  assert.equal(facts.outcome, 'needs-pivot');
   assert.equal(executorCalls, 1);
   assert.equal(existsSync(join(facts.dir, 'DECISION.md')), true);
   rmSync(scr, { recursive: true, force: true });
@@ -973,9 +969,9 @@ test('a non-zero exit is evidence in front of the seats, never a verdict', async
     'the reviewer satisfied means converged; an exit code cannot veto it');
   assert.equal(prompts.length, 1, 'the reviewer reviews, whatever the exit');
   for (const prompt of prompts) {
-    assert.match(prompt, /EVIDENCE: node exited 1/);
-    assert.match(prompt, /indicts the change or the command itself/);
-    assert.doesNotMatch(prompt, /"/, 'the evidence note must stay argv-safe');
+    assert.match(prompt, /"code":1/);
+    assert.match(prompt, /failed assertion/);
+    assert.match(prompt, /__uro_evidence\/round-1-01.out.txt/);
   }
   assert.equal(gateCalls, 1, 'commands run once as evidence — the retry loop is gone');
   assert.equal(Object.hasOwn(facts, 'gateStatus'), false, 'no verdict field survives');
@@ -1230,13 +1226,21 @@ Description: ${id} would make the implementation easier to maintain.
 
 function reviewerForRounds(reports, calls = null) {
   let round = 0;
+  const observed = new Set();
   return async (opts) => {
     calls?.push(opts);
     const report = reports[round++] ?? null;
-    mkdirSync(join(opts.cwd, '__uro_review'), { recursive: true });
+    mkdirSync(join(opts.cwd, '__uro_review/tests'), { recursive: true });
+    const ids = [...String(report ?? '').matchAll(/## (F\d+)/g)].map((match) => match[1]);
+    for (const match of String(report ?? '').matchAll(/Test: (__uro_review\/tests\/[^\n\r]+)/g)) {
+      writeFileSync(join(opts.cwd, match[1].trim()), '# independent proof\n');
+    }
+    const dispositions = [...observed].filter((id) => !ids.includes(id))
+      .map((id) => ({ id, status: 'resolved', reason: 'Reviewed the correction and command evidence; the defect is addressed.' }));
+    for (const id of ids) observed.add(id);
     writeFileSync(join(opts.cwd, '__uro_review', 'REVIEW.md'),
       report === null ? 'Reviewed. No findings this round.\n' : report);
-    return { launchFailed: false, timedOut: false };
+    return { launchFailed: false, timedOut: false, dispositions };
   };
 }
 
@@ -1293,7 +1297,7 @@ test('one blocking finding is fixed by the executor and converges in round two',
 
     assert.equal(facts.outcome, 'review-ready');
     assert.equal(executorCalls, 2);
-    assert.equal(gateCalls, 2);
+    assert.equal(gateCalls, 3);
     assert.equal(facts.debate.roundsRun, 2);
     assert.deepEqual(facts.debate.findingsPerRound, [['F1'], []]);
     assert.deepEqual(facts.debate.resolvedFindingIds, ['F1']);
@@ -1310,10 +1314,11 @@ test('a finding persistent across three rounds detects circling and retries an a
   const plans = [];
   try {
     const facts = await run({
-      task: 'do the task', target: makeTarget(), gate: [], gateRetries: 0,
+      mode: 'autonomous', task: 'do the task', target: makeTarget(), gate: [], gateRetries: 0,
       scratchRoot: scr, runId: 'debate-circling', debateRounds: 4,
       reporter: (event) => events.push(event),
       adapters: {
+        runArbiter: async () => ({ decision: 'amend', reason: 'A corrected implementation approach remains viable.' }),
         runExecutor: async (opts) => {
           plans.push(opts.plan);
           return writingExecutor(opts);
@@ -1349,10 +1354,11 @@ test('circling on the final round suppresses an amend that cannot run', async ()
   const events = [];
   try {
     const facts = await run({
-      task: 'do the task', target: makeTarget(), gate: [], gateRetries: 0,
+      mode: 'autonomous', task: 'do the task', target: makeTarget(), gate: [], gateRetries: 0,
       scratchRoot: scr, runId: 'debate-final-amend', debateRounds: 3,
       reporter: (event) => events.push(event),
       adapters: {
+        runArbiter: async () => ({ decision: 'amend', reason: 'A corrected implementation approach remains viable.' }),
         runExecutor: writingExecutor,
         runGate: async () => ({ passed: true, results: [] }),
         runReview: reviewerForRounds([blockingReview(), blockingReview(), blockingReview()]),
@@ -1375,9 +1381,10 @@ test('circling on the final round suppresses an amend that cannot run', async ()
 test('the fresh pivot still acts when circling is detected on the final round', async () => {
   const scr = scratch();
   const events = [];
+  let pivots = 0;
   try {
     const facts = await run({
-      task: 'do the task', target: makeTarget(), gate: [], gateRetries: 0,
+      mode: 'autonomous', task: 'do the task', target: makeTarget(), gate: [], gateRetries: 0,
       scratchRoot: scr, runId: 'debate-final-fresh', debateRounds: 3,
       reporter: (event) => events.push(event),
       adapters: {
@@ -1387,7 +1394,7 @@ test('the fresh pivot still acts when circling is detected on the final round', 
         runReview: reviewerForRounds([
           blockingReview(), blockingReview(), blockingReview(), blockingReview(),
         ]),
-        shouldPivot: (pivotCount) => pivotCount === 0 ? PIVOT_FRESH : PIVOT_CONCLUDE,
+        runArbiter: async () => ({ decision: ++pivots === 1 ? 'fresh' : 'conclude', reason: 'Reviewed the continued blocker.' }),
       },
     });
 
@@ -1413,12 +1420,14 @@ test('the fresh pivot still acts when circling is detected on the final round', 
 
 test('a fresh pivot replans and continued circling concludes with the complete ledger', async () => {
   const scr = scratch();
+  let pivots = 0;
   try {
     const facts = await run({
-      task: 'do the task', target: makeTarget(), gate: [], gateRetries: 0,
+      mode: 'autonomous', task: 'do the task', target: makeTarget(), gate: [], gateRetries: 0,
       scratchRoot: scr, runId: 'debate-fresh',
       adapters: {
         ...freshPlanningAdapters,
+        runArbiter: async () => ({ decision: ['amend', 'fresh', 'conclude'][pivots++], reason: 'The reviewed approach needs this pivot.' }),
         runExecutor: writingExecutor,
         runGate: async () => ({ passed: true, results: [] }),
         runReview: reviewerForRounds([
@@ -1451,14 +1460,14 @@ test('the conclude pivot stops without reporting success', async () => {
   const events = [];
   try {
     const facts = await run({
-      task: 'do the task', target: makeTarget(), gate: [], gateRetries: 0,
+      mode: 'autonomous', task: 'do the task', target: makeTarget(), gate: [], gateRetries: 0,
       scratchRoot: scr, runId: 'debate-conclude', debateRounds: 3,
       reporter: (event) => events.push(event),
       adapters: {
         runExecutor: writingExecutor,
         runGate: async () => ({ passed: true, results: [] }),
         runReview: reviewerForRounds([blockingReview(), blockingReview(), blockingReview()]),
-        shouldPivot: () => PIVOT_CONCLUDE,
+        runArbiter: async () => ({ decision: 'conclude', reason: 'The approach cannot satisfy requirements.' }),
       },
     });
 
@@ -1573,7 +1582,7 @@ test('debate rounds are unbounded by default and accept any positive operator bo
   assert.throws(() => resolveDebateRounds({ URO_DEBATE_ROUNDS: '2.5' }), /positive integer/);
 });
 
-test('circling triggers Claude to read the change itself, and its view reaches everyone', async () => {
+test('circling keeps Claude in its reviewer role and supplies the actual debate to its pivot judgment', async () => {
   // The owner's rule: once the debate has gone on for some time — the measured
   // circling signal, never a round count — Claude stops refereeing the other
   // seats' claims and reviews the diff first-hand. Its stance and findings are
@@ -1583,7 +1592,7 @@ test('circling triggers Claude to read the change itself, and its view reaches e
     const arbiterRequests = [];
     const executorPlans = [];
     const facts = await run({
-      task: 'do the task', target: makeTarget(), gate: [], gateRetries: 0,
+      mode: 'autonomous', task: 'do the task', target: makeTarget(), gate: [], gateRetries: 0,
       scratchRoot: scr, runId: 'debate-independent-review',
       adapters: {
         runExecutor: async (options) => {
@@ -1611,20 +1620,12 @@ test('circling triggers Claude to read the change itself, and its view reaches e
     });
 
     assert.equal(facts.outcome, 'review-ready', 'the amended round converges');
-    const reviewRequest = arbiterRequests.find((request) => request.type === 'review');
-    assert.ok(reviewRequest, 'circling must trigger an independent review before the pivot');
-    assert.match(String(reviewRequest.diff), /diff --git/);
+    assert.equal(arbiterRequests.some((request) => request.type === 'review'), false);
     const pivotRequest = arbiterRequests.find((request) => request.type === 'pivot');
-    assert.equal(pivotRequest.independentReview.stance, 'mixed',
-      'the pivot must be judged WITH the first-hand view in hand');
-    assert.equal(facts.debate.independentReviews.length, 1);
-    assert.deepEqual(facts.debate.independentReviews[0].findings,
-      [{ id: 'C1', severity: 'P0', text: 'the recurring objection is real at line 4' }]);
-    const amendedPlan = executorPlans.find((plan) => plan.includes('Claude independent review'));
-    assert.ok(amendedPlan, 'the amended fix plan must carry the first-hand findings to Codex');
-    assert.match(amendedPlan, /C1 P0: the recurring objection is real at line 4/);
-    // Severity travels verbatim; nothing filtered it on the way through.
-    assert.equal(facts.debate.independentReviews[0].findings[0].severity, 'P0');
+    assert.match(pivotRequest.diff, /diff --git/);
+    assert.equal(pivotRequest.messages.filter((message) => message.speaker === 'codex').length, 3);
+    assert.equal(facts.debate.independentReviews.length, 0);
+    assert.match(executorPlans[3], /the review shows it is fixable/);
   } finally {
     rmSync(scr, { recursive: true, force: true });
   }

@@ -1,672 +1,353 @@
-import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
-import { join } from 'node:path';
 import test from 'node:test';
-import {
-  productionCapability, productionCursorDraft, productionCursorReview,
-  reviewSeatPrompt, runPlan as executePlan, withSeatWorkspace,
-} from '../src/plan.js';
-import { assertUsablePrompt, classifySeatOutage } from '../src/verifier.js';
+import assert from 'node:assert/strict';
+import { mkdtempSync, readFileSync, rmSync, existsSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { runPlan, runPlanCandidateSet } from '../src/plan.js';
+import { applySuperpowersRequirement } from '../src/superpowers.js';
 
-const VERIFIED_SUPERPOWERS = {
-  ok: true,
-  seats: {
-    codex: { seat: 'codex', verified: true, evidence: 'registry', version: '6.3.0', path: null },
-    cursor: { seat: 'cursor', verified: true, evidence: 'manifest', version: '6.0.2', path: 'C:/cursor-superpowers' },
-    claude: { seat: 'claude', verified: true, evidence: 'manifest', version: '6.0.2', path: 'C:/claude-superpowers' },
+test('candidate token totals include every authored alternative and the reviewer selection',async t=>{
+ const options=setup(t);
+ const result=await runPlanCandidateSet({...options,count:2,interactionMode:'autonomous',
+  draft:async r=>({plan:r.candidateId,gate:[],agree:true,readable:true,content:'AGREE: yes',
+    usage:{inputTokens:10,outputTokens:2}}),
+  select:async()=>({selectedCandidateId:'candidate-2',usage:{inputTokens:5,outputTokens:1}}),
+  review:async r=>({agree:true,readable:true,content:'AGREE: yes',artifactDigest:r.artifactDigest,
+    usage:{inputTokens:3,outputTokens:1}}),
+ });
+ assert.equal(result.tokens.total.inputTokens,28);
+ assert.equal(result.tokens.total.outputTokens,6);
+});
+test('candidate approval identity ignores transport usage but includes artifact bytes',async t=>{
+ const options=setup(t);
+ const make=usage=>runPlanCandidateSet({...options,count:1,
+  draft:async()=>({plan:'same plan',gate:[],agree:true,readable:true,content:'AGREE: yes',usage}),
+  review:async r=>({agree:true,readable:true,content:'AGREE: yes',artifactDigest:r.artifactDigest}),
+ });
+ const first=await make({inputTokens:10}),second=await make({inputTokens:20});
+ assert.equal(first.approval.artifactDigest,second.approval.artifactDigest);
+});
+test('a failed or unreadable candidate selection never silently chooses the first alternative',async t=>{
+ const options=setup(t);
+ for(const select of [async()=>({}),async()=>{throw new Error('offline');}]){
+  const result=await runPlanCandidateSet({...options,count:2,
+   draft:async r=>({plan:r.candidateId,gate:[],agree:true,readable:true,content:'AGREE: yes'}),
+   select,review:async()=>assert.fail('No selected artifact exists'),
+  });
+  assert.equal(result.approved,false);
+  assert.equal(result.selected,null);
+ }
+});
+
+
+test('standalone candidate count authors distinct alternatives and reviews the Codex-selected artifact',async t=>{
+ let authors=0;
+ const result=await runPlan({...setup(t),candidates:3,adapters:adapters({
+  author:async r=>{
+   authors++;
+   assert.equal(r.request.candidateCount,3);
+   return {answer:artifact('Approach '+r.request.candidateId)};
   },
-};
-
-const planText = [
-  '## Title', '', 'Plan test', '',
-  '## Required behavior', '', 'Implement the goal.', '',
-  '## Invariants', '', 'Keep compatibility.', '',
-  '## Test requirements', '', '1. Exercise the behavior.', '',
-  '## Out of scope', '', 'Unrelated work.', '',
-].join('\n');
-
-function fixture() {
-  const directory = mkdtempSync(join(process.cwd(), '.ccc-test-plan-'));
-  return {
-    target: directory,
-    out: join(directory, 'generated'),
-    cleanup: () => rmSync(directory, { recursive: true, force: true }),
-  };
-}
-
-// Claude in one injectable seat: draft / propose / agreement / pivot are all
-// arbiter request types, exactly as production routes them.
-function makeArbiter(handlers = {}) {
-  return async ({ request }) => {
-    const handler = handlers[request.type];
-    if (handler === undefined) return { verdict: 'UNVERIFIED' };
-    return typeof handler === 'function' ? handler(request) : handler;
-  };
-}
-
-const agreeingReview = () => 'AGREE: yes';
-
-function seats({ arbiter = {}, codexReview, review, draft, cursorDraft } = {}) {
-  return {
-    verifySuperpowers: async () => VERIFIED_SUPERPOWERS,
-    draft: draft ?? (async () => ({ plan: planText, gate: [] })),
-    cursorDraft: cursorDraft ?? (async () => ({ plan: `${planText}cursor view\n`, gate: [] })),
-    codexReview: codexReview ?? (async () => agreeingReview()),
-    review: review ?? (async () => agreeingReview()),
-    runArbiter: makeArbiter({
-      draft: { plan: `${planText}claude view\n`, gate: [] },
-      propose: { plan: planText, gate: [] },
-      agreement: { converged: true, reason: 'all seats satisfied' },
-      ...arbiter,
-    }),
-  };
-}
-
-const runPlan = (options) => executePlan({ ...options, adapters: { ...seats(), ...options.adapters } });
-
-// Pins the fix at src/plan.js:330 (`return await work(directory)`). A
-// refactor back to `return work(directory)` hands `finally` a pending
-// promise: `rmSync` deletes the workspace before the async seat inside
-// `work` gets to read a byte out of it, silently breaking every production
-// Cursor hand-off (plan drafting/review, tier-2 goal drafting/review). This
-// test proves the workspace still exists after control has yielded at least
-// once inside `work`, which `return work(directory)` cannot survive.
-test('the seat workspace outlives the async seat that reads it', async () => {
-  const content = await withSeatWorkspace({ 'A.md': 'workspace survives\n' }, async (dir) => {
-    await new Promise((resolve) => setImmediate(resolve));
-    return readFileSync(join(dir, 'A.md'), 'utf8');
-  });
-  assert.equal(content, 'workspace survives\n');
+  review:async r=>{
+   if(r.plan.includes('# STORM plan selection seat')) return {exitCode:0,lastMessage:'<SELECTED_CANDIDATE>candidate-3</SELECTED_CANDIDATE>'};
+   assert.match(r.plan,/Approach candidate-3/);
+   return {exitCode:0,lastMessage:'AGREE: yes\nARTIFACT_DIGEST: '+/ARTIFACT_DIGEST: ([a-f0-9]{64})/.exec(r.plan)?.[1]};
+  },
+ })});
+ assert.equal(result.approved,true);
+ assert.equal(authors,3);
+ assert.match(readFileSync(result.planPath,'utf8'),/Approach candidate-3/);
 });
 
-test('three seats storm, Claude proposes, both seats agree, Claude converges', async () => {
-  const item = fixture();
-  const events = [];
-  const stormInputs = [];
-  try {
-    const result = await executePlan({
-      goal: 'Implement the approved behavior',
-      target: item.target,
-      out: item.out,
-      reporter: (event) => events.push(event),
-      adapters: seats({
-        draft: async (request) => {
-          stormInputs.push(request.input);
-          assert.equal(request.sandbox, 'read-only');
-          return { plan: planText, gate: [] };
-        },
-      }),
-    });
-    assert.equal(result.converged, true);
-    assert.equal(result.reason, 'converged');
-    assert.equal(result.rounds, 1);
-    assert.equal(readFileSync(result.planPath, 'utf8'), planText);
-    assert.deepEqual(JSON.parse(readFileSync(result.gatePath, 'utf8')), []);
-    // Every seat drafted from the RAW goal, not a paraphrase.
-    assert.match(stormInputs[0], /Implement the approved behavior/);
-    // arbiter/start+finish bracket each of Claude's judgements — the draft, the
-    // proposal, and the agreement. That is the live transcript of the third seat.
-    assert.deepEqual(events.map((event) => `${event.stage}/${event.type}`), [
-      'plan/start',
-      'arbiter/start', 'arbiter/finish',
-      'plan/storm',
-      'arbiter/start', 'arbiter/finish',
-      'plan/proposal',
-      'plan/review', 'plan/review',
-      'arbiter/start', 'arbiter/finish',
-      'plan/agreement',
-      'plan/round',
-      'plan/converged',
-      'plan/finish',
-    ]);
-    assert.deepEqual(
-      result.storm[0].drafts.map((draftRecord) => `${draftRecord.seat}:${draftRecord.ok}`),
-      ['codex:true', 'cursor:true', 'claude:true'],
-    );
-  } finally { item.cleanup(); }
+
+test('standalone autonomous planning routes a dissenting final decision to Codex',async t=>{
+ let reviews=0;
+ const result=await runPlan({...setup(t),interactionMode:'autonomous',adapters:adapters({
+  author:async()=>({answer:artifact().replace('AGREE: yes','AGREE: no')}),
+  review:async r=>{
+   reviews++;
+   const digest=/ARTIFACT_DIGEST: ([a-f0-9]{64})/.exec(r.plan)?.[1];
+   return {exitCode:0,lastMessage:(r.plan.includes('Return DECISION:')
+     ?'DECISION: approve\nREASON: The current approach meets the requirements.'
+     :'AGREE: no\nS1 P1: Discuss the approach')+'\nARTIFACT_DIGEST: '+digest};
+  },
+ })});
+ assert.equal(result.approved,true);
+ assert.equal(result.converged,false);
+ assert.equal(result.approval.decidedBy,'codex');
+ assert.equal(reviews,3);
+});
+test('a timed-out planning reviewer retains partial output and never writes a plan',async t=>{
+ const opts=setup(t);
+ const result=await runPlan({...opts,executorTimeout:12,adapters:adapters({
+  review:async r=>{
+   assert.equal(r.timeoutMs,12);
+   return {exitCode:null,timedOut:true,stderr:'complete timeout explanation',
+    lastMessage:'Partial review'};
+  },
+ })});
+ assert.equal(result.reason,'reviewer-unavailable');
+ assert.equal(result.messages.at(-1).content,'Partial review');
+ assert.match(result.messages.at(-1).error,/complete timeout explanation/);
+ assert.equal(existsSync(join(opts.out,'plan.md')),false);
 });
 
-test('mutation control: convergence requires the codex seat to actually agree', async () => {
-  const item = fixture();
-  try {
-    const result = await runPlan({
-      goal: 'Needs all three', target: item.target, out: item.out, rounds: 1,
-      adapters: seats({ codexReview: async () => 'AGREE: no\nS1 P1: unclear rollout' }),
-    });
-    assert.equal(result.converged, false,
-      'codex withheld agreement, so two agreeing seats must not converge the plan');
-    assert.equal(existsSync(join(item.out, 'plan.md')), false);
-    assert.equal(result.roundHistory[0].reviews.codex.agree, false);
-  } finally { item.cleanup(); }
+
+test('failed candidate selection retains all consumed usage and raw authored alternatives',async t=>{
+ const result=await runPlanCandidateSet({...setup(t),count:2,
+  draft:async r=>({plan:r.candidateId,gate:[],content:'AGREE: yes\n'+r.candidateId,
+    agree:true,readable:true,usage:{inputTokens:10,outputTokens:2}}),
+  select:async()=>({selectedCandidateId:'missing',answer:'No usable selection',usage:{inputTokens:5,outputTokens:1}}),
+ });
+ assert.equal(result.approved,false);
+ assert.equal(result.tokens.total.inputTokens,25);
+ assert.equal(result.checkpointState.candidateState.selection.answer,'No usable selection');
+ assert.equal(result.checkpointState.candidateState.candidates[0].response.content,'AGREE: yes\ncandidate-1');
 });
 
-test('mutation control: convergence requires the cursor seat to actually agree', async () => {
-  const item = fixture();
-  try {
-    const result = await runPlan({
-      goal: 'Needs all three', target: item.target, out: item.out, rounds: 1,
-      adapters: seats({ review: async () => 'AGREE: no\nS1 P0: goal not achieved' }),
-    });
-    assert.equal(result.converged, false);
-    assert.equal(existsSync(join(item.out, 'plan.md')), false);
-  } finally { item.cleanup(); }
+
+test('a malformed candidate keeps its delivered artifact and usage for diagnosis',async t=>{
+ const result=await runPlanCandidateSet({...setup(t),count:1,
+  draft:async()=>({answer:'Broken <PLAN_MD> with no gate',usage:{inputTokens:11,outputTokens:3}}),
+ });
+ assert.equal(result.approved,false);
+ assert.equal(result.candidates[0].response.answer,'Broken <PLAN_MD> with no gate');
+ assert.equal(result.candidates[0].attempts.length,6);
+ assert.equal(result.tokens.total.inputTokens,66);
 });
 
-test('Claude is the final arbiter: both seats agreeing does not converge without it', async () => {
-  const item = fixture();
-  try {
-    const result = await runPlan({
-      goal: 'Claude still judges', target: item.target, out: item.out, rounds: 1,
-      adapters: seats({
-        arbiter: { agreement: { converged: false, reason: 'proposal drifts from the goal', feedback: 'realign with the goal' } },
-      }),
-    });
-    assert.equal(result.converged, false);
-    assert.equal(result.roundHistory[0].agreement.converged, false);
-    assert.equal(result.roundHistory[0].agreement.reason, 'proposal drifts from the goal');
-  } finally { item.cleanup(); }
-});
 
-test('silence is not consent: an unreadable agreement cannot converge the round', async () => {
-  const item = fixture();
-  try {
-    const result = await runPlan({
-      goal: 'No judged agreement', target: item.target, out: item.out, rounds: 1,
-      adapters: seats({ arbiter: { agreement: { verdict: 'UNVERIFIED' } } }),
-    });
-    assert.equal(result.converged, false);
-    assert.equal(result.roundHistory[0].agreement.verdict, 'UNVERIFIED');
-  } finally { item.cleanup(); }
-});
-
-test('the plan-tier Codex repair prompt carries the previous answer verbatim', () => {
-  // The prompt travels to the seat on STDIN (runExecutor's `input: plan`), so
-  // there is no argv line to flatten it onto: quotes and line breaks in the
-  // seat's own answer must arrive as the seat wrote them. Flattening them and
-  // still calling it "verbatim" in the audit table would be a false claim.
-  const answer = 'I checked the "goal" against the plan.\nSecond line: no stance anywhere.\n\nThird.';
-  const prompt = reviewSeatPrompt({
-    seat: 'Codex', goal: 'a goal', plan: 'a plan', gate: [], round: 2, repairContent: answer,
-  });
-  assert.ok(prompt.includes(answer), 'the answer arrives whole — quotes and newlines intact');
-  assert.match(prompt, /did not contain a parseable stance/);
-  assert.doesNotMatch(prompt, /\[newline\]/, 'nothing collapsed the seat\'s own text');
-  assert.ok(!reviewSeatPrompt({ seat: 'Codex', goal: 'g', plan: 'p', gate: [], round: 1 })
-    .includes('did not contain a parseable stance'), 'a first ask is not a repair');
-});
-
-test('an unreadable Codex plan review stance is re-asked once with quotes and newlines intact', async () => {
-  const item = fixture();
-  const answer = 'The plan says "ship it".\nMy answer is the required block.';
-  const seen = [];
-  try {
-    const result = await runPlan({
-      goal: 'Verbatim means verbatim', target: item.target, out: item.out, rounds: 1,
-      adapters: seats({
-        codexReview: async (request) => {
-          seen.push(request);
-          return seen.length === 1 ? answer : 'AGREE: yes';
-        },
-      }),
-    });
-    assert.equal(seen.length, 2);
-    assert.equal(seen[1].repairContent, answer,
-      'byte-identical: no quote swapping, no newline collapsing');
-    assert.equal(result.converged, true);
-    assert.equal(result.roundHistory[0].reviews.codex.priorContent, answer,
-      'the repaired row keeps the answer it repaired');
-  } finally { item.cleanup(); }
-});
-
-test('an unreadable plan review stance is re-asked once with the answer fed back verbatim', async () => {
-  const item = fixture();
-  const meta = 'I checked the plan against the goal. My answer is the required AGREE block.';
-  const seen = [];
-  try {
-    const result = await runPlan({
-      goal: 'A stance that cannot be read is not a refusal',
-      target: item.target, out: item.out, rounds: 1,
-      adapters: seats({
-        review: async (request) => {
-          seen.push(request);
-          return seen.length === 1 ? meta : 'AGREE: yes';
-        },
-      }),
-    });
-    assert.equal(seen.length, 2, 'exactly one re-ask per seat per round');
-    assert.equal(seen[1].repairContent, meta, 'the unparseable answer travels back verbatim');
-    assert.equal(seen[1].plan, seen[0].plan, 'the re-ask asks the same question of the same proposal');
-    assert.equal(result.converged, true);
-    assert.equal(result.roundHistory[0].reviews.cursor.stanceRepaired, true);
-  } finally { item.cleanup(); }
-});
-
-test('severities are carried verbatim and never filtered or validated', async () => {
-  const item = fixture();
-  let agreementRequest = null;
-  try {
-    const result = await runPlan({
-      goal: 'Severity is input, not a rule', target: item.target, out: item.out, rounds: 1,
-      adapters: seats({
-        codexReview: async () => 'AGREE: yes\nS1 P0: risky migration\nS2 CRITICAL: made-up level',
-        review: async () => 'AGREE: yes\nSx P2: naming nit',
-        arbiter: {
-          agreement: (request) => {
-            agreementRequest = request;
-            return { converged: true, reason: 'P0 noted and acceptable' };
-          },
-        },
-      }),
-    });
-    // A P0 blocks nothing by rule: with all three agreeing, the plan converges.
-    assert.equal(result.converged, true);
-    // The made-up severity travels untouched to the arbiter and the facts.
-    assert.deepEqual(
-      agreementRequest.reviews.codex.suggestions.map((item2) => item2.severity),
-      ['P0', 'CRITICAL'],
-    );
-    assert.deepEqual(
-      result.roundHistory[0].reviews.codex.suggestions.map((item2) => `${item2.id} ${item2.severity}`),
-      ['S1 P0', 'S2 CRITICAL'],
-    );
-    assert.equal(result.roundHistory[0].reviews.cursor.suggestions[0].severity, 'P2');
-  } finally { item.cleanup(); }
-});
-
-test('every draft failing is storm-exhausted: inability, not a mechanical verdict', async () => {
-  const item = fixture();
-  try {
-    const result = await runPlan({
-      goal: 'Nothing drafted', target: item.target, out: item.out,
-      adapters: seats({
-        draft: async () => { throw new Error('codex draft failed'); },
-        cursorDraft: async () => { throw new Error('cursor draft failed'); },
-        arbiter: { draft: { verdict: 'UNVERIFIED' } },
-      }),
-    });
-    assert.equal(result.converged, false);
-    assert.equal(result.reason, 'storm-exhausted');
-    assert.deepEqual(
-      result.storm[0].drafts.map((draftRecord) => draftRecord.ok),
-      [false, false, false],
-    );
-  } finally { item.cleanup(); }
-});
-
-test('a missing proposal ends the round as arbiter-unavailable, never a substitute rule', async () => {
-  const item = fixture();
-  try {
-    const result = await runPlan({
-      goal: 'No proposer', target: item.target, out: item.out,
-      adapters: seats({ arbiter: { propose: { verdict: 'UNVERIFIED' } } }),
-    });
-    assert.equal(result.converged, false);
-    assert.equal(result.reason, 'arbiter-unavailable');
-    assert.equal(existsSync(join(item.out, 'plan.md')), false);
-  } finally { item.cleanup(); }
-});
-
-test('a seat question reaches the next proposal instead of blocking or vanishing', async () => {
-  const item = fixture();
-  const proposeRequests = [];
-  let cursorRound = 0;
-  try {
-    const result = await runPlan({
-      goal: 'Ask then converge', target: item.target, out: item.out,
-      adapters: seats({
-        review: async () => {
-          cursorRound++;
-          return cursorRound === 1
-            ? 'AGREE: no\nQ1: which store holds the sessions?'
-            : agreeingReview();
-        },
-        arbiter: {
-          propose: (request) => {
-            proposeRequests.push(request);
-            return { plan: planText, gate: [] };
-          },
-          agreement: (request) => ({
-            converged: request.reviews.cursor.agree === true,
-            reason: request.reviews.cursor.agree ? 'ready' : 'cursor still asking',
-            feedback: 'answer the session-store question in the plan',
-          }),
-        },
-      }),
-    });
-    assert.equal(result.converged, true);
-    assert.equal(result.rounds, 2);
-    assert.deepEqual(proposeRequests[1].questions, [
-      { seat: 'cursor', id: 'Q1', text: 'which store holds the sessions?' },
-    ]);
-    assert.match(proposeRequests[1].feedback, /answer the session-store question/);
-  } finally { item.cleanup(); }
-});
-
-test('seat suggestions reach the next proposal verbatim behind Claude feedback', async () => {
-  const item = fixture();
-  const proposeRequests = [];
-  let round = 0;
-  try {
-    await runPlan({
-      goal: 'Feedback carries the words', target: item.target, out: item.out, rounds: 2,
-      adapters: seats({
-        codexReview: async () => {
-          round++;
-          return round === 1 ? 'AGREE: no\nS7 P1: split the migration into two steps' : agreeingReview();
-        },
-        arbiter: {
-          propose: (request) => { proposeRequests.push(request); return { plan: planText, gate: [] }; },
-          agreement: { converged: false, reason: 'not yet', feedback: 'address the codex migration concern' },
-        },
-      }),
-    });
-    assert.match(proposeRequests[1].feedback, /address the codex migration concern/);
-    assert.match(proposeRequests[1].feedback, /codex S7 P1: split the migration into two steps/);
-  } finally { item.cleanup(); }
-});
-
-test('circling is measured, the pivot is judged, and FRESH re-storms all three seats', async () => {
-  const item = fixture();
-  let stormCount = 0;
-  const pivotRequests = [];
-  try {
-    const result = await executePlan({
-      goal: 'Recurring disagreement pivots', target: item.target, out: item.out, rounds: 4,
-      adapters: seats({
-        draft: async () => { stormCount++; return { plan: planText, gate: [] }; },
-        codexReview: async () => 'AGREE: no\nS1 P0: same objection every round',
-        arbiter: {
-          agreement: { converged: false, reason: 'codex still objects', feedback: 'try again' },
-          pivot: (request) => {
-            pivotRequests.push(request);
-            return { decision: 'fresh', reason: 'the framing is dead, restart' };
-          },
-        },
-      }),
-    });
-    assert.equal(result.converged, false);
-    // Three identical rounds of S1 is the deterministic evidence...
-    assert.ok(pivotRequests.length >= 1, 'circling must reach the arbiter');
-    // ...and the judged FRESH decision re-storms: codex drafted more than once.
-    assert.ok(stormCount >= 2, `FRESH must re-storm the seats (drafted ${stormCount} times)`);
-    assert.equal(result.pivotHistory[0].decision, 'fresh');
-    assert.equal(result.pivotHistory[0].unjudged, false);
-    assert.equal(result.pivotHistory[0].reason, 'the framing is dead, restart');
-  } finally { item.cleanup(); }
-});
-
-test('a judged conclude ends the plan as pivot-conclude', async () => {
-  const item = fixture();
-  try {
-    const result = await runPlan({
-      goal: 'Concluded by judgement', target: item.target, out: item.out,
-      adapters: seats({
-        codexReview: async () => 'AGREE: no\nS1 P0: unresolvable here',
-        arbiter: {
-          agreement: { converged: false, reason: 'stuck' },
-          pivot: { decision: 'conclude', reason: 'no framing survives this constraint' },
-        },
-      }),
-    });
-    assert.equal(result.converged, false);
-    assert.equal(result.reason, 'pivot-conclude');
-  } finally { item.cleanup(); }
-});
-
-test('an unjudged pivot falls back to the ladder and says so', async () => {
-  const item = fixture();
-  try {
-    const result = await runPlan({
-      goal: 'Ladder fallback', target: item.target, out: item.out, rounds: 5,
-      adapters: seats({
-        codexReview: async () => 'AGREE: no\nS1 P0: recurring',
-        arbiter: {
-          agreement: { converged: false, reason: 'stuck' },
-          pivot: { verdict: 'UNVERIFIED' },
-        },
-      }),
-    });
-    assert.equal(result.converged, false);
-    assert.ok(result.pivotHistory.length >= 1);
-    assert.equal(result.pivotHistory[0].unjudged, true);
-  } finally { item.cleanup(); }
-});
-
-test('round exhaustion reports rounds-exhausted and writes nothing', async () => {
-  const item = fixture();
-  try {
-    const result = await runPlan({
-      goal: 'Bounded rounds', target: item.target, out: item.out, rounds: 2,
-      adapters: seats({ codexReview: async () => 'AGREE: no' }),
-    });
-    assert.equal(result.converged, false);
-    assert.equal(result.reason, 'rounds-exhausted');
-    assert.equal(result.rounds, 2);
-    assert.equal(existsSync(join(item.out, 'plan.md')), false);
-  } finally { item.cleanup(); }
-});
-
-test('a capability veto is unoverrulable and its remedy drives the next round', async () => {
-  const item = fixture();
-  const feedbackSeen = [];
-  let vetoed = false;
-  try {
-    const result = await runPlan({
-      goal: 'Veto loops with remedy', target: item.target, out: item.out,
-      adapters: {
-        ...seats({
-          arbiter: {
-            propose: (request) => {
-              feedbackSeen.push(request.feedback ?? '');
-              return { plan: planText, gate: [] };
-            },
-            agreement: { converged: true, reason: 'seats agree' },
-          },
-        }),
-        checkCapability: async ({ seat }) => {
-          if (seat === 'reviewer' && !vetoed) {
-            vetoed = true;
-            return { capable: false, what: 'cannot run the named harness', why: 'no binary', alternative: 'use node --test' };
-          }
-          return { capable: true };
-        },
+test('production final-ruling parser rejects echoed, conflicting, and malformed decision fields', async t => {
+  const rulings = [
+    'DECISION: approve, DECISION: revise, or DECISION: stop',
+    'DECISION: approve\nDECISION: stop',
+    'DECISION: approve\nDECISION: approve',
+    'DECISION: approve if the revision works',
+    'DECISION: stop\nDECISION: approve',
+    'DECISION: approve\nDECISION : stop',
+  ];
+  for (const ruling of rulings) {
+    const options = setup(t);
+    let finalReply;
+    const result = await runPlan({ ...options, interactionMode: 'autonomous', adapters: adapters({
+      author: async () => ({ answer: artifact().replace('AGREE: yes', 'AGREE: no') }),
+      review: async r => {
+        const digest = /ARTIFACT_DIGEST: ([a-f0-9]{64})/.exec(r.plan)?.[1];
+        if (!r.plan.includes('Return DECISION:')) {
+          return { exitCode: 0, lastMessage: 'AGREE: no\nS1 P1: Continuing dispute\nARTIFACT_DIGEST: ' + digest };
+        }
+        finalReply = ruling + '\nREASON: This resolves the dispute.\nARTIFACT_DIGEST: ' + digest;
+        return { exitCode: 0, lastMessage: finalReply };
       },
-    });
-    assert.equal(result.converged, true);
-    assert.equal(result.rounds, 2, 'the veto must consume a round and redraft');
-    assert.equal(result.capabilityVetoes.length, 1);
-    assert.match(feedbackSeen[1], /Capability veto remedies/);
-    assert.match(feedbackSeen[1], /use node --test/);
-  } finally { item.cleanup(); }
+    }) });
+    assert.equal(result.approved, false, ruling);
+    assert.equal(result.reason, 'decision-unreadable', ruling);
+    assert.equal(result.messages.at(-1).content, finalReply);
+    assert.equal(existsSync(join(options.out, 'plan.md')), false);
+  }
 });
 
-test('dry-run validates output without invoking any seat', async () => {
-  const item = fixture();
-  let touched = 0;
-  try {
-    const result = await executePlan({
-      goal: 'Dry run only', target: item.target, out: item.out, dryRun: true,
-      adapters: {
-        verifySuperpowers: async () => VERIFIED_SUPERPOWERS,
-        draft: async () => { touched++; return { plan: planText, gate: [] }; },
-        runArbiter: async () => { touched++; return {}; },
+
+test('production selector retains the delivered selection and all failed-call usage before classification', async t => {
+  for (const outcome of ['valid', 'invalid', 'failed', 'timeout']) {
+    await t.test(outcome, async () => {
+    const options = { ...setup(t), candidates: 2 };
+    const selectionText = outcome === 'invalid'
+      ? 'Neither option addresses the invariant.\n<SELECTED_CANDIDATE>missing</SELECTED_CANDIDATE>'
+      : 'Choose the second approach because it preserves compatibility.\n<SELECTED_CANDIDATE>candidate-2</SELECTED_CANDIDATE>';
+    const stderr = 'Complete selector diagnostic: ' + outcome;
+    let reviews = 0;
+    const result = await runPlan({ ...options, adapters: adapters({
+      author: async r => ({ answer: artifact(r.request.candidateId), usage: { inputTokens: 10, outputTokens: 2 } }),
+      review: async r => {
+        if (r.plan.includes('# STORM plan selection seat')) return {
+          exitCode: outcome === 'failed' ? 1 : outcome === 'timeout' ? null : 0,
+          timedOut: outcome === 'timeout', lastMessage: selectionText, stderr,
+          usage: { inputTokens: 7, outputTokens: 1 },
+        };
+        reviews++;
+        return { exitCode: 0, lastMessage: 'AGREE: yes\nARTIFACT_DIGEST: '
+          + /ARTIFACT_DIGEST: ([a-f0-9]{64})/.exec(r.plan)?.[1] };
       },
+    }) });
+    assert.equal(result.tokens.total.inputTokens, 27, outcome);
+    assert.equal(result.checkpointState.candidateState.selection.lastMessage, selectionText, outcome);
+    assert.equal(result.checkpointState.candidateState.selection.stderr, stderr, outcome);
+    assert.equal(result.approved, outcome === 'valid', outcome);
+    assert.equal(reviews, outcome === 'valid' ? 1 : 0, outcome);
+    if (outcome !== 'valid') assert.equal(existsSync(join(options.out, 'plan.md')), false);
     });
-    assert.equal(result.dryRun, true);
-    assert.equal(result.converged, false);
-    assert.equal(touched, 0);
-  } finally { item.cleanup(); }
+  }
 });
 
-test('plan refuses an unverified seat before invoking any agent', async () => {
-  const item = fixture();
-  let touched = 0;
-  try {
-    await assert.rejects(executePlan({
-      goal: 'Refuse early', target: item.target, out: item.out,
-      adapters: {
-        verifySuperpowers: async () => ({
-          ok: false,
-          seats: {
-            ...VERIFIED_SUPERPOWERS.seats,
-            cursor: { seat: 'cursor', verified: false, evidence: 'missing manifest', version: null, path: null },
-          },
-        }),
-        draft: async () => { touched++; return { plan: planText, gate: [] }; },
-      },
-    }), /superpowers preflight failed/);
-    assert.equal(touched, 0);
-  } finally { item.cleanup(); }
-});
 
-test('the verified Cursor directory and raw goal reach the cursor seats', async () => {
-  const item = fixture();
-  const cursorCalls = [];
-  try {
-    await runPlan({
-      goal: 'Cursor gets the goal and the directory', target: item.target, out: item.out, rounds: 1,
-      adapters: seats({
-        review: async (request) => {
-          cursorCalls.push(request);
-          return agreeingReview();
-        },
-      }),
-    });
-    assert.equal(cursorCalls.length, 1);
-    assert.equal(cursorCalls[0].superpowersDir, 'C:/cursor-superpowers');
-    assert.equal(cursorCalls[0].goal, 'Cursor gets the goal and the directory');
-    assert.equal(typeof cursorCalls[0].plan, 'string');
-  } finally { item.cleanup(); }
-});
-
-test('a plan that never converges still reports what it spent', async () => {
-  // R1 from the field: queue summaries printed "Total tokens: 0" after hours
-  // of planning, because usage was only tallied on landed paths. The meter
-  // runs whether or not you arrive.
-  const usage = (inputTokens, outputTokens) => ({
-    inputTokens, cachedInputTokens: 0, outputTokens, reasoningOutputTokens: 0, cacheWriteTokens: 0,
-  });
-  const item = fixture();
-  try {
-    const result = await runPlan({
-      goal: 'Spend and fail honestly', target: item.target, out: item.out, rounds: 1,
-      adapters: seats({
-        draft: async () => ({ plan: planText, gate: [], usage: usage(1000, 50) }),
-        cursorDraft: async () => ({ plan: planText, gate: [], usage: usage(600, 30) }),
-        codexReview: async () => ({ agree: false, suggestions: [], questions: [], content: 'AGREE: no', usage: usage(200, 10) }),
-        arbiter: {
-          draft: { plan: planText, gate: [], usage: usage(400, 20) },
-          propose: { plan: planText, gate: [], usage: usage(300, 15) },
-          agreement: { converged: false, reason: 'codex declined', usage: usage(100, 5) },
-        },
-      }),
-    });
-    assert.equal(result.converged, false);
-    assert.equal(result.tokens.total.inputTokens, 2600,
-      'every seat call must be tallied: 1000+600+400+300+200+100');
-    assert.equal(result.tokens.total.outputTokens, 130);
-  } finally { item.cleanup(); }
-});
-
-test('the reviewer capability request travels as a file, whatever its size', async () => {
-  // spawn ENAMETOOLONG killed a twice-converged dogfood run at this exact
-  // call: the capability prompt embeds the whole converged plan, and argv has
-  // a hard ceiling. The request now rides a workspace file verbatim — quotes,
-  // newlines, and all — behind a short quote-free argv pointer.
-  const hugePlan = `judge this plan: ${'a "quoted line" with detail\n'.repeat(600)}`;
-  assert.ok(hugePlan.length > 8191, 'the fixture must exceed the cmd.exe limit');
-  let seen = null;
-  let argvPrompt = null;
-  const answer = await productionCapability({
-    seat: 'reviewer',
-    prompt: hugePlan,
-    target: '.',
-    verifierModel: 'test-model',
-    verifierTimeout: 50,
-    verify: async ({ prompt }) => {
-      argvPrompt = prompt;
-      assertUsablePrompt(prompt);
-      const requestPath = prompt
-        .replace(/^Read /, '')
-        .replace(/ and follow it exactly.*$/, '');
-      seen = readFileSync(requestPath, 'utf8');
-      return { launchFailed: false, timedOut: false, findings: '{"capable":true}' };
+test('default candidate drafts repair delivered malformed artifacts before selection without spending a round', async t => {
+  const options = { ...setup(t), candidates: undefined, rounds: 1 };
+  const attempts = new Map(), brokenReplies = [];
+  let authors = 0, reviews = 0;
+  const result = await runPlan({ ...options, adapters: adapters({
+    author: async r => {
+      authors++;
+      const id = r.request.candidateId, attempt = (attempts.get(id) ?? 0) + 1;
+      attempts.set(id, attempt);
+      const broken = '<PLAN_MD>' + id + ' missing gate</PLAN_MD>';
+      if (attempt === 1) {
+        brokenReplies.push(broken);
+        return { answer: broken, usage: { inputTokens: 10 } };
+      }
+      assert.match(r.prompt, /planner did not return PLAN_MD and GATE_JSON artifacts/);
+      assert.ok(r.prompt.includes(broken));
+      return { answer: artifact(id + ' repaired'), usage: { inputTokens: 10 } };
     },
-  });
-  assert.equal(answer, '{"capable":true}');
-  assert.ok(argvPrompt.length < 400, 'argv carries only the pointer');
-  assert.match(seen, /a "quoted line" with detail/);
-  assert.ok(seen.length > 8191, 'the file carries the whole request verbatim');
-});
-
-test('the plan cursor draft seat splits a dead process from an unparseable answer', async () => {
-  // Before this, a launch failure fed an EMPTY result to parseDraftArtifact,
-  // which threw "did not return PLAN_MD and GATE_JSON" and discarded the
-  // ActionRequiredError sitting in stderr. The split was inverted in both
-  // directions: a dead process read as a bad answer, and the only text that
-  // could name the account condition was thrown away. Mirrors the decompose
-  // draft seats (63c788f).
-  await assert.rejects(
-    () => productionCursorDraft({
-      goal: 'ship it', target: '.', verifierModel: 'test-model', timeoutMs: 50,
-      verify: async () => ({
-        launchFailed: true,
-        timedOut: false,
-        stderr: "ActionRequiredError: You've hit your usage limit",
-        findings: '',
-        plan: '',
-      }),
-    }),
-    (error) => {
-      assert.match(error.message, /cursor draft seat failed to launch/);
-      assert.match(error.message, /usage limit/, 'the stderr explanation survives to the storm line');
-      assert.equal(classifySeatOutage(error.message).kind, 'quota-exhausted');
-      return true;
+    review: async r => {
+      reviews++;
+      if (r.plan.includes('# STORM plan selection seat')) return {
+        exitCode: 0, lastMessage: '<SELECTED_CANDIDATE>candidate-2</SELECTED_CANDIDATE>',
+        usage: { inputTokens: 7 },
+      };
+      assert.match(r.plan, /candidate-2 repaired/);
+      return { exitCode: 0, lastMessage: 'AGREE: yes\nARTIFACT_DIGEST: '
+        + /ARTIFACT_DIGEST: ([a-f0-9]{64})/.exec(r.plan)?.[1], usage: { inputTokens: 3 } };
     },
-  );
-
-  await assert.rejects(
-    () => productionCursorDraft({
-      goal: 'ship it', target: '.', verifierModel: 'test-model', timeoutMs: 50,
-      verify: async () => ({ launchFailed: false, timedOut: true, stderr: '', findings: '', plan: '' }),
-    }),
-    /cursor draft seat timed out/,
-  );
-
-  // Discrimination control: a seat that RAN and answered badly still gets the
-  // parse error, not a launch-class failure.
-  await assert.rejects(
-    () => productionCursorDraft({
-      goal: 'ship it', target: '.', verifierModel: 'test-model', timeoutMs: 50,
-      verify: async () => ({ launchFailed: false, timedOut: false, findings: 'here is my plan, prose only', plan: '' }),
-    }),
-    /did not return PLAN_MD and GATE_JSON/,
-  );
+  }) });
+  assert.equal(result.approved, true);
+  assert.equal(result.rounds, 1);
+  assert.equal(authors, 6);
+  assert.equal(reviews, 2);
+  assert.equal(result.tokens.total.inputTokens, 70);
+  for (const reply of brokenReplies) assert.ok(result.messages.some(message => message.content === reply));
+  assert.equal(result.messages.filter(message => message.role === 'author').length, 6);
+  assert.equal(result.checkpointState.artifactRepairs, 3);
+});
+test('default perpetually malformed candidates exhaust one shared repair budget and retain delivered evidence', async t => {
+  const options = { ...setup(t), candidates: undefined };
+  let authors = 0, reviews = 0;
+  const result = await runPlan({ ...options, adapters: adapters({
+    author: async () => {
+      authors++;
+      return { answer: '<PLAN_MD>Missing evidence artifact</PLAN_MD>', usage: { inputTokens: 10 } };
+    },
+    review: async () => { reviews++; return { exitCode: 0, lastMessage: 'unused' }; },
+  }) });
+  assert.equal(result.reason, 'proposal-irreparable');
+  assert.equal(result.approved, false);
+  assert.equal(authors, 8, 'three initial candidates and at most five repair calls');
+  assert.equal(reviews, 0);
+  assert.equal(result.tokens.total.inputTokens, 80);
+  assert.equal(result.messages.length, 8);
+  assert.equal(result.checkpointState.artifactRepairs, 6);
+  assert.ok(result.messages.every(message => message.content === '<PLAN_MD>Missing evidence artifact</PLAN_MD>'));
+  assert.equal(existsSync(join(options.out, 'plan.md')), false);
+});
+test('candidate repairs and later proposal repairs consume the same five-repair allowance', async t => {
+  const options = { ...setup(t), candidates: undefined };
+  let candidateOneCalls = 0, authorCalls = 0, reviews = 0;
+  const result = await runPlan({ ...options, adapters: adapters({
+    author: async r => {
+      authorCalls++;
+      if (r.request.previousProposal) return { answer: '<PLAN_MD>Malformed revision</PLAN_MD>' };
+      if (r.request.candidateId === 'candidate-1' && ++candidateOneCalls <= 4) {
+        return { answer: '<PLAN_MD>Malformed first alternative</PLAN_MD>' };
+      }
+      return { answer: artifact(r.request.candidateId) };
+    },
+    review: async r => {
+      if (r.plan.includes('# STORM plan selection seat')) return {
+        exitCode: 0, lastMessage: '<SELECTED_CANDIDATE>candidate-1</SELECTED_CANDIDATE>',
+      };
+      reviews++;
+      return { exitCode: 0, lastMessage: 'AGREE: no\nS1 P1: Revise it\nARTIFACT_DIGEST: '
+        + /ARTIFACT_DIGEST: ([a-f0-9]{64})/.exec(r.plan)?.[1] };
+    },
+  }) });
+  assert.equal(result.approved, false);
+  assert.equal(result.reason, 'proposal-irreparable');
+  assert.equal(result.checkpointState.artifactRepairs, 6);
+  assert.equal(authorCalls, 9);
+  assert.equal(reviews, 1);
 });
 
-test('the plan cursor review seat carries its launch stderr onto the unavailable row', async () => {
-  const row = await productionCursorReview({
-    goal: 'ship it', plan: 'PLAN', gate: [], round: 1, target: '.',
-    verifierModel: 'test-model', timeoutMs: 50,
-    verify: async () => ({
-      launchFailed: true,
-      timedOut: false,
-      stderr: 'ActionRequiredError: Named models unavailable Free plans can only use Auto.',
-      findings: '',
-      plan: '',
-    }),
+const superpowers = { seats: { codex: { verified:true }, claude: { verified:true } } };
+const artifact = (text = 'Plan with "quotes"\nand newlines') =>
+  'AGREE: yes\n<PLAN_MD>' + text + '</PLAN_MD>\n<GATE_JSON>[{"bin":"node","args":["--test"]}]</GATE_JSON>';
+function setup(t) {
+  const target = mkdtempSync(join(tmpdir(),'two-agent-plan-'));
+  t.after(() => rmSync(target,{recursive:true,force:true}));
+  return { target, out:join(target,'out'), goal:'Deliver the requested behavior', superpowers, candidates:1 };
+}
+function adapters({ author, review } = {}) {
+  return {
+    runArbiter: author ?? (async () => ({ answer:artifact() })),
+    runExecutor: review ?? (async r => ({
+      exitCode:0, lastMessage:'AGREE: yes\nARTIFACT_DIGEST: ' + /ARTIFACT_DIGEST: ([a-f0-9]{64})/.exec(r.plan)?.[1],
+    })),
+  };
+}
+test('plan uses Claude author and Codex read-only review with intact artifact bytes and writes approved files', async t => {
+  const options = setup(t), seen = [];
+  const result = await runPlan({...options, adapters:adapters({
+    author:async r => { seen.push(['claude',r]); return {answer:artifact()}; },
+    review:async r => { seen.push(['codex',r]); return {
+      exitCode:0,lastMessage:'AGREE: yes\nARTIFACT_DIGEST: ' + /ARTIFACT_DIGEST: ([a-f0-9]{64})/.exec(r.plan)?.[1],
+    }; },
+  })});
+  assert.equal(result.approved,true);
+  assert.deepEqual(seen.map(([provider])=>provider),['claude','codex']);
+  assert.equal(seen[1][1].sandbox,'read-only');
+  assert.match(seen[1][1].plan,/Plan with "quotes"\nand newlines/);
+  assert.equal(readFileSync(result.planPath,'utf8'),'Plan with "quotes"\nand newlines\n');
+  assert.deepEqual(JSON.parse(readFileSync(result.gatePath,'utf8')),[{bin:'node',args:['--test']}]);
+  assert.match(result.approval.artifactDigest,/^[a-f0-9]{64}$/);
+});
+test('plan feedback reaches the real author prompt and review sees its revision', async t => {
+  let authors = 0, reviews = 0;
+  const result = await runPlan({...setup(t),adapters:adapters({
+    author:async r => {
+      authors++;
+      if(authors===2) assert.match(r.prompt,/S1 P1: Preserve "A"\nSecond objection line/);
+      return {answer:artifact(authors===1?'old':'revised')};
+    },
+    review:async r => {
+      reviews++;
+      if(reviews===2) assert.match(r.plan,/revised/);
+      return {exitCode:0,lastMessage:(reviews===1?'AGREE: no\nS1 P1: Preserve "A"\nSecond objection line':'AGREE: yes')
+        +'\nARTIFACT_DIGEST: '+/ARTIFACT_DIGEST: ([a-f0-9]{64})/.exec(r.plan)?.[1]};
+    },
+  })});
+  assert.equal(result.approved,true);
+  assert.equal(authors,2);
+});
+test('standalone manual disputes expose pending state and do not write approved artifacts', async t => {
+  const options=setup(t);
+  const result=await runPlan({...options,adapters:adapters({
+    review:async r=>({exitCode:0,lastMessage:'AGREE: no\nS1 P1: unresolved\nARTIFACT_DIGEST: '
+      +/ARTIFACT_DIGEST: ([a-f0-9]{64})/.exec(r.plan)?.[1]}),
+  })});
+  assert.equal(result.reason,'needs-decision');
+  assert.equal(result.checkpointState.interactionMode,'manual');
+  assert.equal(existsSync(join(options.out,'plan.md')),false);
+});
+test('dry run and missing provider verification never launch model CLIs', async t => {
+  const options=setup(t);
+  const boundary={runArbiter:()=>assert.fail('paid author call'),runExecutor:()=>assert.fail('paid review call')};
+  const dry=await runPlan({...options,dryRun:true,adapters:boundary});
+  assert.equal(dry.dryRun,true);
+  await assert.rejects(runPlan({...options,superpowers:{seats:{codex:{verified:true}}},adapters:boundary}),/Claude|claude/);
+});
+test('planning preflight checks the actual two providers without inventing Cursor evidence', () => {
+  const result=applySuperpowersRequirement(superpowers,{}, {requiredSeats:['codex','claude']});
+  assert.equal(result.ok,true);
+  assert.deepEqual(Object.keys(result.verification.seats).sort(),['claude','codex']);
+});
+test('candidate alternatives use Claude authorship and Codex reviews exact selected approach', async t => {
+  const options=setup(t);
+  const result=await runPlanCandidateSet({...options,count:2,interactionMode:'autonomous',
+    draft:async r=>({plan:r.candidateId,gate:[],agree:true,readable:true,content:'AGREE: yes'}),
+    select:async r=>({selectedCandidateId:'candidate-2',reason:'Better compatibility'}),
+    review:async r=>({...{agree:true,readable:true,content:'AGREE: yes'},artifactDigest:r.artifactDigest}),
   });
-  assert.equal(row.unavailable, true);
-  assert.equal(row.agree, false, 'an absent seat never consents');
-  assert.equal(row.readable, false);
-  assert.equal(classifySeatOutage(row.error).kind, 'config-refusal',
-    'a review-only outage must be classifiable, or a capped account reads as an anonymous absence');
-
-  const answered = await productionCursorReview({
-    goal: 'ship it', plan: 'PLAN', gate: [], round: 1, target: '.',
-    verifierModel: 'test-model', timeoutMs: 50,
-    verify: async () => ({ launchFailed: false, timedOut: false, findings: 'AGREE: yes', plan: '' }),
-  });
-  assert.equal(answered.unavailable, undefined, 'positive control: a seat that answered is not unavailable');
-  assert.equal(answered.agree, true);
+  assert.equal(result.selected.id,'candidate-2');
+  assert.equal(result.approved,true);
+  assert.equal(result.approval.decidedBy,'codex');
+  assert.equal(result.selected.author,'claude');
 });

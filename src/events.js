@@ -448,6 +448,9 @@ export function detailFor(event) {
         .join(' ');
       return `drafts${tier}${round} ${seats}`.trimEnd();
     }
+    if (event.type === 'review' && (event.speaker || event.provider)) {
+      return `${oneLine(event.provider ?? event.speaker)} role=${oneLine(event.role)} stance=${oneLine(event.stance ?? 'recorded')}${tier}${round}`;
+    }
     if (event.type === 'review') {
       const state = event.unavailable === true
         ? 'UNAVAILABLE'
@@ -461,6 +464,13 @@ export function detailFor(event) {
         ? ` questions=${oneLine(event.questionCount)}`
         : '';
       return `seat=${oneLine(event.seat)} ${state}${ids}${questions}${tier}${round}`;
+    }
+    if (event.speaker || event.provider) {
+      return `${oneLine(event.provider ?? event.speaker)} role=${oneLine(event.role)} stance=${oneLine(event.stance ?? 'recorded')}${tier}${round}`;
+    }
+    if (event.approved !== undefined && ['agreement', 'finish'].includes(event.type)) {
+      return `approved=${oneLine(event.approved)} converged=${oneLine(event.converged)} mode=${oneLine(event.interactionMode ?? 'not recorded')}`
+        + ` decidedBy=${oneLine(event.approval?.decidedBy ?? 'none')}${tier}${round}`;
     }
     if (event.type === 'proposal') {
       return `${event.ok ? 'composed' : 'FAILED'}${event.repair ? ` REPAIR ${oneLine(event.repair)}` : ''}${tier}${round}`;

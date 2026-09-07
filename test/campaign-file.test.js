@@ -45,6 +45,22 @@ function baseDocument(units = [
   return { target: 'target', gate: 'gate.json', units };
 }
 
+test('campaign files normalize provider aliases and mode and reject obsolete or conflicting choices', () => {
+  const root = makeFixture();
+  try {
+    const load = fields => loadCampaignFile(writeCampaign(root, 'providers', { ...baseDocument(), ...fields }));
+    assert.equal(load({}).interactionMode, 'manual');
+    const configured = load({ mode: 'autonomous', claudeModel: 'sonnet', codexModel: 'gpt-6-astra', codexEffort: 'high', arbiterModel: 'sonnet' });
+    assert.equal(configured.interactionMode, 'autonomous');
+    assert.equal(configured.claudeModel, 'sonnet');
+    assert.equal(configured.codexModel, 'gpt-6-astra');
+    assert.throws(() => load({ claudeModel: 'sonnet', arbiterModel: 'opus' }), /conflict/);
+    assert.throws(() => load({ verifierModel: 'auto' }), /obsolete.*claude-model/);
+    assert.throws(() => load({ plannerModel: 'x' }), /obsolete.*claude-model/);
+    assert.throws(() => load({ mode: 'automatic' }), /manual.*autonomous/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test('a declared graph and positional flags normalize identically, while one changed edge does not', () => {
   const root = makeFixture();
   try {
@@ -56,7 +72,7 @@ test('a declared graph and positional flags normalize identically, while one cha
       tokenBudget: 9000,
       executorModel: 'executor-X',
       executorEffort: 'medium',
-      verifierModel: 'verifier-Y',
+      claudeModel: 'verifier-Y',
       units: [
         { id: 'A', task: 'tasks/a.md', unitKind: 'node' },
         { id: 'B', task: 'tasks/b.md', unitKind: 'node' },
@@ -73,7 +89,7 @@ test('a declared graph and positional flags normalize identically, while one cha
       '--unit-kind', 'node', '--target', join(root, 'target'), '--gate', join(root, 'gate.json'),
       '--gate-retries', '1', '--concurrency', '3', '--token-budget', '9000',
       '--executor-model', 'executor-X', '--executor-effort', 'medium',
-      '--verifier-model', 'verifier-Y',
+      '--claude-model', 'verifier-Y',
     ]);
     const { command: _command, ...positionalCampaign } = positional;
     assert.deepEqual(declared, positionalCampaign);

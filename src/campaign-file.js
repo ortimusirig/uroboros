@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { dirname, isAbsolute, resolve } from 'node:path';
 import {
+  normalizeProviderOptions,
   DEFAULT_CONCURRENCY,
   DEFAULT_ROUNDS,
   DEFAULT_TOKEN_BUDGET,
@@ -15,7 +16,7 @@ import { UNIT_KINDS } from './events.js';
 
 const TOP_LEVEL_KEYS = new Set([
   'target', 'gate', 'gateRetries', 'concurrency', 'tokenBudget', 'rounds',
-  'pivotCandidates',
+  'pivotCandidates', 'mode', 'claudeModel', 'codexModel', 'codexEffort', 'plannerModel',
   'arbiterModel',
   'executorModel', 'executorEffort', 'verifierModel', 'units',
 ]);
@@ -247,7 +248,10 @@ export function loadCampaignFile(file) {
     );
   }
 
+  const providers = normalizeProviderOptions(document);
   const loaded = {
+    ...providers,
+    mode: providers.interactionMode,
     tasks,
     candidateSet,
     target,
@@ -256,10 +260,9 @@ export function loadCampaignFile(file) {
     ...(document.pivotCandidates === undefined
       ? {}
       : { pivotCandidates: document.pivotCandidates }),
-    executorModel: document.executorModel,
-    executorEffort: document.executorEffort,
-    verifierModel: document.verifierModel,
-    arbiterModel: document.arbiterModel,
+    executorModel: providers.codexModel,
+    executorEffort: providers.codexEffort,
+    arbiterModel: providers.claudeModel,
     concurrency,
     tokenBudget,
   };

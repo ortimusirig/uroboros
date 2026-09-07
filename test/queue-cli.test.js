@@ -7,7 +7,7 @@ const VERIFIED_SUPERPOWERS = {
   ok: true,
   seats: {
     codex: { seat: 'codex', verified: true, evidence: 'registry', version: '6.3.0' },
-    cursor: { seat: 'cursor', verified: true, evidence: 'manifest', version: '6.0.2' },
+    claude: { seat: 'cursor', verified: true, evidence: 'manifest', version: '6.0.2' },
     claude: { seat: 'claude', verified: true, evidence: 'manifest', version: '6.0.2' },
   },
 };
@@ -26,6 +26,7 @@ test('the queue command sends parsed limits, mode, target, and runtime seams to 
     command: 'queue',
     file: 'queue.json',
     mode: 'autonomous',
+    claudeModel: undefined, codexModel: undefined, codexEffort: undefined,
     maxRuns: 2,
     tokenBudget: 5000,
     acceptGoalSpec: 'goals/G1-first/spec.md',
@@ -44,6 +45,7 @@ test('the queue command sends parsed limits, mode, target, and runtime seams to 
     file: 'queue.json',
     target: 'C:/target',
     mode: 'autonomous',
+    claudeModel: undefined, codexModel: undefined, codexEffort: undefined,
     maxRuns: 2,
     tokenBudget: 5000,
     acceptGoalSpec: 'goals/G1-first/spec.md',
@@ -100,15 +102,15 @@ test('queue refuses an unverified seat before creating a runtime or running the 
       ok: false,
       seats: {
         ...VERIFIED_SUPERPOWERS.seats,
-        cursor: {
-          seat: 'cursor', verified: false, evidence: 'Cursor manifest missing', version: null,
-          remediation: 'Cursor: URO_SUPERPOWERS_DIR=<directory-with-.cursor-plugin>',
+        claude: {
+          seat: 'cursor', verified: false, evidence: 'Claude manifest missing', version: null,
+          remediation: 'Claude: URO_SUPERPOWERS_DIR=<directory-with-.claude-plugin>',
         },
       },
     }),
     createRuntime: () => { runtimeCreations++; return {}; },
     runQueueFn: async () => { queueCalls++; return {}; },
-  }), /Cursor.*[.]cursor-plugin/i);
+  }), /Claude.*[.]claude-plugin/i);
   assert.equal(runtimeCreations, 0);
   assert.equal(queueCalls, 0);
 });

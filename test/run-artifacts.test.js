@@ -11,6 +11,7 @@ import {
 } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { homedir } from 'node:os';
 import { run as executeRun } from '../src/run.js';
 import { withVerifiedSuperpowers } from '../fixtures/verified-superpowers.mjs';
 import { generateRunJournal } from '../src/run-journal.js';
@@ -20,7 +21,7 @@ import { isolate } from '../src/isolation.js';
 
 const run = (options) => executeRun(withVerifiedSuperpowers(options));
 
-const TEST_ROOT = fileURLToPath(new URL('../.ccc-test-run-artifacts/', import.meta.url));
+const TEST_ROOT = join(process.env.URO_TEST_SCRATCH_ROOT ?? (process.platform === 'win32' ? 'C:/ccc-test' : join(homedir(), '.ccc-test')), 'run-artifacts');
 const PROJECT_RUNS = fileURLToPath(new URL('../docs/runs/', import.meta.url));
 
 function temporaryDirectory(prefix) {

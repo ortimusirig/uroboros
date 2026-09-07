@@ -1,21 +1,18 @@
-import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
 import { StringDecoder } from 'node:string_decoder';
 import { spawnCapture } from './spawn.js';
+import { buildClaudeArgs, parseArbiterStream, runArbiter } from './arbiter.js';
+import { materializeReviewBundle } from './review.js';
 import { reportEvent } from './events.js';
-import { annotateUsageConsistency, normalizeCursorUsage } from './usage.js';
+import { addUsage, annotateUsageConsistency } from './usage.js';
 import { resolveStageTimeouts } from './timeouts.js';
-import {
-  inspectSuperpowersDirectory,
-  resolveSuperpowersDir,
-} from './superpowers.js';
 import { inspectWorktreeActivity } from './liveness-evidence.js';
 import {
   createProgressWatchdog,
   resolveExecutorThresholds,
 } from './stall-watchdog.js';
 
-export const DEFAULT_VERIFIER_MODEL = 'cursor-grok-4.5-high';
+export const DEFAULT_VERIFIER_MODEL = 'sonnet';
 
 // Caps on retained review evidence. Candidate text is bounded before the verdict
 // rules see it, so the exact judged strings can always be retained in run facts.
@@ -61,7 +58,6 @@ export function classifySeatOutage(message) {
   return null;
 }
 
-export const VERIFIER_PLUGIN_DIR = fileURLToPath(new URL('../cursor-plugin', import.meta.url));
 
 export function assertNoForbiddenFlags(args) {
   for (const argument of args) {
@@ -77,14 +73,16 @@ export function assertNoForbiddenFlags(args) {
   }
 }
 
-function assertReviewHasNoMode(args) {
-  const mode = args.find((argument) => argument === '--mode'
-    || (typeof argument === 'string' && argument.startsWith('--mode=')));
-  if (mode !== undefined) throw new Error('review pass must omit --mode');
-}
 
-export const DEFAULT_PROMPT = '/uro-verify Read CHANGES.diff and judge the change for correctness and blocking bugs; make the final line exactly NO_BLOCKERS or exactly ISSUES.';
-export const REVIEW_PROMPT = '/uro-review Review TASK.md and CHANGES.diff in one report: correctness and blocking bugs, AND whether the diff fully implements every TASK.md requirement — an unmet requirement is a finding like any other. Write every finding to __uro_review/REVIEW.md with a severity, and every referenced executable test under __uro_review/tests/; write nothing outside __uro_review/. A review with no findings is still a report — write REVIEW.md saying so.';
+export const DEFAULT_PROMPT = 'Read CHANGES.diff and judge the change for correctness and blocking bugs. Remain read-only. Explain your reasoning and make the final line exactly NO_BLOCKERS or exactly ISSUES.';
+export const REVIEW_PROMPT = [
+  '# Claude execution reviewer',
+  'You are read-only. Read TASK.md, CHANGES.diff and the command evidence. Do not write files or run commands that modify the workspace.',
+  'Review correctness and fulfillment of the original requirements. Codex implements and may rebut your findings. Answer its actual arguments; you are the execution reviewer and final execution authority in autonomous mode. Unresolved manual disputes belong to the human.',
+  'Return one JSON artifact bundle: {"version":1,"report":"Markdown report","tests":[{"path":"tests/f1.test.js","content":"executable test source"}],"dispositions":[{"id":"F1","status":"resolved|withdrawn|upheld","reason":"answer to Codex and evidence"}]}. The harness writes the report and tests.',
+  'For each finding use Markdown: ## F1, Severity: blocking|suggestion, Category: ..., Description: ..., Test: __uro_review/tests/f1.test.js, each on its own line. Blocking findings need a real executable test included in the bundle. A clean review still needs a substantive nonblank report.',
+  'Explicitly dispose of EVERY previously open finding with reasons tied to the current diff and evidence. Omission does not close an issue. Keep IDs stable. Include any still-required prior test files. Do not change product intent to eliminate a finding.',
+].join('\n\n');
 
 export function assertUsablePrompt(prompt) {
   if (prompt.includes('"')) throw new Error('verifier prompt must not contain a double quote');
@@ -92,87 +90,7 @@ export function assertUsablePrompt(prompt) {
   if (prompt.trim() === '') throw new Error('verifier prompt must not be empty');
 }
 
-export function buildCursorArgs({
-  model = DEFAULT_VERIFIER_MODEL,
-  prompt = DEFAULT_PROMPT,
-  env = process.env,
-  home = homedir(),
-  superpowersDir,
-} = {}) {
-  assertUsablePrompt(prompt);
-  const resolvedSuperpowersDir = superpowersDir === undefined
-    ? resolveSuperpowersDir({ seat: 'cursor', env, home })
-    : superpowersDir;
-  if (resolvedSuperpowersDir !== null) {
-    const inspected = inspectSuperpowersDirectory({
-      path: resolvedSuperpowersDir,
-      seat: 'cursor',
-    });
-    if (!inspected.ok) {
-      throw new Error(`Cursor superpowers plugin directory is unusable: ${inspected.reason}`);
-    }
-  }
-  // --trust clears Cursor's "Workspace Trust Required" gate for READING the checkout; without
-  // it the agent exits 1 with no output and every review is UNVERIFIED. It is
-  // NOT one of the forbidden flags (--force/--yolo/-f/--approve-mcps auto-APPROVE actions);
-  // --mode plan keeps the agent read-only regardless. Verified live (exit 0, NO_BLOCKERS).
-  const args = [
-    '-p', prompt, '--output-format', 'stream-json', '--mode', 'plan', '--trust',
-    '--plugin-dir', VERIFIER_PLUGIN_DIR,
-    ...(resolvedSuperpowersDir === null
-      ? []
-      : ['--plugin-dir', resolvedSuperpowersDir]),
-    '--model', model,
-  ];
-  assertNoForbiddenFlags(args);
-  return args;
-}
 
-export function buildCursorReviewArgs({
-  model = DEFAULT_VERIFIER_MODEL,
-  prompt = REVIEW_PROMPT,
-  env = process.env,
-  home = homedir(),
-  superpowersDir,
-  platform = process.platform,
-} = {}) {
-  assertUsablePrompt(prompt);
-  const resolvedSuperpowersDir = superpowersDir === undefined
-    ? resolveSuperpowersDir({ seat: 'cursor', env, home })
-    : superpowersDir;
-  if (resolvedSuperpowersDir !== null) {
-    const inspected = inspectSuperpowersDirectory({
-      path: resolvedSuperpowersDir,
-      seat: 'cursor',
-    });
-    if (!inspected.ok) {
-      throw new Error(`Cursor superpowers plugin directory is unusable: ${inspected.reason}`);
-    }
-  }
-  // Cursor's own sandbox exists only on macOS and Linux. Passing it anywhere else
-  // makes the CLI exit 1 with "Sandbox mode is enabled but not available on this
-  // system", which failed EVERY reviewer-write pass on Windows — the primary
-  // target — so the reviewer never wrote a single test. Measured against the real
-  // binary: with the flag it errors, without it the same prompt returns normally.
-  //
-  // The flag was never the guarantee. The reviewer's writes are scoped by
-  // snapshotting the worktree around the review and restoring everything outside
-  // __uro_review/, which is platform-independent and does the actual confining.
-  // Where Cursor's sandbox exists it is kept as a second layer; where it does not,
-  // its absence must not disable the capability.
-  const sandboxed = platform === 'darwin' || platform === 'linux';
-  const args = [
-    '-p', prompt, '--output-format', 'stream-json', '--trust',
-    ...(sandboxed ? ['--sandbox', 'enabled'] : []),
-    '--plugin-dir', VERIFIER_PLUGIN_DIR,
-    ...(resolvedSuperpowersDir === null
-      ? []
-      : ['--plugin-dir', resolvedSuperpowersDir]),
-    '--model', model,
-  ];
-  assertNoForbiddenFlags(args);
-  return args;
-}
 
 export function extractPlanArtifact(streamText) {
   let artifact = null;
@@ -324,6 +242,13 @@ export function deriveVerdictFromEvidence(evidence) {
   const assistant = candidates.assistant ?? {};
   const plan = candidates.plan ?? {};
 
+  if (evidence?.policy === 'claude-terminal') {
+    const verdict = !evidence.termination && result.present && result.usable
+      ? finalLineVerdict(result.text ?? '') : null;
+    return { verdict: verdict ?? 'UNVERIFIED', source: verdict ? 'result' : 'none',
+      judgedText: result.text ?? '', judgedTextTruncated: result.truncated === true };
+  }
+
   const resultVerdict = result.present && result.usable
     ? finalLineVerdict(result.text ?? '')
     : null;
@@ -437,17 +362,6 @@ export function parseVerdict(streamText) {
 }
 
 
-function extractResultUsage(streamText) {
-  let rawUsage;
-  for (const line of streamText.split('\n')) {
-    const s = line.trim();
-    if (!s) continue;
-    let event;
-    try { event = JSON.parse(s); } catch { continue; }
-    if (event.type === 'result') rawUsage = event.usage;
-  }
-  return normalizeCursorUsage(rawUsage);
-}
 
 function createVerifierStreamObserver(onEvent) {
   const decoder = new StringDecoder('utf8');
@@ -480,73 +394,25 @@ function createVerifierStreamObserver(onEvent) {
   };
 }
 
-export async function runReviewPass({
-  cwd,
-  bin = 'agent',
-  prompt = REVIEW_PROMPT,
-  extraArgv = [],
-  model = DEFAULT_VERIFIER_MODEL,
-  timeoutMs,
-  reporter,
-  runId,
-  env = process.env,
-  home = homedir(),
-  superpowersDir,
-  platform = process.platform,
-  signal,
-  beforeKill,
-  onLiveness,
-  spawnProcess,
-  killProcessTree,
-  now = Date.now,
-  setTimer = setTimeout,
-  clearTimer = clearTimeout,
-}) {
-  const resolvedTimeoutMs = timeoutMs === undefined
-    ? resolveStageTimeouts(env).verifier
-    : timeoutMs;
-  const args = [...extraArgv, ...buildCursorReviewArgs({
-    platform,
-    prompt, model, env, home, superpowersDir,
-  })];
-  assertNoForbiddenFlags(args);
-  assertReviewHasNoMode(args);
-  const launchEnv = { ...process.env, ...env };
-  reportEvent(reporter, runId, 'verify', 'start', { bin, args, model, pass: 'review' });
-  const result = await spawnCapture(bin, args, {
-    cwd,
-    env: launchEnv,
-    timeoutMs: resolvedTimeoutMs,
-    timeoutSetting: 'URO_VERIFIER_TIMEOUT_MS',
-    signal,
-    beforeKill,
-    spawnProcess,
-    killProcessTree,
-    now,
-    setTimer,
-    clearTimer,
-    onStdout: () => {
-      try { onLiveness?.(); } catch { /* observation cannot alter the review pass */ }
-    },
+export async function runReviewPass(options) {
+  const { cwd, round = 1, diffDigest = '', prompt = REVIEW_PROMPT,
+    extraArgv = [], env = process.env, timeoutMs = resolveStageTimeouts(env).verifier } = options;
+  assertNoForbiddenFlags(extraArgv);
+  if (extraArgv.length) throw new Error('Claude review does not accept extra command flags');
+  const result = await runArbiter({ ...options, prompt, timeoutMs, stage: 'verify',
+    role: 'execution-reviewer',
+    onStdout: () => { try { options.onLiveness?.(); } catch {} },
   });
-  const usage = extractResultUsage(result.stdout);
-  const review = annotateUsageConsistency({
-    exitCode: result.code,
-    launchFailed: result.timedOut || result.code !== 0,
-    timedOut: result.timedOut,
-    timeoutMs: result.timeoutMs,
-    ...(result.timeoutReason ? { timeoutReason: result.timeoutReason } : {}),
-    ...(result.code === 0 ? {} : { stderr: result.stderr.slice(0, 500) }),
-    usage,
-  });
-  reportEvent(reporter, runId, 'verify', 'finish', {
-    code: result.code,
-    pass: 'review',
-    timedOut: result.timedOut,
-    ...(usage ? { tokens: usage } : {}),
-    usageConsistency: review.usageConsistency.status,
-  });
-  return review;
+  if (result.launchFailed || !result.resultSeen || !result.resultUsable || !result.answer.trim()) {
+    return { ...result, artifact: null, artifactFailed: true };
+  }
+  try {
+    const artifact = await materializeReviewBundle({ cwd, bundle: result.answer, round, diffDigest });
+    return { ...result, artifact, artifactFailed: false };
+  } catch (error) {
+    return { ...result, artifact: null, artifactFailed: true,
+      error: error instanceof Error ? error.message : String(error) };
+  }
 }
 
 // One declared retry absorbs a transient launch refusal — the seat process
@@ -562,14 +428,16 @@ export async function runVerifier(options) {
   if (!first.launchFailed || first.timedOut) return first;
   reportEvent(options.reporter, options.runId, 'verify', 'retry', {
     pass: options.pass,
-    reason: String(first.stderr ?? '').trim().slice(0, 200) || 'launch failed with no stderr',
+    reason: String(first.stderr ?? '').trim() || 'launch failed with no stderr',
   });
-  return runVerifierAttempt(options);
+  const second = await runVerifierAttempt(options);
+  return annotateUsageConsistency({ ...second, attempts: [first, second],
+    usage: first.usage == null && second.usage == null ? null : addUsage(first.usage, second.usage) });
 }
 
 async function runVerifierAttempt({
   cwd,
-  bin = 'agent',
+  bin = 'claude',
   prompt = DEFAULT_PROMPT,
   extraArgv = [],
   model = DEFAULT_VERIFIER_MODEL,
@@ -602,9 +470,9 @@ async function runVerifierAttempt({
   const thresholds = resolveExecutorThresholds(env);
   const resolvedLivenessThresholdMs = livenessThresholdMs ?? thresholds.thresholdMs;
   const resolvedProgressThresholdMs = progressThresholdMs ?? thresholds.progressThresholdMs;
-  const args = [...extraArgv, ...buildCursorArgs({
-    prompt, model, env, home, superpowersDir,
-  })];
+  assertNoForbiddenFlags(extraArgv);
+  if (extraArgv.length) throw new Error('Claude verification does not accept extra command flags');
+  const args = buildClaudeArgs({ prompt, model });
   const launchEnv = { ...process.env, ...env };
   assertNoForbiddenFlags(args);
   const nowMs = () => {
@@ -653,6 +521,7 @@ async function runVerifierAttempt({
   try {
     r = await spawnCapture(bin, args, {
       cwd,
+      input: prompt,
       env: launchEnv,
       timeoutMs: resolvedTimeoutMs,
       timeoutSetting: 'URO_VERIFIER_TIMEOUT_MS',
@@ -696,23 +565,28 @@ async function runVerifierAttempt({
         clearTimer,
       },
     });
+  } catch (error) {
+    const diagnostic = error instanceof Error ? error.message : String(error);
+    r = { code: null, stdout: '', stderr: diagnostic, error: diagnostic,
+      timedOut: false, timeoutMs: resolvedTimeoutMs };
   } finally {
     if (!r) progress?.dispose();
   }
   observer.finish();
   const detail = parseVerdictDetail(r.stdout);
-  // A non-zero exit is a termination just as a deadline is. Without this, a seat
-  // that emitted some prose and then died — Cursor exiting 1 on usage
-  // exhaustion, observed in production — reached the `hasSubstantiveEvidence`
-  // fallback and was recorded as ISSUES, a review conclusion nobody reached.
-  // Every marker check runs before `termination` is consulted, so a seat that
-  // did render a verdict and then exited non-zero still keeps that verdict.
+  const parsedClaude = parseArbiterStream(r.stdout);
+  // Keep termination in the raw verdict evidence. The completed Claude result
+  // check below overrides even a clean marker when the transport failed.
   const terminationReason = r.timedOut
     ? (r.timeoutReason ?? { kind: 'deadline' })
     : (r.code !== 0 ? { kind: 'exit', code: r.code } : null);
-  const evidenceWithTermination = terminationReason
-    ? { ...detail.evidence, termination: terminationReason }
-    : detail.evidence;
+  const evidenceWithTermination = { ...detail.evidence, policy: 'claude-terminal',
+    candidates: { ...detail.evidence.candidates, result: {
+      ...detail.evidence.candidates.result, usable: parsedClaude.resultUsable,
+      ...retainVerdictText(parsedClaude.answer, FINDINGS_LIMIT),
+    } },
+    ...(terminationReason ? { termination: terminationReason } : {}),
+  };
   const derived = deriveVerdictFromEvidence(evidenceWithTermination);
   const evidence = {
     ...evidenceWithTermination,
@@ -720,22 +594,22 @@ async function runVerifierAttempt({
     judgedText: derived.judgedText,
     judgedTextTruncated: derived.judgedTextTruncated,
   };
-  const { text, planText } = detail;
+  const { planText } = detail;
   const { verdict, source } = derived;
   const exitCode = r.code;
   // A seat that started talking and then died is not a seat that reviewed. This
   // once tested only for stream activity, so a single assistant chunk emitted
   // before the CLI aborted (quota exhaustion, killed process) made it false and
-  // the stderr carrying the actual cause was discarded as though the review had
-  // run. Key it on whether a verdict was derivable — `source === 'none'`.
-  const launchFailed = r.timedOut || (exitCode !== 0 && source === 'none');
-  const usage = extractResultUsage(r.stdout);
+  // discarded the stderr carrying the actual cause. Process failure is distinct
+  // from a successfully completed call with an unusable conclusion.
+  const launchFailed = r.timedOut || exitCode !== 0;
+  const usage = parsedClaude.usage;
   // A verdict without its reasoning is not actionable: report the findings on the
   // path where the verifier actually ran, mirroring how stderr is kept when it did not.
   const unannotatedResult = launchFailed
     ? { verdict, exitCode, launchFailed, timedOut: r.timedOut, timeoutMs: r.timeoutMs,
         ...(r.timeoutReason ? { timeoutReason: r.timeoutReason } : {}),
-        stderr: r.stderr.slice(0, 500), verdictSource: source,
+        stderr: r.stderr, verdictSource: source,
         verdictEvidence: evidence, usage }
     : {
         verdict,
@@ -749,19 +623,23 @@ async function runVerifierAttempt({
         // head-slice silently ate everything after 4000 characters — the
         // judged input must be complete. Excerpting belongs at persistence
         // sites, none of which retain this field any more.
-        findings: text.trim(),
+        findings: parsedClaude.answer.trim(),
         verdictSource: source,
         plan: evidence.candidates.plan.present ? planText : null,
         verdictEvidence: evidence,
         usage,
       };
   const result = annotateVerifierConsistency(annotateUsageConsistency(unannotatedResult));
+  Object.assign(result, { provider: 'claude', role: 'execution-reviewer',
+    stdout: r.stdout, stderr: r.stderr, answer: parsedClaude.answer,
+    ...(r.error ? { error: r.error } : {}) });
   progress?.observe({ runId, stage: 'verify', type: 'finish', pass, code: exitCode });
   progress?.dispose();
   reportEvent(reporter, runId, 'verify', 'finish', {
     code: exitCode,
-    verdict,
-    source,
+    verdict: result.verdict,
+    source: result.verdictSource,
+    provider: 'claude', role: 'execution-reviewer',
     ...(usage ? { tokens: usage } : {}),
     timedOut: r.timedOut,
     pass,
