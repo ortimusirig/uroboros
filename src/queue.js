@@ -6,7 +6,8 @@ import {
 } from 'node:fs';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { assertCurrentPlanApproval, assertPlanOutputAvailable, resolveGoal } from './plan.js';
-import { reviewDigest } from './review.js';
+import { detectReview, reviewDigest } from './review.js';
+import { attachQueueCheckpoint, checkpointDigest, readCheckpoint } from './checkpoint.js';
 
 const QUEUE_UNIT_KEYS = new Set(['name', 'task', 'gate', 'goal', 'out']);
 const QUEUE_MODES = new Set(['manual', 'autonomous']);
@@ -177,8 +178,9 @@ function answersFrom(facts) {
 
 function assertCurrentExecutionApproval(facts, runDirectory) {
   const receipt = facts?.approval;
+  const human = receipt?.decidedBy === 'human' && receipt?.basis === 'human' && facts?.interactionMode === 'manual';
   if (facts?.phase !== 'execution' || facts.approved !== true
-    || !isRecord(receipt) || receipt.decidedBy !== 'claude' || receipt.basis !== 'reviewer'
+    || !isRecord(receipt) || (!human && (receipt.decidedBy !== 'claude' || receipt.basis !== 'reviewer'))
     || typeof receipt.reason !== 'string' || receipt.reason.trim() === ''
     || typeof receipt.artifactDigest !== 'string') {
     throw new Error('current execution approval is missing or invalid; review-ready alone does not authorize landing');
@@ -189,6 +191,23 @@ function assertCurrentExecutionApproval(facts, runDirectory) {
   }
   if (reviewDigest(diff) !== receipt.artifactDigest) {
     throw new Error('current execution approval is stale for CHANGES.diff');
+  }
+  if (human) {
+    const evidence = receipt.reviewEvidence;
+    if (!evidence || !detectReview({ dir: runDirectory, artifact: evidence, round: evidence.round,
+      diffDigest: receipt.artifactDigest }).reviewed) throw new Error('human ruling has no current Claude review evidence');
+    const checkpoint = readCheckpoint(runDirectory);
+    if (!Array.isArray(receipt.rulings) || !receipt.rulings.length) throw new Error('human approval has no durable rulings');
+    for (const ruling of receipt.rulings) {
+      const accepted = checkpoint.receipts.find(item => item.decisionId === ruling.decisionId);
+      if (!accepted || accepted.phase !== 'execution' || accepted.stage !== 'execution-dispute'
+        || accepted.artifactDigest !== ruling.artifactDigest || ruling.diffDigest !== receipt.artifactDigest
+        || !accepted.answers.some(item => item.id === ruling.id && item.answer === ruling.answer)
+        || !accepted.questions.some(item => item.id === ruling.id && item.options?.includes('Accept Codex rebuttal'))
+        || !/^Accept Codex rebuttal(?:\s*:|\s*$)/i.test(ruling.answer.trim())) {
+        throw new Error('human approval does not match an accepted durable dispute ruling');
+      }
+    }
   }
 }
 
@@ -298,7 +317,17 @@ function missingDependency(name) {
   return async () => { throw new Error(`queue dependency is not configured: ${name}`); };
 }
 
-export async function runQueue({
+export async function runQueue(options) {
+  return executeQueue({ ...options, queue: loadQueueFile(options.file) });
+}
+
+export async function continueQueue({ context, phaseResult, runDirectory, dependencies = {}, journal = {}, persistJournal = () => {} }) {
+  if (checkpointDigest(readFileSync(context.queue.path, 'utf8')) !== context.fileDigest) throw new Error('queue file changed; saved cursor is invalid');
+  return executeQueue({ ...context.options, queue: context.queue,
+    continuation: { ...context, phaseResult, runDirectory, journal, persistJournal }, dependencies });
+}
+
+async function executeQueue({
   file,
   target,
   mode = 'manual',
@@ -308,11 +337,11 @@ export async function runQueue({
   acceptGoalSpec,
   dryRun = false,
   dependencies = {},
+  queue, continuation,
 }) {
   if (!QUEUE_MODES.has(mode)) {
     throw new TypeError(`invalid queue mode: ${mode}; expected manual or autonomous`);
   }
-  const queue = loadQueueFile(file);
   const zeroTokens = { inputTokens: 0, outputTokens: 0, total: 0 };
   if (dryRun) {
     return {
@@ -349,14 +378,33 @@ export async function runQueue({
 
   await assertCleanTarget(target, { allowedPaths: [queue.logPath] });
 
-  let attemptedCount = 0;
-  let landedCount = 0;
-  let totalTokens = zeroTokens;
+  let attemptedCount = continuation?.attemptedCount ?? 0;
+  let landedCount = continuation?.landedCount ?? 0;
+  let totalTokens = continuation?.totalTokens ?? zeroTokens;
   let stop = null;
   const assumedDecisions = [];
   const allowedQueuePaths = [queue.logPath];
 
   for (const unit of queue.units) {
+    if (continuation && unit.index < continuation.unitIndex) continue;
+    const resuming = continuation && unit.index === continuation.unitIndex;
+    const beforeUnit = { attemptedCount, landedCount, totalTokens: { ...totalTokens } };
+    const journal = continuation?.journal;
+    if (journal) journal.units ??= {};
+    const unitJournal = journal ? (journal.units[unit.index] ??= {}) : {};
+    const persist = () => continuation?.persistJournal(journal);
+    if (unitJournal.logged) {
+      ({ attemptedCount, landedCount, totalTokens } = unitJournal.afterUnit);
+      continue;
+    }
+    const savePending = async (directory, phase, planResult) => {
+      if (!directory || !existsSync(join(directory, 'uro-checkpoint.json'))) return;
+      const checkpoint = await attachQueueCheckpoint(directory, { version: 1, queue,
+        fileDigest: checkpointDigest(readFileSync(queue.path, 'utf8')), unitIndex: unit.index, phase,
+        ...beforeUnit, planResult, options: { file, target: resolve(target), mode,
+          claudeModel, codexModel, codexEffort, maxRuns, tokenBudget, acceptGoalSpec } });
+      if (stop) stop.checkpoint = { directory, artifactDigest: checkpoint.artifactDigest, questions: checkpoint.pending.questions };
+    };
     if (maxRuns !== undefined && attemptedCount >= maxRuns) {
       stop = stopBefore(
         queue.units,
@@ -388,7 +436,13 @@ export async function runQueue({
     let implementationUnit = unit;
     try {
       if (unit.kind === 'goal') {
-        planResult = await launchPlan({ unit, target: resolve(target), mode, claudeModel, codexModel, codexEffort });
+        planResult = unitJournal.planResult ?? (resuming ? (continuation.phase === 'planning' ? continuation.phaseResult : continuation.planResult) : null);
+        if (!planResult) {
+          if (unitJournal.planningStarted) throw new Error('queue planning was already started without a recorded result; automatic replay refused');
+          if (journal) { unitJournal.planningStarted = true; persist(); }
+          planResult = await launchPlan({ unit, target: resolve(target), mode, claudeModel, codexModel, codexEffort });
+        }
+        if (journal) { unitJournal.planResult = planResult; delete unitJournal.planningStarted; persist(); }
         // The taxi meter runs whether or not you arrive: planning spend counts
         // on every path, not only when a unit lands.
         const planTokenReading = factTokens(planResult);
@@ -424,6 +478,7 @@ export async function runQueue({
             stoppedOn: true,
             stopReason: reason,
           });
+          await savePending(planResult?.checkpoint?.directory ?? unit.out, 'planning', planResult);
           break;
         }
         assertCurrentPlanApproval({ unit, result: planResult, mode });
@@ -435,8 +490,19 @@ export async function runQueue({
         };
         allowedQueuePaths.push(implementationUnit.task, implementationUnit.gate);
       }
-      launch = await launchRun({ unit: implementationUnit, target: resolve(target), mode, claudeModel, codexModel, codexEffort });
-      facts = await readRunFacts(launch);
+      if (unitJournal.result) {
+        launch = unitJournal.launch;
+        facts = unitJournal.result;
+      } else if (resuming && continuation.phase === 'execution') {
+        launch = { runDirectory: continuation.runDirectory, runId: continuation.phaseResult.runId };
+        facts = continuation.phaseResult;
+      } else {
+        if (unitJournal.launching) throw new Error('queue child was already launched without a recorded result; automatic replay refused');
+        if (journal) { unitJournal.launching = true; persist(); }
+        launch = await launchRun({ unit: implementationUnit, target: resolve(target), mode, claudeModel, codexModel, codexEffort });
+        facts = await readRunFacts(launch);
+      }
+      if (journal) { unitJournal.result = facts; unitJournal.launch = launch; delete unitJournal.launching; persist(); }
     } catch (error) {
       const durationMs = Math.max(0, now() - startedAt);
       const failedDuringPlanning = unit.kind === 'goal' && planResult === null;
@@ -508,7 +574,9 @@ export async function runQueue({
       // lands unseen — an unavailable or unreadable judgement is a stop,
       // never consent.
       try {
-        landingJudgement = await judgeLanding({
+        if (!unitJournal.judgement && unitJournal.judgementStarted) throw new Error('landing judgement was already started without a recorded result; automatic replay refused');
+        if (!unitJournal.judgement && journal) { unitJournal.judgementStarted = true; persist(); }
+        landingJudgement = unitJournal.judgement ?? await judgeLanding({
           unit,
           facts,
           claudeModel,
@@ -520,17 +588,25 @@ export async function runQueue({
           reasoning: error?.message ?? String(error),
         };
       }
+      if (journal) { unitJournal.judgement = landingJudgement; persist(); }
       if (landingJudgement.approved === true) {
         try {
           if (unit.kind === 'goal') assertCurrentPlanApproval({ unit, result: planResult, mode });
           assertCurrentExecutionApproval(facts, launch.runDirectory);
-          landing = await landDiff({
+          if (journal) {
+            unitJournal.operationId ??= checkpointDigest({ queue: continuation.fileDigest, unit: unit.index,
+              runId: facts.runId, diff: facts.approval.artifactDigest });
+            persist();
+          }
+          landing = unitJournal.landing ?? await landDiff({
             target: resolve(target),
             diffPath: join(launch.runDirectory, 'CHANGES.diff'),
             unit,
             runId: facts?.runId ?? launch?.runId ?? 'unknown',
             allowedDirtyPaths: allowedQueuePaths,
+            ...(unitJournal.operationId ? { operationId: unitJournal.operationId } : {}),
           });
+          if (journal) { unitJournal.landing = landing; persist(); }
           landed = true;
           landedCount++;
         } catch (error) {
@@ -567,9 +643,10 @@ export async function runQueue({
       };
     }
 
-    appendLog(queue.logPath, {
+    const record = {
       name: unit.name,
       runId: facts?.runId ?? launch?.runId ?? null,
+      ...(unitJournal.operationId ? { operationId: unitJournal.operationId, unitIndex: unit.index } : {}),
       outcome: facts?.outcome ?? null,
       findingsLastRound: (facts?.debate?.roundHistory?.at(-1)?.findings ?? []).length,
       tokens,
@@ -607,8 +684,21 @@ export async function runQueue({
         planOutcome: planResult?.reason ?? null,
         implementationOutcome: facts?.outcome ?? null,
       } : {}),
-    });
+    };
+    const logged = unitJournal.operationId && existsSync(queue.logPath)
+      ? readFileSync(queue.logPath, 'utf8').split(/\r?\n/).filter(Boolean).map(line => JSON.parse(line))
+        .filter(row => row.operationId === unitJournal.operationId) : [];
+    if (logged.length > 1 || (logged.length === 1 && (logged[0].commit !== record.commit || logged[0].name !== record.name))) {
+      throw new Error('queue operation log conflicts with saved landing');
+    }
+    if (!logged.length) appendLog(queue.logPath, record);
+    if (journal && landed) {
+      unitJournal.logged = true;
+      unitJournal.afterUnit = { attemptedCount, landedCount, totalTokens };
+      persist();
+    }
 
+    if (facts?.outcome === 'needs-decision') await savePending(launch.runDirectory, 'execution', planResult);
     if (stop !== null) break;
     if (tokenBudget !== undefined && totalTokens.total > tokenBudget
       && attemptedCount < queue.units.length) {
@@ -655,9 +745,13 @@ export async function runQueue({
         questions: [],
       };
     } else if (landedState.complete) {
+      const acceptanceJournal = continuation ? (continuation.journal.acceptance ??= {}) : {};
+      const persistAcceptance = () => continuation?.persistJournal(continuation.journal);
       let acceptance;
       try {
-        acceptance = await acceptGoal({
+        if (!acceptanceJournal.result && acceptanceJournal.started) throw new Error('goal acceptance was already started without a recorded result; automatic replay refused');
+        if (!acceptanceJournal.result && continuation) { acceptanceJournal.started = true; persistAcceptance(); }
+        acceptance = acceptanceJournal.result ?? await acceptGoal({
           claudeModel,
           goalSpecPath: resolve(acceptGoalSpec),
           target: resolve(target),
@@ -666,6 +760,7 @@ export async function runQueue({
       } catch (error) {
         acceptance = { approved: null, reasoning: error?.message ?? String(error) };
       }
+      if (continuation) { acceptanceJournal.result = acceptance; persistAcceptance(); }
       // The taxi meter runs whether or not you arrive: the acceptance judgement
       // spends real tokens on every path, approved or refused or unavailable.
       const acceptanceTokens = usageTokens(acceptance.usage);
@@ -688,9 +783,13 @@ export async function runQueue({
           questions: [],
         };
       }
-      appendLog(queue.logPath, {
+      const operationId = continuation ? checkpointDigest({ queue: continuation.fileDigest, kind: 'goal-acceptance' }) : undefined;
+      const alreadyLogged = operationId && existsSync(queue.logPath) && readFileSync(queue.logPath, 'utf8')
+        .split(/\r?\n/).filter(Boolean).map(line => JSON.parse(line)).some(row => row.operationId === operationId);
+      if (!alreadyLogged) appendLog(queue.logPath, {
         goalAcceptance,
         tokens: acceptanceTokens,
+        ...(operationId ? { operationId } : {}),
         ...(stop === null ? {} : { stopReason: stop.reason }),
       });
     }

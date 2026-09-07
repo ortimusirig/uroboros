@@ -180,6 +180,12 @@ export function parseArgs(argv) {
   if (argv.slice(1).some((arg) => arg === '--help' || arg === '-h')) {
     return { command: 'help' };
   }
+  if (command === 'resume') {
+    const { values } = nodeParseArgs({ args: argv.slice(1), strict: true, allowPositionals: false,
+      options: { run: { type: 'string' }, 'decision-file': { type: 'string' } } });
+    if (!values.run?.trim() || !values['decision-file']?.trim()) throw new Error('resume requires --run and --decision-file');
+    return { command, runDirectory: values.run, decisionFile: values['decision-file'] };
+  }
   if (command === 'doctor') {
     const { values } = nodeParseArgs({
       args: argv.slice(1),

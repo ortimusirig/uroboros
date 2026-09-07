@@ -7,6 +7,7 @@ import { parseTaggedPair, runDecomposeGoal, runDecomposeProject, topologicalOrde
   validateDecomposeProjectRequest, writeTier1Artifacts } from '../src/decompose.js';
 import { parseArgs } from '../src/args.js';
 import { RepairableArtifactError } from '../src/conversation.js';
+import { resumeRun } from '../src/resume.js';
 const superpowers={seats:{codex:{verified:true},claude:{verified:true}}};
 const proposalText = (tasksJson, tasksMd) => `<TASKS_JSON>${JSON.stringify(tasksJson)}</TASKS_JSON>\n<TASKS_MD>${tasksMd}</TASKS_MD>`;
 const goodTasks = [
@@ -63,8 +64,10 @@ for(const tier of ['goal','project']){
  });
  test(tier+' manual dispute preserves the canonical artifact and raw transcript for resume',async t=>{
   const f=goalFixture();t.after(f.cleanup);
+  const target=join(f.root,'target');mkdirSync(target);
+  const projectFile=join(f.root,'project-input.md');writeFileSync(projectFile,'Build the project');
   const run=tier==='goal'?runDecomposeGoal:runDecomposeProject;
-  const result=await run({target:f.root,goalSpecPath:f.specPath,project:'Build the project',out:join(f.root,'project'),
+  const result=await run({target,goalSpecPath:f.specPath,project:projectFile,out:join(f.root,'project'),
    superpowers,adapters:{
     runArbiter:async()=>({answer:(tier==='goal'?taskText:goalsText)()}),
     runExecutor:async r=>({exitCode:0,lastMessage:'AGREE: no\nS1 P1: unresolved\nARTIFACT_DIGEST: '
@@ -77,6 +80,19 @@ for(const tier of ['goal','project']){
   assert.equal(saved.proposal.items[0].id,tier==='goal'?'T1':'G1');
   assert.ok(saved.proposal.sections);
   assert.equal(saved.messages.length,4);
+  const checkpoint = JSON.parse(readFileSync(join(result.out,'uro-checkpoint.json'),'utf8'));
+  const answerPath = join(mkdtempSync(join(tmpdir(),'decomp-answer-')),'answers.json');
+  writeFileSync(answerPath, JSON.stringify({schemaVersion:1,runId:result.runId,
+    artifactDigest:checkpoint.artifactDigest,answers:[{id:checkpoint.pending.questions[0].id,answer:'approve'}]}));
+  const sourcePath=tier==='goal'?f.specPath:projectFile, originalSource=readFileSync(sourcePath,'utf8');
+  writeFileSync(sourcePath,'Changed requirements outside the target.');
+  await assert.rejects(resumeRun({runDirectory:result.out,decisionFile:answerPath,
+    adapters:{author:()=>assert.fail('must not call author'),reviewer:()=>assert.fail('must not call reviewer')}}), /requirements.*changed/);
+  writeFileSync(sourcePath,originalSource);
+  const resumed = await resumeRun({runDirectory:result.out,decisionFile:answerPath,adapters:{
+    author:async()=>({content:'Human ruling received.'}),reviewer:async()=>({content:'Human ruling received.'})}});
+  assert.equal(resumed.approved,true);
+  assert.equal(existsSync(tier==='goal'?join(f.goalDir,'tasks','T1-plan.md'):join(f.root,'project','goals','goals.json')),true);
  });
 }
 test('a converged goal writes topologically ordered task units, write-once', async () => {

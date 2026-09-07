@@ -165,10 +165,11 @@ hazard is reuse of a unit id in the flat scratch root.
 
 Install the plugin from a clone by running `node install.mjs`, then paste the two exact Claude
 Code commands it prints: `/plugin marketplace add <absolute-clone-path>` followed by
-`/plugin install uroboros@uroboros`. The plugin registers these fourteen namespaced slash
+`/plugin install uroboros@uroboros`. The plugin registers these fifteen namespaced slash
 commands while the direct Node CLI remains available:
 
 - `/uroboros:run`
+- `/uroboros:resume`
 - `/uroboros:mutate`
 - `/uroboros:plan`
 - `/uroboros:decompose`
@@ -191,6 +192,7 @@ load this skill so invoking them cannot bypass the governing law.
 The direct CLI surface is:
 
     node bin/loop.js run ...
+    node bin/loop.js resume --run <run-directory> --decision-file <answers.json>
     node bin/loop.js mutate ...
     node bin/loop.js plan ...
     node bin/loop.js decompose ...
@@ -311,6 +313,48 @@ Keep watching the event stream or dashboard. On roughly a 30-minute cadence, als
 This monitoring is planner behavior; the package does not schedule it or contact a human.
 
 ## Iterating
+
+For a saved manual decision, use the direct CLI:
+
+    node bin/loop.js resume --run <run-directory> --decision-file <answers.json>
+
+Read `uro-checkpoint.json` in that run's isolated workspace (or its durable artifact directory).
+For standalone planning or decomposition, the checkpoint is in the reported output directory.
+Copy its current `runId`, top-level `artifactDigest`, and every `pending.questions[].id` into
+the answer file. This decision digest also binds the exact pending questions and revision;
+it is distinct from the plan/diff approval digest. The JSON shape is:
+
+```json
+{
+  "schemaVersion": 1,
+  "runId": "run-1",
+  "artifactDigest": "copy-the-current-checkpoint-artifactDigest",
+  "answers": [{ "id": "Q1", "answer": "Use the existing schema." }]
+}
+```
+
+Supply one nonblank answer for each pending ID, with no duplicate or unknown IDs. Preserve the
+human's exact answer. Planning accepts `approve`, `revise`, or `stop`, optionally followed by
+`: explanation`. For an execution dispute, `Accept Codex rebuttal` (optionally `: explanation`)
+settles only that named issue on unchanged code and evidence. `Require a correction`,
+`Clarify requirements`, and other prose are correction context, not blanket approval. Both
+agents receive the human ruling; actual execution review and unrelated issues still matter.
+
+Resume continues the saved phase and existing workspace. The saved manual mode is immutable:
+there is no resume `--mode` flag. Re-running the original task creates new work and is not resume.
+An identical applied answer returns its recorded result without model calls, another landing,
+or queue advancement. A stale digest/run ID or changed workspace, target, plan, gate or evidence
+is rejected before model use: inspect the latest checkpoint and resolve its current questions;
+do not reuse the old answer against a newly phrased question. An accepted but interrupted
+decision with no completed phase is refused rather than replayed. Recorded completed queue
+phases recover their verified commit/log transition without repeating implementation.
+
+The recorded workspace must still exist and validate. A missing/corrupt workspace is an error;
+preserve the checkpoint and investigate recovery of that same workspace. Durable artifacts do
+not authorize creating a substitute workspace or restarting the task. An existing resume lock
+requires checking the owning invocation; never clear a lock while a resume may still be active.
+Pending workspaces are retained by ordinary pruning. Queued manual work resumes its saved unit
+and cursor with the same queue file; do not trim or edit that file before resuming.
 
 Each `loop run` retains Codex implementation, Claude review, evidence, full delivered messages,
 mode, authority and dissent. Continue corrections in that conversation; preserve pending manual

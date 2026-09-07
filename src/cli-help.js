@@ -1,8 +1,9 @@
 export const CLI_COMMANDS = Object.freeze([
-  'run', 'mutate', 'plan', 'decompose', 'queue', 'batch', 'status', 'dashboard', 'publish', 'prune', 'doctor', 'setup', 'init', 'help',
+  'run', 'resume', 'mutate', 'plan', 'decompose', 'queue', 'batch', 'status', 'dashboard', 'publish', 'prune', 'doctor', 'setup', 'init', 'help',
 ]);
 
 export const CLI_USAGE = `Usage:
+  node bin/loop.js resume --run <run-directory> --decision-file <answers.json>
   node bin/loop.js run --task <plan-file-or-prose> --target <directory> --gate <gate.json> [--gate-retries <0-3>] [--pivot-candidates <1-5>] [--mode manual|autonomous] [--claude-model MODEL] [--codex-model MODEL] [--codex-effort EFFORT] [--executor-timeout <ms>] [--verifier-timeout <ms>] [--arbiter-timeout <ms>] [--gate-timeout <ms>] [--artifact-root <directory>] [--mutate] [--port <0-65535>] [--open] [--no-dashboard] [--quiet]
   node bin/loop.js mutate --target <directory> [--base <ref>] [--tests <command>] [--dry-run]
   node bin/loop.js plan --goal <prose-or-file> --target <directory> --out <directory> [--rounds <n>] [--candidates <1-5>] [--pivot-candidates <1-5>] [--mode manual|autonomous] [--claude-model MODEL] [--codex-model MODEL] [--codex-effort EFFORT] [--dry-run]
@@ -38,6 +39,7 @@ Mode and provider options (run, plan, decompose, queue, batch):
 
 Commands:
   run        Execute isolated Codex implementation and evidence with Claude reviewing read-only.
+  resume     Continue a saved manual phase with JSON answers; saved mode cannot change.
   mutate     Delete changed statements temporarily and report which selected tests do not notice.
   plan       Debate a goal into a mechanically checked plan and gate without changing the target.
   decompose  Debate a project into goals, or one goal into loop-ready task units.

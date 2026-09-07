@@ -187,13 +187,16 @@ export function buildArbiterPrompt(request = {}) {
   }
   if (request.type === 'landing') {
     return [...common,
-      'The reviewer has closed its findings and the debate converged. Before this change lands on the operator\'s tree, review it YOURSELF, first-hand: read the diff against the task, weigh the closed findings and the command evidence, and judge whether it should land.',
+      'The current implementation has an execution approval. Before this change lands on the operator\'s tree, review it YOURSELF, first-hand: read the diff against the task, weigh the findings, human rulings and command evidence, and judge whether it should land.',
+      'Recorded human rulings are final for their named disputes on unchanged artifacts and evidence. Preserve their exact scope; identify new evidence or a different issue explicitly rather than repeating a settled objection. A human ruling does not waive actual execution review.',
       'Landing is your judgement, not a checklist: approve when you are satisfied the change achieves the task without a defect worth stopping for; refuse when you are not, and say exactly why. Severities in your findings are your own words; nothing mechanical acts on them.',
       'Schema: {"approved":true|false,"reasoning":"what you verified first-hand","findings":[{"id":"L1","severity":"P0","text":"..."}]}.',
       `TASK ${String(request.task ?? '')}`,
       `DIFF ${String(request.diff ?? '')}`,
       `CLOSED_FINDINGS ${compact(request.findings ?? [])}`,
       `EVIDENCE ${compact(request.evidence ?? [])}`,
+      `HUMAN_RULINGS ${compact(request.humanRulings ?? [])}`,
+      `EXECUTION_APPROVAL ${compact(request.executionApproval ?? null)}`,
     ].join('\n\n');
   }
   if (request.type === 'acceptance') {

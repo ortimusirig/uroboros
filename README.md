@@ -143,9 +143,14 @@ Integration verification: the follow-up full suite passed 1041 tests with zero f
 That run preceded the final installer availability fix and version/update documentation;
 those narrow changes have separate targeted checks. Independent review remains pending.
 
-Release limitation: manual disputes preserve state and stop, but durable `loop resume`
-is not available yet; it is follow-up work. Use explicit `--mode autonomous` for unattended
-reviewer decisions. The default remains manual.
+The local resume integration sweep subsequently ran 1072 tests: 1063 passed and nine
+new-command packaging/documentation checks failed. Those surface gaps were fixed and the
+affected packaging/installer/parser suite passed 25/25; no second full sweep was run.
+
+Manual disputes now save `uro-checkpoint.json`. Continue with
+`node bin/loop.js resume --run <run-directory> --decision-file <answers.json>`.
+The saved phase, workspace and manual mode are preserved. See [manual resume](docs/usage.md#manual-resume)
+for the answer schema and recovery limits. Independent integration review is still pending.
 
 The default `--mode manual` sends unresolved disputes to the human. With `--mode autonomous`,
 Codex makes final planning decisions and Claude final execution decisions. Queues inherit that
@@ -216,10 +221,11 @@ board opens on runs that need attention (still running, stopped somewhere a pers
 decide, or finished with the two verifier seats disagreeing) rather than on everything, with
 Active, Today and All beside it.
 
-After plugin installation, these are the fourteen namespaced slash commands:
+After plugin installation, these are the fifteen namespaced slash commands:
 
 ```text
 /uroboros:run
+/uroboros:resume
 /uroboros:mutate
 /uroboros:plan
 /uroboros:decompose

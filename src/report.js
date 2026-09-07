@@ -339,6 +339,12 @@ export function buildReportMarkdown(facts, {
       .join('\n') || '(none recorded)',
   ];
   const nonZeroEvidence = (facts.evidence ?? []).filter((entry) => entry.code !== 0);
+  if (facts.outcome === 'needs-decision') {
+    md.push('', '## Resume this manual decision', '',
+      `Run \`node bin/loop.js resume --run "${facts.dir}" --decision-file <answers.json>\`.`,
+      'Read uro-checkpoint.json for the current runId, artifactDigest and pending question IDs. The saved mode and workspace are retained.',
+      ...(facts.checkpoint?.status === 'failed' ? [`Checkpoint persistence failed: ${facts.checkpoint.error}`] : []));
+  }
   if (facts.phase !== undefined) {
     md.push('', '## Decision', '',
       `Phase: ${facts.phase}; mode: ${facts.interactionMode}; authority: ${facts.authority ?? facts.approval?.decidedBy ?? 'not recorded'}`,

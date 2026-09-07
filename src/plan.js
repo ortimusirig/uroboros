@@ -12,6 +12,7 @@ import { addUsage, EMPTY_USAGE } from './usage.js';
 import { runExecutor, DEFAULT_EXECUTOR_MODEL, DEFAULT_EXECUTOR_EFFORT } from './executor.js';
 import { resolveStageTimeouts } from './timeouts.js';
 import { applySuperpowersRequirement, verifySuperpowersSeats } from './superpowers.js';
+import { saveCheckpoint } from './checkpoint.js';
 export { parseSeatReview };
 
 export const DEFAULT_PLAN_CANDIDATES = 3;
@@ -106,7 +107,7 @@ export function assertPlanOutputAvailable(out) {
   if (existsSync(directory) && !isDirectory(directory)) {
     throw new Error(`plan output path is not a directory: ${directory}`);
   }
-  for (const name of ['plan.md', 'gate.json']) {
+  for (const name of ['plan.md', 'gate.json', 'uro-checkpoint.json']) {
     const path = join(directory, name);
     if (existsSync(path)) throw new Error(`refusing to overwrite existing ${path}`);
   }
@@ -637,5 +638,31 @@ export async function runPlan({
       },
     });
   }
+  result.checkpointState.planningContext = { kind: 'plan', request,
+    options: { claudeModel: claudeModel ?? arbiterModel, codexModel, codexEffort, executorTimeout, arbiterTimeout } };
+  if (result.reason === 'needs-decision') {
+    const checkpoint = await saveCheckpoint({ directory: request.out, checkpointState: result.checkpointState,
+      references: request.goalSource && existsSync(request.goalSource) ? [request.goalSource] : [] });
+    result.checkpoint = { directory: request.out, artifactDigest: checkpoint.artifactDigest, questions: checkpoint.pending.questions };
+  }
   return { ...result, dryRun: false, target: request.target, out: request.out };
+}
+
+/** Trusted phase continuation; the public resume layer validates identity first. */
+export async function continuePlanning({ checkpointState, humanRuling, adapters = {}, reporter, env }) {
+  const state = structuredClone(checkpointState);
+  const { request, options } = state.planningContext;
+  const result = await runConversation({ runId: state.runId, reporter, rounds: state.roundsLimit ?? undefined,
+    tier: 'plan', interactionMode: state.interactionMode, requirements: state.requirements,
+    continuation: state, humanRuling,
+    seats: createPlanningSeats({ target: request.target, ...options, runId: state.runId, env, reporter, adapters,
+      authorPrompt: r => `${CONVERSATION_DNA}\n\n${buildArbiterPrompt({ ...r, goal: request.goal })}`,
+      reviewPrompt: reviewSeatPrompt }),
+    strategy: { parseProposal: parsePlanProposal,
+      proposeRequest: context => ({ type: 'propose', goal: request.goal, ...context }),
+      reviewRequests: ({ round, proposal }) => ({ codex: { goal: request.goal, ...proposal, round } }),
+      writeConverged: proposal => writeArtifacts(request.out, proposal.plan, proposal.gate) },
+  });
+  result.checkpointState.planningContext = state.planningContext;
+  return { ...result, target: request.target, out: request.out };
 }

@@ -97,6 +97,9 @@ function renderConversation(run) {
       + (decision.converged === null ? 'not recorded' : String(decision.converged))) + '</p>'
     + (approval ? '<p>' + escapeHtml(approval.decidedBy + ' / ' + approval.basis + ' / ' + approval.artifactDigest)
       + '</p><p>' + escapeHtml(approval.reason) + '</p>' : '')
+    + (run.outcome === 'needs-decision' ? '<p>Resume this saved manual phase from the terminal: '
+      + '<code>node bin/loop.js resume --run &lt;run-directory&gt; --decision-file &lt;answers.json&gt;</code>. '
+      + 'Read uro-checkpoint.json for the current digest and pending IDs. This dashboard is read-only.</p>' : '')
     + messages + '</section>';
 }
 

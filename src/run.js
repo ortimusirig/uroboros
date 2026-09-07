@@ -32,7 +32,8 @@ import {
   resolveExecutorThresholds,
   resolveStallConfig,
 } from './stall-watchdog.js';
-import { archiveRunArtifacts, HARNESS_ARTIFACTS } from './artifacts.js';
+import { archiveRunArtifacts, HARNESS_ARTIFACTS, resolveArtifactRoot } from './artifacts.js';
+import { saveCheckpoint } from './checkpoint.js';
 import { createRunMarker, releaseRunMarker } from './prune.js';
 import { physicalRunIdFor } from './run-id.js';
 import {
@@ -90,6 +91,12 @@ import {
 } from './plan.js';
 
 export { HARNESS_ARTIFACTS } from './artifacts.js';
+
+function rulingEvidenceDigest(gateResult) {
+  return reviewDigest(JSON.stringify((gateResult?.results ?? []).map(result =>
+    Object.fromEntries(['bin', 'args', 'code', 'outputTail', 'stdout', 'stderr', 'error']
+      .filter(key => result[key] !== undefined).map(key => [key, result[key]])))));
+}
 
 const PARTIAL_WORK_GIT_TIMEOUT_MS = 30_000;
 
@@ -599,7 +606,20 @@ export async function run(opts) {
   let planningCheckpoint = continuation?.planningCheckpoint ?? null;
   const reviewerRestorations = continuation?.reviewProtection?.reviewerRestorations ?? [];
   const executorRestorations = continuation?.reviewProtection?.executorRestorations ?? [];
+  const humanRulings = [...(continuation?.humanRulings ?? [])];
   if (continuation) {
+    if (continuation.stage === 'execution-dispute') {
+      for (const question of continuation.decision.questions) {
+        const answer = opts.humanRuling.answers.find(item => item.id === question.id)?.answer ?? '';
+        if (/^Accept Codex rebuttal(?:\s*:|\s*$)/i.test(answer.trim())
+          && question.options?.includes('Accept Codex rebuttal')) {
+          humanRulings.push({ id: question.id, answer, decisionId: opts.humanRuling.decisionId,
+            artifactDigest: opts.humanRuling.artifactDigest, diffDigest: continuation.workspace.diffDigest,
+            evidenceTestDigest: continuation.evidenceTestDigest, evidenceDigest: rulingEvidenceDigest(continuation.gateResult),
+            finding: openFindings.get(question.id) });
+        }
+      }
+    }
     executionMessages.push({ speaker: 'human', role: 'decision-authority', phase: 'execution',
       turn: executionMessages.length + 1, response: opts.humanRuling, content: JSON.stringify(opts.humanRuling) });
     plan = planWithDecision(plan, continuation.decision.questions, opts.humanRuling)
@@ -1239,6 +1259,23 @@ export async function run(opts) {
             resolvedFindingIds.add(finding.id);
           }
         }
+        // Only the recorded accepting choice settles a named dispute. A new
+        // diff, new test bytes or changed finding invalidates that disposition.
+        for (const ruling of humanRulings) {
+          const finding = openFindings.get(ruling.id);
+          if (finding && ruling.diffDigest === reviewDigest(diff)
+            && ruling.evidenceTestDigest === testDigest && !newTestEvidence
+            && ruling.evidenceDigest === rulingEvidenceDigest(gateResult)
+            && finding.description === ruling.finding?.description
+            && finding.test === ruling.finding?.test) {
+            openFindings.delete(ruling.id);
+            resolvedFindingIds.add(ruling.id);
+            ruling.applied = true;
+            disputed = disputed.filter(item => item.id !== ruling.id);
+            appliedDispositions.push({ id: ruling.id, status: 'resolved', decidedBy: 'human',
+              reason: ruling.answer, decisionId: ruling.decisionId, diffDigest: ruling.diffDigest });
+          }
+        }
         const acceptedFindings = [...openFindings.values()];
         const acceptedFindingIds = acceptedFindings.map((finding) => finding.id);
         const validation = { accepted: acceptedFindingIds, rejected: [] };
@@ -1660,11 +1697,19 @@ export async function run(opts) {
   const dissent = executionMessages.filter(message => message.speaker === 'codex'
     && executorFindingResponses(message.response).some(response => response.disposition === 'dispute'));
   const approved = outcome === 'review-ready' && executionMessages.some(message => message.speaker === 'claude');
+  const currentHumanRulings = humanRulings.filter(ruling => ruling.diffDigest === reviewDigest(currentDiff)
+    && ruling.evidenceTestDigest === evidenceTestDigest && ruling.evidenceDigest === rulingEvidenceDigest(gateResult)
+    && ruling.applied && resolvedFindingIds.has(ruling.id));
+  const humanApproval = approved && currentHumanRulings.length > 0 ? {
+    artifactDigest: reviewDigest(currentDiff), decidedBy: 'human', basis: 'human',
+    reason: currentHumanRulings.map(ruling => `${ruling.id}: ${ruling.answer}`).join('\n'),
+    rulings: currentHumanRulings, reviewEvidence: iterations.at(-1)?.reviewer?.artifact,
+  } : null;
   const facts = buildRunFacts({ runId,
     phase: 'execution', interactionMode: mode, authority: decisionAuthority({ interactionMode: mode, phase: 'execution' }),
     messages: executionMessages, planningMessages, dissent, approved, converged: null,
-    approval: approved ? { artifactDigest: reviewDigest(currentDiff), decidedBy: 'claude', basis: 'reviewer',
-      reason: 'The current implementation passed Claude review with all blocking findings explicitly closed.' } : null,
+    approval: humanApproval ?? (approved ? { artifactDigest: reviewDigest(currentDiff), decidedBy: 'claude', basis: 'reviewer',
+      reason: 'The current implementation passed Claude review with all blocking findings explicitly closed.' } : null),
     ...(physicalRunId === runId ? {} : { physicalRunId }),
     target, targetPath: resolve(target),
     dir: iso.dir, isRepo: iso.isRepo,
@@ -1719,7 +1764,7 @@ export async function run(opts) {
         gate: reviewDigest(JSON.stringify(commands)), diff: reviewDigest(currentDiff) },
       iteration: n, debateRound: currentDebateRound, challengeRound, exec, iter, gateResult,
       iterations, decision, resolvedDecision, assumedDecision,
-      messages: executionMessages, openFindings: [...openFindings.values()],
+      messages: executionMessages, openFindings: [...openFindings.values()], humanRulings,
       resolvedFindingIds: [...resolvedFindingIds], evidence: evidence.records(), evidenceTestDigest,
       reviewerTests: [...accumulatedReviewTests], reviewerArtifact: iter?.reviewer?.artifact ?? null,
       tokens, usageChecks, timeoutEvents, executorLaunchCount, iterationExecutorUsage,
@@ -1728,7 +1773,7 @@ export async function run(opts) {
         conflictingIntent, mergePreparationFailure },
       supervision: { stallConfig, executorThresholds, stallRestartCount, stallRecords, livenessChecks },
       reviewProtection: { reviewerRestorations, executorRestorations },
-      options: { target, scratchRoot, artifactRoot: opts.artifactRoot, baseRef, branch, branchName, gateRetries,
+      options: { target, scratchRoot, artifactRoot: resolveArtifactRoot({ scratchRoot, artifactRoot: opts.artifactRoot, env: runEnvironment }), baseRef, branch, branchName, gateRetries,
         correctsRunId, campaignId, campaignBase, round, unitId, campaignUnitKind, perspective, unitKind,
         captureTestCount, executorModel, executorEffort, verifierModel, verifierBin, arbiterModel, arbiterBin,
         challengeRounds, debateRounds: maxDebateRounds, tokenBudget, pivotCandidates, superpowers },
@@ -1743,6 +1788,17 @@ export async function run(opts) {
     reviewerRestorations,
     executorRestorations,
   };
+  if (facts.checkpointState && !continuation) {
+    try {
+      const checkpoint = await saveCheckpoint({ directory: iso.dir, checkpointState: facts.checkpointState,
+        references: [typeof task === 'string' && existsSync(task) ? task : null,
+          typeof gate === 'string' && existsSync(gate) ? gate : null].filter(Boolean) });
+      facts.checkpoint = { directory: iso.dir, artifactDigest: checkpoint.artifactDigest,
+        questions: checkpoint.pending.questions };
+    } catch (error) {
+      facts.checkpoint = { status: 'failed', error: error.message };
+    }
+  }
   writeReport({ dir: iso.dir, facts, reporter: eventReporter, runId });
   const endedAt = new Date();
   try {
@@ -1755,6 +1811,7 @@ export async function run(opts) {
       env: opts.env ?? process.env,
       startedAt,
       endedAt,
+      refresh: Boolean(continuation),
     });
   } catch (error) {
     facts.artifacts = {

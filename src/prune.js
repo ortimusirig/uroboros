@@ -15,6 +15,7 @@ import { resolveArtifact, resolveArtifactRoot } from './artifacts.js';
 import { assertSafeScratchRoot } from './isolation.js';
 import { physicalRunIdFor } from './run-id.js';
 import { spawnCapture } from './spawn.js';
+import { readCheckpoint } from './checkpoint.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -90,6 +91,12 @@ function isActiveRun(directory) {
 }
 
 function isCompletedRun(directory) {
+  const checkpointPath = join(directory, 'w', 'uro-checkpoint.json');
+  if (existsSync(checkpointPath)) {
+    try {
+      if (readCheckpoint(join(directory, 'w')).status !== 'terminal') return false;
+    } catch { return false; }
+  }
   return existsSync(resolveArtifact(join(directory, 'w'), 'uro-runfacts.json'));
 }
 
@@ -206,7 +213,7 @@ export async function pruneScratch({
       || lstatSync(directory).isSymbolicLink()
       || overlapsArtifactRoot(futureRealPath(directory), durableRoot)
       || overlapsAnyTarget(directory, protectedTargets(runDirectories.filter(existsSync)))
-      || isActiveRun(directory)) continue;
+      || isActiveRun(directory) || !isCompletedRun(directory)) continue;
     const worktree = join(directory, 'w');
     if (existsSync(worktree)) await cleanupWorktree(worktree);
     try {

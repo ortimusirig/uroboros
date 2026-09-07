@@ -512,6 +512,7 @@ export function validateDecomposeGoalRequest({ goalSpecPath, target }) {
   const resolvedTarget = resolve(target);
   if (!isDirectory(resolvedTarget)) throw new Error(`target directory does not exist: ${resolvedTarget}`);
   const goalDir = dirname(specPath);
+  if (existsSync(join(goalDir, 'tasks', 'uro-checkpoint.json'))) throw new Error('refusing to overwrite an existing decomposition checkpoint; resume the saved run');
   // The constitution is the operator's: never generated, never validated, quoted
   // when it is there and simply absent when it is not.
   const constitutionPath = join(goalDir, '..', '..', 'constitution.md');
@@ -601,6 +602,7 @@ export function validateDecomposeProjectRequest({ project, target, out }) {
   const resolvedTarget = resolve(target);
   if (!isDirectory(resolvedTarget)) throw new Error(`target directory does not exist: ${resolvedTarget}`);
   const resolvedOut = resolve(out);
+  if (existsSync(join(resolvedOut, 'uro-checkpoint.json'))) throw new Error('refusing to overwrite an existing decomposition checkpoint; resume the saved run');
   if (existsSync(resolvedOut) && !isDirectory(resolvedOut)) {
     throw new Error(`decompose output path is not a directory: ${resolvedOut}`);
   }
@@ -668,6 +670,17 @@ async function runDecomposition(kind, {
         : writeTier1Artifacts(request.out, { text: request.project, source: request.projectSource }, proposal),
     },
   });
+  result.checkpointState.planningContext = { kind, request, context,
+    options: { claudeModel: claudeModel ?? arbiterModel, codexModel, codexEffort, executorTimeout, arbiterTimeout } };
+  if (result.reason === 'needs-decision') {
+    const { saveCheckpoint } = await import('./checkpoint.js');
+    const directory = request.out ?? request.tasksDir;
+    const source = isGoal ? request.goalSpecPath : request.projectSource;
+    const constitutionPath = isGoal ? join(request.goalDir, '..', '..', 'constitution.md') : join(request.out, 'constitution.md');
+    const checkpoint = await saveCheckpoint({ directory, checkpointState: result.checkpointState,
+      references: [source, constitutionPath].filter(path => path && isFile(path)) });
+    result.checkpoint = { directory, artifactDigest: checkpoint.artifactDigest, questions: checkpoint.pending.questions };
+  }
   return { ...result, target: request.target, out: request.out ?? request.tasksDir,
     ...(isGoal ? { goalSpecPath: request.goalSpecPath, goalDir: request.goalDir }
       : { projectSource: request.projectSource }) };
@@ -675,3 +688,29 @@ async function runDecomposition(kind, {
 
 export function runDecomposeGoal(options) { return runDecomposition('goal', options); }
 export function runDecomposeProject(options) { return runDecomposition('project', options); }
+
+export async function continueDecomposition({ checkpointState, humanRuling, adapters = {}, reporter, env }) {
+  const state = structuredClone(checkpointState);
+  const { kind, request, context, options } = state.planningContext;
+  const isGoal = kind === 'goal';
+  const result = await runConversation({ runId: state.runId, reporter, rounds: state.roundsLimit ?? undefined,
+    tier: kind, requirements: state.requirements, interactionMode: state.interactionMode,
+    continuation: state, humanRuling,
+    seats: createPlanningSeats({ target: request.target, ...options, runId: state.runId, reporter, env, adapters,
+      authorPrompt: r => (isGoal ? goalDraftingPrompt : projectDraftingPrompt)({ ...context, ...r, seat: 'Claude' }),
+      reviewPrompt: r => (isGoal ? goalReviewPrompt : projectReviewPrompt)({ ...context, ...r, seat: 'Codex' }) }),
+    strategy: {
+      parseProposal: isGoal ? parseTaskProposal : parseGoalProposal,
+      proposalText: proposal => proposal.text,
+      reviewRequests: ({ proposal, round }) => ({ codex: { ...context, [isGoal ? 'tasks' : 'goals']: proposal.text, round } }),
+      writeConverged: proposal => {
+        const hydrated = { ...proposal, sections: proposal.sections instanceof Map
+          ? proposal.sections : new Map(Object.entries(proposal.sections)) };
+        return isGoal ? writeTier2Artifacts(request.goalDir, hydrated)
+          : writeTier1Artifacts(request.out, { text: request.project, source: request.projectSource }, hydrated);
+      },
+    },
+  });
+  result.checkpointState.planningContext = state.planningContext;
+  return { ...result, target: request.target, out: request.out ?? request.tasksDir };
+}

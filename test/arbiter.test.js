@@ -15,6 +15,15 @@ import {
 } from '../src/arbiter.js';
 import { EMPTY_USAGE, normalizeClaudeUsage } from '../src/usage.js';
 
+test('landing review receives the exact final human ruling with its current approval evidence', () => {
+  const prompt = buildArbiterPrompt({ type: 'landing', task: 'Maintain compatibility.',
+    humanRulings: [{ id: 'F1', answer: 'Accept Codex rebuttal: historical inputs remain excluded.', decisionId: 'ruling-1' }],
+    executionApproval: { basis: 'human', artifactDigest: 'current-diff' } });
+  assert.match(prompt, /historical inputs remain excluded/);
+  assert.match(prompt, /ruling-1/);
+  assert.match(prompt, /current-diff/);
+});
+
 function fakeChild() {
   const child = new EventEmitter();
   child.pid = 12345;

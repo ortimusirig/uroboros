@@ -323,6 +323,7 @@ test('the commit a real landing creates is the SHA it reports back', async () =>
     // No injected runCommand: this exercises the production Git path.
     const result = await landQueueDiff({
       target: root, diffPath, unit: { name: 'unit-1' }, runId: 'run-real',
+      operationId: 'a'.repeat(64),
     });
 
     const head = git('rev-parse', 'HEAD').trim();
@@ -330,6 +331,13 @@ test('the commit a real landing creates is the SHA it reports back', async () =>
     assert.equal(result.commit, head, 'the reported SHA is the commit the landing created');
     assert.deepEqual(result.paths, ['a.txt']);
     assert.match(git('log', '-1', '--pretty=%s'), /queue: land unit-1 \(run-real\)/);
+    // Equivalent durable state to interruption after commit but before its SHA
+    // was journaled: recovery knows only the operation identity and exact diff.
+    const recovered = await landQueueDiff({ target: root, diffPath,
+      unit: { name: 'unit-1' }, runId: 'run-real', operationId: 'a'.repeat(64) });
+    assert.equal(recovered.recovered, true);
+    assert.equal(recovered.commit, head);
+    assert.equal(git('rev-list', '--count', 'HEAD').trim(), '2');
   } finally {
     cleanup();
   }

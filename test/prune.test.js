@@ -32,6 +32,16 @@ function makeRun(scratchRoot, runId, ageDays, now = Date.now()) {
   return directory;
 }
 
+test('prune retains pending and interrupted manual checkpoints even when run facts exist', async () => {
+  const scratchRoot = temporaryScratch();
+  for (const status of ['needs-decision', 'accepted', 'corrupt', 'terminal']) {
+    const directory = makeRun(scratchRoot, status, 5);
+    writeFileSync(join(directory, 'w', 'uro-checkpoint.json'), status === 'corrupt' ? '{' : JSON.stringify({ status }));
+  }
+  const result = await pruneScratch({ scratchRoot, keep: 0, dryRun: true });
+  assert.deepEqual(result.wouldRemove, []);
+});
+
 test('prune --keep 2 removes three of five runs and keeps the two newest', async () => {
   const scratchRoot = temporaryScratch();
   const now = Date.parse('2026-08-29T12:00:00.000Z');

@@ -3,6 +3,8 @@ import {
   copyFileSync,
   existsSync,
   mkdirSync,
+  lstatSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   statSync,
@@ -18,6 +20,8 @@ import { isSafePhysicalRunId, physicalRunIdFor } from './run-id.js';
 export const HARNESS_ARTIFACTS = Object.freeze([
   'TASK.md',
   'DECISION.md',
+  'uro-checkpoint.json',
+  'uro-resume.lock',
   '__uro_review/',
   '__uro_evidence/',
   '.uro-tmp/',
@@ -152,6 +156,7 @@ export function archiveRunArtifacts({
   env = process.env,
   startedAt,
   endedAt,
+  refresh = false,
 }) {
   const root = resolveArtifactRoot({ scratchRoot, artifactRoot, env });
   let physicalRunId = null;
@@ -181,10 +186,30 @@ export function archiveRunArtifacts({
     retentionAllowed = true;
     mkdirSync(durableDirectory, { recursive: true });
 
+    const copyEvidenceDirectory = (source, destination, boundary) => {
+      if (lstatSync(source).isSymbolicLink() || !containsPath(realpathSync(boundary), realpathSync(source))) {
+        throw new Error('evidence retention refused a symbolic-link boundary');
+      }
+      if (existsSync(destination) && lstatSync(destination).isSymbolicLink()) throw new Error('artifact destination is a symbolic link');
+      if (lstatSync(source).isDirectory()) {
+        mkdirSync(destination, { recursive: true });
+        for (const entry of readdirSync(source)) copyEvidenceDirectory(join(source, entry), join(destination, entry), boundary);
+      } else if (lstatSync(source).isFile()) copyFileSync(source, destination);
+      else throw new Error('evidence retention refused a nonregular file');
+    };
     for (const filename of HARNESS_ARTIFACTS) {
+      if (filename === 'uro-resume.lock') continue;
       const source = join(dir, filename);
-      if (!existsSync(source) || !statSync(source).isFile()) continue;
+      if (!existsSync(source)) continue;
       try {
+        if (['__uro_evidence/', '__uro_review/'].includes(filename)) {
+          copyEvidenceDirectory(source, join(durableDirectory, filename), dir);
+          result.copied.push(filename);
+          continue;
+        }
+        if (!statSync(source).isFile()) continue;
+        if (lstatSync(source).isSymbolicLink() || (existsSync(join(durableDirectory, filename))
+          && lstatSync(join(durableDirectory, filename)).isSymbolicLink())) throw new Error('artifact symbolic link refused');
         copyFileSync(source, join(durableDirectory, filename));
         result.copied.push(filename);
       } catch (error) {
@@ -204,7 +229,7 @@ export function archiveRunArtifacts({
     try {
       mkdirSync(root, { recursive: true });
       const entry = indexEntry(facts, dir, startedAt, endedAt);
-      appendFileSync(result.index.path, `${JSON.stringify(entry)}\n`);
+      if (!refresh) appendFileSync(result.index.path, `${JSON.stringify(entry)}\n`);
       result.index = { ...result.index, status: 'ok' };
     } catch (error) {
       result.status = 'failed';

@@ -11,10 +11,64 @@ import {
 import { basename, join, resolve } from 'node:path';
 import test from 'node:test';
 import { planningArtifactDigest } from '../src/conversation.js';
-import { runQueue } from '../src/queue.js';
+import { runQueue, continueQueue, loadQueueFile } from '../src/queue.js';
+import { checkpointDigest } from '../src/checkpoint.js';
 import { reviewDigest } from '../src/review.js';
 
 const APPROVED_DIFF = 'diff --git a/x b/x\n+reviewed change\n';
+
+test('queue recovery reuses a completed acceptance after its log write was interrupted', async () => {
+  const f = makeFixture(1);
+  try {
+    const queue = loadQueueFile(f.file);
+    const totalTokens = { inputTokens: 0, outputTokens: 0, total: 0 };
+    const journal = { units: { 1: { logged: true, afterUnit: { attemptedCount: 1, landedCount: 1, totalTokens } } } };
+    const context = { queue, fileDigest: checkpointDigest(readFileSync(f.file, 'utf8')), unitIndex: 1,
+      options: { target: f.target, acceptGoalSpec: join(f.directory, 'spec.md') } };
+    writeFileSync(queue.logPath, JSON.stringify({ name: 'unit-1', landed: true, commit: 'a'.repeat(40) }) + '\n');
+    let calls = 0, fail = true;
+    const dependencies = { assertCleanTarget: async () => {}, acceptGoal: async () => {
+      calls++; return { approved: true, reasoning: 'verified', usage: { inputTokens: 2, outputTokens: 3 } };
+    }, appendLog: () => { if (fail) { fail = false; throw new Error('interrupted log'); } } };
+    await assert.rejects(continueQueue({ context, journal, dependencies }), /interrupted log/);
+    const result = await continueQueue({ context, journal, dependencies });
+    assert.equal(calls, 1);
+    assert.equal(result.goalAcceptance.approved, true);
+    assert.equal(result.totalTokens.total, 5);
+  } finally { f.cleanup(); }
+});
+
+test('queue recovery refuses to replay an in-flight later planning call', async () => {
+  const f = makeFixture(1);
+  try {
+    const queue = loadQueueFile(f.file);
+    queue.units[0] = { ...queue.units[0], kind: 'goal', goal: 'A goal', out: join(f.directory, 'out') };
+    let calls = 0;
+    const result = await continueQueue({ context: { queue,
+      fileDigest: checkpointDigest(readFileSync(f.file, 'utf8')), unitIndex: 0,
+      options: { target: f.target } }, journal: { units: { 1: { planningStarted: true } } },
+      dependencies: { assertCleanTarget: async () => {}, launchPlan: async () => { calls++; return {}; }, appendLog: () => {} } });
+    assert.equal(calls, 0);
+    assert.match(result.stop.reason, /already.*planning|planning.*already|replay refused/);
+  } finally { f.cleanup(); }
+});
+
+test('queue recovery refuses to repeat an in-flight final landing judgement', async () => {
+  const f = makeFixture(1);
+  try {
+    const queue = loadQueueFile(f.file), runDirectory = join(f.directory, 'run');
+    mkdirSync(runDirectory);
+    writeFileSync(join(runDirectory, 'CHANGES.diff'), APPROVED_DIFF);
+    let calls = 0;
+    const result = await continueQueue({ context: { queue,
+      fileDigest: checkpointDigest(readFileSync(f.file, 'utf8')), unitIndex: 1, phase: 'execution',
+      options: { target: f.target } }, runDirectory, phaseResult: reviewReady('current'),
+      journal: { units: { 1: { judgementStarted: true } } },
+      dependencies: { assertCleanTarget: async () => {}, judgeLanding: async () => { calls++; return { approved: true }; }, appendLog: () => {} } });
+    assert.equal(calls, 0);
+    assert.match(result.stop.reason, /replay refused/);
+  } finally { f.cleanup(); }
+});
 
 function makeFixture(count = 3) {
   const directory = mkdtempSync(join(process.cwd(), '.ccc-test-queue-'));
@@ -115,7 +169,7 @@ function fakeRuntime(facts, overrides = {}) {
 
 test('queue requires explicit execution approval bound to the actual diff before final review', async () => {
   for (const mutation of ['valid', 'false', 'missing-approved', 'missing', 'missing-digest', 'stale', 'legacy',
-    'wrong-phase', 'wrong-reviewer', 'wrong-basis', 'empty-reason', 'missing-diff']) {
+    'wrong-phase', 'wrong-reviewer', 'wrong-basis', 'empty-reason', 'missing-diff', 'fabricated-human']) {
     const fixture = makeFixture(1);
     const facts = reviewReady('approval-check');
     if (mutation === 'false') facts.approved = false;
@@ -126,6 +180,7 @@ test('queue requires explicit execution approval bound to the actual diff before
     if (mutation === 'legacy') { delete facts.phase; delete facts.approved; delete facts.approval; }
     if (mutation === 'wrong-phase') facts.phase = 'planning';
     if (mutation === 'wrong-reviewer') facts.approval.decidedBy = 'codex';
+    if (mutation === 'fabricated-human') Object.assign(facts.approval, { decidedBy: 'human', basis: 'human', rulings: [] });
     if (mutation === 'wrong-basis') facts.approval.basis = 'consensus';
     if (mutation === 'empty-reason') facts.approval.reason = ' ';
     const runtime = fakeRuntime([facts]);

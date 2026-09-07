@@ -117,6 +117,31 @@ async function currentReview(options, { findings = '', tests = [], dispositions 
 const blocker = '## F1\nSeverity: blocking\nDescription: Branch drops valid input.\nTest: __uro_review/tests/f1.test.js\n';
 const proof = { path: 'tests/f1.test.js', content: 'throw new Error("branch evidence");\n' };
 
+for (const change of ['correction', 'unrelated', 'diff', 'evidence']) test(`human rulings preserve ${change} work for actual review`, async t => {
+  let resumed = false;
+  const fixture = harness(`human-${change}`, { options: { debateRounds: 4 }, adapters: {
+    runExecutor: async () => ({ exitCode: 0, changedFiles: ['implementation.js'], lastMessage: JSON.stringify({
+      findingResponses: [{ id: 'F1', disposition: 'dispute', reason: 'Excluded input.' }] }) }),
+    diffText: async () => resumed && change === 'diff' ? 'changed implementation diff' : 'original implementation diff',
+    runGate: async () => ({ results: [{ bin: 'node', args: ['test.js'], code: resumed && change === 'evidence' ? 2 : 1,
+      outputTail: resumed && change === 'evidence' ? 'New different failure evidence' : 'Original failure evidence' }] }),
+    runReview: async options => currentReview(options, { findings: blocker + (resumed && change === 'unrelated'
+      ? '\n## F2\nSeverity: blocking\nDescription: Another required branch fails.\nTest: __uro_review/tests/f2.test.js\n' : ''),
+      tests: [proof, ...(resumed && change === 'unrelated' ? [{ path: 'tests/f2.test.js', content: 'throw Error("another");' }] : [])],
+      dispositions: [{ id: 'F1', status: 'upheld', reason: 'Still supporting original position.' }] }),
+  } });
+  t.after(() => rmSync(fixture.root, { recursive: true, force: true }));
+  const pending = await executeRun(fixture.options);
+  assert.equal(pending.outcome, 'needs-decision');
+  resumed = true;
+  const done = await execution.continueExecution({ checkpointState: pending.checkpointState,
+    humanRuling: { decisionId: 'test-ruling', artifactDigest: 'test-artifact', answers: [{ id: 'F1',
+      answer: change === 'correction' ? 'Require a correction' : 'Accept Codex rebuttal' }] }, adapters: fixture.options.adapters });
+  assert.notEqual(done.outcome, 'review-ready', change);
+  assert.equal(done.approved, false);
+  assert.ok(done.debate.openFindings.some(finding => finding.id === (change === 'unrelated' ? 'F2' : 'F1')));
+});
+
 test('queue accepts the real execution receipt only while its persisted diff is current and reviewed', async (t) => {
   for (const state of ['reviewed', 'skipped', 'changed']) {
     const fixture = harness(`queue-receipt-${state}`, { adapters: {

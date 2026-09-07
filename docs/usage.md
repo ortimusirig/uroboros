@@ -27,10 +27,10 @@ a goal spec into task units directly, then queue those. On large repositories, u
 Run `loop queue --file queue.json --dry-run` before an unattended session to validate every
 input and goal output path without launching an agent.
 
-Manual disputes preserve state and stop. Durable `loop resume` is not available in this
-release; continuation tooling is follow-up work. Do not treat re-running a stopped task as resume.
+Manual disputes save a durable checkpoint. Use [manual resume](#manual-resume) to continue
+the existing phase and workspace. Re-running a stopped task creates a new run.
 
-The default mode is `manual`. `--mode autonomous` is passed to both planning and execution. A unit lands only after actual Claude review approval
+The default mode is `manual`. `--mode autonomous` is passed to both planning and execution. A unit lands only after actual Claude review and a current execution approval (including a scoped manual human ruling)
 (outcome `review-ready`) AND Claude, reading the final diff first-hand at landing time,
 records its approval. Any other outcome, a refusal, or an unreachable final review stops
 the queue with the judgement in `queue-log.jsonl`; nothing is retried or skipped.
@@ -66,7 +66,8 @@ and its own log row. `--accept-goal` resolves relative to the current working di
 unlike the queue file's own `task`/`gate`/`goal`/`out` paths, which resolve relative to
 the queue file.
 
-A stopped goal resumes across invocations rather than restarting: trim the queue file
+A queue stopped by a manual decision resumes through `loop resume` with the original queue
+file and its saved cursor. For a separate new queue invocation after a limit stop, trim the queue file
 down to the units that have not yet landed, then re-invoke `loop queue --accept-goal`.
 `queue-log.jsonl` already carries the landed rows and their commit SHAs, and the
 acceptance base spans every invocation, so a trimmed queue file never narrows what
@@ -74,6 +75,41 @@ Claude reviews at the end. After a REFUSED acceptance specifically, append fix
 task-units to that same queue file (same log) and re-run. Re-running an untrimmed queue
 file re-executes units that already landed against a worktree where their diff is
 already applied, and typically fails with "applied diff touched no paths".
+
+## Manual resume
+
+```sh
+node bin/loop.js resume --run <run-directory> --decision-file <answers.json>
+```
+
+Use the execution workspace or its durable artifact directory; standalone planning and
+decomposition use their reported output directory. Read `uro-checkpoint.json` and copy
+its current top-level `runId`, `artifactDigest` and all `pending.questions[].id` values:
+
+```json
+{"schemaVersion":1,"runId":"run-1","artifactDigest":"copy-current-checkpoint-digest","answers":[{"id":"Q1","answer":"Use the existing schema."}]}
+```
+
+Every pending ID needs exactly one nonblank answer. Unknown, duplicate, missing and stale
+answers are rejected before model use. The decision digest covers the questions and revision;
+the approval digest separately identifies the reviewed artifact. Planning dispositions are
+`approve`, `revise`, and `stop`; append `: explanation` when needed. For an execution dispute,
+`Accept Codex rebuttal` settles that named issue on unchanged code/evidence. Other text is
+delivered as correction context and does not automatically approve anything. Human rulings
+reach both agents; a human approval retains actual Claude review evidence and unrelated issues.
+
+The saved manual mode cannot be changed. Completed answer replay returns its recorded result
+without another implementation, commit or queue advance. A completed queue phase can recover
+its verified commit/log transition. An interrupted accepted decision with no completed result
+is refused rather than guessed or re-executed. An existing resume lock requires inspecting
+the owning invocation before recovery; never clear one while that invocation may still run.
+Changed target/code/evidence or missing/corrupt workspaces fail actionably. Preserve the saved
+objects and inspect the problem; the file archive is not permission to create a replacement
+workspace. Pending workspaces survive ordinary pruning. Keep queued work's queue file unchanged.
+
+The dashboard is read-only: use its saved run path with the command above. Resumed reports,
+review/evidence directories and checkpoints refresh in the durable run directory; the initial
+artifact index entry is retained once and checkpoint history records decision transitions.
 
 ```
 node bin/loop.js run --task <plan-file-or-prose> --target <folder> --gate <gate.json> [--gate-retries M] [--pivot-candidates N] [--mode manual|autonomous] [--claude-model MODEL] [--codex-model MODEL] [--codex-effort EFFORT] [--arbiter-timeout MS] [--artifact-root DIRECTORY] [--mutate] [--port PORT] [--open] [--no-dashboard] [--quiet]
@@ -94,7 +130,7 @@ node bin/loop.js init <directory>
 node bin/loop.js help
 ```
 
-The corresponding plugin commands are `/uroboros:run`, `/uroboros:mutate`, `/uroboros:plan`,
+The corresponding plugin commands are `/uroboros:run`, `/uroboros:resume`, `/uroboros:mutate`, `/uroboros:plan`,
 `/uroboros:decompose`, `/uroboros:queue`, `/uroboros:batch`, `/uroboros:status`,
 `/uroboros:dashboard`, `/uroboros:publish`, `/uroboros:prune`, `/uroboros:doctor`,
 `/uroboros:setup`, `/uroboros:init`, and `/uroboros:help`. Install them with
@@ -279,7 +315,7 @@ error; multi-word inline prose is used verbatim.
 
 | Outcome | Meaning | Exit |
 |---|---|---|
-| `review-ready` | current Claude review approved: blocking findings closed, diff produced | 0 |
+| `review-ready` | current execution approval with actual Claude review: blocking findings closed, diff produced | 0 |
 | `no-op` | executor changed nothing | 0 |
 | `verifier-failed` | the reviewer failed to launch, timed out, or wrote no report | 4 |
 | `timed-out` | the final executor, evidence, or reviewer stage exceeded its deadline | 5 |

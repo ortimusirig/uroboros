@@ -26,6 +26,7 @@ import { physicalRunIdFor } from '../src/run-id.js';
 import { executeQueueCommand } from '../src/queue-cli.js';
 import { runPlan } from '../src/plan.js';
 import { runDecomposeGoal, runDecomposeProject } from '../src/decompose.js';
+import { resumeRun } from '../src/resume.js';
 
 // Short path, outside OneDrive and outside AppData (both are rejected by
 // assertSafeScratchRoot; AppData is MSIX-redirected under a packaged host).
@@ -75,6 +76,18 @@ async function main() {
   }
   if (opts.command === 'help') {
     process.stdout.write(`${CLI_USAGE}\n`);
+    return;
+  }
+  if (opts.command === 'resume') {
+    try {
+      const result = await resumeRun(opts);
+      process.stdout.write(`${JSON.stringify(result)}\n`);
+      process.exitCode = result.queueResult?.stop && !['max-runs', 'token-budget'].includes(result.queueResult.stop.kind)
+        ? 1 : result.approved === true || result.outcome === 'review-ready' ? 0 : 1;
+    } catch (error) {
+      process.stderr.write(`resume failed: ${error.message}\n`);
+      process.exitCode = 2;
+    }
     return;
   }
   if (opts.command === 'queue') {

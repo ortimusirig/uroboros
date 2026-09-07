@@ -196,18 +196,19 @@ function unavailable(response) {
  */
 export async function runConversation({
   runId, reporter, rounds, tier, requirements = '', interactionMode = 'manual',
-  seats = {}, strategy = {}, prelude = {},
+  seats = {}, strategy = {}, prelude = {}, continuation, humanRuling,
 } = {}) {
   const authority = decisionAuthority({ interactionMode, phase: 'planning' });
   if (rounds !== undefined && (!Number.isSafeInteger(rounds) || rounds < 1)) {
     throw new TypeError('rounds must be a positive integer');
   }
-  const messages = [...(prelude.messages ?? [])], roundHistory = [...(prelude.roundHistory ?? [])];
-  let usageTotal = addUsage(EMPTY_USAGE, prelude.usage);
-  let proposal = null, artifactDigest = null, approval = null, pendingDecision = null;
-  let openIssues = [], feedback = '', artifactRepairs = prelude.artifactRepairs ?? 0, revisionDigest = null;
+  const messages = [...(continuation?.messages ?? prelude.messages ?? [])], roundHistory = [...(continuation?.roundHistory ?? prelude.roundHistory ?? [])];
+  let usageTotal = addUsage(EMPTY_USAGE, continuation?.usage ?? prelude.usage);
+  let proposal = continuation?.proposal ?? null, artifactDigest = continuation?.artifactDigest ?? null, approval = null, pendingDecision = null;
+  let openIssues = continuation?.openIssues ?? [], feedback = continuation?.feedback ?? '',
+    artifactRepairs = continuation?.artifactRepairs ?? prelude.artifactRepairs ?? 0, revisionDigest = continuation?.revisionDigest ?? null;
   let initialAuthor = prelude.author;
-  let round = 0;
+  let round = continuation?.round ?? 0;
   const author = seats.author ?? seats.arbitrate;
   const reviewer = seats.reviewCodex;
   const renderProposal = value => value == null ? '' : strategy.proposalText?.(value) ?? value.plan ?? '';
@@ -217,7 +218,8 @@ export async function runConversation({
     proposal: canonicalPlanningArtifact(proposal), artifactDigest, approval,
     messages: canonicalPlanningArtifact(messages), openIssues: canonicalPlanningArtifact(openIssues),
     pendingDecision, round, roundsLimit: rounds ?? null, artifactRepairs,
-    revisionDigest, feedback, usage: { ...usageTotal },
+    revisionDigest, feedback, usage: { ...usageTotal }, roundHistory,
+    ...(continuation?.candidateState ? { candidateState: continuation.candidateState } : {}),
   });
   const finish = (reason, extra = {}) => {
     const result = {
@@ -279,6 +281,33 @@ export async function runConversation({
     return answer;
   };
   const approvalFor = (basis, reason) => ({ artifactDigest, decidedBy: 'codex', basis, reason });
+
+  if (continuation) {
+    if (continuation.interactionMode !== 'manual' || interactionMode !== 'manual'
+      || continuation.runId !== runId || planningArtifactDigest(requirements, proposal) !== artifactDigest) {
+      throw new Error('invalid saved planning continuation');
+    }
+    const answer = humanRuling?.answers?.find(item => item.id === continuation.pendingDecision?.id)?.answer;
+    if (typeof answer !== 'string' || !answer.trim()) throw new Error('missing human planning ruling');
+    messages.push({ speaker: 'human', role: 'decision-authority', phase: 'planning',
+      turn: messages.length + 1, round, stance: 'ruling', content: answer,
+      artifactDigest, decisionId: humanRuling.decisionId });
+    const disposition = /^(approve|revise|stop)(?:\s*:|\s*$)/i.exec(answer.trim())?.[1]?.toLowerCase();
+    feedback = `Authoritative human ruling for the recorded dispute:\n${answer}\nContinue from the saved proposal; preserve unrelated requirements and issues.`;
+    if (disposition === 'approve' || disposition === 'stop') {
+      // Delivery is evidence, not a new veto over the human ruling on this version.
+      const notice = { type: 'human-ruling', humanRuling, proposal, previousProposal: renderProposal(proposal),
+        requirements, feedback, artifactDigest, round, interactionMode, phase: 'planning', messages: [...messages] };
+      await call(author, notice, 'claude', 'author');
+      await call(reviewer, { ...notice, messages: [...messages] }, 'codex', 'reviewer');
+      if (disposition === 'stop') return finish('human-stopped');
+      approval = { artifactDigest, decidedBy: 'human', basis: 'human', reason: answer,
+        decisionId: humanRuling.decisionId };
+      const written = await strategy.writeConverged?.(proposal);
+      return finish('approved', written);
+    }
+    if (disposition === 'revise') revisionDigest = artifactDigest;
+  }
 
   while (rounds === undefined || round < rounds) {
     round++;

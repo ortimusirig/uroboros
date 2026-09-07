@@ -220,12 +220,17 @@ export async function landQueueDiff({
   diffPath,
   unit,
   runId,
+  operationId,
   allowedDirtyPaths = [],
 }, {
   runCommand = spawnCapture,
 } = {}) {
   const resolvedTarget = resolve(target);
   const prefix = ['-C', resolvedTarget];
+  if (operationId) {
+    const recovered = await recoverQueueLanding({ target, diffPath, operationId, allowedDirtyPaths }, { runCommand });
+    if (recovered) return recovered;
+  }
 
   // Runs may take hours. Recheck immediately before applying so changes made since
   // queue startup can never be swept into the queue commit.
@@ -291,7 +296,8 @@ export async function landQueueDiff({
       );
     }
 
-    const message = `queue: land ${oneLine(unit.name)} (${oneLine(runId)})`;
+    const message = `queue: land ${oneLine(unit.name)} (${oneLine(runId)})`
+      + (operationId ? `\n\nUroboros-Operation: ${operationId}` : '');
     await gitCommand(runCommand, [
       ...prefix,
       'commit',
@@ -324,6 +330,20 @@ export async function landQueueDiff({
   return { paths, commit: head.stdout.trim() };
 }
 
+/** Recover only the exact current commit; unrelated target changes stay a refusal. */
+export async function recoverQueueLanding({ target, diffPath, operationId, allowedDirtyPaths = [] }, { runCommand = spawnCapture } = {}) {
+  if (!/^[a-f0-9]{64}$/.test(operationId)) throw new Error('invalid queue operation identity');
+  const prefix = ['-C', resolve(target)];
+  const body = await gitCommand(runCommand, [...prefix, 'log', '-1', '--format=%B'], {}, 'cannot inspect queue commit');
+  if (!body.stdout.split(/\r?\n/).includes(`Uroboros-Operation: ${operationId}`)) return null;
+  await assertCleanTarget(target, { runCommand, allowedPaths: allowedDirtyPaths });
+  const change = await gitCommand(runCommand, [...prefix, 'diff', 'HEAD^', 'HEAD'], {}, 'cannot verify recovered queue change');
+  if (change.stdout !== readFileSync(diffPath, 'utf8')) throw new Error('queue operation commit does not match its recorded diff');
+  const head = await gitCommand(runCommand, [...prefix, 'rev-parse', 'HEAD'], {}, 'cannot identify recovered queue commit');
+  const paths = await gitCommand(runCommand, [...prefix, 'diff', '--name-only', '-z', 'HEAD^', 'HEAD'], {}, 'cannot inspect recovered queue paths');
+  return { commit: head.stdout.trim(), paths: paths.stdout.split('\0').filter(Boolean), recovered: true };
+}
+
 // Claude's final review before landing — the hierarchy's last step. Claude
 // reads the composed task and the diff first-hand, with the closed findings
 // and the non-zero evidence in front of it, and judges the landing. An
@@ -341,6 +361,8 @@ export async function judgeLandingWithClaude({ unit, facts, runDirectory, claude
     task: readOptional(join(runDirectory, 'TASK.md')) || unit?.name || '',
     diff: readOptional(join(runDirectory, 'CHANGES.diff')),
     findings: facts?.debate?.roundHistory?.at(-1)?.findings ?? [],
+    humanRulings: facts?.approval?.basis === 'human' ? facts.approval.rulings : [],
+    executionApproval: facts?.approval ?? null,
     evidence: (facts?.evidence ?? []).filter((entry) => entry.code !== 0),
   };
   let result;

@@ -6,6 +6,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { join, resolve } from 'node:path';
@@ -16,6 +17,28 @@ import {
 } from '../src/artifacts.js';
 
 const TEST_ROOT = fileURLToPath(new URL('../.ccc-test-artifacts/', import.meta.url));
+
+test('evidence directory retention refuses symlink traversal and never copies unrelated directory trees', () => {
+  const root = temporaryDirectory('evidence-boundary-');
+  try {
+    const worktree = join(root, 'run', 'w'), outside = join(root, 'outside'), artifactRoot = join(root, 'records');
+    writeProducedArtifacts(worktree);
+    mkdirSync(outside);
+    writeFileSync(join(outside, 'private.txt'), 'must stay outside');
+    mkdirSync(join(worktree, '__uro_review'));
+    mkdirSync(join(worktree, '.uro-tmp'));
+    writeFileSync(join(worktree, '.uro-tmp', 'unrelated.txt'), 'not retained');
+    symlinkSync(outside, join(worktree, '__uro_review', 'escape'), process.platform === 'win32' ? 'junction' : 'dir');
+    const runFacts = facts();
+    const archived = archiveRunArtifacts({ dir: worktree, runId: runFacts.runId, facts: runFacts,
+      scratchRoot: root, artifactRoot, startedAt: new Date(), endedAt: new Date() });
+    assert.equal(archived.status, 'failed');
+    assert.match(archived.copyFailures[0].error, /symbolic-link/);
+    assert.equal(existsSync(join(artifactRoot, runFacts.runId, '__uro_review', 'escape', 'private.txt')), false);
+    assert.equal(existsSync(join(artifactRoot, runFacts.runId, '.uro-tmp')), false);
+    assert.equal(readFileSync(join(outside, 'private.txt'), 'utf8'), 'must stay outside');
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
 
 function temporaryDirectory(prefix) {
   mkdirSync(TEST_ROOT, { recursive: true });
