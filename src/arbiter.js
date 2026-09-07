@@ -220,7 +220,7 @@ export function buildArbiterPrompt(request = {}) {
     return [
       '# Claude plan drafting seat',
       'You are read-only. Do not create, edit, or delete files and do not run a gate.',
-      'You are one of three seats drafting independently from the same raw goal. Draft from your own reading of the repository; do not imagine what the other seats might write.',
+      'You are the planning author. Codex independently reviews your exact proposal. Draft from the requirements and repository evidence.',
       'Draft an implementation plan and its executable gate.json for this goal:',
       String(request.goal ?? ''),
       'Every cited path and line must already exist in the target; verify each citation by reading before citing. Describe proposed new paths without formatting them as citations.',
@@ -235,7 +235,7 @@ export function buildArbiterPrompt(request = {}) {
     return [
       '# Claude proposal seat',
       'You are read-only. Do not create, edit, or delete files and do not run a gate.',
-      'Three seats drafted plans independently from the same raw goal. Collate them into one proposal: keep the strongest structure, graft the best ideas from the others, and resolve their disagreements by judgement stated in the plan itself.',
+      'You are the planning author. Answer every Codex objection with evidence, then defend or revise your proposal. Codex is the final planning reviewer in autonomous mode; unresolved manual-mode disputes belong to the human.',
       `GOAL ${String(request.goal ?? '')}`,
       ...(request.drafts ?? []).flatMap((draft) => [
         `## Draft from the ${draft.seat} seat`,
@@ -252,19 +252,6 @@ export function buildArbiterPrompt(request = {}) {
       'Return exactly two tagged artifacts and no prose outside them:',
       '<PLAN_MD>\n...complete Markdown...\n</PLAN_MD>',
       '<GATE_JSON>\n[{"bin":"...","args":["..."]}]\n</GATE_JSON>',
-    ].join('\n\n');
-  }
-  if (request.type === 'agreement') {
-    return [...common,
-      'You are the final arbiter of plan convergence. Two seats have reviewed the proposal against the raw goal; their responses are below, verbatim, severities included. No severity blocks by rule — weigh everything by judgement.',
-      'Converge only when the proposal genuinely achieves the goal and both seats have said AGREE: yes. If either seat disagrees, or you are not satisfied, do not converge; say what must change.',
-      SEAT_STATE_LAW,
-      'Schema: {"converged":true,"reason":"brief merits"} or {"converged":false,"reason":"...","feedback":"exact corrections for the next proposal"}.',
-      `GOAL ${String(request.goal ?? '')}`,
-      `PROPOSAL ${String(request.proposal ?? '')}`,
-      `GATE ${compact(request.gate ?? null)}`,
-      seatReviewBlock('CODEX_REVIEW', request.reviews?.codex),
-      seatReviewBlock('CURSOR_REVIEW', request.reviews?.cursor),
     ].join('\n\n');
   }
   if (request.type === 'capability') {

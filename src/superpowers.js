@@ -273,22 +273,21 @@ export async function verifySuperpowersSeats({
   home = homedir(),
   codexBin = 'codex',
   spawn = spawnCapture,
+  requiredSeats = REQUIRED_SEATS,
 } = {}) {
-  const [codex, cursor, claude] = await Promise.all([
-    verifyCodexSuperpowers({ bin: codexBin, spawn, env }),
-    Promise.resolve(verifyDirectorySuperpowers({ seat: 'cursor', env, home })),
-    Promise.resolve(verifyDirectorySuperpowers({ seat: 'claude', env, home })),
-  ]);
-  return {
-    ok: codex.verified && cursor.verified && claude.verified,
-    seats: { codex, cursor, claude },
-  };
+  const entries = await Promise.all(requiredSeats.map(async seat => [
+    seat, seat === 'codex'
+      ? await verifyCodexSuperpowers({ bin: codexBin, spawn, env })
+      : verifyDirectorySuperpowers({ seat, env, home }),
+  ]));
+  const seats = Object.fromEntries(entries);
+  return { ok: entries.every(([, value]) => value.verified), seats };
 }
 
-export function applySuperpowersRequirement(verification, env = process.env) {
+export function applySuperpowersRequirement(verification, env = process.env, { requiredSeats = REQUIRED_SEATS } = {}) {
   const bypassed = readEnv(env, 'REQUIRE_SUPERPOWERS') === '0';
   const suppliedSeats = verification?.seats ?? {};
-  const seats = Object.fromEntries(REQUIRED_SEATS.map((seat) => [
+  const seats = Object.fromEntries(requiredSeats.map((seat) => [
     seat,
     suppliedSeats[seat] ?? {
       seat,
@@ -301,10 +300,10 @@ export function applySuperpowersRequirement(verification, env = process.env) {
   ]));
   const normalizedVerification = {
     ...verification,
-    ok: REQUIRED_SEATS.every((seat) => seats[seat].verified === true),
+    ok: requiredSeats.every((seat) => seats[seat].verified === true),
     seats,
   };
-  const failed = REQUIRED_SEATS.map((seat) => seats[seat])
+  const failed = requiredSeats.map((seat) => seats[seat])
     .filter((seat) => seat.verified !== true);
   if (failed.length === 0) {
     return { ok: true, bypassed, reason: null, verification: normalizedVerification };

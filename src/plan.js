@@ -1,53 +1,17 @@
-import {
-  accessSync,
-  constants,
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-  statSync,
-  unlinkSync,
-  writeFileSync,
-} from 'node:fs';
+import { accessSync, constants, existsSync, mkdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
-import { homedir, tmpdir } from 'node:os';
+import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
-import {
-  ARBITER_UNVERIFIED,
-  buildArbiterPrompt,
-  DEFAULT_ARBITER_MODEL,
-  runArbiter,
-  seatReviewContext,
-} from './arbiter.js';
-import {
-  CONVERSATION_DNA,
-  parseSeatReview,
-  RepairableArtifactError,
-  runConversation,
-  seatLaunchFailure,
-  STANCE_REPAIR_CLOSING,
-  STANCE_REPAIR_OPENING,
-  stanceRepairLines,
-  unavailableSeatReview,
-} from './conversation.js';
+import { buildArbiterPrompt, DEFAULT_ARBITER_MODEL, runArbiter } from './arbiter.js';
+import { CONVERSATION_DNA, conversationText, parseSeatReview, RepairableArtifactError,
+  runConversation, seatLaunchFailure, stanceRepairLines } from './conversation.js';
+import { decisionAuthority } from './decision-policy.js';
 import { reportEvent } from './events.js';
-import { runExecutor } from './executor.js';
-
+import { addUsage, EMPTY_USAGE } from './usage.js';
+import { runExecutor, DEFAULT_EXECUTOR_MODEL, DEFAULT_EXECUTOR_EFFORT } from './executor.js';
 import { resolveStageTimeouts } from './timeouts.js';
-import { runVerifier } from './verifier.js';
-import {
-  applySuperpowersRequirement,
-  verifySuperpowersSeats,
-} from './superpowers.js';
-
-// The seat-review format belongs to the conversation, not to the planner; it is
-// re-exported here so plan-tier callers keep a single import site.
+import { applySuperpowersRequirement, verifySuperpowersSeats } from './superpowers.js';
 export { parseSeatReview };
-
-// Cursor takes its prompt on argv, where a newline is not a line break, so the
-// standing law travels flattened into those single-line prompts.
-const ONE_LINE_CONVERSATION_DNA = CONVERSATION_DNA.replace(/\n/g, ' ');
 
 export const DEFAULT_PLAN_CANDIDATES = 3;
 export const MAX_PLAN_CANDIDATES = 5;
@@ -215,298 +179,12 @@ function draftingPrompt({
   ].join('\n');
 }
 
-async function productionDraft(request) {
-  const result = await runExecutor({
-    plan: request.input,
-    cwd: request.target,
-    model: request.plannerModel,
-    sandbox: request.sandbox,
-    timeoutMs: request.timeoutMs,
-    runId: request.runId,
-    attempt: request.round,
-    env: request.env,
-  });
-  if (result.exitCode !== 0 || result.timedOut) {
-    throw new Error(`planner seat exited ${result.exitCode}${result.timedOut ? ' after timing out' : ''}`);
-  }
-  return { ...parseDraftArtifact(result.lastMessage), usage: result.usage };
-}
-
-function selectionPrompt({ candidates, ledger, failedPlan }) {
-  return [
-    CONVERSATION_DNA,
-    '',
-    '# STORM plan selection seat',
-    '',
-    'Select one viable plan using judgement. Do not score or rank the candidates.',
-    'Prefer the approach that best satisfies the goal and gate while learning from the supplied evidence.',
-    ...(ledger ? ['', ledgerPrompt(ledger)] : []),
-    ...(failedPlan ? ['', 'Discarded framing (do not select a disguised copy):', failedPlan] : []),
-    '',
-    ...candidates.flatMap((candidate) => [
-      `## ${candidate.id}`,
-      `Declared perspective: ${candidate.perspective}`,
-      candidate.plan,
-      `Gate: ${JSON.stringify(candidate.gate)}`,
-      '',
-    ]),
-    'Return exactly <SELECTED_CANDIDATE>candidate-N</SELECTED_CANDIDATE>.',
-  ].join('\n');
-}
-
-function selectedCandidateId(value) {
-  if (typeof value === 'string') {
-    return /<SELECTED_CANDIDATE>\s*([^<\s]+)\s*<\/SELECTED_CANDIDATE>/i.exec(value)?.[1]
-      ?? value.trim();
-  }
-  if (value && typeof value === 'object') {
-    return value.selectedCandidateId ?? value.candidateId ?? value.id ?? null;
-  }
-  return null;
-}
-
-async function productionSelect(request) {
-  const result = await runExecutor({
-    plan: request.input,
-    cwd: request.target,
-    model: request.plannerModel,
-    sandbox: 'read-only',
-    timeoutMs: request.timeoutMs,
-    runId: request.runId,
-    env: request.env,
-  });
-  if (result.exitCode !== 0 || result.timedOut) {
-    throw new Error(`plan selector exited ${result.exitCode}${result.timedOut ? ' after timing out' : ''}`);
-  }
-  return {
-    selectedCandidateId: selectedCandidateId(result.lastMessage),
-    usage: result.usage,
-  };
-}
-
-function oneLineArtifact(text) {
-  return String(text).replaceAll('"', "'")
-    .replace(/[\r\n]+/g, ' [newline] ')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-// The response format is prompt discipline, not protocol: the parser extracts
-// what matches and carries severities VERBATIM (see parseSeatReview in
-// conversation.js). Nothing anywhere validates a severity, filters by one, or
-// branches on one — they are input to the arbiter's judgement and nothing else.
-export function reviewSeatPrompt({ seat, goal, plan, gate, round, repairContent }) {
-  return [
-    ONE_LINE_CONVERSATION_DNA,
-    `# ${seat} plan review seat`,
-    'You receive the raw goal and a proposed implementation plan. Judge independently whether the plan achieves the goal; explore the target repository for real evidence.',
-    `GOAL ${oneLineArtifact(goal)}`,
-    `PLAN ${oneLineArtifact(plan)}`,
-    `GATE ${oneLineArtifact(JSON.stringify(gate))}`,
-    `ROUND ${round}`,
-    'Respond in exactly this structure and nothing else:',
-    'AGREE: yes or AGREE: no.',
-    'Then zero or more suggestion lines, one per line, formatted: S<id> P0: description (or P1, P2 — your judgement of priority; nothing mechanical acts on it).',
-    'Reuse the same S<id> for a suggestion you have raised in an earlier round so recurrence is visible.',
-    'Then zero or more question lines formatted: Q<id>: question.',
-    'AGREE: yes means you are satisfied the plan achieves the goal and you could work from it as written.',
-    // The seat's own unreadable answer, fed back once and WHOLE. This prompt
-    // reaches Codex on stdin (runExecutor's `input`), never on argv, so the
-    // one-line rendering the other artifacts use would flatten quotes and line
-    // breaks for no reason — and "verbatim" would stop being true.
-    ...(repairContent ? stanceRepairLines(repairContent) : []),
-  ].join(' ');
-}
-
-// Cursor's CLI takes its prompt on argv and cannot read stdin, so a prompt
-// embedding a whole proposal dies on the Windows 8191-character command line —
-// the same wall that silenced the arbiter until its prompt moved to stdin.
-// Measured live: the seat went mute in every call of the first three-way run.
-// The hand-off is therefore the repo's established file pattern: artifacts on
-// disk in a scratch directory, a short prompt naming their absolute paths —
-// exactly how run-mode reviews already read TASK.md and CHANGES.diff.
-//
-// Exported because every tier's Cursor seat needs the same hand-off; the
-// decomposition tiers hand over PROJECT.md/GOAL_SPEC.md the way this one hands
-// over GOAL.md.
-export async function withSeatWorkspace(files, work) {
-  const directory = mkdtempSync(join(tmpdir(), 'uro-plan-seat-'));
-  try {
-    for (const [name, content] of Object.entries(files)) {
-      writeFileSync(join(directory, name), content, 'utf8');
-    }
-    // AWAITED, not returned: `return work(directory)` hands back a pending
-    // promise, and `finally` then deletes the workspace before the seat has
-    // read a single file out of it.
-    return await work(directory);
-  } finally {
-    try { rmSync(directory, { recursive: true, force: true }); } catch { /* scratch */ }
-  }
-}
-
-export async function productionCursorDraft({
-  goal, target, verifierModel, timeoutMs, runId, env, home, superpowersDir, feedback, failedPlan,
-  verify = runVerifier,
-}) {
-  return withSeatWorkspace({
-    'GOAL.md': `${goal}\n`,
-    ...(feedback ? { 'FEEDBACK.md': `${feedback}\n` } : {}),
-    ...(failedPlan ? { 'FAILED_PLAN.md': `${failedPlan}\n` } : {}),
-  }, async (workspace) => {
-    const prompt = [
-      ONE_LINE_CONVERSATION_DNA,
-      '# Cursor plan drafting seat',
-      'You are one of three seats drafting independently from the same raw goal. Draft from your own reading of the repository.',
-      `Read the goal from ${oneLineArtifact(join(workspace, 'GOAL.md'))} and draft an implementation plan and its evidence commands (gate.json) for it. The harness runs those commands once per round and records their output as evidence for the seats; no exit code passes or fails the change.`,
-      ...(feedback ? [`Apply the required corrections in ${oneLineArtifact(join(workspace, 'FEEDBACK.md'))}.`] : []),
-      ...(failedPlan ? [`${oneLineArtifact(join(workspace, 'FAILED_PLAN.md'))} holds a discarded framing; choose a genuinely different strategy.`] : []),
-      'Every cited path and line must already exist in the target; verify each citation by reading before citing.',
-      'Reply in plain chat text, not a plan tool artifact. If your client renders a plan tool anyway, ALSO print both tagged artifacts as chat text — the tags are the only thing read.',
-      'Return exactly <PLAN_MD>...markdown...</PLAN_MD> then <GATE_JSON>[...]</GATE_JSON> and no prose outside them.',
-    ].join(' ');
-    const result = await verify({
-      cwd: target, prompt, model: verifierModel, timeoutMs, pass: 'plan', env, home, superpowersDir,
-    });
-    // A seat whose process died produced nothing judgeable, and that is a
-    // LAUNCH failure carrying its stderr — the same split the decompose draft
-    // seats make (63c788f). Feeding the empty result to the parser instead
-    // inverted it in both directions: a dead process read as an unparseable
-    // answer, and the ActionRequiredError explaining WHY was discarded with it.
-    if (result.launchFailed || result.timedOut) {
-      throw new Error(seatLaunchFailure('cursor draft', result));
-    }
-    const artifact = parseDraftArtifact(`${result.findings ?? ''}\n${result.plan ?? ''}`);
-    return { ...artifact, usage: result.usage };
-  });
-}
-
-export async function productionCursorReview({
-  goal, plan, gate, round, target, verifierModel, timeoutMs, env, home, superpowersDir,
-  repairContent, verify = runVerifier,
-}) {
-  return withSeatWorkspace({
-    'GOAL.md': `${goal}\n`,
-    'PROPOSAL.md': `${plan}\n`,
-    'PROPOSED_GATE.json': `${JSON.stringify(gate, null, 2)}\n`,
-    // Verbatim on disk, like every other artifact this seat reads: argv is
-    // where long text dies on Windows, and the answer must arrive whole.
-    ...(repairContent ? { 'PREVIOUS_ANSWER.md': `${repairContent}\n` } : {}),
-  }, async (workspace) => {
-    const prompt = [
-      ONE_LINE_CONVERSATION_DNA,
-      '# Cursor plan review seat',
-      `Read the raw goal from ${oneLineArtifact(join(workspace, 'GOAL.md'))} and the proposed plan from ${oneLineArtifact(join(workspace, 'PROPOSAL.md'))} with its evidence commands ${oneLineArtifact(join(workspace, 'PROPOSED_GATE.json'))}.`,
-      'Judge independently whether the plan achieves the goal; explore the target repository for real evidence.',
-      'Your review is of THIS proposal only: every AGREE, suggestion, and question must be about the plan in PROPOSAL.md as it addresses the goal in GOAL.md. Repository exploration is evidence about this plan, never a licence to review other features or files on their own.',
-      `ROUND ${round}.`,
-      'Respond in plain chat text, in exactly this structure and nothing else:',
-      'AGREE: yes or AGREE: no.',
-      'Then zero or more suggestion lines, one per line, formatted: S<id> P0: description (or P1, P2 — your judgement of priority; nothing mechanical acts on it).',
-      'Reuse the same S<id> for a suggestion you have raised in an earlier round so recurrence is visible.',
-      'Then zero or more question lines formatted: Q<id>: question.',
-      'AGREE: yes means you are satisfied the plan achieves the goal and you could work from it as written.',
-      ...(repairContent ? [
-        STANCE_REPAIR_OPENING,
-        `Your previous answer is in ${oneLineArtifact(join(workspace, 'PREVIOUS_ANSWER.md'))}, verbatim and complete.`,
-        ...STANCE_REPAIR_CLOSING,
-      ] : []),
-    ].join(' ');
-    const result = await verify({
-      cwd: target, prompt, model: verifierModel, timeoutMs, pass: 'plan', env, home, superpowersDir,
-    });
-    if (result.launchFailed || result.timedOut) return unavailableSeatReview(result);
-    return { ...parseSeatReview(`${result.findings ?? ''}\n${result.plan ?? ''}`), usage: result.usage };
-  });
-}
-
-async function productionCodexReview({
-  goal, plan, gate, round, target, plannerModel, timeoutMs, runId, env, repairContent,
-}) {
-  const result = await runExecutor({
-    plan: reviewSeatPrompt({ seat: 'Codex', goal, plan, gate, round, repairContent }),
-    cwd: target,
-    model: plannerModel,
-    sandbox: 'read-only',
-    timeoutMs,
-    runId,
-    env,
-  });
-  if (result.exitCode !== 0 || result.timedOut) {
-    return { agree: false, readable: false, suggestions: [], questions: [], content: '', unavailable: true, usage: result.usage };
-  }
-  return { ...parseSeatReview(result.lastMessage), usage: result.usage };
-}
-
-// The capability seats are tier-agnostic: each answers only about its own
-// ability to do the work described in whatever text the tier hands it, so the
-// decomposition tiers launch exactly these three transports.
-export async function productionCapability({
-  seat,
-  prompt,
-  target,
-  plannerModel,
-  verifierModel,
-  arbiterModel,
-  executorTimeout,
-  verifierTimeout,
-  arbiterTimeout,
-  runId,
-  env,
-  home,
-  superpowersDir,
-  verify = runVerifier,
-}) {
-  if (seat === 'executor') {
-    const result = await runExecutor({
-      plan: prompt, cwd: target, model: plannerModel, sandbox: 'read-only',
-      timeoutMs: executorTimeout, runId, env,
-    });
-    return result.exitCode === 0 && !result.timedOut
-      ? result.lastMessage
-      : { verdict: ARBITER_UNVERIFIED };
-  }
-  if (seat === 'reviewer') {
-    const instructions = prompt.replace(
-      'Return exactly one JSON object and no prose.',
-      'Return one JSON object followed only by the required final verdict marker.',
-    );
-    // The capability request embeds the whole converged plan, which no argv
-    // survives: spawn ENAMETOOLONG killed a twice-converged dogfood run at
-    // this exact call, and the old quote/newline flattening also mangled the
-    // plan it was asking about. The request travels verbatim as a workspace
-    // file; argv carries only the pointer.
-    const result = await withSeatWorkspace({
-      'CAPABILITY_REQUEST.md': `${instructions}\n`,
-    }, (workspace) => verify({
-      cwd: target,
-      prompt: `Read ${join(workspace, 'CAPABILITY_REQUEST.md')} and follow it exactly. End with exactly NO_BLOCKERS.`,
-      model: verifierModel,
-      timeoutMs: verifierTimeout,
-      pass: 'capability',
-      env,
-      home,
-      superpowersDir,
-    }));
-    return result.launchFailed || result.timedOut
-      ? { verdict: ARBITER_UNVERIFIED }
-      : result.findings;
-  }
-  return runArbiter({
-    cwd: target,
-    request: { type: 'capability', seat, plan: prompt },
-    prompt,
-    model: arbiterModel,
-    timeoutMs: arbiterTimeout,
-    runId,
-    env,
-  });
-}
 
 function normalizeDraft(value) {
   if (value && typeof value === 'object' && typeof value.plan === 'string') {
     let gate = value.gate;
     if (typeof gate === 'string') gate = JSON.parse(gate);
-    return { ...value, plan: value.plan.endsWith('\n') ? value.plan : `${value.plan}\n`, gate };
+    return { plan: value.plan.endsWith('\n') ? value.plan : `${value.plan}\n`, gate };
   }
   return parseDraftArtifact(value);
 }
@@ -549,12 +227,6 @@ function candidateFailure(error) {
   };
 }
 
-function declarePerspective(plan, perspective) {
-  const source = String(plan ?? '');
-  if (source.includes(perspective)) return source;
-  return `## Perspective\n\n${perspective}\n\n${source}`;
-}
-
 export function planCandidateFacts(candidate, selectedId = null) {
   const planGate = {
     passed: candidate.gateResult?.passed === true,
@@ -570,136 +242,246 @@ export function planCandidateFacts(candidate, selectedId = null) {
   };
 }
 
-/**
- * Generate and mechanically check a bounded STORM candidate set. The helper is
- * deliberately side-effect free with respect to plan artifacts; callers decide
- * whether the selected plan is written or executed.
- */
-export async function runPlanCandidateSet({
-  goal,
-  target,
-  count = DEFAULT_PLAN_CANDIDATES,
-  mode = 'initial',
-  round = 1,
-  ledger = null,
-  failedPlan = '',
-  previousPlan = '',
-  feedback = '',
-  pivot = '',
-  plannerModel,
-  timeoutMs = resolveStageTimeouts().executor,
-  gateTimeout = resolveStageTimeouts().gate,
-  runId = `plan-candidates-${randomUUID()}`,
-  env = process.env,
-  draft,
-  select,
-} = {}) {
-  validatePlanCandidateCount(count, mode === 'fresh' ? 'pivotCandidates' : 'candidates');
-  if (mode !== 'initial' && mode !== 'fresh') {
-    throw new TypeError(`unknown candidate mode: ${mode}`);
-  }
-  if (typeof goal !== 'string' || goal.trim() === '') {
-    throw new TypeError('candidate goal must be a non-empty string');
-  }
-  if (typeof target !== 'string' || target === '') {
-    throw new TypeError('candidate target must be a non-empty string');
-  }
-  const draftCandidate = draft ?? productionDraft;
-  const perspectives = mode === 'fresh' ? FRESH_PERSPECTIVES : INITIAL_PERSPECTIVES;
-  const definitions = Array.from({ length: count }, (_, index) => ({
-    id: `candidate-${index + 1}`,
-    perspective: perspectives[index],
-  }));
 
-  const candidates = await Promise.all(definitions.map(async (definition) => {
-    const input = draftingPrompt({
-      goal,
-      round,
-      previousPlan,
-      feedback,
-      pivot,
-      perspective: definition.perspective,
-      candidateId: definition.id,
-      candidateCount: count,
-      ledger,
-      failedPlan,
-    });
-    let artifact;
-    let gateResult;
-    try {
-      artifact = normalizeDraft(await draftCandidate({
-        input,
-        goal,
-        target,
-        round,
-        candidateId: definition.id,
-        candidateIndex: Number(definition.id.slice('candidate-'.length)),
-        candidateCount: count,
-        perspective: definition.perspective,
-        mode,
-        ledger,
-        failedPlan,
-        plannerModel,
-        sandbox: 'read-only',
-        timeoutMs,
-        runId,
-        env,
-      }));
-      artifact.plan = declarePerspective(artifact.plan, definition.perspective);
-    } catch (error) {
-      gateResult = candidateFailure(error);
-    }
-    // No mechanical gate judges a candidate. Drafting is the only thing that can
-    // fail here; every drafted plan reaches the selection seat, which judges.
-    // gateResult keeps its shape because run.js facts and the dashboard read it.
-    if (artifact) gateResult = { passed: true, failures: [] };
-    return { ...definition, input, ...(artifact ?? {}), gateResult };
-  }));
-  const surviving = candidates.filter((candidate) => candidate.gateResult?.passed === true);
-  if (surviving.length === 0) {
-    return { mode, candidates, surviving: [], selected: null, exhausted: true };
-  }
+export async function planningPreflight({ adapters = {}, superpowers, env, home }) {
+  const requiredSeats = ['codex', 'claude'];
+  const verification = superpowers?.seats ? superpowers
+    : await (adapters.verifySuperpowers ?? verifySuperpowersSeats)({ env, home, requiredSeats });
+  const requirement = applySuperpowersRequirement(verification, env, { requiredSeats });
+  if (!requirement.ok) throw new Error(`superpowers preflight failed: ${requirement.reason}`);
+  return requirement;
+}
 
-  let selected = surviving[0];
-  let selectionUsage;
-  const selectCandidate = select ?? (draft === undefined ? productionSelect : null);
-  if (surviving.length > 1 && typeof selectCandidate === 'function') {
-    let answer;
-    try {
-      answer = await selectCandidate({
-        input: selectionPrompt({ candidates: surviving, ledger, failedPlan }),
-        goal,
-        target,
-        candidates: surviving.map((candidate) => ({
-          id: candidate.id,
-          perspective: candidate.perspective,
-          plan: candidate.plan,
-          gate: candidate.gate,
-        })),
-        ledger,
-        failedPlan,
-        mode,
-        plannerModel,
-        timeoutMs,
-        runId,
-        env,
-      });
-      selectionUsage = answer?.usage;
-    } catch {
-      answer = null;
-    }
-    const chosenId = selectedCandidateId(answer);
-    selected = surviving.find((candidate) => candidate.id === chosenId) ?? selected;
-  }
-  return {
-    mode,
-    candidates,
-    surviving,
-    selected,
-    exhausted: false,
-    ...(selectionUsage === undefined ? {} : { selectionUsage }),
+export function planningAuthorPrompt(prompt, request) {
+  return [
+    prompt,
+    ...(request.candidateCount ? [`Author candidate ${request.candidateId} of ${request.candidateCount}. Its perspective is: ${request.perspective}. Make this approach materially distinct and describe that perspective in the plan.`] : []),
+    'You are Claude, the author. Codex reviews this artifact. State AGREE: yes if you endorse the delivered artifact, or AGREE: no and explain retained dissent. Include the complete required tagged artifacts.',
+    'Answer every outstanding objection with evidence. Preserve dissent explicitly. During reconciliation state the disputed point, evidence, and what would change your position.',
+    `Interaction mode: ${request.interactionMode}. Autonomous final planning authority: Codex. Manual unresolved disputes: human.`,
+    request.previousProposal ? 'Previous proposal:\n' + request.previousProposal : '',
+    request.feedback ? 'Feedback (verbatim):\n' + request.feedback : '',
+    conversationText(request.messages),
+  ].filter(Boolean).join('\n\n');
+}
+
+export function planningReviewPrompt(prompt, request) {
+  return [
+    prompt,
+    `ARTIFACT_DIGEST: ${request.artifactDigest}`,
+    'Engage with the author reasoning and previous messages. Retain open issue IDs; identify addressed IDs with ADDRESSED: id,id. State unresolved questions as Q<id>: question.',
+    request.finalDecision
+      ? 'You are Codex, the final planning reviewer in autonomous mode. Resolve this specific dispute. Return DECISION: approve, DECISION: revise, or DECISION: stop; REASON: your substantive reasoning; and ARTIFACT_DIGEST: the exact digest above. A revision does not approve current bytes. Retain author dissent; your ruling is not consensus.'
+      : 'Return AGREE: yes or AGREE: no and ARTIFACT_DIGEST: the exact digest above. Explain objections in substantive prose and S<id> P1: description lines. During reconciliation state evidence and what would change your position.',
+    conversationText(request.messages),
+    ...(request.repairContent ? stanceRepairLines(request.repairContent) : []),
+  ].join('\n\n');
+}
+
+function parsePlanningReview(result) {
+  const source = String(result.lastMessage ?? '');
+  return { ...parseSeatReview(source), usage: result.usage,
+    artifactDigest: /(?:^|\n)\s*ARTIFACT_DIGEST:\s*([a-f0-9]{64})\b/i.exec(source)?.[1]?.toLowerCase(),
+    decision: /(?:^|\n)\s*DECISION:\s*(approve|revise|stop)\b/i.exec(source)?.[1]?.toLowerCase(),
+    reason: /(?:^|\n)\s*REASON:\s*([^\n]+)/i.exec(source)?.[1] ?? '',
+    addressedIssueIds: /(?:^|\n)\s*ADDRESSED:\s*([^\n]+)/i.exec(source)?.[1]?.split(',').map(id => id.trim()) ?? [],
   };
 }
+
+/** Inject model process boundaries while keeping prompt construction and parsing real. */
+export function createPlanningSeats({
+  target, claudeModel = DEFAULT_ARBITER_MODEL, codexModel = DEFAULT_EXECUTOR_MODEL,
+  codexEffort = DEFAULT_EXECUTOR_EFFORT, executorTimeout, arbiterTimeout,
+  runId, env, reporter, adapters = {}, authorPrompt, reviewPrompt,
+}) {
+  const hermetic = ['runArbiter', 'runExecutor', 'author', 'reviewer', 'draft', 'codexReview']
+    .some(key => Object.hasOwn(adapters, key));
+  const authorTransport = adapters.runArbiter ?? (hermetic ? null : runArbiter);
+  const reviewTransport = adapters.runExecutor ?? (hermetic ? null : runExecutor);
+  return {
+    author: adapters.author ?? (async request => {
+      if (typeof authorTransport !== 'function') return { unavailable: true, error: 'Claude author transport unavailable' };
+      return authorTransport({
+        cwd: target, request, prompt: planningAuthorPrompt(authorPrompt(request), request),
+        model: claudeModel, timeoutMs: arbiterTimeout, runId, env, reporter,
+      });
+    }),
+    reviewCodex: adapters.reviewer ?? adapters.codexReview ?? (async request => {
+      if (typeof reviewTransport !== 'function') return { unavailable: true, error: 'Codex reviewer transport unavailable' };
+      const result = await reviewTransport({
+        cwd: target, plan: planningReviewPrompt(reviewPrompt(request), request),
+        model: codexModel, effort: codexEffort, sandbox: 'read-only',
+        timeoutMs: executorTimeout, runId, env,
+      });
+      if (result.exitCode !== 0 || result.timedOut || result.launchFailed) {
+        return { unavailable: true, error: seatLaunchFailure('codex review', result), usage: result.usage,
+          content: result.lastMessage ?? '', stderr: result.stderr };
+      }
+      return parsePlanningReview(result);
+    }),
+  };
+}
+
+export function reviewSeatPrompt({ goal, plan, gate, round }) {
+  return [CONVERSATION_DNA, '# Codex plan reviewer',
+    'Independently inspect repository evidence and review this exact plan against the original requirements.',
+    'GOAL', goal, 'PLAN', plan, 'GATE', JSON.stringify(gate, null, 2), `ROUND ${round}`,
+  ].join('\n\n');
+}
+
+async function productionDraft(request) {
+  const result = await runArbiter({
+    request: { type: 'draft', goal: request.goal },
+    prompt: planningAuthorPrompt(request.input, request),
+    cwd: request.target, model: request.claudeModel, timeoutMs: request.timeoutMs,
+    runId: request.runId, env: request.env,
+  });
+  if (result?.verdict === 'UNVERIFIED' || result?.launchFailed || result?.timedOut) {
+    throw new Error(seatLaunchFailure('claude author', result));
+  }
+  return { ...parsePlanProposal(result), ...parseSeatReview(result.answer), usage: result.usage };
+}
+
+function selectionPrompt({ candidates, ledger, failedPlan }) {
+  return [
+    CONVERSATION_DNA,
+    '',
+    '# STORM plan selection seat',
+    '',
+    'Select one viable plan using judgement. Do not score or rank the candidates.',
+    'Prefer the approach that best satisfies the goal and gate while learning from the supplied evidence.',
+    ...(ledger ? ['', ledgerPrompt(ledger)] : []),
+    ...(failedPlan ? ['', 'Discarded framing (do not select a disguised copy):', failedPlan] : []),
+    '',
+    ...candidates.flatMap((candidate) => [
+      `## ${candidate.id}`,
+      `Declared perspective: ${candidate.perspective}`,
+      candidate.plan,
+      `Gate: ${JSON.stringify(candidate.gate)}`,
+      '',
+    ]),
+    'Return exactly <SELECTED_CANDIDATE>candidate-N</SELECTED_CANDIDATE>.',
+  ].join('\n');
+}
+
+function selectedCandidateId(value) {
+  if (typeof value === 'string') {
+    return /<SELECTED_CANDIDATE>\s*([^<\s]+)\s*<\/SELECTED_CANDIDATE>/i.exec(value)?.[1]
+      ?? value.trim();
+  }
+  if (value && typeof value === 'object') {
+    return value.selectedCandidateId ?? value.candidateId ?? value.id ?? null;
+  }
+  return null;
+}
+
+
+async function productionSelect(request, execute = runExecutor) {
+  const result = await execute({
+    plan: request.input, cwd: request.target, model: request.codexModel,
+    effort: request.codexEffort, sandbox: 'read-only', timeoutMs: request.executorTimeout,
+    runId: request.runId, env: request.env,
+  });
+  if (result.exitCode !== 0 || result.timedOut) throw new Error(seatLaunchFailure('codex selector', result));
+  return { selectedCandidateId: selectedCandidateId(result.lastMessage), usage: result.usage };
+}
+
+export async function runPlanCandidateSet({
+  goal, target, count = DEFAULT_PLAN_CANDIDATES, mode = 'initial',
+  interactionMode = 'manual', round = 1, rounds, ledger = null,
+  failedPlan = '', previousPlan = '', feedback = '', pivot = '',
+  claudeModel, codexModel, codexEffort, plannerModel,
+  timeoutMs = resolveStageTimeouts().arbiter, executorTimeout = resolveStageTimeouts().executor,
+  runId = `plan-candidates-${randomUUID()}`, env = process.env, reporter,
+  draft, select, review,
+} = {}) {
+  decisionAuthority({ interactionMode, phase: 'planning' });
+  validatePlanCandidateCount(count, mode === 'fresh' ? 'pivotCandidates' : 'candidates');
+  if (!['initial', 'fresh'].includes(mode)) throw new TypeError(`unknown candidate mode: ${mode}`);
+  if (typeof goal !== 'string' || !goal.trim()) throw new TypeError('candidate goal must be a non-empty string');
+  if (typeof target !== 'string' || !target) throw new TypeError('candidate target must be a non-empty string');
+  if (plannerModel !== undefined) throw new TypeError('plannerModel is ambiguous; use claudeModel or codexModel');
+  const draftCandidate = draft ?? productionDraft;
+  const perspectives = mode === 'fresh' ? FRESH_PERSPECTIVES : INITIAL_PERSPECTIVES;
+  const common = { goal, target, round, mode, interactionMode, ledger, failedPlan,
+    claudeModel, codexModel, codexEffort, timeoutMs, executorTimeout, runId, env };
+  const candidates = await Promise.all(Array.from({ length: count }, async (_, index) => {
+    const definition = { id: `candidate-${index + 1}`, perspective: perspectives[index], author: 'claude' };
+    const input = draftingPrompt({ goal, round, previousPlan, feedback, pivot, ...definition,
+      candidateId: definition.id, candidateCount: count, ledger, failedPlan });
+    let response;
+    try {
+      response = await draftCandidate({ ...common, input, candidateId: definition.id,
+        candidateIndex: index + 1, candidateCount: count, perspective: definition.perspective });
+      const artifact = parsePlanProposal(response);
+      return { ...definition, ...artifact, response, input, gateResult: { passed: true, failures: [] } };
+    } catch (error) {
+      return { ...definition, input, response, gateResult: candidateFailure(error) };
+    }
+  }));
+  const surviving = candidates.filter(candidate => candidate.gateResult.passed);
+  let selected = surviving[0], selectionUsage, selection;
+  const failure = reason => {
+    const usage = candidates.reduce((total, candidate) => addUsage(total, candidate.response?.usage),
+      selectionUsage ?? EMPTY_USAGE);
+    return { mode, interactionMode, candidates, surviving, selected: null,
+      exhausted: surviving.length === 0, approved: false, converged: false, approval: null, reason,
+      tokens: { total: usage }, checkpointState: {
+        version: 1, phase: 'planning', tier: 'plan', runId, interactionMode,
+        authority: decisionAuthority({ interactionMode, phase: 'planning' }), requirements: goal,
+        proposal: null, artifactDigest: null, approval: null, messages: [], openIssues: [], usage,
+        candidateState: { mode, selectedCandidateId: null, candidates, selection },
+      } };
+  };
+  if (!surviving.length) return failure('author-unavailable');
+  if (surviving.length > 1) {
+    const choose = select ?? (draft ? null : productionSelect);
+    if (!choose) return failure('reviewer-unavailable');
+    let answer;
+    try {
+      answer = await choose({ ...common, candidates: surviving,
+        input: selectionPrompt({ candidates: surviving, ledger, failedPlan }) });
+    } catch { return failure('reviewer-unavailable'); }
+    selectionUsage = answer?.usage;
+    selection = answer;
+    selected = surviving.find(candidate => candidate.id === selectedCandidateId(answer));
+    if (!selected) return failure('selection-unreadable');
+  }
+  const productionSeats = createPlanningSeats({
+    target, claudeModel, codexModel, codexEffort, executorTimeout, arbiterTimeout: timeoutMs,
+    runId, env,
+    adapters: draft ? { author: async () => null } : {},
+    authorPrompt: request => draftingPrompt({ goal, round: request.round, feedback: request.feedback }),
+    reviewPrompt: request => reviewSeatPrompt(request),
+  });
+  let first = true;
+  const result = await runConversation({
+    runId, reporter, tier: 'plan', interactionMode, requirements: goal, rounds,
+    seats: {
+      author: async request => {
+        if (first) { first = false; return selected.response; }
+        if (draft) return draft({ ...common, ...request,
+          input: draftingPrompt({ goal, round: request.round, feedback: request.feedback,
+            previousPlan: request.previousProposal }), candidateId: selected.id });
+        return productionSeats.author(request);
+      },
+      reviewCodex: review ?? productionSeats.reviewCodex,
+    },
+    strategy: {
+      parseProposal: parsePlanProposal,
+      reviewRequests: ({ proposal, round: turn }) => ({ codex: { goal, ...proposal, round: turn } }),
+      writeConverged: proposal => ({ selected: { ...selected, ...proposal } }),
+    },
+  });
+  const earlierUsage = candidates.filter(candidate => candidate.id !== selected.id)
+    .reduce((total, candidate) => addUsage(total, candidate.response?.usage), selectionUsage ?? EMPTY_USAGE);
+  result.tokens.total = addUsage(result.tokens.total, earlierUsage);
+  result.checkpointState.usage = { ...result.tokens.total };
+  result.checkpointState.candidateState = { mode, selectedCandidateId: selected.id, candidates, selection };
+  return { mode, interactionMode, candidates, surviving, selected: null, exhausted: false,
+    ...result, ...(selectionUsage === undefined ? {} : { selectionUsage }) };
+}
+
 
 function writeArtifacts(out, plan, gate) {
   mkdirSync(out, { recursive: true });
@@ -716,205 +498,58 @@ function writeArtifacts(out, plan, gate) {
 }
 
 export async function runPlan({
-  goal,
-  target,
-  out,
-  rounds,
-  candidates = DEFAULT_PLAN_CANDIDATES,
-  pivotCandidates = DEFAULT_PLAN_CANDIDATES,
-  plannerModel,
-  verifierModel,
-  arbiterModel = DEFAULT_ARBITER_MODEL,
-  gateTimeout = resolveStageTimeouts().gate,
+  goal, target, out, rounds, interactionMode = 'manual',
+  candidates = DEFAULT_PLAN_CANDIDATES, pivotCandidates = DEFAULT_PLAN_CANDIDATES,
+  claudeModel, codexModel, codexEffort, plannerModel, verifierModel, arbiterModel,
   executorTimeout = resolveStageTimeouts().executor,
-  verifierTimeout = resolveStageTimeouts().verifier,
   arbiterTimeout = resolveStageTimeouts().arbiter,
-  dryRun = false,
-  runId = `plan-${randomUUID()}`,
-  reporter,
-  baseDirectory = process.cwd(),
-  env = process.env,
-  home = homedir(),
-  superpowers,
-  adapters = {},
+  dryRun = false, runId = `plan-${randomUUID()}`, reporter,
+  baseDirectory = process.cwd(), env = process.env, home = homedir(), superpowers, adapters = {},
 } = {}) {
-  if (rounds !== undefined && (!Number.isSafeInteger(rounds) || rounds < 1)) {
-    throw new TypeError('rounds must be a positive integer');
+  decisionAuthority({ interactionMode, phase: 'planning' });
+  if (plannerModel !== undefined || verifierModel !== undefined) {
+    throw new TypeError('plannerModel/verifierModel are ambiguous; use claudeModel or codexModel');
   }
+  if (rounds !== undefined && (!Number.isSafeInteger(rounds) || rounds < 1)) throw new TypeError('rounds must be a positive integer');
   validatePlanCandidateCount(candidates, 'candidates');
   validatePlanCandidateCount(pivotCandidates, 'pivotCandidates');
-  const verifySuperpowers = adapters.verifySuperpowers ?? verifySuperpowersSeats;
-  const verification = superpowers?.seats
-    ? { ok: Object.values(superpowers.seats).every((seat) => seat.verified === true), seats: superpowers.seats }
-    : await verifySuperpowers({ env, home });
-  const requirement = applySuperpowersRequirement(verification, env);
-  if (!requirement.ok) throw new Error(`superpowers preflight failed: ${requirement.reason}`);
-  const verifiedSeats = requirement.verification.seats;
-  const cursorSuperpowersDir = verifiedSeats.cursor.verified
-    ? verifiedSeats.cursor.path
-    : null;
+  await planningPreflight({ adapters, superpowers, env, home });
   const request = validatePlanRequest({ goal, target, out, baseDirectory });
-  reportEvent(reporter, runId, 'plan', 'start', {
-    tier: 'plan',
-    target: request.target, out: request.out, rounds, candidates, pivotCandidates,
-    goalSource: request.goalSource,
+  reportEvent(reporter, runId, 'plan', 'start', { tier: 'plan', target: request.target,
+    out: request.out, rounds, candidates, pivotCandidates, interactionMode, goalSource: request.goalSource });
+  if (dryRun) return { runId, dryRun: true, approved: false, converged: false, rounds: 0,
+    target: request.target, out: request.out };
+  const seats = createPlanningSeats({
+    target: request.target, claudeModel: claudeModel ?? arbiterModel, codexModel, codexEffort,
+    executorTimeout, arbiterTimeout, runId, env, reporter, adapters,
+    authorPrompt: authorRequest => `${CONVERSATION_DNA}\n\n${buildArbiterPrompt({ ...authorRequest, goal: request.goal })}`,
+    reviewPrompt: reviewSeatPrompt,
   });
-  if (dryRun) {
-    const result = { runId, dryRun: true, converged: false, rounds: 0, target: request.target, out: request.out };
-    reportEvent(reporter, runId, 'plan', 'finish', {
-      tier: 'plan', dryRun: true, converged: false, rounds: 0,
+  let result;
+  if (candidates > 1) {
+    const execute = adapters.runExecutor ?? (Object.keys(adapters).some(key =>
+      ['runArbiter', 'author', 'reviewer', 'draft', 'codexReview'].includes(key)) ? null : runExecutor);
+    result = await runPlanCandidateSet({
+      goal: request.goal, target: request.target, count: candidates, interactionMode, rounds,
+      claudeModel: claudeModel ?? arbiterModel, codexModel, codexEffort,
+      timeoutMs: arbiterTimeout, executorTimeout, runId, env, reporter,
+      draft: r => seats.author({ ...r, type: r.previousProposal ? 'propose' : 'draft' }),
+      review: seats.reviewCodex,
+      select: execute ? r => productionSelect(r, execute)
+        : async () => { throw new Error('Codex selector unavailable'); },
     });
-    return result;
+    if (result.approved) Object.assign(result, writeArtifacts(request.out, result.selected.plan, result.selected.gate));
+  } else {
+    result = await runConversation({
+      runId, reporter, rounds, tier: 'plan', interactionMode, requirements: request.goal, seats,
+      strategy: {
+        draftRequest: () => ({ claudeRequest: { type: 'draft', goal: request.goal } }),
+        proposeRequest: context => ({ type: 'propose', goal: request.goal, ...context }),
+        parseProposal: parsePlanProposal,
+        reviewRequests: ({ round, proposal }) => ({ codex: { goal: request.goal, ...proposal, round } }),
+        writeConverged: proposal => writeArtifacts(request.out, proposal.plan, proposal.gate),
+      },
+    });
   }
-
-  // Seat wiring. Injecting `draft` marks a hermetic test: production seats then
-  // stay out unless explicitly supplied, so a unit test can never launch a CLI.
-  const draftCodex = adapters.draft ?? productionDraft;
-  const hermetic = adapters.draft !== undefined;
-  const draftCursor = adapters.cursorDraft ?? (hermetic ? null : productionCursorDraft);
-  const reviewCursor = adapters.review ?? (hermetic ? null : productionCursorReview);
-  const reviewCodex = adapters.codexReview ?? (hermetic ? null : productionCodexReview);
-  const runArbiterSeat = adapters.runArbiter ?? (hermetic ? null : runArbiter);
-  const checkCapability = adapters.checkCapability
-    ?? adapters.capabilityCheck
-    ?? (hermetic || adapters.review !== undefined ? null : productionCapability);
-
-  // Claude's seat. Every judgement type routes through here, so the standing law
-  // reaches the proposing and agreement prompts exactly as it reaches the
-  // drafting and review seats. Usage is tallied by the engine, once per call.
-  const arbitrate = async (arbiterRequest) => {
-    if (typeof runArbiterSeat !== 'function') {
-      return { verdict: ARBITER_UNVERIFIED, unavailable: true };
-    }
-    const injected = adapters.runArbiter !== undefined;
-    if (injected) reportEvent(reporter, runId, 'arbiter', 'start', {
-      model: arbiterModel, judgement: arbiterRequest.type,
-    });
-    let result;
-    try {
-      result = await runArbiterSeat({
-        cwd: request.target,
-        request: arbiterRequest,
-        prompt: `${CONVERSATION_DNA}\n\n${buildArbiterPrompt(arbiterRequest)}`,
-        model: arbiterModel,
-        timeoutMs: arbiterTimeout,
-        runId,
-        env,
-        reporter: injected ? undefined : reporter,
-      });
-    } catch {
-      result = { verdict: ARBITER_UNVERIFIED };
-    }
-    if (injected) reportEvent(reporter, runId, 'arbiter', 'finish', {
-      verdict: result?.verdict ?? (result ? 'ANSWERED' : ARBITER_UNVERIFIED),
-      judgement: arbiterRequest.type,
-    });
-    return result;
-  };
-
-  // The capability seats are launched by this tier, so the tier — not the
-  // engine — carries their models, timeouts and directories.
-  const capabilityContext = {
-    target: request.target,
-    plannerModel,
-    verifierModel,
-    arbiterModel,
-    executorTimeout,
-    verifierTimeout,
-    arbiterTimeout,
-    runId,
-    env,
-    home,
-    superpowersDir: cursorSuperpowersDir,
-  };
-
-  const result = await runConversation({
-    runId,
-    reporter,
-    rounds,
-    tier: 'plan',
-    seats: {
-      draftCodex,
-      draftCursor,
-      reviewCodex,
-      reviewCursor,
-      arbitrate,
-      checkCapability: typeof checkCapability === 'function'
-        ? (seatRequest) => checkCapability({ ...capabilityContext, ...seatRequest })
-        : null,
-    },
-    strategy: {
-      draftRequest: ({ round, feedback, failedPlan }) => ({
-        codexInput: {
-          input: draftingPrompt({
-            goal: request.goal, round, previousPlan: '', feedback, pivot: '', failedPlan,
-          }),
-          goal: request.goal,
-          target: request.target,
-          out: request.out,
-          round,
-          plannerModel,
-          sandbox: 'read-only',
-          timeoutMs: executorTimeout,
-          runId,
-          env,
-        },
-        cursorRequest: {
-          goal: request.goal,
-          target: request.target,
-          round,
-          verifierModel,
-          timeoutMs: verifierTimeout,
-          runId,
-          env,
-          home,
-          superpowersDir: cursorSuperpowersDir,
-          feedback,
-          failedPlan,
-        },
-        claudeRequest: {
-          type: 'draft', goal: request.goal, feedback, failedPlan,
-        },
-      }),
-      parseDraft: normalizeDraft,
-      parseProposal: parsePlanProposal,
-      proposeRequest: ({ drafts, feedback, questions, previousProposal }) => ({
-        type: 'propose',
-        goal: request.goal,
-        drafts: drafts.map(({ seat, plan, gate }) => ({ seat, plan, gate })),
-        feedback,
-        questions,
-        previousProposal,
-      }),
-      reviewRequests: ({ round, proposal }) => ({
-        codex: {
-          goal: request.goal, plan: proposal.plan, gate: proposal.gate, round,
-          target: request.target, plannerModel, timeoutMs: executorTimeout, runId, env,
-        },
-        cursor: {
-          goal: request.goal, plan: proposal.plan, gate: proposal.gate, round,
-          target: request.target, verifierModel, timeoutMs: verifierTimeout,
-          env, home, superpowersDir: cursorSuperpowersDir,
-        },
-      }),
-      // Exactly one re-ask per seat per round (the engine's bound): the same
-      // review request, carrying the seat's own unparseable answer back to it.
-      reviewRepairRequest: ({ request: reviewRequest, content }) => ({
-        ...reviewRequest, repairContent: content,
-      }),
-      agreementRequest: ({ proposal, reviews }) => ({
-        type: 'agreement',
-        goal: request.goal,
-        proposal: proposal.plan,
-        gate: proposal.gate,
-        reviews: {
-          codex: seatReviewContext(reviews.codex),
-          cursor: seatReviewContext(reviews.cursor),
-        },
-      }),
-      capabilityPlanText: (proposal) => proposal.plan,
-      writeConverged: (proposal) => writeArtifacts(request.out, proposal.plan, proposal.gate),
-    },
-  });
   return { ...result, dryRun: false, target: request.target, out: request.out };
 }

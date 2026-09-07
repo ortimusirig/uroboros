@@ -1,3 +1,4 @@
+import { decisionAuthority } from './decision-policy.js';
 import { WAIT_NOT_ACKNOWLEDGED } from './interaction-signals.js';
 import { parseDecisionJudgement } from './arbiter.js';
 
@@ -14,33 +15,26 @@ export function operatorPresenceEvidence({
 }
 
 export function createAutonomousDecisionResolver(options = {}) {
-  const presenceEvidence = operatorPresenceEvidence(options);
-  const arbiter = options.arbiter;
-
-  return async ({ questions, plan }) => {
-    if (!Array.isArray(questions) || questions.length === 0) return { answers: [] };
-
-    const hasAuthorityQuestion = questions.some((question) => question.kind === 'authority');
-    if (hasAuthorityQuestion && presenceEvidence.ttyAttached) return { answers: [] };
-    if (typeof arbiter !== 'function') return { answers: [] };
-    const answers = [];
+  const phase = options.phase ?? 'execution';
+  const interactionMode = options.interactionMode ?? 'autonomous';
+  const decidedBy = decisionAuthority({ interactionMode, phase });
+  // Keep the execution arbiter alias while its call site migrates to reviewer.
+  const reviewer = options.reviewer ?? (phase === 'execution' ? options.arbiter : undefined);
+  return async ({ questions, plan, artifactDigest, messages = [] }) => {
+    if (!Array.isArray(questions) || questions.length === 0 || decidedBy === 'human'
+      || typeof reviewer !== 'function') return { answers: [] };
+    const answers = [], decisions = [];
     for (const question of questions) {
       let response;
-      try { response = await arbiter({ type: 'decision', question, plan }); }
+      try { response = await reviewer({ type: 'decision', phase, interactionMode,
+        question, plan, artifactDigest, messages }); }
       catch { return { answers: [] }; }
       const judgement = parseDecisionJudgement(response);
       if (judgement.verdict !== 'answered') return { answers: [] };
       answers.push({ id: question.id, answer: judgement.answer });
+      decisions.push({ question, response, reason: judgement.reason ?? '' });
     }
-    if (!hasAuthorityQuestion) return { answers };
-
-    return {
-      answers,
-      escalation: 'operator-absent',
-      presenceEvidence,
-      reasoning: 'No TTY was attached and the run was invoked non-interactively, so no '
-        + 'operator was available to answer. The read-only arbiter judged the challenge '
-        + 'inside the isolated worktree for later operator review.',
-    };
+    return { answers, decidedBy, role: 'reviewer', basis: 'reviewer', phase,
+      interactionMode, artifactDigest, decisions };
   };
 }

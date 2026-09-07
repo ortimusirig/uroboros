@@ -1,21 +1,7 @@
-import {
-  DebateLedger,
-  detectCircling,
-  PIVOT_CONCLUDE,
-  PIVOT_FRESH,
-  shouldPivot,
-} from './debate.js';
-import {
-  ARBITER_UNVERIFIED,
-  buildArbiterPrompt,
-  parseAgreementJudgement,
-  parseCapabilityJudgement,
-  parsePivotJudgement,
-  seatStance,
-} from './arbiter.js';
+import { createHash } from 'node:crypto';
+import { decisionAuthority } from './decision-policy.js';
 import { reportEvent } from './events.js';
 import { addUsage, EMPTY_USAGE } from './usage.js';
-import { classifySeatOutage } from './verifier.js';
 
 // The standing law every seat reads before it drafts, proposes, reviews, or
 // judges agreement — identical in every tier, so a seat cannot be told one
@@ -63,7 +49,7 @@ export const MAX_ARTIFACT_REPAIRS = 5;
  * can then be neither classified nor remedied.
  */
 export function seatLaunchFailure(seat, result) {
-  const stderr = result?.stderr ? String(result.stderr).trim().slice(0, 200) : '';
+  const stderr = result?.stderr ? String(result.stderr) : '';
   return `${seat} seat ${result?.timedOut ? 'timed out' : 'failed to launch'}${stderr ? `: ${stderr}` : ''}`;
 }
 
@@ -75,7 +61,7 @@ export function seatLaunchFailure(seat, result) {
  * record. Without it a review-only outage has nothing to classify, and a capped
  * account reads as an anonymous absent seat.
  */
-export function unavailableSeatReview(result, seat = 'cursor review') {
+export function unavailableSeatReview(result, seat = 'codex review') {
   return {
     agree: false,
     readable: false,
@@ -156,703 +142,246 @@ export function stanceRepairLines(content) {
   ];
 }
 
-function capabilityPrompt({ seat, plan, remedyOnly = false, previousAnswer }) {
-  return buildArbiterPrompt({
-    type: 'capability', seat, plan, remedyOnly, previousAnswer,
-  }).replace('# Claude arbiter seat', `# ${seat} capability seat`);
-}
 
-async function capabilityVetoes({
-  plan,
-  checkCapability,
-  reporter,
-  runId,
-  planRound,
-  tier,
-}) {
-  if (typeof checkCapability !== 'function') return [];
-  const vetoes = [];
-  for (const seat of ['executor', 'reviewer', 'arbiter']) {
-    const firstPrompt = capabilityPrompt({ seat, plan });
-    // A probe that cannot even launch (spawn ENAMETOOLONG killed a
-    // twice-converged dogfood run at the finish line) is an unavailable
-    // judge — not a veto, not consent, and never a crash that discards
-    // judged work. The seat is skipped and the conversation proceeds.
-    let first;
-    try { first = await checkCapability({ seat, plan, prompt: firstPrompt }); }
-    catch { continue; }
-    let judgement = parseCapabilityJudgement(first);
-    if (judgement.verdict !== 'answered' || judgement.capable !== false) continue;
-    const answers = [first];
-    if (!judgement.complete) {
-      const prompt = capabilityPrompt({
-        seat, plan, remedyOnly: true, previousAnswer: first,
-      });
-      let second;
-      try {
-        second = await checkCapability({
-          seat,
-          plan,
-          prompt,
-          remedyOnly: true,
-          previousAnswer: first,
-        });
-      } catch { second = undefined; }
-      answers.push(second);
-      const supplement = parseCapabilityJudgement(second);
-      if (supplement.verdict === 'answered' && supplement.capable === false) {
-        judgement = {
-          ...judgement,
-          what: supplement.what || judgement.what,
-          why: supplement.why || judgement.why,
-          alternative: supplement.alternative || judgement.alternative,
-        };
-        judgement.complete = Boolean(judgement.what && judgement.why && judgement.alternative);
-      } else {
-        const alternative = typeof second === 'string'
-          ? second.trim()
-          : typeof second?.alternative === 'string' ? second.alternative.trim()
-            : typeof second?.answer === 'string' ? second.answer.trim() : '';
-        if (alternative) {
-          judgement = { ...judgement, alternative, complete: Boolean(judgement.what && judgement.why) };
-        }
-      }
-    }
-    const veto = { seat, ...judgement, answers };
-    vetoes.push(veto);
-    reportEvent(reporter, runId, 'capability', 'vetoed', {
-      tier,
-      planRound,
-      seat,
-      what: veto.what,
-      why: veto.why,
-      alternative: veto.alternative,
-      complete: veto.complete,
-      answers,
-    });
+/** Canonical JSON identity includes requirements, plan bytes, and evidence configuration. */
+export function canonicalPlanningArtifact(value) {
+  if (value instanceof Map) value = Object.fromEntries(value);
+  if (Array.isArray(value)) return value.map(canonicalPlanningArtifact);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.keys(value).sort()
+      .filter(key => value[key] !== undefined)
+      .map(key => [key, canonicalPlanningArtifact(value[key])]));
   }
-  return vetoes;
+  return value;
 }
 
-function vetoFeedback(vetoes) {
-  return [
-    '# Capability veto remedies',
-    '',
-    'The previous draft cannot proceed. Redraft it around each seat-authoritative remedy.',
-    '',
-    ...vetoes.flatMap((veto) => [
-      `## ${veto.seat}`,
-      `Cannot do: ${veto.what}`,
-      `Limitation: ${veto.why}`,
-      `Use instead: ${veto.alternative || 'No complete alternative was supplied; find a compatible mechanism.'}`,
-      '',
-    ]),
-  ].join('\n');
+export function planningArtifactDigest(requirements, proposal) {
+  return createHash('sha256').update(JSON.stringify(canonicalPlanningArtifact({ requirements, proposal }))).digest('hex');
+}
+
+export function conversationText(messages = []) {
+  return messages.map(message => [
+    `## ${message.speaker} (${message.role}), turn ${message.turn}, ${message.stance}`,
+    message.content,
+    ...(message.error ? [`Transport error: ${message.error}`] : []),
+    ...(message.decision ? [`Decision: ${message.decision}; ${message.reason ?? ''}`] : []),
+  ].join('\n')).join('\n\n');
+}
+
+function responseText(response) {
+  if (typeof response === 'string') return response;
+  return response?.content ?? response?.answer ?? response?.text ?? '';
+}
+
+function stance(response) {
+  const parsed = parseSeatReview(responseText(response));
+  return {
+    ...parsed,
+    ...(response && typeof response === 'object' ? response : {}),
+    content: responseText(response),
+  };
+}
+
+function unavailable(response) {
+  return response == null || response.unavailable || response.launchFailed || response.timedOut
+    || response.verdict === 'UNVERIFIED';
 }
 
 /**
- * The tier-agnostic conversation: three seats storm from the same raw input,
- * the arbiter proposes, two seats review, the arbiter judges agreement, and a
- * converged proposal is written by the tier's own writer. Tiers differ only in
- * their `strategy` — what a request looks like, how an artifact parses, and
- * what converging writes. The engine owns the loop, the ledger, the pivot, the
- * usage meter, and the event stream.
+ * Claude owns every proposal. Codex reviews the delivered version; after a
+ * substantive answer and reconciliation, unresolved disputes follow the mode.
+ * Writers run only after version-specific approval. The returned checkpoint
+ * contains serializable state; persistence and validated resume belong to the
+ * caller and do not require reconstructing messages from summaries.
  */
 export async function runConversation({
-  runId,
-  reporter,
-  rounds,
-  tier,
-  seats = {},
-  strategy = {},
+  runId, reporter, rounds, tier, requirements = '', interactionMode = 'manual',
+  seats = {}, strategy = {},
 } = {}) {
-  const {
-    draftCodex,
-    draftCursor,
-    reviewCodex,
-    reviewCursor,
-    arbitrate: arbitrateSeat,
-    checkCapability,
-  } = seats;
-  const {
-    draftRequest,
-    parseDraft,
-    proposeRequest,
-    parseProposal,
-    proposalText,
-    reviewRequests,
-    reviewRepairRequest,
-    agreementRequest,
-    capabilityPlanText,
-    writeConverged,
-  } = strategy;
-
-  const ledger = new DebateLedger();
-  // Every seat call adds its usage here, so a conversation that never converges
-  // still reports what it spent. The taxi meter runs whether or not you arrive.
+  const authority = decisionAuthority({ interactionMode, phase: 'planning' });
+  if (rounds !== undefined && (!Number.isSafeInteger(rounds) || rounds < 1)) {
+    throw new TypeError('rounds must be a positive integer');
+  }
+  const messages = [], roundHistory = [];
   let usageTotal = EMPTY_USAGE;
-  const tallyUsage = (value) => { if (value?.usage) usageTotal = addUsage(usageTotal, value.usage); return value; };
-  let pivotCount = 0;
-  const pivotHistory = [];
-  const capabilityHistory = [];
-  const stormHistory = [];
-  const roundHistory = [];
-
-  /**
-   * Every call actually MADE to the cursor seat, in order, with the failure text
-   * when it failed. A seat that was never configured contributes nothing here —
-   * a call that did not happen must read as neither a success nor a failure.
-   *
-   * This ledger is deliberately narrower than the record: the failure texts feed
-   * only the terminal outage summary, never an event and never a review row, so
-   * naming the outage costs the transcript nothing.
-   */
-  const cursorInteractions = [];
-  const noteCursorCall = (seat, ok, message) => {
-    if (seat !== 'cursor') return;
-    cursorInteractions.push(ok ? { ok: true } : { ok: false, message });
-  };
-
-  /**
-   * A production review seat does NOT throw when its process dies — it returns
-   * an `unavailable` row (src/plan.js and both decompose review seats, all
-   * keyed off `launchFailed || timedOut`). That non-throwing return is a FAILED
-   * interaction: reading it as a success made the terminal outage summary inert
-   * for every round past the first, against the exact shape it was built for.
-   * A seat with no hook at all is not routed here — nothing was called, so
-   * nothing is recorded.
-   */
-  const noteSeatReview = (seat, review) => {
-    if (review.unavailable === true) noteCursorCall(seat, false, review.error);
-    else noteCursorCall(seat, true);
-  };
-
-  /**
-   * The seat is capped only when EVERY call to it failed and at least one
-   * failure names a condition we can actually classify. A seat that answered
-   * once demonstrably launched, so however loudly it failed afterwards it is not
-   * capped — and a run whose cursor calls all died of something unrecognised
-   * gets no invented remedy. The last classifiable message wins: it is the most
-   * recent thing the seat actually said about itself.
-   */
-  const cursorOutage = () => {
-    if (cursorInteractions.length === 0) return null;
-    if (cursorInteractions.some((call) => call.ok)) return null;
-    let outage = null;
-    for (const call of cursorInteractions) {
-      const classified = classifySeatOutage(call.message);
-      if (classified) outage = { ...classified, message: call.message };
-    }
-    return outage;
-  };
-
-  const arbitrate = async (arbiterRequest) => {
-    if (typeof arbitrateSeat !== 'function') {
-      return { verdict: ARBITER_UNVERIFIED, unavailable: true };
-    }
-    let result;
-    try {
-      result = await arbitrateSeat(arbiterRequest);
-    } catch {
-      result = { verdict: ARBITER_UNVERIFIED };
-    }
-    return tallyUsage(result);
-  };
-
-  const finish = (reason, round, extra = {}) => {
-    const converged = reason === 'converged';
-    // A capped seat is named at EVERY terminal, not only the one it caused. The
-    // peer's run discovered the cap at round 4 of a 25-minute conversation; the
-    // record has to say so wherever the conversation happens to end.
-    const outage = cursorOutage();
+  let proposal = null, artifactDigest = null, approval = null, pendingDecision = null;
+  let openIssues = [], feedback = '', artifactRepairs = 0, revisionDigest = null;
+  let round = 0;
+  const author = seats.author ?? seats.arbitrate;
+  const reviewer = seats.reviewCodex;
+  const renderProposal = value => value == null ? '' : strategy.proposalText?.(value) ?? value.plan ?? '';
+  const snapshot = () => ({
+    version: 1, phase: 'planning', tier, runId, interactionMode, authority,
+    requirements: canonicalPlanningArtifact(requirements),
+    proposal: canonicalPlanningArtifact(proposal), artifactDigest, approval,
+    messages: canonicalPlanningArtifact(messages), openIssues: canonicalPlanningArtifact(openIssues),
+    pendingDecision, round, roundsLimit: rounds ?? null, artifactRepairs,
+    revisionDigest, feedback, usage: { ...usageTotal },
+  });
+  const finish = (reason, extra = {}) => {
     const result = {
-      runId,
-      converged,
-      reason,
-      rounds: round,
-      storm: stormHistory,
-      roundHistory,
-      capabilityVetoes: capabilityHistory,
-      pivotHistory,
-      tokens: { total: { ...usageTotal } },
-      ...(outage === null ? {} : { seatOutages: { cursor: outage } }),
-      ...extra,
+      runId, interactionMode, approved: approval !== null,
+      converged: approval?.basis === 'consensus', approval, reason, rounds: round,
+      proposal, artifactDigest, messages, roundHistory, openIssues,
+      tokens: { total: { ...usageTotal } }, checkpointState: snapshot(), ...extra,
     };
     reportEvent(reporter, runId, 'plan', 'finish', {
-      tier,
-      converged,
-      reason,
-      rounds: round,
-      ...(extra.pivot === undefined ? {} : { pivot: extra.pivot }),
+      tier, interactionMode, approved: result.approved, converged: result.converged,
+      approval, reason, rounds: round,
     });
     return result;
   };
-
-  const failureMessage = (error) => (error instanceof Error ? error.message : String(error));
-
-  // What the seat ACTUALLY said, verbatim and untrimmed. A judgement that did
-  // not parse cannot be represented by its parsed fields — they are all
-  // absent — so exactly then the answer itself is the only evidence of what
-  // happened, and dropping it (dogfood run 3, round 3) makes the failure
-  // undiagnosable after the fact.
-  const rawAnswer = (response) => {
-    if (typeof response === 'string') return response;
-    if (typeof response?.answer === 'string') return response.answer;
-    return '';
-  };
-
-  // What a proposal READS AS, in the tier's own words. Only the plan tier's
-  // artifact happens to be a `plan` string; a tier whose proposal is
-  // {items, sections} says so here, and that rendering — never `undefined` — is
-  // what the next proposal, the pivot judgement, and a FRESH re-storm see.
-  const renderProposal = (proposal) => proposalText?.(proposal) ?? proposal.plan;
-
-  // All three seats draft independently from the SAME raw input - never from a
-  // paraphrase, so their takes stay uncorrelated.
-  const stormOnce = async ({ round, feedback, failedPlan }) => {
-    const requests = draftRequest({ round, feedback, failedPlan });
-    const attempts = await Promise.all([
-      (async () => {
-        try {
-          // Usage is tallied on the seat's own answer, before parsing: a seat
-          // that spoke unintelligibly still spent what it spent.
-          const artifact = parseDraft(tallyUsage(await draftCodex(requests.codexInput)));
-          return { seat: 'codex', ...artifact };
-        } catch (error) { return { seat: 'codex', error: failureMessage(error) }; }
-      })(),
-      (async () => {
-        if (typeof draftCursor !== 'function') return { seat: 'cursor', error: 'cursor drafting seat unavailable' };
-        let response;
-        try { response = tallyUsage(await draftCursor(requests.cursorRequest)); }
-        catch (error) {
-          const message = failureMessage(error);
-          noteCursorCall('cursor', false, message);
-          return { seat: 'cursor', error: message };
-        }
-        // The seat launched and answered. Whatever the tier then makes of the
-        // artifact, this seat is demonstrably not capped — an unparseable draft
-        // must never be counted as an account that could not run.
-        noteCursorCall('cursor', true);
-        try {
-          return { seat: 'cursor', ...parseDraft(response) };
-        } catch (error) { return { seat: 'cursor', error: failureMessage(error) }; }
-      })(),
-      (async () => {
-        const response = await arbitrate(requests.claudeRequest);
-        if (!response || response.verdict === ARBITER_UNVERIFIED
-          || response.launchFailed || response.timedOut) {
-          return { seat: 'claude', error: 'claude drafting seat unavailable' };
-        }
-        try {
-          const text = typeof response === 'string' ? response : response.answer ?? response;
-          return { seat: 'claude', ...parseDraft(text) };
-        } catch (error) { return { seat: 'claude', error: failureMessage(error) }; }
-      })(),
-    ]);
-    reportEvent(reporter, runId, 'plan', 'storm', {
-      tier,
-      planRound: round,
-      drafts: attempts.map(({ seat, error }) => ({ seat, ok: !error, ...(error ? { error } : {}) })),
-    });
-    stormHistory.push({
-      round,
-      drafts: attempts.map(({ seat, error }) => ({ seat, ok: !error, ...(error ? { error } : {}) })),
-    });
-    return attempts;
-  };
-
-  const normalizeSeatReview = (value) => {
-    if (typeof value === 'string') return parseSeatReview(value);
-    if (value && typeof value === 'object' && typeof value.agree === 'boolean') {
-      return {
-        readable: true,
-        suggestions: [],
-        questions: [],
-        content: '',
-        ...value,
-      };
-    }
-    return parseSeatReview(String(value?.content ?? ''));
-  };
-
-  const unavailableReview = () => ({
-    agree: false, readable: false, suggestions: [], questions: [], content: '', unavailable: true,
-  });
-
-  // A readable review is fully represented by its parsed structure. An
-  // unreadable stance is not — the raw text is the only evidence of what the
-  // seat actually said, so it travels verbatim in exactly that case, alongside
-  // whether the one bounded re-ask ran and whether it repaired the reading.
-  const reviewRow = (review) => ({
-    agree: review.agree,
-    readable: review.readable !== false,
-    suggestions: review.suggestions,
-    questions: review.questions,
-    ...(review.unavailable ? { unavailable: true } : {}),
-    ...(review.stanceReasked ? { stanceReasked: true } : {}),
-    ...(review.stanceRepaired ? { stanceRepaired: true } : {}),
-    ...(review.readable === false && !review.unavailable
-      ? { content: review.content ?? '' } : {}),
-    ...(review.priorContent ? { priorContent: review.priorContent } : {}),
-    ...(review.reaskContent ? { reaskContent: review.reaskContent } : {}),
-  });
-
-  /**
-   * One seat's review for one round, with the bounded stance re-ask.
-   *
-   * A seat whose answer carries no stance RAN and SPOKE — that is a reading
-   * failure, not a refusal — so its own words go back to it once, verbatim,
-   * and the answer is read again. The bound is exactly one re-ask per seat per
-   * round (it stands in the design's determinism-and-caps audit table): a
-   * second unreadable answer travels as it does today, non-consenting, with
-   * the raw text intact. Tolerance lives in READING; meaning is never re-asked.
-   * A seat that never ran is not re-asked at all — there is no reading to
-   * repair, and a rule may not stand in for a seat that said nothing.
-   */
-  const askSeatReview = async (seat, call, request) => {
-    if (typeof call !== 'function') return unavailableReview();
-    let answer;
-    try { answer = tallyUsage(await call(request)); }
-    catch (error) {
-      // The seat call itself died. The engine keeps proceeding-as-unavailable
-      // exactly as before; the failure text is captured only for the terminal
-      // outage summary, so it reaches neither the events nor the review row.
-      noteCursorCall(seat, false, failureMessage(error));
-      return unavailableReview();
-    }
-    const review = normalizeSeatReview(answer);
-    noteSeatReview(seat, review);
-    if (review.readable !== false || review.unavailable === true) return review;
-    if (typeof reviewRepairRequest !== 'function') return review;
-    const content = review.content ?? '';
-    // Nothing was said, so there is nothing to feed back: every tier's repair
-    // paragraph is gated on that text, which would make the second request
-    // byte-identical to the first — a seat call spent to learn nothing. The
-    // row travels as stance-unreadable directly, still not consenting.
-    if (content.trim() === '') return review;
-    let repairRequest;
-    // A hook that throws means no re-ask was ever made. Recording that as a
-    // re-ask that failed would be a check that did not run reading as one
-    // that did — so the first answer stands exactly as it did before.
-    try { repairRequest = reviewRepairRequest({ seat, request, content }); }
-    catch { return review; }
-    if (repairRequest === null || repairRequest === undefined) return review;
-    let repaired;
+  const call = async (fn, request, speaker, role) => {
+    let response;
     try {
-      const reaskAnswer = tallyUsage(await call(repairRequest));
-      repaired = normalizeSeatReview(reaskAnswer);
-      noteSeatReview(seat, repaired);
-    } catch (error) {
-      // The re-ask was made and the seat died on it. That happened, and the
-      // record says so; the seat's first answer stands untouched beside it.
-      noteCursorCall(seat, false, failureMessage(error));
-      return { ...review, stanceReasked: true };
-    }
-    if (repaired.readable === false || repaired.unavailable === true) {
-      return {
-        ...review,
-        stanceReasked: true,
-        // A bound states what it withheld: when the re-ask said something new
-        // and still unreadable, both answers are evidence and both are kept.
-        ...(repaired.content && repaired.content !== content
-          ? { reaskContent: repaired.content } : {}),
+      response = typeof fn === 'function' ? await fn(request) : {
+        unavailable: true, error: `${speaker} ${role} is unavailable`,
       };
+    } catch (error) {
+      response = { unavailable: true, error: error instanceof Error ? error.message : String(error) };
     }
-    // The repaired answer is the review now — but the answer it repaired is
-    // where the seat's original prose lives (F20: a genuine verified review
-    // wrapped in meta-commentary). Reading was repaired; the first words are
-    // not deleted for having been unreadable.
-    return {
-      ...repaired, stanceReasked: true, stanceRepaired: true, priorContent: content,
+    if (response?.usage) usageTotal = addUsage(usageTotal, response.usage);
+    const parsed = stance(response);
+    const message = {
+      speaker, role, phase: 'planning', turn: messages.length + 1, round,
+      artifactDigest: request.artifactDigest ?? null,
+      stance: unavailable(response) ? 'unavailable' : parsed.readable
+        ? (parsed.agree ? 'agree' : 'disagree') : 'stance-unreadable',
+      content: parsed.content, addressedIssueIds: parsed.addressedIssueIds ?? [],
+      unresolvedQuestions: parsed.questions ?? [],
+      transport: Object.fromEntries(['stderr', 'stdout', 'exitCode', 'launchFailed', 'timedOut', 'usage']
+        .filter(key => response?.[key] !== undefined).map(key => [key, response[key]])),
+      ...(response?.error ? { error: response.error } : {}),
+      ...(parsed.decision ? { decision: parsed.decision, reason: parsed.reason } : {}),
     };
+    messages.push(message);
+    if (role === 'reviewer' || unavailable(response)) {
+      reportEvent(reporter, runId, 'plan', role === 'author' ? 'proposal' : 'review', { tier, ...message });
+    }
+    return { response, parsed, message };
   };
-
-  const reviewBoth = async ({ round, proposal }) => {
-    const requests = reviewRequests({ round, proposal });
-    const [codex, cursor] = await Promise.all([
-      askSeatReview('codex', reviewCodex, requests.codex),
-      askSeatReview('cursor', reviewCursor, requests.cursor),
-    ]);
-    for (const [seat, review] of [['codex', codex], ['cursor', cursor]]) {
-      reportEvent(reporter, runId, 'plan', 'review', {
-        tier,
-        planRound: round,
-        seat,
-        agree: review.agree === true,
-        readable: review.readable !== false,
-        suggestionIds: review.suggestions.map((item) => item.id),
-        questionCount: review.questions.length,
-        ...(review.unavailable ? { unavailable: true } : {}),
-        ...(review.stanceReasked ? { stanceReasked: true } : {}),
-        ...(review.stanceRepaired ? { stanceRepaired: true } : {}),
-      });
-    }
-    return { codex, cursor };
+  const repair = error => {
+    approval = null;
+    feedback = [error.message, 'Previous delivered response:', messages.at(-1)?.content ?? ''].join('\n');
+    roundHistory.push({ round, repair: error.message });
+    artifactRepairs++;
+    return artifactRepairs <= MAX_ARTIFACT_REPAIRS;
   };
-
-  let stormDrafts = null;
-  let reStorm = true;
-  let feedback = '';
-  let failedPlan = '';
-  let previousProposal = '';
-  let openQuestions = [];
-  let round = 0;
-  let artifactRepairs = 0;
-
-  for (round = 1; rounds === undefined || round <= rounds; round++) {
-    if (reStorm) {
-      const cursorCallsBeforeStorm = cursorInteractions.length;
-      stormDrafts = await stormOnce({ round, feedback, failedPlan });
-      reStorm = false;
-      // A deterministic refusal — a named model a free plan may not use —
-      // answers identically every single call. Continuing burns Codex and
-      // Claude rounds toward a convergence that has been impossible since the
-      // first second (peer-observed: a full 25-minute round with the reviewer
-      // dead). It is caught HERE, on the conversation's first cursor call, and
-      // only there: a seat that already launched once is not refusing, and a
-      // quota failure is not deterministic in this way, so both keep today's
-      // proceed-as-unavailable behaviour with the outage named at the terminal.
-      //
-      // Checked before storm-exhaustion because it is the strictly more
-      // actionable account of the same moment — it names the flag that fixes
-      // the run — and every draft error stays in `storm` either way.
-      //
-      // `cursorCallsBeforeStorm === 0` keeps the rule provably storm-scoped now
-      // that reviews also record interactions: without it, a run whose only
-      // cursor calls are reviews could reach a FRESH re-storm holding exactly
-      // one refused interaction and stop there, rounds after the fact.
-      if (cursorCallsBeforeStorm === 0 && cursorInteractions.length === 1
-        && cursorInteractions[0].ok === false
-        && classifySeatOutage(cursorInteractions[0].message)?.kind === 'config-refusal') {
-        // Fail closed: nothing is written, converged false, and the remedy
-        // travels in `seatOutages` that `finish` attaches.
-        return finish('verifier-unlaunchable', round);
-      }
-      if (stormDrafts.every((attempt) => attempt.error)) {
-        // Nothing was drafted, so there is nothing to talk about. This is
-        // inability, not a mechanical verdict on any artifact.
-        return finish('storm-exhausted', round);
-      }
+  const review = async (request) => {
+    let answer = await call(reviewer, request, 'codex', 'reviewer');
+    if (!unavailable(answer.response) && !answer.parsed.readable
+      && !request.finalDecision && answer.parsed.content) {
+      const repairedRequest = strategy.reviewRepairRequest?.({ request, content: answer.parsed.content })
+        ?? { ...request, repairContent: answer.parsed.content };
+      answer = await call(reviewer, { ...repairedRequest, messages: [...messages] }, 'codex', 'reviewer');
     }
+    return answer;
+  };
+  const approvalFor = (basis, reason) => ({ artifactDigest, decidedBy: 'codex', basis, reason });
 
-    const proposeResponse = await arbitrate(proposeRequest({
-      round,
-      drafts: stormDrafts.filter((attempt) => !attempt.error),
-      feedback,
-      questions: openQuestions,
-      previousProposal,
-    }));
-    let proposal = null;
-    let repair = null;
-    if (proposeResponse && proposeResponse.verdict !== ARBITER_UNVERIFIED
-      && !proposeResponse.launchFailed && !proposeResponse.timedOut) {
-      try {
-        // The seat's response goes to the tier's parser RAW. Collapsing it to
-        // text here stringified an artifact-less object to '[object Object]',
-        // which every tier parser then read as a MALFORMED artifact and fed
-        // back — forever, when rounds are unbounded. Only the tier knows what
-        // its artifact looks like, so only the tier can tell a seat that said
-        // nothing (terminal) from one that said it badly (repairable).
-        proposal = parseProposal(proposeResponse);
-      } catch (error) {
-        if (error instanceof RepairableArtifactError) repair = error.message;
-        else proposal = null;
-      }
-    }
-    reportEvent(reporter, runId, 'plan', 'proposal', {
-      tier, planRound: round, ok: proposal !== null, ...(repair === null ? {} : { repair }),
-    });
-    if (repair !== null) {
-      // The seat ran and answered; the answer just does not parse. That is a
-      // repairable artifact, so the error goes back to it verbatim rather than
-      // ending the conversation. The row keeps this round's number: a repair
-      // and the retry it buys happened INSIDE the round, and the record says so.
-      roundHistory.push({ round, repair });
-      artifactRepairs += 1;
-      if (artifactRepairs > MAX_ARTIFACT_REPAIRS) {
-        // A stated bound, not a silent cap: the seat has now answered
-        // unreadably MAX_ARTIFACT_REPAIRS + 1 times, every message is in
-        // roundHistory above, and the conversation ends without converging so
-        // no partial artifact is ever written from an artifact that never
-        // parsed. Unbounded `rounds` would otherwise loop here forever.
-        return finish('proposal-irreparable', round);
-      }
-      feedback = repair;
-      reStorm = false;
-      // F12 (dogfood run 6): a repair is not deliberation — no seat reviewed
-      // anything in it — so it must not spend a round. Undoing the loop's
-      // increment lets the retried proposal reuse this round's number, which
-      // is what makes `--rounds 1` still buy one real round of review after a
-      // malformed first answer. The budget on repairs is the one above.
-      round -= 1;
+  while (rounds === undefined || round < rounds) {
+    round++;
+    const previousProposal = renderProposal(proposal);
+    const request = proposal === null
+      ? strategy.draftRequest?.({ round, feedback })?.claudeRequest ?? { type: 'draft' }
+      : strategy.proposeRequest?.({ round, feedback, questions: openIssues,
+        previousProposal, drafts: [] }) ?? { type: 'propose', previousProposal };
+    const authorRequest = {
+      ...request, round, feedback, previousProposal, messages: [...messages],
+      requirements, artifactDigest, interactionMode, phase: 'planning',
+      reconciliation: round > 1,
+    };
+    const authored = await call(author, authorRequest, 'claude', 'author');
+    if (unavailable(authored.response)) return finish('author-unavailable');
+    let nextProposal;
+    try { nextProposal = strategy.parseProposal(authored.response); }
+    catch (error) {
+      reportEvent(reporter, runId, 'plan', 'proposal', { tier, ...authored.message, parseError: error.message });
+      if (!(error instanceof RepairableArtifactError)) return finish('author-unavailable', { error: error.message });
+      if (!repair(error)) return finish('proposal-irreparable');
+      round--;
       continue;
     }
-    if (proposal === null) {
-      // The collating seat did not produce a proposal. A seat that did not run
-      // cannot be substituted by a rule, so the round cannot proceed.
-      return finish('arbiter-unavailable', round);
+    proposal = nextProposal;
+    artifactDigest = planningArtifactDigest(requirements, proposal);
+    authored.message.artifactDigest = artifactDigest;
+    reportEvent(reporter, runId, 'plan', 'proposal', { tier, ...authored.message });
+    approval = null;
+    if (revisionDigest === artifactDigest) {
+      feedback = 'The reviewer required a revision, but the artifact bytes did not change. Implement the recorded revision.';
+      if (++artifactRepairs > MAX_ARTIFACT_REPAIRS) return finish('proposal-irreparable');
+      round--;
+      continue;
     }
-    previousProposal = renderProposal(proposal);
-
-    const reviews = await reviewBoth({ round, proposal });
-    openQuestions = [
-      ...reviews.codex.questions.map((question) => ({ seat: 'codex', ...question })),
-      ...reviews.cursor.questions.map((question) => ({ seat: 'cursor', ...question })),
-    ];
-
-    const agreementResponse = await arbitrate(agreementRequest({ round, proposal, reviews }));
-    const judgedAgreement = parseAgreementJudgement(agreementResponse);
-    const agreement = judgedAgreement.verdict === 'answered'
-      ? judgedAgreement
-      : { ...judgedAgreement, raw: rawAnswer(agreementResponse) };
-    reportEvent(reporter, runId, 'plan', 'agreement', {
-      tier,
-      planRound: round,
-      converged: agreement.verdict === 'answered' && agreement.converged === true,
-      unjudged: agreement.verdict !== 'answered',
-      ...(agreement.reason ? { reason: agreement.reason } : {}),
-    });
-
-    // Convergence is three seats actually agreeing. Silence, an unreadable
-    // response, or an absent seat is not agreement; an overruled objection does
-    // not exist here at all - Claude persuades through feedback, never outvotes.
-    const seatsAgree = reviews.codex.agree === true && reviews.cursor.agree === true;
-    const converged = seatsAgree
-      && agreement.verdict === 'answered'
-      && agreement.converged === true;
-
-    const suggestionIds = [
-      ...reviews.codex.suggestions.map((item) => `codex-${item.id}`),
-      ...reviews.cursor.suggestions.map((item) => `cursor-${item.id}`),
-    ];
-    ledger.record(round, suggestionIds);
+    revisionDigest = null;
+    const reviewRequest = {
+      ...(strategy.reviewRequests?.({ round, proposal })?.codex ?? { proposal }),
+      round, artifactDigest, interactionMode, phase: 'planning', messages: [...messages],
+      reconciliation: round > 1, openIssues,
+    };
+    let reviewed = await review(reviewRequest);
+    if (unavailable(reviewed.response)) return finish('reviewer-unavailable');
+    if (!reviewed.parsed.readable) return finish('stance-unreadable');
+    if (reviewed.parsed.artifactDigest !== artifactDigest) return finish('stale-review');
+    const currentIssues = [
+      ...(reviewed.parsed.suggestions ?? []),
+      ...(reviewed.parsed.questions ?? []),
+    ].map(issue => ({ speaker: 'codex', ...issue }));
+    const addressed = new Set(reviewed.parsed.addressedIssueIds ?? []);
+    const retained = reviewed.parsed.agree ? [] : openIssues.filter(issue => !addressed.has(issue.id));
+    const continuingDispute = retained.length > 0
+      || currentIssues.some(issue => openIssues.some(previous => previous.id === issue.id))
+      || currentIssues.length === 0 || !authored.parsed.agree;
+    openIssues = [...new Map([...retained, ...currentIssues].map(issue => [issue.id, issue])).values()];
     roundHistory.push({
-      round,
-      reviews: {
-        codex: reviewRow(reviews.codex),
-        cursor: reviewRow(reviews.cursor),
-      },
-      agreement,
-      converged,
+      round, artifactDigest, author: authored.message, reviews: { codex: reviewed.message },
     });
-    reportEvent(reporter, runId, 'plan', 'round', {
-      tier,
-      planRound: round,
-      suggestionIds,
-      codexAgrees: reviews.codex.agree === true,
-      cursorAgrees: reviews.cursor.agree === true,
-      // The booleans stay for compatibility with journals already on disk, but
-      // the STATE is the truth: a seat whose stance could not be read has not
-      // disagreed, and a seat that never ran has not spoken at all.
-      codexState: seatStance(reviews.codex),
-      cursorState: seatStance(reviews.cursor),
-      converged,
-    });
-
-    if (converged) {
-      const capabilityText = capabilityPlanText(proposal);
-      if (capabilityText !== null && capabilityText !== undefined) {
-        const vetoes = await capabilityVetoes({
-          plan: capabilityText,
-          checkCapability,
-          reporter,
-          runId,
-          planRound: round,
-          tier,
+    if (authored.parsed.readable && authored.parsed.agree && reviewed.parsed.agree) {
+      approval = approvalFor('consensus', reviewed.parsed.reason || 'Claude and Codex explicitly agree on this artifact.');
+    } else {
+      feedback = reviewed.parsed.content;
+      // One author answer and one reviewer response constitute reconciliation.
+      // This is a dispute routing point, not an implicit limit on allowed rounds.
+      if (round > 1 && continuingDispute) {
+        const question = 'Should this proposal be approved, revised, or stopped? Resolve the retained Claude and Codex positions.';
+        if (authority === 'human') {
+          pendingDecision = {
+            id: `planning-${artifactDigest}`, phase: 'planning', artifactDigest,
+            question, options: ['approve', 'revise', 'stop'],
+            positions: { claude: authored.message.content, codex: reviewed.message.content },
+            evidence: [], interactionMode,
+          };
+          return finish('needs-decision', { pendingDecision });
+        }
+        reviewed = await review({
+          ...reviewRequest, finalDecision: true, question, messages: [...messages],
         });
-        if (vetoes.length > 0) {
-          capabilityHistory.push({ round, vetoes });
-          feedback = vetoFeedback(vetoes);
+        if (unavailable(reviewed.response)) return finish('reviewer-unavailable');
+        if (reviewed.parsed.artifactDigest !== artifactDigest) return finish('stale-review');
+        if (!['approve', 'revise', 'stop'].includes(reviewed.parsed.decision)
+          || !reviewed.parsed.reason?.trim()) return finish('decision-unreadable');
+        if (reviewed.parsed.decision === 'stop') return finish('reviewer-stopped');
+        if (reviewed.parsed.decision === 'revise') {
+          revisionDigest = artifactDigest;
+          feedback = reviewed.parsed.reason + '\n' + reviewed.parsed.content;
           continue;
         }
+        approval = approvalFor('reviewer', reviewed.parsed.reason);
       }
-      let extra;
-      try {
-        extra = await writeConverged(proposal);
-      } catch (error) {
+    }
+    if (approval) {
+      let written;
+      try { written = await strategy.writeConverged?.(proposal); }
+      catch (error) {
         if (!(error instanceof RepairableArtifactError)) throw error;
-        // A contradiction the writer found (a cycle, a mismatch) is the seats'
-        // to resolve, and they only can if they are told what it was.
-        roundHistory.push({ round, repair: error.message });
-        // The SAME budget as a parse repair, deliberately: both are one seat
-        // answering unreadably about one artifact, and the audit row bounds
-        // the pair at MAX_ARTIFACT_REPAIRS per conversation. Nothing else can
-        // stop this loop — the `continue` below leaves from inside the
-        // converged branch, so circling detection and the pivot never run, and
-        // at production defaults `rounds` is unbounded. Agreeing seats plus a
-        // writer that rejects deterministically (the same cycle every time)
-        // burned tokens forever before this bound existed.
-        artifactRepairs += 1;
-        if (artifactRepairs > MAX_ARTIFACT_REPAIRS) {
-          return finish('proposal-irreparable', round);
-        }
-        feedback = error.message;
-        reStorm = false;
-        // No `round -= 1` here, unlike the parse-repair path: deliberation DID
-        // happen in this round — both seats read the proposal and agreed — and
-        // only then did the writer find the contradiction. The round was spent.
+        if (!repair(error)) return finish('proposal-irreparable');
         continue;
       }
-      reportEvent(reporter, runId, 'plan', 'converged', {
-        tier,
-        planRound: round,
-        suggestions: suggestionIds.length,
+      reportEvent(reporter, runId, 'plan', 'agreement', {
+        tier, artifactDigest, approval, approved: true, converged: approval.basis === 'consensus',
       });
-      return finish('converged', round, extra);
-    }
-
-    // Claude's feedback leads; the seats' own words follow verbatim so the next
-    // proposal answers them rather than a summary of them.
-    feedback = [
-      agreement.feedback || '',
-      ...['codex', 'cursor'].flatMap((seat) => reviews[seat].suggestions.map(
-        (item) => `${seat} ${item.id} ${item.severity}: ${item.text}`,
-      )),
-    ].filter(Boolean).join('\n');
-
-    if (detectCircling(ledger)) {
-      const pivotResponse = await arbitrate({
-        type: 'pivot',
-        ledger: Array.from({ length: ledger.currentRound }, (_, index) => ({
-          round: index + 1, findingIds: ledger.round(index + 1),
-        })),
-        recurringFindings: suggestionIds.filter((id) => ledger.stuckFindings().has(id)),
-        attempted: pivotHistory,
-        plan: renderProposal(proposal),
-      });
-      const pivotJudgement = parsePivotJudgement(pivotResponse);
-      const unjudged = pivotJudgement.verdict !== 'answered';
-      const decision = unjudged ? shouldPivot(pivotCount) : pivotJudgement.decision;
-      pivotCount++;
-      pivotHistory.push({
-        decision,
-        unjudged,
-        ...(pivotJudgement.reason ? { reason: pivotJudgement.reason } : {}),
-        // The engine's own ladder decided this one, so what the seat said —
-        // and could not be read — is the only record of why it had to.
-        ...(unjudged ? { raw: rawAnswer(pivotResponse) } : {}),
-      });
-      reportEvent(reporter, runId, 'plan', 'pivot', {
-        tier,
-        planRound: round,
-        decision,
-        unjudged,
-        ...(pivotJudgement.reason ? { reason: pivotJudgement.reason } : {}),
-      });
-      if (decision === PIVOT_CONCLUDE) {
-        return finish('pivot-conclude', round, { pivot: PIVOT_CONCLUDE });
-      }
-      if (decision === PIVOT_FRESH) {
-        reStorm = true;
-        failedPlan = renderProposal(proposal);
-        previousProposal = '';
-        openQuestions = [];
-        feedback = '';
-      } else {
-        feedback = `${feedback}\nAmend the approach specifically to break the recurring suggestions.`;
-      }
+      return finish(approval.basis === 'consensus' ? 'converged' : 'approved', written);
     }
   }
-
-  return finish('rounds-exhausted', round - 1);
+  return finish('rounds-exhausted');
 }

@@ -1,69 +1,37 @@
-import { test } from 'node:test';
+import test from 'node:test';
 import assert from 'node:assert/strict';
-import {
-  createAutonomousDecisionResolver,
-  operatorPresenceEvidence,
-} from '../src/decision-resolver.js';
-
-const question = (kind = 'technical', recommendation = 'use the existing convention') => ({
-  id: 'Q1',
-  kind,
-  question: 'Which approach should be used?',
-  options: 'invent a new approach, use the existing convention',
-  recommendation,
+import { createAutonomousDecisionResolver, operatorPresenceEvidence } from '../src/decision-resolver.js';
+const question = { id: 'Q1', kind: 'authority', question: 'Choose an approach?', options: 'A, B' };
+test('autonomous phase reviewer resolves authority with or without a terminal and is attributed', async () => {
+  for (const [phase, provider] of [['planning','codex'],['execution','claude']]) {
+    for (const ttyAttached of [true,false]) {
+      const resolver = createAutonomousDecisionResolver({ phase, ttyAttached, reviewer: async r => {
+        assert.equal(r.phase, phase);
+        return { answer: 'B', reason: 'B meets the requirement' };
+      } });
+      const result = await resolver({ questions: [question], plan: 'plan' });
+      assert.deepEqual(result.answers, [{ id: 'Q1', answer: 'B' }]);
+      assert.equal(result.decidedBy, provider);
+      assert.equal(result.role, 'reviewer');
+      assert.equal(result.basis, 'reviewer');
+      assert.equal(result.escalation, undefined);
+    }
+  }
 });
-
-test('the autonomous resolver uses the arbiter and may reject the executor recommendation', async () => {
-  const requests = [];
-  const resolver = createAutonomousDecisionResolver({
-    ttyAttached: true,
-    invocation: 'interactive',
-    arbiter: async (request) => {
-      requests.push(request);
-      return { answer: 'invent a new approach', reason: 'it fits the stated constraint' };
-    },
-  });
-  assert.deepEqual(await resolver({
-    questions: [question()], plan: 'approved plan', task: 'task text',
-  }), { answers: [{ id: 'Q1', answer: 'invent a new approach' }] });
-  assert.equal(requests[0].question.recommendation, 'use the existing convention');
-
-  const unavailable = createAutonomousDecisionResolver({ ttyAttached: false });
-  assert.deepEqual(await unavailable({ questions: [question()] }), { answers: [] });
+test('headless manual mode preserves questions and never delegates authority', async () => {
+  const resolver = createAutonomousDecisionResolver({ interactionMode: 'manual', phase: 'planning',
+    ttyAttached: false, reviewer: () => { throw new Error('must not be called'); } });
+  assert.deepEqual((await resolver({ questions: [question] })).answers, []);
 });
-
-test('authority resolution requires no-TTY evidence and records its reasoning', async () => {
-  const present = createAutonomousDecisionResolver({
-    ttyAttached: true,
-    invocation: 'interactive',
-  });
-  assert.deepEqual(await present({ questions: [question('authority')] }), { answers: [] });
-
-  const absent = createAutonomousDecisionResolver({
-    ttyAttached: false,
-    invocation: 'non-interactive',
-    arbiter: async () => ({ answer: 'use the existing convention' }),
-  });
-  const resolution = await absent({ questions: [question('authority')] });
-  assert.deepEqual(resolution.answers, [{ id: 'Q1', answer: 'use the existing convention' }]);
-  assert.equal(resolution.escalation, 'operator-absent');
-  assert.deepEqual(resolution.presenceEvidence, {
-    ttyAttached: false,
-    invocation: 'non-interactive',
-    operatorWait: 'not-acknowledged',
-  });
-  assert.match(resolution.reasoning, /No TTY.*non-interactively/i);
+test('execution arbiter alias remains usable and unavailable reviewers supply no answers', async () => {
+  const resolver = createAutonomousDecisionResolver({ arbiter: async () => ({ answer: 'A' }) });
+  assert.deepEqual((await resolver({ questions: [question] })).answers, [{ id:'Q1', answer:'A' }]);
+  for (const reviewer of [undefined, async () => ({}), async () => { throw new Error('offline'); }]) {
+    const unavailable = createAutonomousDecisionResolver({ phase: 'planning', reviewer });
+    assert.deepEqual((await unavailable({ questions: [question] })).answers, []);
+  }
 });
-
-test('presence evidence distinguishes interactive and non-interactive invocation', () => {
-  assert.deepEqual(operatorPresenceEvidence({ ttyAttached: true }), {
-    ttyAttached: true,
-    invocation: 'interactive',
-    operatorWait: 'available',
-  });
-  assert.deepEqual(operatorPresenceEvidence({ ttyAttached: false }), {
-    ttyAttached: false,
-    invocation: 'non-interactive',
-    operatorWait: 'not-acknowledged',
-  });
+test('presence evidence remains presentation data', () => {
+  assert.equal(operatorPresenceEvidence({ ttyAttached:false }).operatorWait, 'not-acknowledged');
+  assert.equal(operatorPresenceEvidence({ ttyAttached:true }).operatorWait, 'available');
 });
