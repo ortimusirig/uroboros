@@ -6,7 +6,7 @@ Status: user approved the eight-point design in conversation; revised written sp
 
 Source baseline: `9501282aedd6901d69bb568d93a444acf14a865c`
 
-This revision supersedes the earlier three-round controller proposal in this file. Its historical text remains in commit `3466247`. It does not replace the approved two-agent roles or existing operational checkout.
+This revision supersedes both the earlier three-round controller proposal (historical commit `3466247`) and the proposed 24-provider-call ceiling (historical commit `2879969`). The user rejected a default numerical conversation ceiling, clarified reviewer-guided supervision throughout execution, and requires checkable evidence from both agents at every phase. It does not replace the approved two-agent roles or existing operational checkout.
 
 ## Plain-language agreement
 
@@ -70,6 +70,27 @@ Introduce a versioned, append-only dialogue journal whose correctness-critical w
 
 Messages have stable IDs and sequence, sender/recipient bound by the harness seat, reply-to, issue IDs, artifact/context digests, ordinary-language content and evidence references. An agent cannot impersonate the human or the other seat by emitting a sender field.
 
+### Mandatory evidence from both parties
+
+This is a protocol requirement for both agents in every phase: initial planning, candidate selection, clarification, implementation, review, rebuttal, drift/progress assessment, replanning, memory promotion and final decisions. Every substantive factual claim must identify the evidence supporting it. Authority, confidence, a plausible explanation or the other agent's agreement cannot replace evidence.
+
+Link individual claims to stable evidence IDs; a decorative bibliography or an unrelated citation is insufficient. An evidence record states what claim it supports and provides a locator plus source identity:
+
+- Code: repository-relative file and precise line/symbol locator, pinned revision or captured content digest, and the applicable base/diff identity for uncommitted work. The counterpart gets access to that exact source, not an unversioned path that may already have changed.
+- Commands/tests: the actual command, relevant non-secret execution configuration, working directory, exit/status, code version and durable raw-output artifact. Running a narrow test cannot support a claim that the whole suite passed.
+- User requirements/decisions: stable original message/briefing/decision ID and the relevant text. Agent recollection is not an independent user instruction.
+- External documentation: direct source URL and relevant section, version/date where applicable, retrieval time and a retained permitted excerpt or snapshot sufficient to check the claim. Respect source licensing and sensitive-data boundaries.
+- Recalled memory: link through to its underlying decision or observation evidence. A memory summary repeating a claim does not independently verify it.
+- Inference: label it as inference, cite the premises and explain the connection concisely. A proposed experiment cites the known premises and is not presented as an observed result.
+
+Questions, preferences and hypotheses remain possible without invented proof: label their kind and cite the observation or requirement motivating them when available. If evidence is not known or accessible, mark that gap explicitly and request clarification or an investigation. An unanswered question is not a verified finding; changing the label to hypothesis cannot justify treating an unsupported fact as established or approving a correction as verified.
+
+The receiving party checks material cited evidence before accepting a factual correction, claiming a finding verified or closing an evidence-dependent issue. Record which sources were actually inspected or checks actually run, their result and any disagreement with the cited interpretation. Merely acknowledging a message or repeating its citation is not verification. Both parties can challenge relevance, freshness or sufficiency, including evidence cited by the final reviewer.
+
+The harness validates reference structure, existence/accessibility, project/permission scope, pinned identity and claim-to-reference links; it does not pretend these checks prove semantic correctness. Agent review assesses whether the source really supports the claim. Missing, stale, inaccessible, mismatched or insufficient evidence keeps the claim unverified and the affected evidence-dependent decision unresolved. A syntactically valid but irrelevant citation must be challenged, not accepted automatically.
+
+Apply the same requirement to final authority decisions and approval rationales. An autonomous decision may record a reasoned tradeoff or unresolved uncertainty, but it cannot relabel an unsupported claim as proven, waive a mandatory evidence check or claim an unperformed test passed. Record disagreements and remaining assumptions separately from verified facts. Keep the full cited evidence accessible to the other party and in resumable records; do not broaden access to private/global material merely to satisfy a citation.
+
 Supported conversational actions are:
 
 - Ask for clarification or missing evidence.
@@ -98,13 +119,17 @@ Conversation-only turns are read-only for the project artifact. Only the designa
 
 Planning integrates the snapshot through drafting, optional candidate selection, discussion, revision and final Codex decisions. Information supplied only to a selector does not count as delivered to the final reviewer. Material author discoveries become context deltas before review.
 
-Execution begins from approved planning context. Codex's findings and command evidence extend it, and Claude receives that inherited context plus current implementation evidence. Pure explanation does not launch another coding step. Substantive plan changes return to Claude planning and Codex review before implementation; ordinary corrections within the approved plan remain execution work.
+Execution begins from approved planning context. Codex's findings and command evidence extend it, and Claude receives that inherited context plus current implementation evidence. Codex can yield at a safe execution boundary with a cited uncertainty or request for clarification before completing the implementation; the response routes to Claude and resumes the affected work with the answer recorded. This does not assume messages can be injected into an arbitrary already-running CLI process.
+
+Claude also reviews meaningful implementation checkpoints, asks why a change was made and examines Codex's cited interpretation before judging it. Codex may substantiate or rebut Claude's concern. Pure explanation does not launch another coding step. Resolve clarification under the existing plan, correct code when the plan is sound, or return substantive plan changes to Claude planning and Codex review before implementation resumes. Preserve completed work and the evidence/discussion in all three cases.
 
 ## 5. Completion and decision authority
 
 A clean first review can finish without further discussion. Otherwise, dialogue continues while an unresolved material issue has a useful next question, check, rebuttal or correction.
 
-Models judge issue validity and whether further investigation can help. The controller enforces identities, permitted operations and explicit resource limits. Detect repeated identical issue state/messages without new evidence; before repeating that same exchange again, route the recorded positions to the established final authority. Do not declare semantic novelty merely because a string or hash changed.
+The phase reviewer supplies progress and drift judgment at meaningful planning/execution checkpoints. It asks whether work still serves the original problem/scope, what changed or was learned, which cited evidence supports the current interpretation, whether an argument is repeating and what the next action would establish. The counterpart can challenge that assessment with evidence. Continue, clarify, correct, replan or stop based on these recorded judgments, not a default round/call count.
+
+The controller enforces identity, permissions, current-artifact/evidence rules and any limits the user explicitly configured. Repeated state/messages are observable signals for reviewer assessment, not a mechanical declaration that the problem is insoluble. If useful progress is no longer justified, the reviewer records a final autonomous disposition or requests the established human/manual decision. Do not declare semantic novelty merely because a string or hash changed. Reviewer judgment can be wrong and does not mathematically guarantee termination; no hidden numerical dialogue ceiling is implied.
 
 An author may challenge a review and explain why another investigation is useful, but cannot veto the designated final reviewer indefinitely. Autonomous planning decisions belong to Codex; autonomous execution decisions belong to Claude. Manual unresolved decisions use human checkpoints. Preserve disagreement in reports when authority decides without consensus.
 
@@ -114,7 +139,7 @@ Missing required context, unavailable providers, invalid responses or exhausted 
 
 ## 6. Resource safeguards and compatibility
 
-No default three-round limit is introduced. Initial candidate breadth defaults to one; explicit alternative exploration remains supported.
+No default round, provider-call or elapsed-conversation ceiling is introduced. The earlier 24-call proposal is rejected and removed from v1. Initial candidate breadth defaults to one; explicit alternative exploration remains supported.
 
 Retain existing controls as separate concepts:
 
@@ -123,19 +148,17 @@ Retain existing controls as separate concepts:
 | Planning/decomposition --rounds N | Preserve any positive safe integer as an explicit proposal/review-cycle limit; omission adds no such cycle cap. Question/answer-only turns do not consume a proposal cycle. |
 | --candidates and --pivot-candidates | Preserve explicit supported breadth; alternative drafting/selection is reported and resource-accounted separately. |
 | Execution URO_DEBATE_ROUNDS / debateRounds | Preserve the explicit execution correction/review limit; do not repurpose it as a dialogue-message cap. |
-| Internal challengeRounds | Preserve its existing bounded executor-challenge semantics; ordinary dialogue is not a back door to retry that same exhausted challenge. |
+| Internal challengeRounds | Preserve explicit caller limits and legacy saved limits as recorded. New issue-driven dialogue must not inherit a hidden default two-challenge cutoff; the reviewer assesses clarification, progress and replanning. |
 | Batch --rounds and per-task --round | Preserve campaign refinement meanings and existing validation. |
 | Existing token budgets and stage timeouts | Preserve their scope and results; pass remaining relevant budgets into child launches instead of silently resetting them. |
 
 For an explicit planning --rounds 1, explanation and evidence exchange may continue on the first artifact within resource bounds. A second proposal cycle is forbidden. If the final decision requires such a revision, return unapproved with the limit explained.
 
-New proposed safety default, made explicit for written-design approval: at most **24 provider launches per work-item lineage**. This is an emergency resource ceiling, not a target conversation length or a limit of 24 rewrites. It covers initial drafting, candidates/selection, discussion, review, implementation, repairs, final-decision calls and fresh planning within that work item. Expose --max-provider-calls N on planning, decomposition, execution and queue entry points; queue applies it to each unit, and all values must be positive safe integers. The limit is shown before work starts and in reports; neither agent can raise it.
+Track launches, usage, time, repairs and uncertainty for observability, even when no conversation limit is configured. Persist launch intent before a call; failed or uncertain attempts remain recorded, and unavailable token usage is not zero. Parent queue/campaign constraints and per-item constraints still apply where explicitly configured. Resume, phase changes and fresh planning cannot reset those existing accounts.
 
-Add --active-time-budget-ms N to the same entry points, disabled unless configured with a positive safe integer; existing per-stage timeouts remain effective. Active-time accounting excludes time awaiting human input or a process being offline, survives continuation, and is checked before launching new work. It is a dispatch budget, not a promise to kill an in-flight write at the deadline. Report any overrun by a call already in flight. Token/call/time limits are distinct; missing provider token accounting is unavailable, not zero.
+No new --max-provider-calls or --active-time-budget-ms feature is included. Existing provider quotas, explicit user budgets and stage timeouts remain operational constraints, not evidence that the work is correct or no longer worthwhile. A configured budget stop preserves work unapproved; neither agent can override user-set limits or spend another unbudgeted call for a final verdict.
 
-Reserve a call budget slot durably before launch. A failed or uncertain attempted launch consumes the slot rather than allowing infinite free retries. A failure proven to occur before launch can be recorded as not attempted. Parent queue/campaign constraints and per-item constraints both apply; nested operations cannot bypass whichever budget is tighter.
-
-A newly queued unit has its own work-item allowance while remaining under parent limits. Resume, issue reopening, fresh replanning and phase changes within a unit do not reset that unit's accounting. Existing saved explicit limits are preserved. A budget stop retains state but never spends another unbudgeted call to obtain a final verdict.
+Mechanical format repairs, transport failure handling and permission checks remain distinct from semantic conversation. A bounded malformed-envelope repair does not cap a valid coworker discussion; unrecoverable communication or uncertain side effects pause with evidence rather than cause blind repeated execution.
 
 ## 7. Execution discoveries and reopened planning
 
@@ -174,21 +197,25 @@ Required acceptance cases:
 3. Both roles independently inspect an additional relevant source, exchange evidence and correct or rebut an issue without automatically rewriting the whole artifact.
 4. A clean first review stops; a clarification-only exchange leaves artifact bytes unchanged; a real revision receives current-artifact re-review.
 5. Contradictory or stale memory remains attributed; missing required context and cross-project references cannot produce approval.
-6. Explicit planning rounds, campaign rounds, candidate breadth, execution debate and challenge limits retain their separate behavior.
+6. Explicit planning rounds, campaign rounds, candidate breadth, execution debate and saved/explicit challenge limits retain their separate behavior; no default three-round, 24-call or hidden two-challenge cutoff constrains the new issue dialogue.
 7. Autonomous final authority and unresolved manual authority stay unchanged; delivery acknowledgment, silence or malformed output never becomes agreement.
 8. Changed artifacts/material context invalidate approval, while ordinary audit-log growth does not; a revision-required verdict cannot approve an unapplied change.
 9. Queue, phase changes, reopened planning and process restarts preserve context, issue history, operation identity and consumed budgets.
-10. Failed/uncertain launches, repeated clarification/repair loops and explicit resource exhaustion terminate visibly without approval or unaccounted retries.
+10. Failed/uncertain launches and explicit resource exhaustion pause visibly without approval or unaccounted retries. Valid repeated discussion receives evidence-led reviewer progress/drift assessment rather than termination solely from a message count.
 11. Version-1 manual checkpoint migration preserves pending questions and prior receipts; version-2 technical continuation cannot bypass a human decision, scope validation or exhausted budget.
 12. A replayed completed operation or accepted answer does not repeat inference, edits, queue accounting or landing commits; uncertain outcomes remain explicit.
 13. Concurrent notebook writes serialize without lost updates; live-lock conflicts, journal corruption and storage failure fail visibly. Optional historical search failure does not silently drop required current context.
 14. Reports preserve natural-language questions, answers, rebuttals, evidence and dissent, without exporting private reasoning or credentials.
 15. All controller/delivery acceptance paths use fake providers and isolated Windows fixtures. A later bounded live CLI smoke test is separately authorized and labeled; no test proves identical understanding inside two models.
+16. Every substantive claim type from either seat in planning, execution, review, progress assessment and final decisions carries resolvable claim-linked evidence. Missing, stale, inaccessible, out-of-scope and irrelevant references cannot support verified dispositions or approval.
+17. Questions and explicitly labeled hypotheses can request missing evidence without fabricated citations; unperformed checks and unsupported assumptions cannot be promoted to observed facts.
+18. Material counterpart verification records actual inspected sources or independently executed checks, not just delivery acknowledgment; a reviewer-cited factual mistake can be challenged and corrected.
+19. A mid-execution cited uncertainty yields safely to Claude, records clarification and resumes without replaying completed edits. A substantive planning error routes through Claude replanning and Codex review with the same retained evidence/history.
 
 Run the affected unit/integration suites and full existing suite during implementation, then independent code review and packaging/documentation checks. Prior test counts and CI results are historical, not verification of this feature.
 
 ## Review and implementation boundary
 
-The user approved the high-level design. This revised written contract adds explicit compatibility, persistence and safety details for review, notably the proposed 24-call work-item safeguard and restricted technical continuation form. These details are not represented as already individually approved.
+The user approved the high-level design, then explicitly rejected a default numerical loop ceiling, clarified reviewer-guided conversation during execution and required both parties to cite checkable evidence at every phase. This revision incorporates those instructions. The complete revised written contract, including compatibility/persistence details and the restricted technical continuation form, remains at written review; no rejected numerical default is awaiting approval.
 
 Superpowers brainstorming requires written-design review before writing-plans. Saving and locally committing this specification does not implement the feature, install a memory/transport component, change an operational plugin, push, merge or release. The existing PR5 branch and operational checkout remain preserved.
