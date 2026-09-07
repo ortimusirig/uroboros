@@ -4,6 +4,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   readdirSync,
   rmSync,
   unlinkSync,
@@ -171,6 +172,65 @@ test('false inspection receipts cannot verify a factual claim', () => {
   }
 });
 
+test('an observed read receipt permits later semantic assessment without rewriting the observation', () => {
+  const { base, root, directory } = fixture();
+  try {
+    const evidence = captureEvidence({ projectId: 'p1', root, directory, evidence: codeEvidence() });
+    assert.equal(readFileSync(evidence.capturedPath, 'utf8'), 'export const enabled = true;\n');
+    const receipt = createInspectionReceipt({
+      operationId: 'op-read', seat: 'codex', evidence: [evidence], inspected: [evidence.id], result: 'read',
+    });
+    const originalReceipt = structuredClone(receipt);
+    const claim = { id: 'claim-1', kind: 'fact', text: 'The feature is enabled', evidenceIds: ['code-1'] };
+    for (const result of ['supports', 'contradicts', 'insufficient']) {
+      const verification = {
+        claimId: 'claim-1', evidenceIds: ['code-1'], result,
+        reason: 'Assessment supplied after inspecting the captured source.', inspectionReceipts: [receipt],
+      };
+      const originalVerification = structuredClone(verification);
+      assert.deepEqual(validateClaims({
+        claims: [claim], evidence: [evidence], projectId: 'p1', roots: [root, directory],
+        verifications: [verification], seat: 'codex',
+      }), { valid: true, errors: [] }, result);
+      assert.deepEqual(receipt, originalReceipt);
+      assert.deepEqual(verification, originalVerification);
+    }
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('later semantic support still requires an observed same-seat receipt covering its evidence', () => {
+  const { base, root, directory } = fixture();
+  try {
+    const evidence = captureEvidence({ projectId: 'p1', root, directory, evidence: codeEvidence() });
+    const claim = { id: 'claim-1', kind: 'fact', text: 'The feature is enabled', evidenceIds: ['code-1'] };
+    const receiptFor = (overrides) => createInspectionReceipt({
+      operationId: 'op-read', seat: 'codex', evidence: [evidence], inspected: true, result: 'read', ...overrides,
+    });
+    const cases = [
+      ['missing', [], /no available inspection receipt/],
+      ['unobserved', [receiptFor({ inspected: false })], /not inspected/],
+      ['wrong seat', [receiptFor({ seat: 'claude' })], /another seat/],
+      ['unrelated evidence', [receiptFor({ evidence: ['other-evidence'] })], /omits evidence/],
+    ];
+    for (const [name, inspectionReceipts, expectedError] of cases) {
+      const result = validateClaims({
+        claims: [claim], evidence: [evidence], projectId: 'p1', roots: [root, directory],
+        verifications: [{
+          claimId: 'claim-1', evidenceIds: ['code-1'], result: 'supports',
+          reason: 'The captured source enables the feature.', inspectionReceipts,
+        }],
+        seat: 'codex',
+      });
+      assert.equal(result.valid, false, name);
+      assert.match(result.errors.join('\n'), expectedError, name);
+    }
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
 test('verification evidence must be nonempty and linked to the assessed claim', () => {
   const { base, root, directory } = fixture();
   try {
@@ -203,7 +263,7 @@ test('verification evidence must be nonempty and linked to the assessed claim', 
       id: 'claim-1', kind: 'fact', text: 'The feature is enabled', evidenceIds: ['code-1'],
     };
     const receiptFor = (item, operationId) => createInspectionReceipt({
-      operationId, seat: 'codex', evidence: [item], inspected: true, result: 'supports',
+      operationId, seat: 'codex', evidence: [item], inspected: true, result: 'read',
     });
     const check = (verification) => validateClaims({
       claims: [claim],
@@ -344,6 +404,28 @@ test('code evidence recognizes supported token prefix shapes', () => {
   }
 });
 
+test('PowerShell credential assignments cannot reach durable code capture', () => {
+  const sources = [
+    '$token = "syntheticopaquevalue123"',
+    "$Password='syntheticopaquevalue123'",
+    '$api_key=syntheticopaquevalue123',
+    '$env:TOKEN = "syntheticopaquevalue123"',
+    "$script:password = 'syntheticopaquevalue123'",
+  ];
+  for (const source of sources) {
+    const { base, root, directory } = fixture();
+    try {
+      writeFileSync(join(root, 'src', 'feature.js'), source);
+      assert.throws(() => captureEvidence({
+        projectId: 'p1', root, directory, evidence: codeEvidence(),
+      }), /credential|sensitive/i, source);
+      assert.equal(existsSync(directory), false, source);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  }
+});
+
 test('code evidence recognizes a Bearer credential value outside assignment syntax', () => {
   const { base, root, directory } = fixture();
   try {
@@ -364,6 +446,9 @@ test('benign credential-like code remains capturable', () => {
     'export const guidance = "authorization fields require review";\n',
     'export const shortExample = "sk-short";\n',
     'export const patternName = "github_pattern";\n',
+    '$tokenCount = 3;\n',
+    'const prefix$token = "ordinary identifier";\n',
+    '$env:TOKEN_COUNT = 3;\n',
   ];
 
   for (const source of sources) {

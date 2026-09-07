@@ -142,6 +142,29 @@ test('supported token prefix shapes are redacted from required context', () => {
   }
 });
 
+test('PowerShell credential assignments are redacted before required context persistence', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'uro-context-powershell-'));
+  try {
+    for (const content of [
+      '$token = "syntheticopaquevalue123"',
+      "$Password='syntheticopaquevalue123'",
+      '$api_key=syntheticopaquevalue123',
+      '$env:TOKEN = "syntheticopaquevalue123"',
+      "$script:password = 'syntheticopaquevalue123'",
+    ]) {
+      const entry = requirement({ content });
+      const value = snapshot({ entries: [entry] });
+      assert.doesNotMatch(renderSharedContext({ snapshot: value }), /syntheticopaquevalue123/, content);
+      assert.equal(value.completeness.complete, false, content);
+      const path = persistSharedContext({ directory, snapshot: value });
+      assert.doesNotMatch(readFileSync(path, 'utf8'), /syntheticopaquevalue123/, content);
+      assert.equal(entry.content, content);
+    }
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test('a Bearer credential value outside assignment syntax is redacted as incomplete context', () => {
   const content = 'headers.set("Authorization", "Bearer syntheticmethodvalue123")';
   const entry = requirement({ content });
@@ -159,6 +182,9 @@ test('benign credential-like context remains complete', () => {
     'authorization fields require review',
     'The short example is sk-short',
     'The identifier is github_pattern',
+    '$tokenCount = 3',
+    'const prefix$token = "ordinary identifier"',
+    '$env:TOKEN_COUNT = 3',
   ];
 
   for (const content of contents) {

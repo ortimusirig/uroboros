@@ -28,7 +28,7 @@ function requireString(value, label) {
 function redactString(value) {
   let redacted = value;
   redacted = redacted.replace(
-    /((?:^|[^A-Za-z0-9_$])(?:"|')?(?:password|passwd|secret|token|api[-_]?key|authorization|cookie|credential)(?:"|')?\s*\]?\s*[=:]\s*)(?:(["'])(.*?)\2|([^,;}\r\n]+))/gi,
+    /((?:^|[^A-Za-z0-9_$])\$?(?:"|')?(?:password|passwd|secret|token|api[-_]?key|authorization|cookie|credential)(?:"|')?\s*\]?\s*[=:]\s*)(?:(["'])(.*?)\2|([^,;}\r\n]+))/gi,
     (_match, prefix, quote) => `${prefix}${quote ? `${quote}[REDACTED]${quote}` : '[REDACTED]'}`,
   );
   redacted = redacted.replace(/(\bbearer\s+)[A-Za-z0-9._~+/-]{8,}={0,2}(?![A-Za-z0-9._~+/-])/gi,

@@ -149,11 +149,35 @@ test('the notebook applies bounded credential screening while preserving benign 
       'authorizationPolicy = "Bearer is one documented scheme"',
       'The short example is sk-short',
       'The identifier is github_pattern',
+      '$tokenCount = 3',
+      'const prefix$token = "ordinary identifier"',
+      '$env:TOKEN_COUNT = 3',
     ];
     for (const [index, content] of benign.entries()) {
       memory.append({ entry: memoryEntry({ id: `benign-${index}`, content }) });
     }
     assert.deepEqual(memory.list().map(({ content }) => content), benign);
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('PowerShell credential assignments cannot become notebook records', () => {
+  const { base, target, artifactRoot } = repository();
+  try {
+    const memory = openProjectMemory({ artifactRoot, project: resolveProjectIdentity({ target }) });
+    for (const content of [
+      '$token = "syntheticopaquevalue123"',
+      "$Password='syntheticopaquevalue123'",
+      '$api_key=syntheticopaquevalue123',
+      '$env:TOKEN = "syntheticopaquevalue123"',
+      "$script:password = 'syntheticopaquevalue123'",
+    ]) {
+      assert.throws(() => memory.append({ entry: memoryEntry({ content }) }), /credential/i, content);
+      assert.deepEqual(readdirSync(join(memory.directory, 'entries')), []);
+    }
+    memory.append({ entry: memoryEntry() });
+    assert.deepEqual(memory.list().map(({ version }) => version), [1]);
   } finally {
     rmSync(base, { recursive: true, force: true });
   }

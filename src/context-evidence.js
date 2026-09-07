@@ -37,7 +37,7 @@ function canonical(value) {
 function redactString(value) {
   let result = value;
   result = result.replace(
-    /((?:^|[^A-Za-z0-9_$])(?:"|')?(?:password|passwd|secret|token|api[-_]?key|authorization|cookie|credential)(?:"|')?\s*\]?\s*[=:]\s*)(?:(["'])(.*?)\2|([^,;}\r\n]+))/gi,
+    /((?:^|[^A-Za-z0-9_$])\$?(?:"|')?(?:password|passwd|secret|token|api[-_]?key|authorization|cookie|credential)(?:"|')?\s*\]?\s*[=:]\s*)(?:(["'])(.*?)\2|([^,;}\r\n]+))/gi,
     (_match, prefix, quote) => `${prefix}${quote ? `${quote}[REDACTED]${quote}` : '[REDACTED]'}`,
   );
   result = result.replace(/(\bbearer\s+)[A-Za-z0-9._~+/-]{8,}={0,2}(?![A-Za-z0-9._~+/-])/gi,
@@ -317,6 +317,8 @@ export function validateClaims({ claims, evidence, projectId, roots, verificatio
           errors.push(`verification evidence ${evidenceId} does not identify claim ${claim.id}`);
         }
       }
+      // The caller resolves these from its trusted registry, never from model receipt bodies.
+      // Receipts establish observation; the verification separately records the seat's assessment.
       const receiptList = verification.inspectionReceipts ?? verification.receipts ?? [];
       if (!Array.isArray(receiptList) || receiptList.length === 0) {
         errors.push(`verification for claim ${claim.id} has no available inspection receipt`);
@@ -327,9 +329,6 @@ export function validateClaims({ claims, evidence, projectId, roots, verificatio
           errors.push(`inspection receipt for claim ${claim.id} was not inspected`);
         }
         if (receipt.seat !== seat) errors.push(`inspection receipt for claim ${claim.id} belongs to another seat`);
-        if (verification.result === 'supports' && receipt.result !== 'supports') {
-          errors.push(`inspection receipt does not support claim ${claim.id}`);
-        }
         if (!requestedIds.every((id) => receipt.evidenceIds?.includes(id))) {
           errors.push(`inspection receipt omits evidence for claim ${claim.id}`);
         }
