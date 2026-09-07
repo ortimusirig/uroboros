@@ -25,6 +25,7 @@ export const HARNESS_ARTIFACTS = Object.freeze([
   '__uro_review/',
   '__uro_evidence/',
   '__uro_context/',
+  '__uro_dialogue/',
   '.uro-tmp/',
   'CHANGES.diff',
   'uro-report.md',
@@ -203,7 +204,7 @@ export function archiveRunArtifacts({
       const source = join(dir, filename);
       if (!existsSync(source)) continue;
       try {
-        if (['__uro_evidence/', '__uro_review/', '__uro_context/'].includes(filename)) {
+        if (['__uro_evidence/', '__uro_review/', '__uro_context/', '__uro_dialogue/'].includes(filename)) {
           copyEvidenceDirectory(source, join(durableDirectory, filename), dir);
           result.copied.push(filename);
           continue;
