@@ -146,7 +146,7 @@ Verification: claimId, evidenceIds, inspectionReceiptIds, result (supports|contr
 
 State schemaVersion:2 includes run/project/phase/mode/authority, snapshot and artifact identity, messages, issues/dispositions, approval, next action, proposalCycles/correctionCycles, explicit limits, resources, pendingDecision, technicalPause and operation identities. All open blocking issues need explicit authorized dispositions. New artifact/material context clears approval; audit growth does not.
 
-Optional envelope memoryProposals entries contain id, content, kind, claimIds, issueId and tags. The harness binds proposer/message/run/context provenance; validate referenced claims/issues and retain proposals in state. Model-supplied status cannot promote a proposal. Phase integration curates notebook records only after the relevant explicit disposition, retaining disputed/unsupported status rather than calling agreement a verified fact.
+Optional envelope memoryProposals entries contain id, content, kind, claimIds, optional issueId and tags. The harness binds proposer/message/run/context provenance; validate referenced claims/issues and retain proposals in state. Model-supplied status cannot promote a proposal. Phase integration curates notebook records only after the relevant explicit issue disposition or current-artifact approval, retaining disputed/unsupported status rather than calling agreement a verified fact. A clean decision can be proposed for memory without inventing an objection just to obtain an issueId.
 
 Controller scope is explicit: createDialogueState also accepts scope:{sourceRoots,evidenceRoots}, supplied from validated project/artifact roots by the harness, never inferred from a seat's evidence locator. Persist and revalidate this scope on resume. An inspect request may name an authorized source before its digest is known; capture computes identity from actual bytes, then the seat assesses that evidence. Unknown narration is not an inspection receipt.
 
@@ -233,6 +233,8 @@ Import the real functions in each file; use literal requirement/evidence fixture
 Fake-provider dispatch scenarios: first clean review ends without extra call; ask-answer-verify keeps bytes/cycles; >3 valid exchanges and >2 challenges are not cut off; rounds=1 allows Q&A but refuses second proposal; reviewer progress/stop judgment retained; budget stops before even final decision; one format repair then unreadable. Track failed and repair launches, null usage and separate message/proposal counts.
 
 Exercise either seat proposing a notebook update, unknown claim/issue references rejected, and proposal provenance bound by the harness. Task2 stores validated attributed proposals only; Tasks3-4 perform notebook recall/promotion at real phase boundaries.
+
+Distinguish routine reviewer sign-off from final unresolved-dispute authority: decisionAuthority returns human in manual mode, but a clean evidenced review must still finish without an unnecessary human checkpoint. Add a clean-manual-review case alongside unresolved-manual-dispute routing.
 
 - [ ] **Step 2: Run RED.**
 ~~~powershell
