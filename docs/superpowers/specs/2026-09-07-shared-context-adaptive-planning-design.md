@@ -2,7 +2,7 @@
 
 Date: 2026-09-07
 
-Status: user approved the eight-point design in conversation; revised written specification awaiting final review
+Status: approved for implementation after the end-to-end flow review; user requested Superpowers planning and execution
 
 Source baseline: `9501282aedd6901d69bb568d93a444acf14a865c`
 
@@ -127,6 +127,8 @@ Claude also reviews meaningful implementation checkpoints, asks why a change was
 
 A clean first review can finish without further discussion. Otherwise, dialogue continues while an unresolved material issue has a useful next question, check, rebuttal or correction.
 
+Review depth is the phase reviewer's judgment. It can sign off from sufficient existing evidence, request a focused check, perform a broader final pass, or reopen a conversation/replanning issue. No separate final-review provider call is mandatory. Conversation remains possible during final review in both phases; a question does not restart the entire review. This discretion does not waive the required claim-linked evidence, explicit user requirements, current-artifact approval or permission boundaries.
+
 The phase reviewer supplies progress and drift judgment at meaningful planning/execution checkpoints. It asks whether work still serves the original problem/scope, what changed or was learned, which cited evidence supports the current interpretation, whether an argument is repeating and what the next action would establish. The counterpart can challenge that assessment with evidence. Continue, clarify, correct, replan or stop based on these recorded judgments, not a default round/call count.
 
 The controller enforces identity, permissions, current-artifact/evidence rules and any limits the user explicitly configured. Repeated state/messages are observable signals for reviewer assessment, not a mechanical declaration that the problem is insoluble. If useful progress is no longer justified, the reviewer records a final autonomous disposition or requests the established human/manual decision. Do not declare semantic novelty merely because a string or hash changed. Reviewer judgment can be wrong and does not mathematically guarantee termination; no hidden numerical dialogue ceiling is implied.
@@ -216,6 +218,6 @@ Run the affected unit/integration suites and full existing suite during implemen
 
 ## Review and implementation boundary
 
-The user approved the high-level design, then explicitly rejected a default numerical loop ceiling, clarified reviewer-guided conversation during execution and required both parties to cite checkable evidence at every phase. This revision incorporates those instructions. The complete revised written contract, including compatibility/persistence details and the restricted technical continuation form, remains at written review; no rejected numerical default is awaiting approval.
+The user approved the high-level design, rejected a default numerical loop ceiling, clarified reviewer-guided conversation during execution and required both parties to cite checkable evidence at every phase. After reviewing the full query-to-completion flow, including discretionary final review and conversation during that review, the user instructed: "makes sense, using superpowers plan and execute this please". Implementation planning and local execution are now authorized.
 
-Superpowers brainstorming requires written-design review before writing-plans. Saving and locally committing this specification does not implement the feature, install a memory/transport component, change an operational plugin, push, merge or release. The existing PR5 branch and operational checkout remain preserved.
+Superpowers writing-plans and subagent-driven-development govern the implementation. Saving this specification does not itself implement the feature, install a memory/transport component, change an operational plugin, push, merge or release. The existing PR5 branch and operational checkout remain preserved.
