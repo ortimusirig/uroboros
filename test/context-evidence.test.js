@@ -300,20 +300,80 @@ test('code evidence containing a credential is refused before any durable copy i
   }
 });
 
-test('code evidence refuses quoted authorization assignments before durable capture', () => {
+test('code evidence applies bounded credential grammar before durable capture', () => {
+  const cases = [
+    ['bare field with double-quoted value', 'export const authorization = "Bearer synthetic-bare-value";\n'],
+    ['dot field with single-quoted value', "headers.authorization='Bearer synthetic-dot-value';\n"],
+    ['spaced bracket field with double-quoted key', "headers [ \"authorization\" ] = 'Bearer synthetic-bracket-double-value';\n"],
+    ['bracket field with single-quoted key', 'headers[\'authorization\']="Bearer synthetic-bracket-single-value";\n'],
+    ['JSON field', 'export const settings = {"authorization" : "Bearer synthetic-json-value"};\n'],
+  ];
+
+  for (const [name, source] of cases) {
+    const { base, root, directory } = fixture();
+    try {
+      writeFileSync(join(root, 'src', 'feature.js'), source);
+      assert.throws(() => captureEvidence({
+        projectId: 'p1', root, directory, evidence: codeEvidence(),
+      }), /credential|sensitive/i, name);
+      assert.equal(existsSync(directory) ? readdirSync(directory).length : 0, 0, name);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  }
+});
+
+test('code evidence recognizes supported token prefix shapes', () => {
+  const cases = [
+    ['OpenAI token prefix', 'export const value = "sk-syntheticprefix123";\n'],
+    ['GitHub token prefix', 'export const value = "ghp_syntheticprefix123";\n'],
+    ['GitHub fine-grained token prefix', 'export const value = "github_pat_syntheticprefix123";\n'],
+  ];
+
+  for (const [name, source] of cases) {
+    const { base, root, directory } = fixture();
+    try {
+      writeFileSync(join(root, 'src', 'feature.js'), source);
+      assert.throws(() => captureEvidence({
+        projectId: 'p1', root, directory, evidence: codeEvidence(),
+      }), /credential|sensitive/i, name);
+      assert.equal(existsSync(directory) ? readdirSync(directory).length : 0, 0, name);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  }
+});
+
+test('code evidence recognizes a Bearer credential value outside assignment syntax', () => {
+  const { base, root, directory } = fixture();
+  try {
+    writeFileSync(join(root, 'src', 'feature.js'),
+      'headers.set("Authorization", "Bearer syntheticmethodvalue123");\n');
+    assert.throws(() => captureEvidence({
+      projectId: 'p1', root, directory, evidence: codeEvidence(),
+    }), /credential|sensitive/i);
+    assert.equal(existsSync(directory) ? readdirSync(directory).length : 0, 0);
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('benign credential-like code remains capturable', () => {
   const sources = [
-    'export const authorization = "Bearer synthetic-assignment-value";\n',
-    'export const settings = {"authorization": "Bearer synthetic-json-value"};\n',
+    'export const authorizationPolicy = "Bearer is one documented scheme";\n',
+    'export const guidance = "authorization fields require review";\n',
+    'export const shortExample = "sk-short";\n',
+    'export const patternName = "github_pattern";\n',
   ];
 
   for (const source of sources) {
     const { base, root, directory } = fixture();
     try {
       writeFileSync(join(root, 'src', 'feature.js'), source);
-      assert.throws(() => captureEvidence({
+      const captured = captureEvidence({
         projectId: 'p1', root, directory, evidence: codeEvidence(),
-      }), /credential|sensitive/i);
-      assert.equal(existsSync(directory) ? readdirSync(directory).length : 0, 0);
+      });
+      assert.equal(existsSync(captured.capturedPath), true);
     } finally {
       rmSync(base, { recursive: true, force: true });
     }

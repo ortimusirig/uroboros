@@ -104,19 +104,69 @@ test('required credential redaction is visible as incomplete context without mut
   assert.equal(entry.content, 'Use Authorization: Bearer secret-session-token');
 });
 
-test('quoted authorization assignments are redacted as incomplete context', () => {
+test('bounded credential grammar redacts required context without mutating input', () => {
+  const cases = [
+    ['authorization = "Bearer synthetic-bare-value"', 'synthetic-bare-value'],
+    ["headers.authorization='Bearer synthetic-dot-value'", 'synthetic-dot-value'],
+    ["headers [ \"authorization\" ] = 'Bearer synthetic-bracket-double-value'", 'synthetic-bracket-double-value'],
+    ['headers[\'authorization\']="Bearer synthetic-bracket-single-value"', 'synthetic-bracket-single-value'],
+    ['{"authorization" : "Bearer synthetic-json-value"}', 'synthetic-json-value'],
+  ];
+
+  for (const [content, credential] of cases) {
+    const entry = requirement({ content });
+    const value = snapshot({ entries: [entry] });
+    const serialized = JSON.stringify(value);
+    assert.equal(serialized.includes(credential), false, content);
+    assert.match(serialized, /\[REDACTED\]/);
+    assert.equal(value.completeness.complete, false);
+    assert.equal(entry.content, content);
+  }
+});
+
+test('supported token prefix shapes are redacted from required context', () => {
+  const cases = [
+    ['Use sk-syntheticprefix123', 'sk-syntheticprefix123'],
+    ['Use ghp_syntheticprefix123', 'ghp_syntheticprefix123'],
+    ['Use github_pat_syntheticprefix123', 'github_pat_syntheticprefix123'],
+  ];
+
+  for (const [content, credential] of cases) {
+    const entry = requirement({ content });
+    const value = snapshot({ entries: [entry] });
+    const serialized = JSON.stringify(value);
+    assert.equal(serialized.includes(credential), false, content);
+    assert.match(serialized, /\[REDACTED\]/);
+    assert.equal(value.completeness.complete, false);
+    assert.equal(entry.content, content);
+  }
+});
+
+test('a Bearer credential value outside assignment syntax is redacted as incomplete context', () => {
+  const content = 'headers.set("Authorization", "Bearer syntheticmethodvalue123")';
+  const entry = requirement({ content });
+  const value = snapshot({ entries: [entry] });
+  const serialized = JSON.stringify(value);
+  assert.doesNotMatch(serialized, /syntheticmethodvalue123/);
+  assert.match(serialized, /\[REDACTED\]/);
+  assert.equal(value.completeness.complete, false);
+  assert.equal(entry.content, content);
+});
+
+test('benign credential-like context remains complete', () => {
   const contents = [
-    'authorization = "Bearer synthetic-assignment-value"',
-    '{"authorization": "Bearer synthetic-json-value"}',
+    'authorizationPolicy = "Bearer is one documented scheme"',
+    'authorization fields require review',
+    'The short example is sk-short',
+    'The identifier is github_pattern',
   ];
 
   for (const content of contents) {
     const entry = requirement({ content });
     const value = snapshot({ entries: [entry] });
-    const serialized = JSON.stringify(value);
-    assert.doesNotMatch(serialized, /synthetic-(?:assignment|json)-value/);
-    assert.match(serialized, /\[REDACTED\]/);
-    assert.equal(value.completeness.complete, false);
+    assert.equal(value.completeness.complete, true, content);
+    assert.equal(value.entries[0].content, content);
+    assert.doesNotMatch(JSON.stringify(value), /\[REDACTED\]/);
     assert.equal(entry.content, content);
   }
 });

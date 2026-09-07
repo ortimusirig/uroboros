@@ -129,6 +129,36 @@ test('the notebook rejects caller ownership fields without poisoning later recor
   }
 });
 
+test('the notebook applies bounded credential screening while preserving benign text', () => {
+  const { base, target, artifactRoot } = repository();
+  try {
+    const memory = openProjectMemory({ artifactRoot, project: resolveProjectIdentity({ target }) });
+    const credentials = [
+      'headers [ "authorization" ] = "Bearer synthetic-notebook-bracket-value"',
+      'headers.set("Authorization", "Bearer syntheticnotebookmethod123")',
+      'Use ghp_syntheticnotebook123',
+      'Use github_pat_syntheticnotebook123',
+    ];
+    for (const [index, content] of credentials.entries()) {
+      assert.throws(() => memory.append({
+        entry: memoryEntry({ id: `credential-${index}`, content }),
+      }), /credential/i, content);
+    }
+
+    const benign = [
+      'authorizationPolicy = "Bearer is one documented scheme"',
+      'The short example is sk-short',
+      'The identifier is github_pattern',
+    ];
+    for (const [index, content] of benign.entries()) {
+      memory.append({ entry: memoryEntry({ id: `benign-${index}`, content }) });
+    }
+    assert.deepEqual(memory.list().map(({ content }) => content), benign);
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
 test('project listing and text/tag search are deterministic and preserve caller objects', () => {
   const { base, target, artifactRoot } = repository();
   try {

@@ -73,8 +73,9 @@ export function resolveProjectIdentity({ target }) {
 function assertNoCredentials(value, key = '') {
   if (SENSITIVE_KEY.test(key)) throw new TypeError(`project memory refuses credential field: ${key}`);
   if (typeof value === 'string'
-    && (/(?:authorization\s*:\s*bearer|(?:password|secret|token|api[-_]?key)\s*[=:])/i.test(value)
-      || /\b(?:sk|gh[opusr]|github_pat)-[A-Za-z0-9_-]{8,}\b/.test(value))) {
+    && (/(?:^|[^A-Za-z0-9_$])(?:"|')?(?:password|passwd|secret|token|api[-_]?key|authorization|cookie|credential)(?:"|')?\s*\]?\s*[=:]\s*(?:(["'])(.*?)\1|([^,;}\r\n]+))/i.test(value)
+      || /(\bbearer\s+)[A-Za-z0-9._~+/-]{8,}={0,2}(?![A-Za-z0-9._~+/-])/i.test(value)
+      || /\b(?:sk-|gh[opusr][_-]|github_pat[_-])[A-Za-z0-9_-]{8,}\b/.test(value))) {
     throw new TypeError('project memory refuses credential values');
   }
   if (Array.isArray(value)) value.forEach((item) => assertNoCredentials(item));
