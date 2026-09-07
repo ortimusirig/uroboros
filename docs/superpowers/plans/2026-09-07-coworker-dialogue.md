@@ -147,6 +147,10 @@ Verification: claimId, evidenceIds, inspectionReceiptIds, result (supports|contr
 
 State schemaVersion:2 includes run/project/phase/mode/authority, snapshot and artifact identity, messages, issues/dispositions, approval, next action, proposalCycles/correctionCycles, explicit limits, resources, pendingDecision, technicalPause and operation identities. All open blocking issues need explicit authorized dispositions. New artifact/material context clears approval; audit growth does not.
 
+The reviewer may provide authorized issue dispositions and current-artifact sign-off in one approve envelope on the already-running review call. No extra provider call is required. A decide envelope alone settles issues but does not imply whole-artifact approval; render this explicit action distinction in protocol guidance without adding a second outcome schema.
+
+An explicit applicable issue rejection or claim-owner withdrawal distinguishes the linked disproved claim from live approval premises without requiring a new artifact. Preserve the original claim, assessment and disposition as attributed history. An unrelated issue closure/deferment cannot retire a claim, nor can retirement hide a live disposition/approval premise or unresolved material dependency. Expose this status for notebook promotion and reporting; a retired claim cannot become a verified notebook fact.
+
 For both propose and revise, the dispatcher owns the single provider launch. Validate the returned envelope against the operation's saved INPUT artifact/context identities before applying the result. The revise callback receives that saved transport response and envelope, launches no provider, and computes the resulting artifact/context identities from actual parsed/applied output. Its returned response, if any, is a local projection of the same outcome, not another provider reply. Durably journal any local application effect; persist the resulting identity and invalidate approval before reviewer dispatch. Q&A invokes no artifact application callback.
 
 Optional envelope memoryProposals entries contain id, content, kind, claimIds, optional issueId and tags. The harness binds proposer/message/run/context provenance; validate referenced claims/issues and retain proposals in state. Model-supplied status cannot promote a proposal. Phase integration curates notebook records only after the relevant explicit issue disposition or current-artifact approval, retaining disputed/unsupported status rather than calling agreement a verified fact. A clean decision can be proposed for memory without inventing an objection just to obtain an issueId.
@@ -272,7 +276,7 @@ git commit -m "feat: add durable evidence-led coworker dialogue"
 
 ## Task 3: Shared planning and decomposition conversations
 
-**Files:** Create src/planning-dialogue.js, test/planning-dialogue.test.js. Modify src/plan.js, src/decompose.js, src/conversation.js (compatibility/prompt consistency/rendering), src/args.js (affected defaults/validation), src/executor.js and src/arbiter.js (observed tool receipts), src/review-protection.js and src/isolation.js (context/dialogue sidecar protections/exclusions), test/plan.test.js, test/decompose.test.js, test/candidate-campaign.test.js and affected transport/args/protection/isolation tests.
+**Files:** Create src/planning-dialogue.js, test/planning-dialogue.test.js. Modify src/plan.js, src/decompose.js, src/conversation.js (compatibility/prompt consistency/rendering), src/args.js (affected defaults/validation), src/executor.js and src/arbiter.js (observed tool receipts), src/review-protection.js and src/isolation.js (context/dialogue sidecar protections/exclusions), test/plan.test.js, test/decompose.test.js, test/candidate-campaign.test.js, test/events.test.js and the fresh-planning fixture portions of test/resume.test.js, plus affected transport/args/protection/isolation tests. Task5 still owns recovery semantics and the remaining resume test changes.
 
 **Interfaces:** Consumes Tasks 1-2; produces runPlanningDialogue and existing runPlan/runPlanCandidateSet/decompose results plus sharedContext/dialogue/resources. Existing integer rounds, artifact validators/writer, output paths and legacy readers preserved.
 
@@ -324,7 +328,7 @@ Before commit explicitly git add each changed path from this task Files list. Re
 
 ## Task 4: Execution questions, review dialogue and retained-work replanning
 
-**Files:** Create src/execution-dialogue.js, test/execution-dialogue.test.js. Modify src/run.js, src/executor.js, src/verifier.js, src/review.js, src/evidence.js, src/decision-resolver.js only at dialogue seams. Extend test/run.test.js, test/review-loop.test.js, test/reviewer-gate.test.js, test/fresh-pivot.test.js, test/claude-review-transport.test.js.
+**Files:** Create src/execution-dialogue.js, test/execution-dialogue.test.js. Modify src/run.js, src/executor.js, src/verifier.js, src/review.js, src/evidence.js, src/gate.js, src/decision-resolver.js only at dialogue seams. Extend test/run.test.js, test/review-loop.test.js, test/reviewer-gate.test.js, test/gate.test.js, test/fresh-pivot.test.js, test/claude-review-transport.test.js.
 
 **Interfaces:** Consumes approved planning context/history/resources; produces runExecutionDialogue and serializable execution continuation. Existing landing and human authority remain.
 
@@ -353,13 +357,15 @@ Adapt these local values to existing run.js stage variables. Codex returns cited
 
 Update snapshot with actual diff and command evidence before Claude review. Retain review bundle checks/isolation; remove any new-mode requirement to fabricate an executable test for every concern or to run an automatic extra clean final pass. Required evidence and acceptable required check outcomes remain. Final discussion can reopen at any point. New code/context invalidates old approval; unperformed correction cannot land.
 
+For harness-run commands, capture actual argv, cwd, exit/status, full outputs and code identity at execution time. Existing evidence.js writes and gate.js onEvidence are best-effort legacy sinks: new-mode required evidence must surface capture failure and pause before a subsequent effect, not proceed using only an excerpt or invented output. Preserve legacy behavior explicitly outside the new mode. Test a failed required sink with a second command whose real counter must remain untouched, alongside the legacy sink behavior. Partial nested provider observations remain observations; never substitute outer CLI argv/cwd for a nested command.
+
 Fresh planning retains parent issue, novelty evidence, original scope, completed work and consumed budgets; Claude revises, Codex approves, then Codex executes. Reuse amend/fresh/conclude and existing decision-resolver semantics. Legacy readers remain unchanged.
 
 Reuse Task3 notebook lifecycle for execution work items and execution-derived memory proposals: either seat may propose; the harness validates provenance/evidence/disposition before writing. Retain selected history in execution/replan snapshots. Do not leave notebook recall or promotion disconnected from the real run path.
 
 - [ ] **Step 4: GREEN focused and whole suite.**
 ~~~powershell
-node --test test/execution-dialogue.test.js test/run.test.js test/review-loop.test.js test/reviewer-gate.test.js test/fresh-pivot.test.js test/claude-review-transport.test.js test/review-protection.test.js test/verifier-evidence.test.js test/executor.test.js test/decision-resolver.test.js
+node --test test/execution-dialogue.test.js test/run.test.js test/review-loop.test.js test/reviewer-gate.test.js test/gate.test.js test/fresh-pivot.test.js test/claude-review-transport.test.js test/review-protection.test.js test/verifier-evidence.test.js test/executor.test.js test/decision-resolver.test.js
 node --test
 ~~~
 - [ ] **Step 5: Self-review/report, explicitly stage changed task paths, commit.**
