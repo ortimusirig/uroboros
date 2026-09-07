@@ -1241,7 +1241,7 @@ function reviewerForRounds(reports, calls = null) {
     for (const id of ids) observed.add(id);
     writeFileSync(join(opts.cwd, '__uro_review', 'REVIEW.md'),
       report === null ? 'Reviewed. No findings this round.\n' : report);
-    return { launchFailed: false, timedOut: false, dispositions };
+    return { conclusion: /Severity: blocking/.test(report ?? '') ? 'issues' : 'clean', launchFailed: false, timedOut: false, dispositions };
   };
 }
 

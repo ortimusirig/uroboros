@@ -709,7 +709,7 @@ test('an opted-in passing run records mutation survivors without changing its ou
           order.push('reviewer');
           mkdirSync(join(cwd, '__uro_review'), { recursive: true });
           writeFileSync(join(cwd, '__uro_review', 'REVIEW.md'), 'Reviewed. No findings.\n');
-          return { launchFailed: false, timedOut: false };
+          return { conclusion: 'clean', launchFailed: false, timedOut: false };
         },
         runMutation: async () => {
           order.push('mutation');

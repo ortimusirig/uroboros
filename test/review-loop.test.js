@@ -17,6 +17,37 @@ import { runQueue } from '../src/queue.js';
 import { planningArtifactDigest } from '../src/conversation.js';
 import { withVerifiedSuperpowers } from '../fixtures/verified-superpowers.mjs';
 import { materializeReviewBundle, reviewDigest } from '../src/review.js';
+import { runReviewPass } from '../src/verifier.js';
+import { EventEmitter } from 'node:events';
+
+for (const [name, bundle, approved] of [
+  ['missing', { report: 'I could not finish checking the implementation.' }, false],
+  ['malformed', { conclusion: true, report: 'Incomplete review.' }, false],
+  ['inconclusive', { conclusion: 'inconclusive', report: 'The dependency could not be inspected.' }, false],
+  ['issues without findings', { conclusion: 'issues', report: 'An unresolved correctness issue remains.' }, false],
+  ['clean with blocker', { conclusion: 'clean', report: '## F1\nSeverity: blocking\nDescription: Wrong behavior.\nTest: __uro_review/tests/f1.test.js' }, false],
+  ['clean', { conclusion: 'clean', report: 'Checked the current diff against requirements and command evidence; no blockers remain.' }, true],
+]) test(`production bundle-to-controller ${name} conclusion cannot invent approval`, async t => {
+  const answer = JSON.stringify({ version: 1, tests: [], ...bundle });
+  const fixture = harness(`bundle-${name.replaceAll(' ', '-')}`, { options: { debateRounds: 1 }, adapters: {
+    runReview: options => runReviewPass({ ...options, bin: process.execPath, env: {}, spawnProcess: () => {
+      const child = new EventEmitter(); child.pid = 12345;
+      child.stdout = new EventEmitter(); child.stderr = new EventEmitter(); child.stdin = { end() {} };
+      queueMicrotask(() => {
+        child.stdout.emit('data', Buffer.from(JSON.stringify({ type: 'result', subtype: 'success', is_error: false,
+          result: answer, usage: { input_tokens: 1, output_tokens: 1 } }) + '\n'));
+        child.emit('close', 0);
+      });
+      return child;
+    } }),
+  } });
+  t.after(() => rmSync(fixture.root, { recursive: true, force: true }));
+  const facts = await executeRun(fixture.options);
+  assert.equal(facts.approved, approved);
+  assert.equal(facts.outcome === 'review-ready', approved);
+  assert.ok(facts.messages.some(message => message.content.includes(bundle.report) || message.content.includes(answer)));
+  if (approved) assert.equal(facts.approval.artifactDigest, reviewDigest(readFileSync(join(facts.dir, 'CHANGES.diff'))));
+});
 
 function filesIn(root) {
   const files = new Map();
@@ -109,13 +140,53 @@ function harness(runId, overrides = {}) {
   };
 }
 
-async function currentReview(options, { findings = '', tests = [], dispositions = [] } = {}) {
-  const bundle = { version: 1, report: findings || 'No blocking findings after checking requirements.', tests, dispositions };
+async function currentReview(options, { findings = '', tests = [], dispositions = [], conclusion = findings ? 'issues' : 'clean' } = {}) {
+  const bundle = { version: 1, conclusion, report: findings || 'No blocking findings after checking requirements.', tests, dispositions };
   return { provider: 'claude', role: 'execution-reviewer', launchFailed: false, timedOut: false,
     answer: JSON.stringify(bundle), artifact: await materializeReviewBundle({ ...options, bundle }) };
 }
 const blocker = '## F1\nSeverity: blocking\nDescription: Branch drops valid input.\nTest: __uro_review/tests/f1.test.js\n';
 const proof = { path: 'tests/f1.test.js', content: 'throw new Error("branch evidence");\n' };
+
+for (const conclusion of ['issues', 'inconclusive']) test(`human acceptance requires usable current ${conclusion} bundle evidence`, async t => {
+  let resumed = false;
+  const fixture = harness(`human-bundle-${conclusion}`, { adapters: {
+    runExecutor: async () => ({ exitCode: 0, changedFiles: ['implementation.js'], lastMessage: JSON.stringify({
+      findingResponses: [{ id: 'F1', disposition: 'dispute', reason: 'The input is explicitly excluded.' }] }) }),
+    runReview: options => {
+      const bundle = { version: 1, conclusion: resumed ? conclusion : 'issues', report: blocker, tests: [proof],
+        dispositions: [{ id: 'F1', status: 'upheld', reason: 'I retain my objection to the excluded input.' }] };
+      return runReviewPass({ ...options, bin: process.execPath, env: {}, spawnProcess: () => {
+        const child = new EventEmitter(); child.pid = 12345;
+        child.stdout = new EventEmitter(); child.stderr = new EventEmitter(); child.stdin = { end() {} };
+        queueMicrotask(() => {
+          child.stdout.emit('data', Buffer.from(JSON.stringify({ type: 'result', subtype: 'success', is_error: false,
+            result: JSON.stringify(bundle), usage: { input_tokens: 1, output_tokens: 1 } }) + '\n'));
+          child.emit('close', 0);
+        });
+        return child;
+      } });
+    },
+  } });
+  t.after(() => rmSync(fixture.root, { recursive: true, force: true }));
+  const pending = await executeRun(fixture.options);
+  assert.equal(pending.outcome, 'needs-decision');
+  resumed = true;
+  const done = await execution.continueExecution({ checkpointState: pending.checkpointState,
+    humanRuling: { decisionId: 'current-human', artifactDigest: 'current-artifact', answers: [{ id: 'F1', answer: 'Accept Codex rebuttal' }] },
+    adapters: fixture.options.adapters });
+  assert.equal(done.approved, conclusion === 'issues');
+  if (conclusion === 'issues') {
+    assert.equal(done.approval.basis, 'human');
+    assert.equal(done.approval.decidedBy, 'human');
+    assert.equal(done.approval.reviewEvidence.conclusion, 'issues');
+    assert.deepEqual(done.approval.rulings.map(ruling => ruling.id), ['F1']);
+  } else {
+    assert.equal(done.approval, null);
+    assert.equal(done.outcome, 'verifier-failed');
+    assert.ok(done.messages.some(message => message.content.includes('inconclusive')));
+  }
+});
 
 for (const change of ['correction', 'unrelated', 'diff', 'evidence']) test(`human rulings preserve ${change} work for actual review`, async t => {
   let resumed = false;
@@ -420,7 +491,7 @@ test('review scope violations are restored and retained in events and run facts'
         writeFileSync(join(cwd, 'implementation.js'), 'reviewer changed implementation\n');
         writeFileSync(join(cwd, 'reviewer-extra.js'), 'outside scope\n');
         writeReview(cwd, { id: 'F1', severity: 'suggestion' });
-        return { launchFailed: false, timedOut: false };
+        return { conclusion: 'clean', launchFailed: false, timedOut: false };
       },
     },
   });
@@ -484,7 +555,7 @@ test('executor review-file restoration and reviewer tests accumulate across roun
             id: 'F2', testFile: '__uro_review/tests/f2.test.js',
           });
         } else writeReview(cwd, { id: 'F3', severity: 'suggestion' });
-        return { launchFailed: false, timedOut: false, dispositions: reviewRound >= 3
+        return { conclusion: reviewRound >= 3 ? 'clean' : 'issues', launchFailed: false, timedOut: false, dispositions: reviewRound >= 3
           ? ['F1', 'F2'].map((id) => ({ id, status: 'resolved', reason: 'The correction and reviewer tests cover the finding.' })) : [] };
       },
       runGate: async ({ commands }) => {
@@ -553,7 +624,7 @@ test('a failing reviewer test is evidence fed back to the executor through the d
             id: 'F2', severity: 'blocking', testFile: '__uro_review/tests/f2.test.js',
           });
         } else writeReview(cwd, { id: 'F3', severity: 'suggestion' });
-        return { launchFailed: false, timedOut: false, dispositions: reviewRound >= 3
+        return { conclusion: reviewRound >= 3 ? 'clean' : 'issues', launchFailed: false, timedOut: false, dispositions: reviewRound >= 3
           ? ['F1', 'F2'].map((id) => ({ id, status: 'resolved', reason: 'The correction and reviewer tests cover the finding.' })) : [] };
       },
       runGate: async ({ commands }) => {

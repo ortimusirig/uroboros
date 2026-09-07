@@ -7,7 +7,6 @@ const VERIFIED_SUPERPOWERS = {
   ok: true,
   seats: {
     codex: { seat: 'codex', verified: true, evidence: 'registry', version: '6.3.0' },
-    claude: { seat: 'cursor', verified: true, evidence: 'manifest', version: '6.0.2' },
     claude: { seat: 'claude', verified: true, evidence: 'manifest', version: '6.0.2' },
   },
 };
@@ -111,7 +110,7 @@ test('queue refuses an unverified seat before creating a runtime or running the 
       seats: {
         ...VERIFIED_SUPERPOWERS.seats,
         claude: {
-          seat: 'cursor', verified: false, evidence: 'Claude manifest missing', version: null,
+          seat: 'claude', verified: false, evidence: 'Claude manifest missing', version: null,
           remediation: 'Claude: URO_SUPERPOWERS_DIR=<directory-with-.claude-plugin>',
         },
       },

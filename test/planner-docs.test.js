@@ -6,17 +6,17 @@ import { CAMPAIGN_SHAPES } from '../src/campaign.js';
 import { CLI_COMMANDS, CLI_USAGE } from '../src/cli-help.js';
 
 const skillPath = fileURLToPath(new URL('../skills/uroboros/SKILL.md', import.meta.url));
-const usagePath = fileURLToPath(new URL('../docs/usage.md', import.meta.url));
+const usagePath = fileURLToPath(new URL('../docs/guides/usage.md', import.meta.url));
 const readmePath = fileURLToPath(new URL('../README.md', import.meta.url));
-const publishingPath = fileURLToPath(new URL('../docs/publishing.md', import.meta.url));
+const publishingPath = fileURLToPath(new URL('../docs/guides/publishing.md', import.meta.url));
 const skill = readFileSync(skillPath, 'utf8');
 const usage = readFileSync(usagePath, 'utf8');
 const readme = readFileSync(readmePath, 'utf8');
 const publishing = readFileSync(publishingPath, 'utf8');
 const userDocs = [
   ['README.md', readme],
-  ['docs/usage.md', usage],
-  ['docs/publishing.md', publishing],
+  ['docs/guides/usage.md', usage],
+  ['docs/guides/publishing.md', publishing],
 ];
 
 function escapeRegExp(value) {
@@ -120,7 +120,7 @@ test('historical mode letters survive only as one design-spec cross-reference li
   assert.match(historicalLines[0], /committed campaign design spec/);
   assert.match(historicalLines[0], /Mode A maps to Candidates\/Rounds, and Mode B maps to Graph/);
   for (const [label, text] of userDocs) {
-    const guardedText = label === 'docs/usage.md'
+    const guardedText = label === 'docs/guides/usage.md'
       ? text.split(/\r?\n/).filter((line) => line !== historicalLines[0]).join('\n')
       : text;
     assert.doesNotMatch(

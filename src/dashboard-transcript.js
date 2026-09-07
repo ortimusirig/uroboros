@@ -89,8 +89,11 @@ function renderConversation(run) {
   const status = decision.approved ? (decision.converged === false ? 'Approved; dissent retained' : 'Approved')
     : decision.authority === 'human' ? 'Needs human decision' : 'Unapproved';
   const messages = (run.messages ?? []).map(message => {
-    const text = message.recordedContent ? decodeRecordedText(message.recordedContent).text : message.content ?? '';
-    return '<details><summary>' + escapeHtml(providerLabel(message, 'Agent')) + '</summary><pre>' + escapeHtml(text) + '</pre></details>';
+    const decoded = message.recordedContent ? decodeRecordedText(message.recordedContent) : { text: message.content ?? '' };
+    return '<details><summary>' + escapeHtml(providerLabel(message, 'Agent')) + '</summary><pre>' + escapeHtml(decoded.text) + '</pre>'
+      + (decoded.truncated ? typeof message.content === 'string'
+        ? '<p>This view was truncated. Inspect the original message content field in uro-runfacts.json for the complete retained message.</p>'
+        : '<p>This historical record was truncated; the original complete content was not retained in this record.</p>' : '') + '</details>';
   }).join('');
   return '<section class="conversation-decision"><h3>' + escapeHtml(status) + '</h3><p>'
     + escapeHtml(decision.phase + ' / ' + decision.interactionMode + '; agreement: '

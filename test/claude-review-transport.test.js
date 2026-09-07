@@ -26,8 +26,23 @@ const success = (result) => ({ type: 'result', subtype: 'success', is_error: fal
   duration_ms: 3, duration_api_ms: 2, num_turns: 1, session_id: 'test', total_cost_usd: 0,
   usage: { input_tokens: 7, cache_read_input_tokens: 2, cache_creation_input_tokens: 3, output_tokens: 4 },
 });
-const reviewBundle = JSON.stringify({ version: 1, report: 'Reviewed required behavior. No findings.',
+const reviewBundle = JSON.stringify({ version: 1, conclusion: 'clean', report: 'Reviewed required behavior. No findings.',
   tests: [{ path: 'tests/f1.test.js', content: 'console.log("independent test");\n' }] });
+
+for (const answer of [
+  '{"version":1,"conclusion":"inconclusive","conclusion":"clean","report":"Incomplete review.","tests":[]}',
+  '{"version":1,"conclu\\u0073ion":"issues","conclusion":"clean","report":"Conflicting review.","tests":[]}',
+  JSON.stringify({ version: 1, conclusion: 'clean', report: 'Prior issue upheld.', tests: [],
+    dispositions: [{ id: 'F1', status: 'upheld', reason: 'Still broken.' }] }),
+]) test('conflicting machine review conclusions cannot publish a usable receipt', async t => {
+  const cwd = mkdtempSync(join(tmpdir(), 'uro-conflicting-conclusion-'));
+  t.after(() => rmSync(cwd, { recursive: true, force: true }));
+  const fixture = captureFixture([success(answer)]);
+  const result = await runReviewPass({ cwd, bin: process.execPath, env: {}, spawnProcess: fixture.spawnProcess });
+  assert.equal(result.artifactFailed, true);
+  assert.equal(result.artifact, null);
+  assert.equal(result.answer, answer);
+});
 
 for (const [name, terminal, want] of [
   ['empty', '', 'UNVERIFIED'],

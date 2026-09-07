@@ -72,6 +72,7 @@ export function detectReview({ dir, artifact, round, diffDigest }) {
   const reviewPath = join(reviewDirectory, 'REVIEW.md');
   if (round !== undefined || diffDigest !== undefined) {
     if (!artifact || artifact.round !== round || artifact.diffDigest !== diffDigest) return { reviewed: false };
+    if (!['clean', 'issues'].includes(artifact.conclusion)) return { reviewed: false };
     try {
       const manifest = JSON.parse(readFileSync(join(reviewDirectory, 'manifest.json'), 'utf8'));
       if (JSON.stringify(manifest) !== JSON.stringify(artifact)) return { reviewed: false };
@@ -101,7 +102,8 @@ export function detectReview({ dir, artifact, round, diffDigest }) {
   });
   const testFiles = findTestFiles(join(reviewDirectory, 'tests'))
     .map((path) => `${REVIEW_DIR}/tests/${path}`);
-  return { reviewed: true, findings, testFiles };
+  if (artifact?.conclusion === 'clean' && findings.some(finding => finding.severity === 'blocking')) return { reviewed: false };
+  return { reviewed: true, findings, testFiles, ...(artifact ? { conclusion: artifact.conclusion } : {}) };
 }
 
 function validTestPath(path) {
@@ -160,11 +162,31 @@ function validateStructuredReport(report) {
 }
 
 export async function materializeReviewBundle({ cwd, bundle, round = 1, diffDigest = '' }) {
-  if (typeof bundle === 'string') bundle = JSON.parse(bundle.trim().replace(/^```json\s*|\s*```$/g, ''));
+  if (typeof bundle === 'string') {
+    const source = bundle.trim().replace(/^```json\s*|\s*```$/g, '');
+    bundle = JSON.parse(source);
+    // JSON.parse silently takes the last duplicate key. Do not let an earlier
+    // inconclusive/issues conclusion be overwritten into terminal authority.
+    const tokens = source.match(/"(?:\\.|[^"\\])*"|[{}\[\]:,]/g) ?? [];
+    let depth = 0, conclusions = 0;
+    for (let index = 0; index < tokens.length; index++) {
+      const token = tokens[index];
+      if (token === '{' || token === '[') depth++;
+      else if (token === '}' || token === ']') depth--;
+      else if (depth === 1 && token.startsWith('"') && tokens[index + 1] === ':'
+        && JSON.parse(token) === 'conclusion') conclusions++;
+    }
+    if (conclusions !== 1) throw new Error('missing or conflicting review conclusion');
+  }
   if (!bundle || (bundle.version !== undefined && bundle.version !== 1)
     || typeof bundle.report !== 'string' || !bundle.report.trim()
     || !Array.isArray(bundle.tests ?? [])) throw new Error('invalid review bundle');
   validateStructuredReport(bundle.report);
+  if (!['clean', 'issues', 'inconclusive'].includes(bundle.conclusion)) throw new Error('missing or invalid review conclusion');
+  if (bundle.conclusion === 'clean' && (/^\s*Severity\s*:\s*blocking\s*$/im.test(bundle.report)
+    || (Array.isArray(bundle.dispositions) && bundle.dispositions.some(item => item?.status === 'upheld')))) {
+    throw new Error('clean review conclusion conflicts with blocking findings');
+  }
   const tests = bundle.tests ?? [];
   if (tests.length > 100) throw new Error('too many review test files');
   const files = new Map();
@@ -191,7 +213,7 @@ export async function materializeReviewBundle({ cwd, bundle, round = 1, diffDige
   for (const path of files.keys()) {
     try { previous[path] = reviewDigest(readFileSync(join(cwd, REVIEW_DIR, path))); } catch (e) { if (e.code !== 'ENOENT') throw e; }
   }
-  const artifact = { version: 1, round, diffDigest,
+  const artifact = { version: 1, round, diffDigest, conclusion: bundle.conclusion,
     bundleDigest: reviewDigest(JSON.stringify(bundle)),
     files: Object.fromEntries([...files].map(([path, content]) => [path, reviewDigest(content)])),
     testFiles: [...files.keys()].filter((path) => path.startsWith('tests/')).map((path) => `${REVIEW_DIR}/${path}`),

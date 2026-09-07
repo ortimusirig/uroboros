@@ -11,6 +11,72 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { PIVOT_CONCLUDE, PIVOT_FRESH } from '../src/debate.js';
 import { createFreshPivotBranch, run } from '../src/run.js';
+import { execFileSync } from 'node:child_process';
+import { assertSafeScratchRoot } from '../src/isolation.js';
+import { materializeReviewBundle } from '../src/review.js';
+
+test('autonomous actual-Git fresh pivot retains complete command evidence through final archive without collisions', async t => {
+  const base = process.env.URO_TEST_SCRATCH_ROOT ?? (process.platform === 'win32' ? 'C:/ccc-test' : '/tmp/ccc-test');
+  assertSafeScratchRoot(base);
+  mkdirSync(base, { recursive: true });
+  const root = mkdtempSync(join(base, 'uro-evidence-pivot-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const cwd = join(root, 'worktree'); mkdirSync(cwd);
+  const git = (...args) => execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8' }).trim();
+  git('init', '-b', 'main');
+  git('config', 'core.autocrlf', 'false');
+  writeFileSync(join(cwd, 'source.txt'), 'base\n'); git('add', 'source.txt');
+  git('-c', 'user.name=Test', '-c', 'user.email=test@local', 'commit', '-qm', 'base');
+  const baseCommit = git('rev-parse', 'HEAD');
+  const stdout = 'BEGIN COMPLETE STDOUT\n' + 'full-output-'.repeat(500) + '\nEND STDOUT';
+  const stderr = 'BEGIN COMPLETE STDERR\n' + 'full-error-'.repeat(500) + '\nEND STDERR';
+  let reviews = 0, pivoted = false, evidenceCalls = 0;
+  const facts = await run({ task: 'Implement a replacement.', mode: 'autonomous', target: cwd, gate: [],
+    gateRetries: 0, debateRounds: 6, scratchRoot: root, artifactRoot: join(root, 'archive'),
+    runId: 'actual-git-evidence-pivot', superpowers: TEST_SUPERPOWERS,
+    adapters: {
+      isolate: async () => ({ dir: cwd, isRepo: true, branch: 'main', baseCommit, baseRef: 'HEAD' }),
+      diffText: async () => git('diff', 'HEAD', '--', 'source.txt'),
+      runExecutor: async () => {
+        if (pivoted) {
+          assert.equal(readFileSync(join(cwd, '__uro_evidence/round-1-01.out.txt'), 'utf8'), stdout);
+          assert.equal(readFileSync(join(cwd, '__uro_evidence/round-1-01.err.txt'), 'utf8'), stderr);
+          assert.equal(readFileSync(join(cwd, '__uro_review/tests/f1.test.js'), 'utf8'), executableProof.toString());
+        }
+        writeFileSync(join(cwd, 'source.txt'), pivoted ? 'replacement\n' : 'failed approach\n');
+        return { exitCode: 0, changedFiles: ['source.txt'], lastMessage: 'Answered prior evidence.' };
+      },
+      runGate: async ({ onEvidence }) => {
+        evidenceCalls++;
+        onEvidence({ bin: 'fixture', args: [], code: 0, stdout: evidenceCalls === 1 ? stdout : `later ${evidenceCalls}`,
+          stderr: evidenceCalls === 1 ? stderr : '' });
+        return { results: [] };
+      },
+      runReview: async options => {
+        reviews++;
+        const bundle = { version: 1, conclusion: pivoted ? 'clean' : 'issues',
+          report: pivoted ? 'Checked replacement diff and all retained evidence. No blockers remain.' : reviewText,
+          tests: [{ path: 'tests/f1.test.js', content: executableProof.toString() }],
+          dispositions: pivoted ? [{ id: 'F1', status: 'resolved', reason: 'Replacement meets the original boundary.' }] : [] };
+        return { answer: JSON.stringify(bundle), artifact: await materializeReviewBundle({ ...options, bundle }) };
+      },
+      detectCircling: () => !pivoted && reviews >= 2,
+      runArbiter: async ({ request }) => { assert.equal(request.type, 'pivot'); return { decision: 'fresh', reason: 'Replace the failed strategy.' }; },
+      draftPlanCandidate: async request => ({ plan: `replacement ${request.candidateId}`, gate: [], agree: true, readable: true, content: 'AGREE: yes' }),
+      selectPlanCandidate: async () => ({ selectedCandidateId: 'candidate-1', reason: 'Meets the contract.' }),
+      reviewPlanCandidate: async request => ({ agree: true, readable: true, content: 'AGREE: yes', artifactDigest: request.artifactDigest }),
+      createFreshPivotBranch: async options => { const result = await createFreshPivotBranch(options); pivoted = true; return result; },
+    } });
+  assert.equal(pivoted, true);
+  assert.equal(facts.approved, true);
+  assert.equal(facts.artifacts.status, 'ok');
+  assert.equal(new Set(facts.evidence.map(entry => entry.outFile)).size, facts.evidence.length);
+  for (const dir of [cwd, facts.artifacts.directory]) {
+    assert.equal(readFileSync(join(dir, '__uro_evidence/round-1-01.out.txt'), 'utf8'), stdout);
+    assert.equal(readFileSync(join(dir, '__uro_evidence/round-1-01.err.txt'), 'utf8'), stderr);
+  }
+  assert.ok(!git('diff', '--name-only').includes('__uro_review'));
+});
 
 
 const TEST_SUPERPOWERS = {
@@ -139,7 +205,7 @@ async function runFreshScenario({ allCandidatesFail = false, clean = false } = {
         mkdirSync(reviewDir, { recursive: true });
         writeFileSync(join(cwd, '__uro_review', 'REVIEW.md'), reviewText);
         writeFileSync(join(reviewDir, 'f1.test.js'), executableProof);
-        return { launchFailed: false, timedOut: false };
+        return { conclusion: 'issues', launchFailed: false, timedOut: false };
       },
       captureWorktreeSnapshot: async () => ({}),
       restoreWorktreeSnapshot: async () => ({ restoredPaths: [] }),

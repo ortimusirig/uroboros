@@ -8,21 +8,6 @@
 
 Claude authors plans and Codex reviews them. Codex implements in a Git-isolated workspace; Claude reviews the implementation, answering Codex corrections and rebuttals. The harness retains command evidence, complete delivered messages, decisions and dissent.
 
-### If you are an AI agent setting this up for someone
-
-Follow [`skills/uroboros-setup/SKILL.md`](skills/uroboros-setup/SKILL.md), the single source of
-truth for the bootstrap procedure. If this README is all you have, fetch the skill directly:
-<https://raw.githubusercontent.com/ortimusirig/uroboros/main/skills/uroboros-setup/SKILL.md>.
-
-Expected order:
-
-1. Verify Node 24 or newer, git, the Codex CLI, the Claude CLI, and superpowers in both agents.
-2. With the operator's consent, install anything missing.
-3. Have the operator complete the two CLI sign-ins.
-4. Install the plugin.
-5. Restart the Claude Code session so its slash commands register.
-6. Run the demo pass.
-
 ## Install
 
 Run these two commands inside Claude Code (not a terminal):
@@ -47,6 +32,21 @@ Explicit plugin versions control update detection; changed commits with an uncha
 version can be skipped. See [Claude Code version management](https://code.claude.com/docs/en/plugins-reference#version-management).
 These are documented update instructions, not a claim that a live update was tested.
 
+
+### If you are an AI agent setting this up for someone
+
+Follow [`skills/uroboros-setup/SKILL.md`](skills/uroboros-setup/SKILL.md), the single source of
+truth for the bootstrap procedure. If this README is all you have, fetch the skill directly:
+<https://raw.githubusercontent.com/ortimusirig/uroboros/main/skills/uroboros-setup/SKILL.md>.
+
+Expected order:
+
+1. Verify Node 24 or newer, git, the Codex CLI, the Claude CLI, and superpowers in both agents.
+2. With the operator's consent, install anything missing.
+3. Have the operator complete the two CLI sign-ins.
+4. Install the plugin.
+5. Restart the Claude Code session so its slash commands register.
+6. Run the demo pass.
 
 ## First run
 
@@ -120,7 +120,7 @@ the project now delivers that goal's capability before the goal counts as achiev
 ```
 Project ──► goals          (loop decompose --project; MVP-first, dependency-ordered)
 Goal    ──► task units     (loop decompose --goal; plan.md + gate.json each)
-Task    ──► landed commit  (loop queue; the same evidence → debate → Claude-lands loop)
+Task    ──► landed commit  (loop queue; evidence → debate → final landing review)
 ```
 
 Run approved plans sequentially with `loop queue`. Relative task, gate, goal-file, and output
@@ -139,18 +139,10 @@ loop queue --file queue.json --mode autonomous --max-runs 3 --token-budget 50000
 ```
 
 For goal units Claude authors and Codex reviews the exact goal, plan and gate artifact.
-Integration verification: the follow-up full suite passed 1041 tests with zero failures.
-That run preceded the final installer availability fix and version/update documentation;
-those narrow changes have separate targeted checks. Independent review remains pending.
-
-The local resume integration sweep subsequently ran 1072 tests: 1063 passed and nine
-new-command packaging/documentation checks failed. Those surface gaps were fixed and the
-affected packaging/installer/parser suite passed 25/25; no second full sweep was run.
-
 Manual disputes now save `uro-checkpoint.json`. Continue with
 `node bin/loop.js resume --run <run-directory> --decision-file <answers.json>`.
-The saved phase, workspace and manual mode are preserved. See [manual resume](docs/usage.md#manual-resume)
-for the answer schema and recovery limits. Independent integration review is still pending.
+The saved phase, workspace and manual mode are preserved. See [manual resume](docs/guides/usage.md#manual-resume)
+for the answer schema, same-workspace recovery and replay/staleness limits.
 
 The default `--mode manual` sends unresolved disputes to the human. With `--mode autonomous`,
 Codex makes final planning decisions and Claude final execution decisions. Queues inherit that
@@ -167,59 +159,41 @@ The executor/arbiter aliases remain with conflict detection. `--planner-model` a
 Wherever an approach is being chosen — the initial plan, and again when the arbiter decides an
 approach is dead rather than merely wrong — several candidates are drafted from deliberately
 distinct declared perspectives and one is selected, so the loop compares approaches instead of
-polishing the first one it thought of. A dead plan is replaced, not abandoned.
-The queue stops on the first non-approved result. A change lands only when Claude approved the current diff
-with every blocking finding resolved AND Claude, reading the diff first-hand at
+polishing the first one it thought of. Autonomous replanning requires a reviewed replacement;
+manual pivots offer correction, fresh planning over retained work, or stop.
+The queue stops on the first non-approved result. A change lands only with valid current-diff execution approval and every blocking finding resolved,
+including a validated human ruling in manual mode, AND Claude, reading the diff first-hand at
 landing time, approves it; a refusal or an unreachable final review always stops the queue
 with the judgement recorded. Each landed unit is committed locally, nothing is pushed, and
 `queue-log.jsonl` is appended beside the queue file. Use `--dry-run` to validate and
 print every resolved path without starting a run or spending tokens.
-An untracked `queue-log.jsonl` inside the target is the sole clean-tree exception; the
-queue definition itself must be tracked or kept outside the target repository.
+The queue allows its untracked `queue-log.jsonl` and exact generated plan, gate and checkpoint
+paths backed by validated queued-goal provenance, including earlier approved goals during resume.
+Unrelated files and source edits remain rejected. The queue definition itself must be tracked
+or kept outside the target repository.
 
-A single `loop run` never modifies the target folder: work lands on a branch in an
-isolated copy for review. `loop queue` is the explicit automation that applies and commits
+A single `loop run` keeps product changes in an isolated workspace for review. `loop queue` is the explicit automation that applies and commits
 only fully approved diffs to the clean target, one at a time.
 
 ## Why this shape
 
-Three separate failure modes get three separate seats:
+Claude and Codex alternate author and reviewer roles so the agent producing an artifact receives an independent response before work advances.
 
-- **Codex writes but cannot mark its own homework.** It never decides whether it succeeded.
-- **The harness executes but never judges.** Every declared command runs exactly once per
-  round, whatever its neighbours exited; full stdout/stderr land in `__uro_evidence/` and
-  the exit codes travel to the seats as recorded evidence. No exit code passes or fails a
-  change — what a non-zero exit MEANS is the seats' question.
-- **Claude reviews holistically; the harness writes its returned tests.** One review pass reads
-  TASK.md and the diff and reports correctness AND intent findings in a single
-  `__uro_review/REVIEW.md` — an unmet requirement is a finding like any other. It may write
-  into `__uro_review/` and nowhere else — the worktree is snapshotted around the review and
-  everything outside that directory is restored, so the boundary is enforced rather than
-  trusted. A blocking finding without a test is demoted to a suggestion, and a seat that
-  runs but writes no report did not review.
-- **Claude arbitrates, then reviews first-hand.** The arbiter judges each finding (a
-  reviewer objection can be overruled, but an unavailable arbiter preserves the objection),
-  answers the executor's own questions instead of letting it answer them, reads the change
-  itself when the debate circles, and decides when to amend, replan, or conclude. The debate
-  is not round-capped; it ends when the arbiter says so or the findings stop recurring. At
-  landing, Claude reviews the final diff first-hand and nothing lands without its recorded
-  approval — silence is never consent.
+- Claude authors plans and decompositions; Codex reviews the exact requirements, plan and evidence configuration. In autonomous mode Codex settles planning disputes.
+- Codex implements in an isolated workspace. Claude reads the current diff, command evidence and Codex's corrections or rebuttals. Its read-only response is a structured report and executable test bundle; the harness validates and writes files under `__uro_review/`. Reviewer tests are protected from executor edits.
+- The harness runs declared commands as evidence and retains complete stdout/stderr in `__uro_evidence/`. Agents judge what those results mean. A valid bundle explicitly declares `clean`, `issues` or `inconclusive`; missing, conflicting, incomplete or failed review never implies approval.
+- Blocking findings stay open until explicitly resolved or withdrawn after Codex can answer and current test evidence is available. In manual mode the human settles unresolved disputes through the saved checkpoint. A validated human ruling settles only its named current dispute; it does not waive unrelated blockers or an unavailable review.
+- Autonomous execution decisions belong to Claude. It may request correction, a reviewed replacement plan or a stop. Final queue landing separately checks the current diff and records Claude's judgement before committing locally.
 
-If the reviewer fails to launch, times out, or produces no report, that is reported as
-`verifier-failed` — never silently treated as a clean review.
+A standalone run leaves reviewed changes in its isolate. A queue applies approved diffs to a clean target and commits them locally. Publishing is a separate explicit action.
 
-**No credentials are stored or passed by this package.** Each CLI authenticates itself on
-your machine with your own subscription, and cost follows those subscriptions. Nothing is
-billed through this skill.
+This gives users isolated edits, independent tests, inspectable evidence and retained dissent. The costs are extra CLI usage, latency, setup and the need to supply useful requirements and checks. Independent review can still miss defects; weak evidence does not become strong evidence because two agents discussed it.
 
-Windows is the primary, fully-exercised target. macOS and Linux should work — pure Node,
-POSIX `which`, plain `spawn` — but treat the first Unix run as verification.
+Each provider CLI owns authentication. Uroboros does not introduce an API-key integration or transfer credentials between machines. Actual billing, quotas and model availability depend on each CLI's configured login and account entitlement.
 
-`loop dashboard` serves a read-only live view: one tab is the transcript — what each seat is
-thinking, the files it touched, and the diff beside it — and one is a board of every run. The
-board opens on runs that need attention (still running, stopped somewhere a person must
-decide, or finished with the two verifier seats disagreeing) rather than on everything, with
-Active, Today and All beside it.
+Windows is the most exercised platform in this repository. macOS and Linux use the same Node implementation, but platform-specific behavior still needs verification on the machine running it.
+
+`loop dashboard` provides a read-only transcript and run board. The transcript shows delivered messages, touched files, evidence and diffs. The board highlights active runs, unresolved decisions and retained dissent, with Active, Today and All filters. When an encoded view is shortened it is visibly marked; the original message remains inspectable in `uro-runfacts.json`.
 
 After plugin installation, these are the fifteen namespaced slash commands:
 
@@ -257,8 +231,8 @@ node bin/loop.js decompose --goal goals/G1-demo/spec.md --target .
 ```
 
 For the full command surface, every flag, campaign shapes, outcomes, and configuration, see
-[docs/usage.md](docs/usage.md). For GitHub publishing and the confidentiality guard, see
-[docs/publishing.md](docs/publishing.md).
+[docs/guides/usage.md](docs/guides/usage.md). For GitHub publishing and the confidentiality guard, see
+[docs/guides/publishing.md](docs/guides/publishing.md).
 
 ## Smoke test
 
@@ -276,10 +250,7 @@ recording each command run, and the review's findings in `debate.roundHistory`.
 
 - **Never pass `--ignore-user-config` to Codex.** It discards the project trust registry and
   Codex silently goes read-only — it appears to work and writes nothing.
-- **Do not check this repository out under `AppData`.** The scratch-root guard refuses paths
-  there, and several tests build fixtures inside the repository directory, so the suite fails
-  with `scratch root under AppData is forbidden` — pointing at the fixture rather than at
-  where you cloned it. Any other location is fine.
+- **Choose a safe scratch root outside `AppData` and OneDrive.** The scratch-root guard refuses those locations. The source checkout may live elsewhere; isolated execution and test scratch directories must satisfy the guard.
 - **`where codex` may list an extensionless npm shim first.** Handled: the resolver prefers a
   PATHEXT-executable variant.
 
@@ -315,7 +286,16 @@ The test suite has zero runtime dependencies and no build step. `fixtures/` hold
 Codex/Claude test streams and historical Cursor NDJSON records so the parsers are tested against actual vendor
 output rather than invented shapes.
 
-See [PORTING.md](PORTING.md) for moving this to another machine.
+See [moving between machines](docs/guides/porting.md) for moving this to another machine.
+
+## Repository navigation
+
+- [Documentation index](docs/README.md): current [guides](docs/guides/) and dated [historical records](docs/history/).
+- [Runtime](src/) and [CLI entry point](bin/); [tests](test/) and [provider fixtures](fixtures/).
+- [Plugin commands](commands/), [skills](skills/) and [plugin metadata](.claude-plugin/).
+- [Implementation plans](docs/superpowers/plans/) and [design specs](docs/superpowers/specs/).
+- [Campaign workboard](campaign/) and [project goals](uro-project/): tracked development records, kept in place and excluded from the verifier's readable payload.
+- [Run notes](docs/runs/README.md), [optional tooling](docs/optional-tools/) and [documentation assets](docs/assets/).
 
 ## License
 

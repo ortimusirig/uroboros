@@ -23,7 +23,7 @@ const marketplaceManifestPath = join(metadataDirectory, 'marketplace.json');
 const packagePath = join(root, 'package.json');
 const installerPath = join(root, 'install.mjs');
 const readmePath = join(root, 'README.md');
-const usagePath = join(root, 'docs', 'usage.md');
+const usagePath = join(root, 'docs', 'guides', 'usage.md');
 const skillPath = join(root, 'skills', 'uroboros', 'SKILL.md');
 const setupSkillPath = join(root, 'skills', 'uroboros-setup', 'SKILL.md');
 

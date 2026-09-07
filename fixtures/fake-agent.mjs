@@ -8,7 +8,7 @@ if (process.argv.includes('--version')) {
   process.stdout.write(JSON.stringify({ type: 'assistant',
     message: { role: 'assistant', content: [{ type: 'text', text: report }] } }) + '\n');
   process.stdout.write(JSON.stringify({ type: 'result', subtype: 'success', is_error: false,
-    result: JSON.stringify({ version: 1, report, tests: [] }),
+    result: JSON.stringify({ version: 1, conclusion: 'clean', report, tests: [] }),
     usage: { input_tokens: 10, output_tokens: 4, cache_read_input_tokens: 3, cache_creation_input_tokens: 2 },
   }) + '\n');
 }

@@ -122,11 +122,11 @@ for (const interruption of ['log', 'return']) test(`an explicit human acceptance
     runGate: async () => ({ passed: true, results: [] }),
     runReview: async options => {
       reviews.push(options);
-      const bundle = { version: 1,
+      const bundle = { version: 1, conclusion: 'issues',
         report: '## F1\nSeverity: blocking\nDescription: Support excluded input.\nTest: __uro_review/tests/f1.test.js\n',
         tests: [{ path: 'tests/f1.test.js', content: 'throw new Error("excluded input");\n' }],
         dispositions: [{ id: 'F1', status: 'upheld', reason: 'I still prefer supporting it.' }] };
-      if (options.runId === 'execution-1') Object.assign(bundle, { report: 'No blocking findings.', tests: [], dispositions: [] });
+      if (options.runId === 'execution-1') Object.assign(bundle, { conclusion: 'clean', report: 'No blocking findings.', tests: [], dispositions: [] });
       return { provider: 'claude', answer: JSON.stringify(bundle),
         artifact: await materializeReviewBundle({ ...options, bundle }) };
     },
@@ -232,7 +232,7 @@ for (const twoGoals of [false, true]) test(`queued saved planning inside the tar
       facts = await run(withVerifiedSuperpowers({ task: unit.task, gate: unit.gate, target, scratchRoot: join(root, 'scratch'), runId: `goal-run-${implementations}`,
         adapters: { runExecutor: async ({ cwd }) => { writeFileSync(join(cwd, 'source.js'), `changed ${implementations}\n`); return { exitCode: 0, changedFiles: ['source.js'], lastMessage: 'Done' }; },
           runGate: async () => ({ results: [] }), runReview: async options => {
-            const bundle = { version: 1, report: 'No blockers.', tests: [] };
+            const bundle = { version: 1, conclusion: 'clean', report: 'No blockers.', tests: [] };
             return { artifact: await materializeReviewBundle({ ...options, bundle }), answer: JSON.stringify(bundle) };
           } } }));
       return { runDirectory: facts.dir };
@@ -319,7 +319,7 @@ for (const choice of ['stop', 'correction', 'fresh plan', 'further planning disp
     }, runGate: async ({ onEvidence }) => { onEvidence?.({ bin: 'node', args: ['test.js'], code: 1, stdout: 'Retained full evidence.' }); return { results: [] }; },
     runReview: async options => {
       reviews++;
-      const bundle = { version: 1, report: resumed ? 'No remaining blockers.'
+      const bundle = { version: 1, conclusion: resumed ? 'clean' : 'issues', report: resumed ? 'No remaining blockers.'
         : '## F1\nSeverity: blocking\nDescription: Strategy misses a case.\nTest: __uro_review/tests/f1.test.js\n', tests: [proof],
         dispositions: resumed ? [{ id: 'F1', status: 'resolved', reason: 'Correction meets the requirement.' }] : [] };
       return { artifact: await materializeReviewBundle({ ...options, bundle }), answer: JSON.stringify(bundle) };

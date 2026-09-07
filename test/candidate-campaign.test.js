@@ -136,7 +136,7 @@ test('Mode A candidates overlap from one repository and base while retaining dis
             mkdirSync(join(cwd, '__uro_review'), { recursive: true });
             writeFileSync(join(cwd, '__uro_review', 'REVIEW.md'),
               'Reviewed. No findings.\n');
-            return { launchFailed: false, timedOut: false, usage: usage(2, 1) };
+            return { conclusion: 'clean', launchFailed: false, timedOut: false, usage: usage(2, 1) };
           },
         },
       },

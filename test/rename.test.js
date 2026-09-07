@@ -249,7 +249,7 @@ test('README teaches marketplace installation first and retains the contributor 
 });
 
 test('the reference documentation files exist and are substantial', () => {
-  for (const relative of ['docs/usage.md', 'docs/publishing.md']) {
+  for (const relative of ['docs/guides/usage.md', 'docs/guides/publishing.md']) {
     const path = fileURLToPath(new URL(`../${relative}`, import.meta.url));
     assert.ok(existsSync(path), `${relative} must exist`);
     assert.ok(readFileSync(path, 'utf8').trim().length > 500,
@@ -272,8 +272,8 @@ test('every relative link in README resolves to a file that exists', () => {
   }
 });
 
-test('commands documented in docs/usage.md are accepted by the real parser', () => {
-  const usagePath = fileURLToPath(new URL('../docs/usage.md', import.meta.url));
+test('commands documented in docs/guides/usage.md are accepted by the real parser', () => {
+  const usagePath = fileURLToPath(new URL('../docs/guides/usage.md', import.meta.url));
   const usage = readFileSync(usagePath, 'utf8');
   const documented = [...usage.matchAll(/^\s*node bin\/loop\.js ([a-z]+)/gm)]
     .map((match) => match[1]);
@@ -290,7 +290,7 @@ test('commands documented in docs/usage.md are accepted by the real parser', () 
     ['init', ['init', 'demo-directory']],
   ]);
   assert.ok(documented.length > 0,
-    'positive control: docs/usage.md must document at least one command invocation');
+    'positive control: docs/guides/usage.md must document at least one command invocation');
   for (const command of new Set(documented)) {
     assert.ok(CLI_COMMANDS.includes(command),
       `${command} is documented but absent from the real command list`);

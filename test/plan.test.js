@@ -268,6 +268,54 @@ test('candidate repairs and later proposal repairs consume the same five-repair 
 });
 
 const superpowers = { seats: { codex: { verified:true }, claude: { verified:true } } };
+test('autonomous planning final decision uses terminal stop despite earlier delivered approve marker', async t => {
+  let finals = 0;
+  const first = 'DECISION: approve\nREASON: Preliminary approval before checking the disputed branch.';
+  const result = await runPlan({ ...setup(t), interactionMode: 'autonomous', adapters: adapters({ review: async r => {
+    const digest = /ARTIFACT_DIGEST: ([a-f0-9]{64})/.exec(r.plan)?.[1];
+    const final = r.plan.includes('Return DECISION: approve');
+    if (final) finals++;
+    const terminal = final ? `DECISION: stop\nREASON: The requested behavior cannot be met.\nARTIFACT_DIGEST: ${digest}`
+      : `AGREE: no\nS1 P1: Unresolved behavior.\nARTIFACT_DIGEST: ${digest}`;
+    return { exitCode: 0, lastMessage: terminal, agentMessages: [first, terminal] };
+  } }) });
+  assert.equal(finals, 1);
+  assert.equal(result.approved, false);
+  assert.equal(result.reason, 'reviewer-stopped');
+  assert.equal(result.messages.at(-1).decision, 'stop');
+  assert.ok(result.messages.at(-1).content.startsWith(first));
+});
+for (const failed of [false, true]) test(`planning retains every delivered Codex argument and terminal authority (failed=${failed})`, async t => {
+  const prompts = [];
+  const first = 'AGREE: yes\nDECISION: approve\nFirst delivered argument: preserve the original empty-input contract.';
+  let reviews = 0;
+  const result = await runPlan({ ...setup(t), adapters: adapters({
+    author: async r => { prompts.push(r.prompt); return { answer: artifact('stable plan') }; },
+    review: async r => {
+      reviews++;
+      const terminal = 'AGREE: no\nS1 P1: The boundary is unresolved.\nARTIFACT_DIGEST: '
+        + /ARTIFACT_DIGEST: ([a-f0-9]{64})/.exec(r.plan)?.[1];
+      return { exitCode: failed ? 1 : 0, timedOut: false, lastMessage: terminal,
+        agentMessages: [first, terminal], stdout: 'complete captured stream', stderr: failed ? 'quota diagnostic' : '',
+        usage: { inputTokens: 7, outputTokens: 3 } };
+    },
+  }) });
+  assert.equal(result.approved, false);
+  const retained = result.messages.filter(message => message.speaker === 'codex');
+  assert.equal(retained.length, reviews);
+  assert.ok(retained.every(message => message.content.indexOf(first) === 0));
+  assert.ok(retained.every(message => message.transport.agentMessages[0] === first));
+  assert.equal(result.tokens.total.inputTokens, reviews * 7);
+  assert.equal(result.tokens.total.outputTokens, reviews * 3);
+  if (failed) {
+    assert.equal(result.reason, 'reviewer-unavailable');
+    assert.equal(retained[0].transport.stderr, 'quota diagnostic');
+  } else {
+    assert.equal(result.reason, 'needs-decision');
+    assert.ok(prompts[1].includes(first));
+    assert.ok(retained.every(message => message.stance === 'disagree'));
+  }
+});
 const artifact = (text = 'Plan with "quotes"\nand newlines') =>
   'AGREE: yes\n<PLAN_MD>' + text + '</PLAN_MD>\n<GATE_JSON>[{"bin":"node","args":["--test"]}]</GATE_JSON>';
 function setup(t) {

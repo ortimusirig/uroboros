@@ -8,7 +8,7 @@ import {
   EXECUTOR_PREAMBLE,
   runExecutor as realExecutor,
 } from './executor.js';
-import { createEvidenceWriter } from './evidence.js';
+import { createEvidenceWriter, EVIDENCE_DIR } from './evidence.js';
 import { buildReviewerTestCommands, runGate as realGate } from './gate.js';
 import {
   DEFAULT_VERIFIER_MODEL,
@@ -169,12 +169,12 @@ export async function createFreshPivotBranch({
   try {
     // The failed implementation is deliberately abandoned. Clear the disposable
     // worktree before creating the replacement branch at the immutable base; the
-    // debate ledger and append-only event history retain the evidence that matters.
-    // events.jsonl is append-only run history, not part of the discarded solution.
-    // Preserve it across the destructive branch reset so pre-pivot evidence remains visible.
+    // debate ledger, append-only events and complete command-output files remain
+    // run evidence, independent of the discarded solution. Keep evidence paths
+    // valid; the same writer continues with a monotonically increasing sequence.
     await checkedGit(
       cwd,
-      ['clean', '-ffd', '-x', '-e', 'events.jsonl', '-e', '.uro-tmp'],
+      ['clean', '-ffd', '-x', '-e', 'events.jsonl', '-e', '.uro-tmp', '-e', `${EVIDENCE_DIR}/`],
       'fresh pivot clean',
       spawn,
     );
@@ -1206,11 +1206,15 @@ export async function run(opts) {
                 runId,
                 pass: 'review',
                 onLiveness: () => watchdog?.touch('verify'),
+                livenessThresholdMs: executorThresholds.thresholdMs,
+                progressThresholdMs: executorThresholds.progressThresholdMs,
+                judgeLiveness: judgeLiveness ?? undefined,
+                onLivenessDecision: decision => livenessChecks?.push({ pass: 'review', iteration: n, ...decision }),
                   });
                   if (adapters.runReview && !response?.artifact && !response?.launchFailed
                     && !response?.timedOut && !response?.artifactFailed && existsSync(reportPath)) {
                     const detected = detectReview({ dir: iso.dir });
-                    const bundle = { version: 1, report: readFileSync(reportPath, 'utf8'),
+                    const bundle = { version: 1, conclusion: response?.conclusion, report: readFileSync(reportPath, 'utf8'),
                       tests: (detected.testFiles ?? []).map((path) => ({
                         path: path.slice(REVIEW_DIR.length + 1), content: readFileSync(join(iso.dir, path), 'utf8') })),
                       dispositions: response?.dispositions ?? [] };
@@ -1376,7 +1380,11 @@ export async function run(opts) {
               diffDigest: reviewDigest(diff) })) };
           outcome = 'needs-decision'; debateStopReason = 'needs-decision'; break;
         }
-        if (acceptedFindings.length === 0 && !newTestEvidence) {
+        const humanSettledReview = mode === 'manual' && blockingFindings.length > 0
+          && blockingFindings.every(finding => appliedDispositions.some(disposition => disposition.id === finding.id
+            && disposition.decidedBy === 'human'));
+        const cleanConclusion = runReview === null || reviewer.artifact?.conclusion === 'clean' || humanSettledReview;
+        if (acceptedFindings.length === 0 && !newTestEvidence && cleanConclusion) {
           outcome = 'review-ready';
           debateStopReason = 'converged';
           reportEvent(eventReporter, runId, 'debate', 'converged', {

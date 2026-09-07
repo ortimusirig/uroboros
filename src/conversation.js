@@ -252,7 +252,7 @@ export async function runConversation({
         ? (parsed.agree ? 'agree' : 'disagree') : 'stance-unreadable',
       content: parsed.content, addressedIssueIds: parsed.addressedIssueIds ?? [],
       unresolvedQuestions: parsed.questions ?? [],
-      transport: Object.fromEntries(['stderr', 'stdout', 'exitCode', 'launchFailed', 'timedOut', 'usage']
+      transport: Object.fromEntries(['stderr', 'stdout', 'agentMessages', 'exitCode', 'launchFailed', 'timedOut', 'usage']
         .filter(key => response?.[key] !== undefined).map(key => [key, response[key]])),
       ...(response?.error ? { error: response.error } : {}),
       ...(parsed.decision ? { decision: parsed.decision, reason: parsed.reason } : {}),

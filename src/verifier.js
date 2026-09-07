@@ -79,7 +79,7 @@ export const REVIEW_PROMPT = [
   '# Claude execution reviewer',
   'You are read-only. Read TASK.md, CHANGES.diff and the command evidence. Do not write files or run commands that modify the workspace.',
   'Review correctness and fulfillment of the original requirements. Codex implements and may rebut your findings. Answer its actual arguments; you are the execution reviewer and final execution authority in autonomous mode. Unresolved manual disputes belong to the human.',
-  'Return one JSON artifact bundle: {"version":1,"report":"Markdown report","tests":[{"path":"tests/f1.test.js","content":"executable test source"}],"dispositions":[{"id":"F1","status":"resolved|withdrawn|upheld","reason":"answer to Codex and evidence"}]}. The harness writes the report and tests.',
+  'Return one JSON artifact bundle: {"version":1,"conclusion":"clean|issues|inconclusive","report":"Markdown report","tests":[{"path":"tests/f1.test.js","content":"executable test source"}],"dispositions":[{"id":"F1","status":"resolved|withdrawn|upheld","reason":"answer to Codex and evidence"}]}. The harness writes the report and tests. Use clean only when you completed review of this current diff and evidence with no unresolved blockers; issues for remaining correctness blockers; inconclusive when review could not be completed. Missing or inconclusive conclusions cannot approve.',
   'For each finding use Markdown: ## F1, Severity: blocking|suggestion, Category: ..., Description: ..., Test: __uro_review/tests/f1.test.js, each on its own line. Blocking findings need a real executable test included in the bundle. A clean review still needs a substantive nonblank report.',
   'Explicitly dispose of EVERY previously open finding with reasons tied to the current diff and evidence. Omission does not close an issue. Keep IDs stable. Include any still-required prior test files. Do not change product intent to eliminate a finding.',
 ].join('\n\n');
@@ -394,15 +394,102 @@ function createVerifierStreamObserver(onEvent) {
   };
 }
 
+function createReviewSupervision({ cwd, env = process.env, reporter, runId, pass, onLiveness,
+  livenessThresholdMs, progressThresholdMs, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout,
+  judgeLiveness, livenessJudgeTimeoutMs, getProcessTree, getWorktreeActivity, onLivenessDecision }) {
+  const thresholds = resolveExecutorThresholds(env);
+  const resolvedLivenessThresholdMs = livenessThresholdMs ?? thresholds.thresholdMs;
+  const resolvedProgressThresholdMs = progressThresholdMs ?? thresholds.progressThresholdMs;
+  const nowMs = () => {
+    const value = now();
+    return value instanceof Date ? value.getTime() : value;
+  };
+  const startedAt = nowMs();
+  let lastByteAt = null;
+  let lastAgentMessage = '';
+  let lastObservedEvent = { runId, stage: 'verify', type: 'start', pass };
+  const lastEvents = [{ ...lastObservedEvent, ts: new Date(startedAt).toISOString() }];
+  const rememberEvent = (event) => {
+    lastEvents.push({ ...event, ts: new Date(nowMs()).toISOString() });
+    if (lastEvents.length > 10) lastEvents.shift();
+  };
+  const progress = typeof reporter === 'function'
+    ? createProgressWatchdog({
+      reporter, runId, stage: 'verify', pass, thresholdMs: resolvedProgressThresholdMs,
+      now, setTimer, clearTimer,
+    })
+    : null;
+  progress?.observe(lastObservedEvent);
+  const observer = createVerifierStreamObserver((event) => {
+    lastObservedEvent = {
+      runId,
+      stage: 'verify',
+      type: typeof event?.type === 'string' ? event.type : 'stream',
+      pass,
+      ...(typeof event?.subtype === 'string' ? { subtype: event.subtype } : {}),
+    };
+    rememberEvent(lastObservedEvent);
+    if (event?.type === 'result' && typeof event.result === 'string') {
+      lastAgentMessage = event.result;
+    } else if (event?.type === 'assistant' && Array.isArray(event.message?.content)) {
+      lastAgentMessage = event.message.content
+        .filter((part) => part?.type === 'text' && typeof part.text === 'string')
+        .map((part) => part.text)
+        .join('\n');
+    }
+    if (event?.type === 'item.completed') {
+      progress?.observe({ ...lastObservedEvent, type: 'item_completed' });
+    }
+  });
+  return {
+    onStdout(chunk) {
+      lastByteAt = nowMs();
+      try { onLiveness?.(); } catch { /* observation cannot alter captured output */ }
+      observer.onStdout(chunk);
+    },
+    livenessSupervision: {
+      thresholdMs: resolvedLivenessThresholdMs,
+      judge: judgeLiveness,
+      ...(livenessJudgeTimeoutMs === undefined ? {} : {
+        judgeTimeoutMs: livenessJudgeTimeoutMs,
+      }),
+      ...(getProcessTree === undefined ? {} : { getProcessTree }),
+      getWorktreeActivity: getWorktreeActivity
+        ?? (typeof judgeLiveness === 'function'
+          ? (sinceMs) => inspectWorktreeActivity(cwd, sinceMs)
+          : undefined),
+      onEvent: (type, fields) => {
+        reportEvent(reporter, runId, 'liveness', type, fields);
+      },
+      onDecision: onLivenessDecision,
+      getLiveness: () => ({
+        gapMs: nowMs() - (lastByteAt ?? startedAt),
+        lastEvent: lastObservedEvent,
+        lastEvents: [...lastEvents],
+        lastAgentMessage,
+        seat: 'verifier',
+        pass,
+      }),
+      now,
+      setTimer,
+      clearTimer,
+    },
+    finish() { observer.finish(); progress?.dispose(); },
+  };
+}
+
 export async function runReviewPass(options) {
   const { cwd, round = 1, diffDigest = '', prompt = REVIEW_PROMPT,
     extraArgv = [], env = process.env, timeoutMs = resolveStageTimeouts(env).verifier } = options;
   assertNoForbiddenFlags(extraArgv);
   if (extraArgv.length) throw new Error('Claude review does not accept extra command flags');
-  const result = await runArbiter({ ...options, prompt, timeoutMs, stage: 'verify',
-    role: 'execution-reviewer',
-    onStdout: () => { try { options.onLiveness?.(); } catch {} },
-  });
+  const supervision = createReviewSupervision(options);
+  let result;
+  try {
+    result = await runArbiter({ ...options, prompt, timeoutMs, stage: 'verify',
+      role: 'execution-reviewer', onStdout: supervision.onStdout,
+      livenessSupervision: supervision.livenessSupervision });
+  } finally { supervision.finish(); }
   if (result.launchFailed || !result.resultSeen || !result.resultUsable || !result.answer.trim()) {
     return { ...result, artifact: null, artifactFailed: true };
   }
@@ -467,56 +554,15 @@ async function runVerifierAttempt({
   const resolvedTimeoutMs = timeoutMs === undefined
     ? resolveStageTimeouts(env).verifier
     : timeoutMs;
-  const thresholds = resolveExecutorThresholds(env);
-  const resolvedLivenessThresholdMs = livenessThresholdMs ?? thresholds.thresholdMs;
-  const resolvedProgressThresholdMs = progressThresholdMs ?? thresholds.progressThresholdMs;
   assertNoForbiddenFlags(extraArgv);
   if (extraArgv.length) throw new Error('Claude verification does not accept extra command flags');
   const args = buildClaudeArgs({ prompt, model });
   const launchEnv = { ...process.env, ...env };
   assertNoForbiddenFlags(args);
-  const nowMs = () => {
-    const value = now();
-    return value instanceof Date ? value.getTime() : value;
-  };
-  const startedAt = nowMs();
-  let lastByteAt = null;
-  let lastAgentMessage = '';
-  let lastObservedEvent = { runId, stage: 'verify', type: 'start', pass };
-  const lastEvents = [{ ...lastObservedEvent, ts: new Date(startedAt).toISOString() }];
-  const rememberEvent = (event) => {
-    lastEvents.push({ ...event, ts: new Date(nowMs()).toISOString() });
-    if (lastEvents.length > 10) lastEvents.shift();
-  };
-  const progress = typeof reporter === 'function'
-    ? createProgressWatchdog({
-      reporter, runId, stage: 'verify', pass, thresholdMs: resolvedProgressThresholdMs,
-      now, setTimer, clearTimer,
-    })
-    : null;
-  progress?.observe(lastObservedEvent);
+  const supervision = createReviewSupervision({ cwd, env, reporter, runId, pass, onLiveness,
+    livenessThresholdMs, progressThresholdMs, now, setTimer, clearTimer,
+    judgeLiveness, livenessJudgeTimeoutMs, getProcessTree, getWorktreeActivity, onLivenessDecision });
   reportEvent(reporter, runId, 'verify', 'start', { bin, args, model, pass });
-  const observer = createVerifierStreamObserver((event) => {
-    lastObservedEvent = {
-      runId,
-      stage: 'verify',
-      type: typeof event?.type === 'string' ? event.type : 'stream',
-      pass,
-      ...(typeof event?.subtype === 'string' ? { subtype: event.subtype } : {}),
-    };
-    rememberEvent(lastObservedEvent);
-    if (event?.type === 'result' && typeof event.result === 'string') {
-      lastAgentMessage = event.result;
-    } else if (event?.type === 'assistant' && Array.isArray(event.message?.content)) {
-      lastAgentMessage = event.message.content
-        .filter((part) => part?.type === 'text' && typeof part.text === 'string')
-        .map((part) => part.text)
-        .join('\n');
-    }
-    if (event?.type === 'item.completed') {
-      progress?.observe({ ...lastObservedEvent, type: 'item_completed' });
-    }
-  });
   let r;
   try {
     r = await spawnCapture(bin, args, {
@@ -532,47 +578,16 @@ async function runVerifierAttempt({
       now,
       setTimer,
       clearTimer,
-      onStdout: (chunk) => {
-        lastByteAt = nowMs();
-        try { onLiveness?.(); } catch { /* observation cannot alter captured output */ }
-        observer.onStdout(chunk);
-      },
-      livenessSupervision: {
-        thresholdMs: resolvedLivenessThresholdMs,
-        judge: judgeLiveness,
-        ...(livenessJudgeTimeoutMs === undefined ? {} : {
-          judgeTimeoutMs: livenessJudgeTimeoutMs,
-        }),
-        ...(getProcessTree === undefined ? {} : { getProcessTree }),
-        getWorktreeActivity: getWorktreeActivity
-          ?? (typeof judgeLiveness === 'function'
-            ? (sinceMs) => inspectWorktreeActivity(cwd, sinceMs)
-            : undefined),
-        onEvent: (type, fields) => {
-          reportEvent(reporter, runId, 'liveness', type, fields);
-        },
-        onDecision: onLivenessDecision,
-        getLiveness: () => ({
-          gapMs: nowMs() - (lastByteAt ?? startedAt),
-          lastEvent: lastObservedEvent,
-          lastEvents: [...lastEvents],
-          lastAgentMessage,
-          seat: 'verifier',
-          pass,
-        }),
-        now,
-        setTimer,
-        clearTimer,
-      },
+      onStdout: supervision.onStdout,
+      livenessSupervision: supervision.livenessSupervision,
     });
   } catch (error) {
     const diagnostic = error instanceof Error ? error.message : String(error);
     r = { code: null, stdout: '', stderr: diagnostic, error: diagnostic,
       timedOut: false, timeoutMs: resolvedTimeoutMs };
   } finally {
-    if (!r) progress?.dispose();
+    supervision.finish();
   }
-  observer.finish();
   const detail = parseVerdictDetail(r.stdout);
   const parsedClaude = parseArbiterStream(r.stdout);
   // Keep termination in the raw verdict evidence. The completed Claude result
@@ -633,8 +648,6 @@ async function runVerifierAttempt({
   Object.assign(result, { provider: 'claude', role: 'execution-reviewer',
     stdout: r.stdout, stderr: r.stderr, answer: parsedClaude.answer,
     ...(r.error ? { error: r.error } : {}) });
-  progress?.observe({ runId, stage: 'verify', type: 'finish', pass, code: exitCode });
-  progress?.dispose();
   reportEvent(reporter, runId, 'verify', 'finish', {
     code: exitCode,
     verdict: result.verdict,

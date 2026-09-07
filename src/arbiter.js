@@ -499,6 +499,7 @@ export async function runArbiter({
     launchFailed: captured.code !== 0 || captured.timedOut,
     timedOut: captured.timedOut,
     timeoutMs: captured.timeoutMs,
+    ...(captured.timeoutReason ? { timeoutReason: captured.timeoutReason } : {}),
     exitCode: captured.code,
   });
   if (result.launchFailed) {

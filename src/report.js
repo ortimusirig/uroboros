@@ -35,7 +35,11 @@ export function recordedMessage(message) {
 }
 
 function messageText(message) {
-  return message.recordedContent ? decodeRecordedText(message.recordedContent).text : message.content ?? '';
+  const decoded = message.recordedContent ? decodeRecordedText(message.recordedContent) : { text: message.content ?? '' };
+  return decoded.text + (decoded.truncated
+    ? typeof message.content === 'string'
+      ? '\n\n[This view was truncated. Inspect the original message content field in uro-runfacts.json for the complete retained message.]'
+      : '\n\n[This historical record was truncated; the original complete content was not retained in this record.]' : '');
 }
 
 export function buildRunFacts({

@@ -178,7 +178,7 @@ test('a clean fan-in merge contains both distinctive parent changes and is revie
             verifierPasses.push(pass);
             mkdirSync(join(cwd, '__uro_review'), { recursive: true });
             writeFileSync(join(cwd, '__uro_review', 'REVIEW.md'), 'Reviewed. No findings.\n');
-            return { launchFailed: false, timedOut: false };
+            return { conclusion: 'clean', launchFailed: false, timedOut: false };
           },
         },
       },

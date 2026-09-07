@@ -1,3 +1,5 @@
+> Historical record. This document preserves the original observations and design; consult the [current guide](../guides/usage.md) and [project overview](../../README.md) for current behavior.
+
 # Uroboros: Claude ↔ Codex ↔ Cursor — The Three-Way Debate Loop
 
 > **Historical design document.** This is the original three-way debate design as first

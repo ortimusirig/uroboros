@@ -1,3 +1,5 @@
+> Historical record. This document preserves the original observations and design; consult the [current guide](../guides/usage.md) and [project overview](../../README.md) for current behavior.
+
 # Observability completeness audit
 
 Date: 2026-08-15. Baseline audited: v3 campaign code at `cd6d883`.

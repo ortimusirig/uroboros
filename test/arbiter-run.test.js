@@ -40,7 +40,7 @@ function verifierSequence(rounds) {
     if (findings) writeFileSync(join(cwd, '__uro_review/tests/f1.test.js'), '// independent proof\n');
     writeFileSync(join(cwd, '__uro_review', 'REVIEW.md'),
       findings === '' ? 'Reviewed. No findings this round.\n' : findings);
-    return { launchFailed: false, timedOut: false,
+    return { conclusion: /Severity: blocking/.test(findings) ? 'issues' : 'clean', launchFailed: false, timedOut: false,
       dispositions: findings === '' && round > 1 ? [{ id: 'F1', status: 'resolved', reason: 'Codex corrected the reported behavior and evidence now covers it.' }] : [] };
   };
 }

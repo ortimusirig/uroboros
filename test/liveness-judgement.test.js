@@ -5,6 +5,60 @@ import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runExecutor } from '../src/executor.js';
+import { runReviewPass } from '../src/verifier.js';
+
+for (const mode of ['no-judge', 'no-reporter', 'stuck', 'working', 'malformed', 'hung-judge', 'progress', 'deadline']) {
+  test(`production review bundle supervises ${mode} with injected clocks and process cleanup`, async t => {
+    const cwd = mkdtempSync(join(tmpdir(), 'uro-review-supervision-'));
+    t.after(() => rmSync(cwd, { recursive: true, force: true }));
+    const clock = controlledClock(), child = fakeChild(), events = [], inputs = [];
+    let kills = 0;
+    const pending = runReviewPass({ cwd, bin: process.execPath, env: {},
+      ...(mode === 'deadline' ? { timeoutMs: 20 } : {}),
+      ...(mode === 'no-reporter' ? {} : { reporter: event => events.push(event) }), runId: 'review-supervision', pass: 'review',
+      livenessThresholdMs: 50, progressThresholdMs: 35, livenessJudgeTimeoutMs: 20,
+      now: clock.now, setTimer: clock.setTimer, clearTimer: clock.clearTimer,
+      spawnProcess: () => child, killProcessTree: process => { kills++; process.emit('close', 1); },
+      getProcessTree: () => ({ available: true, descendants: [] }),
+      getWorktreeActivity: () => ({ available: true, changed: false, changedFiles: [] }),
+      ...(mode === 'no-judge' ? {} : { judgeLiveness: input => {
+        inputs.push(input);
+        if (mode === 'hung-judge') return new Promise(() => {});
+        return mode === 'malformed' ? {} : { status: mode === 'working' ? 'working' : 'stuck',
+          reasoning: 'Injected review process evidence.', nextIntervalMs: 50 };
+      } }),
+    });
+    await flush();
+    if (mode === 'progress') {
+      for (let i = 0; i < 10; i++) {
+        clock.advance(30);
+        child.stdout.emit('data', Buffer.from(JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text: `checked path ${i}` }] } }) + '\n'));
+        await flush();
+      }
+      assert.equal(inputs.length, 0);
+      assert.equal(kills, 0);
+    } else {
+      clock.advance(mode === 'deadline' ? 20 : 50);
+      await flush(); await flush();
+      if (mode === 'hung-judge') { clock.advance(20); await flush(); await flush(); }
+      if (mode === 'working') {
+        assert.equal(inputs.length, 1);
+        assert.equal(inputs[0].seat, 'verifier');
+        assert.equal(kills, 0);
+      } else assert.equal(kills, 1);
+    }
+    if (mode === 'working' || mode === 'progress') {
+      child.stdout.emit('data', Buffer.from(JSON.stringify({ type: 'result', subtype: 'success', is_error: false,
+        result: JSON.stringify({ version: 1, conclusion: 'clean', report: 'All required paths checked.', tests: [] }) }) + '\n'));
+      child.emit('close', 0);
+    } else if (!kills) child.emit('close', 1);
+    const result = await pending;
+    assert.equal(result.artifactFailed, !['working', 'progress'].includes(mode));
+    if (!['working', 'progress'].includes(mode)) assert.equal(result.timedOut, true);
+    if (mode === 'deadline') assert.equal(result.timeoutReason.kind, 'deadline');
+    if (!['deadline', 'no-reporter'].includes(mode)) assert.ok(events.some(event => event.type === 'stalled' && event.tier === 'progress'));
+  });
+}
 import { createLivenessDeadline } from '../src/spawn.js';
 import { run as executeRun } from '../src/run.js';
 import { withVerifiedSuperpowers } from '../fixtures/verified-superpowers.mjs';

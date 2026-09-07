@@ -7,7 +7,7 @@ import fs from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
 import * as artifacts from '../src/review.js';
 
-const bundle = { version: 1, report: 'No blocking findings after checking the required behavior.', tests: [] };
+const bundle = { version: 1, conclusion: 'clean', report: 'No blocking findings after checking the required behavior.', tests: [] };
 function fixture(t) {
   const cwd = mkdtempSync(join(tmpdir(), 'uro-bundle-'));
   t.after(() => rmSync(cwd, { recursive: true, force: true }));
@@ -33,7 +33,7 @@ test('review bundle materializes sanctioned artifacts with round and diff bindin
   const cwd = fixture(t);
   assert.equal(typeof artifacts.materializeReviewBundle, 'function');
   const receipt = await artifacts.materializeReviewBundle({ cwd, bundle: { ...bundle,
-    report: '## F1\nSeverity: blocking\nDescription: Wrong branch\nTest: __uro_review/tests/nested/f1.test.js\n',
+    conclusion: 'issues', report: '## F1\nSeverity: blocking\nDescription: Wrong branch\nTest: __uro_review/tests/nested/f1.test.js\n',
     tests: [{ path: 'tests/nested/f1.test.js', content: 'throw new Error("proof");\n' }],
   }, round: 2, diffDigest: 'abc' });
   assert.equal(receipt.round, 2);
@@ -79,7 +79,7 @@ test('invalid reviewer test references cannot carry blocking authority', async (
   const cwd = fixture(t);
   assert.equal(typeof artifacts.materializeReviewBundle, 'function');
   const receipt = await artifacts.materializeReviewBundle({ cwd, bundle: { ...bundle,
-    report: '## F1\nSeverity: blocking\nDescription: Allegation\nTest: ../../external.js\n',
+    conclusion: 'issues', report: '## F1\nSeverity: blocking\nDescription: Allegation\nTest: ../../external.js\n',
   }, round: 1, diffDigest: 'abc' });
   const review = artifacts.detectReview({ dir: cwd, artifact: receipt, round: 1, diffDigest: 'abc' });
   assert.equal(review.findings[0].severity, 'suggestion');

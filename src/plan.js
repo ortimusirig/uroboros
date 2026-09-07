@@ -308,12 +308,22 @@ function parsePlanningReview(result) {
     .map(match => match[1].trim().toLowerCase());
   const decision = decisions.length === 1 && ['approve', 'revise', 'stop'].includes(decisions[0])
     ? decisions[0] : undefined;
-  return { ...parseSeatReview(source), usage: result.usage,
+  return { ...parseSeatReview(source), ...planningReviewEvidence(result), usage: result.usage,
     artifactDigest: /(?:^|\n)\s*ARTIFACT_DIGEST:\s*([a-f0-9]{64})\b/i.exec(source)?.[1]?.toLowerCase(),
     decision,
     reason: /(?:^|\n)\s*REASON:\s*([^\n]+)/i.exec(source)?.[1] ?? '',
     addressedIssueIds: /(?:^|\n)\s*ADDRESSED:\s*([^\n]+)/i.exec(source)?.[1]?.split(',').map(id => id.trim()) ?? [],
   };
+}
+
+// Retention and authority are separate: only lastMessage above determines the
+// ruling, while all delivered messages remain ordered and verbatim in the record.
+function planningReviewEvidence(result) {
+  const agentMessages = Array.isArray(result.agentMessages)
+    ? result.agentMessages.filter(message => typeof message === 'string') : [];
+  return { content: agentMessages.length ? agentMessages.join('\n\n') : result.lastMessage ?? '',
+    agentMessages, stdout: result.stdout, stderr: result.stderr, exitCode: result.exitCode,
+    timedOut: result.timedOut, launchFailed: result.launchFailed };
 }
 
 /** Inject model process boundaries while keeping prompt construction and parsing real. */
@@ -343,7 +353,7 @@ export function createPlanningSeats({
       });
       if (result.exitCode !== 0 || result.timedOut || result.launchFailed) {
         return { unavailable: true, error: seatLaunchFailure('codex review', result), usage: result.usage,
-          content: result.lastMessage ?? '', stderr: result.stderr };
+          ...planningReviewEvidence(result) };
       }
       return parsePlanningReview(result);
     }),

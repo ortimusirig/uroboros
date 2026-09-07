@@ -66,6 +66,8 @@ function walk(dir, base = dir, out = []) {
 const sha = (path) => createHash('sha256').update(readFileSync(path)).digest('hex');
 
 function isPayloadFile(item, child) {
+  // This field report was repository-only before its move into docs/history.
+  if (item === 'docs' && child === 'history/2026-08-27-performance-findings.md') return false;
   // Run-journal tests and real executions create timestamped notes here. They are
   // runtime output, not package input, and may disappear while a concurrent test
   // process is validating the payload. Keep only the checked-in directory guide.
