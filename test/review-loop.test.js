@@ -13,9 +13,10 @@ import { tmpdir } from 'node:os';
 import { dirname, join, relative, sep } from 'node:path';
 import { run as executeRun } from '../src/run.js';
 import * as execution from '../src/run.js';
+import { runQueue } from '../src/queue.js';
 import { planningArtifactDigest } from '../src/conversation.js';
 import { withVerifiedSuperpowers } from '../fixtures/verified-superpowers.mjs';
-import { materializeReviewBundle } from '../src/review.js';
+import { materializeReviewBundle, reviewDigest } from '../src/review.js';
 
 function filesIn(root) {
   const files = new Map();
@@ -115,6 +116,36 @@ async function currentReview(options, { findings = '', tests = [], dispositions 
 }
 const blocker = '## F1\nSeverity: blocking\nDescription: Branch drops valid input.\nTest: __uro_review/tests/f1.test.js\n';
 const proof = { path: 'tests/f1.test.js', content: 'throw new Error("branch evidence");\n' };
+
+test('queue accepts the real execution receipt only while its persisted diff is current and reviewed', async (t) => {
+  for (const state of ['reviewed', 'skipped', 'changed']) {
+    const fixture = harness(`queue-receipt-${state}`, { adapters: {
+      runReview: state === 'skipped' ? null : currentReview,
+    } });
+    t.after(() => rmSync(fixture.root, { recursive: true, force: true }));
+    const facts = await executeRun(fixture.options);
+    assert.equal(facts.outcome, 'review-ready');
+    assert.equal(facts.approved, state !== 'skipped');
+    if (state !== 'skipped') assert.equal(facts.approval.artifactDigest,
+      reviewDigest(readFileSync(join(facts.dir, 'CHANGES.diff'))));
+    if (state === 'changed') writeFileSync(join(facts.dir, 'CHANGES.diff'), 'unreviewed change');
+    writeFileSync(join(fixture.root, 'plan.md'), 'Implement requested change');
+    writeFileSync(join(fixture.root, 'gate.json'), '[]');
+    const file = join(fixture.root, 'queue.json');
+    writeFileSync(file, JSON.stringify([{ task: 'plan.md', gate: 'gate.json' }]));
+    let judged = 0;
+    let landed = 0;
+    await runQueue({ file, target: fixture.target, dependencies: {
+      assertCleanTarget: async () => {},
+      launchRun: async () => ({ runDirectory: facts.dir }),
+      readRunFacts: async () => JSON.parse(readFileSync(join(facts.dir, 'uro-runfacts.json'), 'utf8')),
+      judgeLanding: async () => { judged++; return { approved: true }; },
+      landDiff: async () => { landed++; return { commit: 'fixture' }; },
+    } });
+    assert.equal(judged, state === 'reviewed' ? 1 : 0, state);
+    assert.equal(landed, state === 'reviewed' ? 1 : 0, state);
+  }
+});
 
 test('a deliberately skipped embedding reviewer is not reported as a Claude invocation', async (t) => {
   const fixture = harness('review-skipped', { adapters: { runReview: null } });

@@ -54,6 +54,14 @@ test('the queue command sends parsed limits, mode, target, and runtime seams to 
   }]);
 });
 
+test('queue CLI preserves a nondefault canonical Claude model for downstream final reviews', async () => {
+  let received;
+  await executeQueueCommand({ file: 'queue.json', claudeModel: 'claude-opus-4-6' }, {
+    runtime: {}, runQueueFn: async options => { received = options; return {}; },
+  });
+  assert.equal(received.claudeModel, 'claude-opus-4-6');
+});
+
 test('the queue command creates the production runtime when one is not injected', async () => {
   const runtime = { production: true };
   const env = { CODEX_HOME: 'C:/registered-codex-home' };

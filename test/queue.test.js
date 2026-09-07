@@ -12,6 +12,9 @@ import { basename, join, resolve } from 'node:path';
 import test from 'node:test';
 import { planningArtifactDigest } from '../src/conversation.js';
 import { runQueue } from '../src/queue.js';
+import { reviewDigest } from '../src/review.js';
+
+const APPROVED_DIFF = 'diff --git a/x b/x\n+reviewed change\n';
 
 function makeFixture(count = 3) {
   const directory = mkdtempSync(join(process.cwd(), '.ccc-test-queue-'));
@@ -42,6 +45,9 @@ function reviewReady(runId, overrides = {}) {
   return {
     runId,
     outcome: 'review-ready',
+    phase: 'execution',
+    approved: true,
+    approval: { artifactDigest: reviewDigest(APPROVED_DIFF), decidedBy: 'claude', basis: 'reviewer', reason: 'Reviewed current diff' },
     gateStatus: 'passed',
     correctnessVerdict: 'NO_BLOCKERS',
     intentVerdict: 'NO_BLOCKERS',
@@ -91,7 +97,9 @@ function fakeRuntime(facts, overrides = {}) {
       launchRun: async (request) => {
         const index = launches.length;
         launches.push(request);
-        const runDirectory = `run-directory-${index + 1}`;
+        const runDirectory = join(request.target, `run-directory-${index + 1}`);
+        mkdirSync(runDirectory, { recursive: true });
+        writeFileSync(join(runDirectory, 'CHANGES.diff'), APPROVED_DIFF);
         directories.set(runDirectory, facts[index]);
         return { runDirectory };
       },
@@ -104,6 +112,63 @@ function fakeRuntime(facts, overrides = {}) {
     },
   };
 }
+
+test('queue requires explicit execution approval bound to the actual diff before final review', async () => {
+  for (const mutation of ['valid', 'false', 'missing-approved', 'missing', 'missing-digest', 'stale', 'legacy',
+    'wrong-phase', 'wrong-reviewer', 'wrong-basis', 'empty-reason', 'missing-diff']) {
+    const fixture = makeFixture(1);
+    const facts = reviewReady('approval-check');
+    if (mutation === 'false') facts.approved = false;
+    if (mutation === 'missing-approved') delete facts.approved;
+    if (mutation === 'missing') delete facts.approval;
+    if (mutation === 'missing-digest') delete facts.approval.artifactDigest;
+    if (mutation === 'stale') facts.approval.artifactDigest = reviewDigest('other diff');
+    if (mutation === 'legacy') { delete facts.phase; delete facts.approved; delete facts.approval; }
+    if (mutation === 'wrong-phase') facts.phase = 'planning';
+    if (mutation === 'wrong-reviewer') facts.approval.decidedBy = 'codex';
+    if (mutation === 'wrong-basis') facts.approval.basis = 'consensus';
+    if (mutation === 'empty-reason') facts.approval.reason = ' ';
+    const runtime = fakeRuntime([facts]);
+    if (mutation === 'missing-diff') runtime.dependencies.readRunFacts = async ({ runDirectory }) => {
+      unlinkSync(join(runDirectory, 'CHANGES.diff'));
+      return facts;
+    };
+    try {
+      const result = await runQueue({ file: fixture.file, target: fixture.target, dependencies: runtime.dependencies });
+      assert.equal(runtime.judgements.length, mutation === 'valid' ? 1 : 0, mutation);
+      assert.equal(runtime.landings.length, mutation === 'valid' ? 1 : 0, mutation);
+      if (mutation !== 'valid') assert.match(result.stop.reason, /execution approval/i, mutation);
+    } finally { fixture.cleanup(); }
+  }
+});
+
+test('queue rechecks execution approval after final review before applying a changed diff', async () => {
+  const fixture = makeFixture(1);
+  const runtime = fakeRuntime([reviewReady('r1')], {
+    judgeLanding: async ({ runDirectory }) => {
+      writeFileSync(join(runDirectory, 'CHANGES.diff'), 'unreviewed replacement');
+      return { approved: true };
+    },
+  });
+  try {
+    const result = await runQueue({ file: fixture.file, target: fixture.target, dependencies: runtime.dependencies });
+    assert.equal(runtime.landings.length, 0);
+    assert.match(result.stop.reason, /execution approval.*stale/i);
+  } finally { fixture.cleanup(); }
+});
+
+test('queue forwards the canonical Claude model to both final judgements', async () => {
+  for (const claudeModel of [undefined, 'claude-opus-4-6']) {
+    const fixture = makeFixture(1);
+    const runtime = fakeRuntime([reviewReady('r1')]);
+    try {
+      await runQueue({ file: fixture.file, target: fixture.target, claudeModel,
+        acceptGoalSpec: join(fixture.directory, 'spec.md'), dependencies: runtime.dependencies });
+      assert.equal(runtime.judgements[0].claudeModel, claudeModel);
+      assert.equal(runtime.acceptances[0].claudeModel, claudeModel);
+    } finally { fixture.cleanup(); }
+  }
+});
 
 function readLog(path) {
   if (!existsSync(path)) return [];
@@ -790,7 +855,7 @@ test('Claude final review runs before every landing and its judgement is recorde
       dependencies: runtime.dependencies,
     });
     assert.equal(runtime.judgements.length, 1, 'no landing without the final review');
-    assert.equal(runtime.judgements[0].runDirectory, 'run-directory-1');
+    assert.equal(basename(runtime.judgements[0].runDirectory), 'run-directory-1');
     assert.equal(runtime.landings.length, 1);
     const log = readLog(fixture.logPath);
     assert.equal(log[0].finalReview.approved, true);
@@ -809,7 +874,7 @@ test('a refused final review stops the queue with Claude reasoning and lands not
       reviewReady('run-2'),
       reviewReady('run-3'),
     ], {
-      judgeLanding: async ({ runDirectory }) => runDirectory === 'run-directory-2'
+      judgeLanding: async ({ runDirectory }) => basename(runDirectory) === 'run-directory-2'
         ? {
             approved: false,
             reasoning: 'the diff narrows shared scope the task requires',
@@ -954,7 +1019,7 @@ test('acceptance waits for the whole queue file: a stop short of the last unit n
   const fixture = makeFixture(2);
   try {
     const runtime = fakeRuntime([reviewReady('run-1'), reviewReady('run-2')], {
-      judgeLanding: async ({ runDirectory }) => (runDirectory === 'run-directory-2'
+      judgeLanding: async ({ runDirectory }) => (basename(runDirectory) === 'run-directory-2'
         ? { approved: false, reasoning: 'second unit is not sound' }
         : { approved: true, reasoning: 'sound' }),
     });

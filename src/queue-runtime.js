@@ -9,7 +9,7 @@ import {
 } from 'node:path';
 import { assertCurrentPlanApproval } from './plan.js';
 import { spawnCapture } from './spawn.js';
-import { parseAcceptanceJudgement, parseLandingJudgement, runArbiter } from './arbiter.js';
+import { DEFAULT_ARBITER_MODEL, parseAcceptanceJudgement, parseLandingJudgement, runArbiter } from './arbiter.js';
 
 const GIT_TIMEOUT_MS = 30_000;
 // Git's well-known empty-tree object hash — valid in any repository without
@@ -329,7 +329,7 @@ export async function landQueueDiff({
 // and the non-zero evidence in front of it, and judges the landing. An
 // unreachable or unreadable judgement returns approved: null; the queue
 // treats anything but an explicit yes as a stop.
-export async function judgeLandingWithClaude({ unit, facts, runDirectory }, {
+export async function judgeLandingWithClaude({ unit, facts, runDirectory, claudeModel = DEFAULT_ARBITER_MODEL }, {
   arbiter = runArbiter,
   cwd = process.cwd(),
 } = {}) {
@@ -345,7 +345,7 @@ export async function judgeLandingWithClaude({ unit, facts, runDirectory }, {
   };
   let result;
   try {
-    result = await arbiter({ cwd, request });
+    result = await arbiter({ cwd, request, model: claudeModel });
   } catch (error) {
     return {
       approved: null,
@@ -395,7 +395,7 @@ function readQueueLogRows(logPath) {
 // trail is refused rather than judged partial. An unreachable or unreadable
 // judgement — Claude's or Git's — returns approved: null; the queue treats
 // anything but an explicit yes as a stop.
-export async function judgeGoalAcceptance({ goalSpecPath, target, logPath }, {
+export async function judgeGoalAcceptance({ goalSpecPath, target, logPath, claudeModel = DEFAULT_ARBITER_MODEL }, {
   arbiter = runArbiter,
   runCommand = spawnCapture,
   cwd = process.cwd(),
@@ -499,7 +499,7 @@ export async function judgeGoalAcceptance({ goalSpecPath, target, logPath }, {
   };
   let result;
   try {
-    result = await arbiter({ cwd, request });
+    result = await arbiter({ cwd, request, model: claudeModel });
   } catch (error) {
     return {
       approved: null,

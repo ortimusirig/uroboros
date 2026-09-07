@@ -6,6 +6,7 @@ import {
 } from 'node:fs';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { assertCurrentPlanApproval, assertPlanOutputAvailable, resolveGoal } from './plan.js';
+import { reviewDigest } from './review.js';
 
 const QUEUE_UNIT_KEYS = new Set(['name', 'task', 'gate', 'goal', 'out']);
 const QUEUE_MODES = new Set(['manual', 'autonomous']);
@@ -174,7 +175,24 @@ function answersFrom(facts) {
   return Array.isArray(candidate) ? candidate.map((answer) => ({ ...answer })) : [];
 }
 
-function evaluateFacts(facts) {
+function assertCurrentExecutionApproval(facts, runDirectory) {
+  const receipt = facts?.approval;
+  if (facts?.phase !== 'execution' || facts.approved !== true
+    || !isRecord(receipt) || receipt.decidedBy !== 'claude' || receipt.basis !== 'reviewer'
+    || typeof receipt.reason !== 'string' || receipt.reason.trim() === ''
+    || typeof receipt.artifactDigest !== 'string') {
+    throw new Error('current execution approval is missing or invalid; review-ready alone does not authorize landing');
+  }
+  let diff;
+  try { diff = readFileSync(join(runDirectory, 'CHANGES.diff')); } catch {
+    throw new Error('current execution approval cannot be verified: CHANGES.diff is missing or unreadable');
+  }
+  if (reviewDigest(diff) !== receipt.artifactDigest) {
+    throw new Error('current execution approval is stale for CHANGES.diff');
+  }
+}
+
+function evaluateFacts(facts, runDirectory) {
   if (!isRecord(facts)) {
     return { action: 'stop', reason: 'completed run facts are missing or invalid', questions: [] };
   }
@@ -188,10 +206,11 @@ function evaluateFacts(facts) {
     };
   }
 
-  // review-ready IS the seats' agreement: the debate converged with no
-  // accepted blocking finding under the arbiter's judgement, and the
-  // reviewer's report plus the evidence trail travel in the facts for any
-  // reader who wants them. Nothing here re-decides.
+  // Historical outcome labels remain readable but cannot substitute for the
+  // explicit execution review receipt bound to the artifact we will land.
+  try { assertCurrentExecutionApproval(facts, runDirectory); } catch (error) {
+    return { action: 'stop', kind: 'execution-approval', reason: error.message, questions: [] };
+  }
   return { action: 'land' };
 }
 
@@ -460,7 +479,7 @@ export async function runQueue({
     const { tokens } = tokenReading;
     if (tokenReading.valid) totalTokens = addTokens(totalTokens, tokens);
     const evaluation = tokenReading.valid
-      ? evaluateFacts(facts)
+      ? evaluateFacts(facts, launch.runDirectory)
       : {
         action: 'stop',
         kind: 'token-accounting',
@@ -492,6 +511,7 @@ export async function runQueue({
         landingJudgement = await judgeLanding({
           unit,
           facts,
+          claudeModel,
           runDirectory: launch.runDirectory,
         }) ?? { approved: null, reasoning: 'landing judge returned nothing' };
       } catch (error) {
@@ -503,6 +523,7 @@ export async function runQueue({
       if (landingJudgement.approved === true) {
         try {
           if (unit.kind === 'goal') assertCurrentPlanApproval({ unit, result: planResult, mode });
+          assertCurrentExecutionApproval(facts, launch.runDirectory);
           landing = await landDiff({
             target: resolve(target),
             diffPath: join(launch.runDirectory, 'CHANGES.diff'),
@@ -637,6 +658,7 @@ export async function runQueue({
       let acceptance;
       try {
         acceptance = await acceptGoal({
+          claudeModel,
           goalSpecPath: resolve(acceptGoalSpec),
           target: resolve(target),
           logPath: queue.logPath,

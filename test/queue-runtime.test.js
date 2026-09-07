@@ -440,6 +440,25 @@ test('a failed dry-run apply check performs no mutating Git command', async () =
   assert.deepEqual(calls[2].args.slice(2, 5), ['apply', '--check', '--index']);
 });
 
+test('both final queue judges map the selected or default Claude model at the arbiter boundary', async () => {
+  for (const claudeModel of [undefined, 'claude-opus-4-6']) {
+    const workspace = goalWorkspace();
+    try {
+      writeFileSync(workspace.logPath, JSON.stringify({ name: 'unit', landed: true, commit: 'abc123' }) + '\n');
+      const calls = [];
+      const options = {
+        runCommand: async () => ({ code: 0, stdout: 'diff' }),
+        arbiter: async request => { calls.push(request); return { approved: true, reasoning: 'Approved' }; },
+      };
+      await judgeLandingWithClaude({ runDirectory: workspace.directory, facts: {}, claudeModel }, options);
+      await judgeGoalAcceptance({ ...workspace, claudeModel }, options);
+      assert.deepEqual(calls.map(call => [call.request.type, call.model]), [
+        ['landing', claudeModel ?? 'sonnet'], ['acceptance', claudeModel ?? 'sonnet'],
+      ]);
+    } finally { workspace.cleanup(); }
+  }
+});
+
 test('judgeLandingWithClaude hands Claude the composed task, diff, findings, and evidence', async () => {
   const directory = mkdtempSync(join(process.cwd(), '.ccc-test-landing-'));
   try {
