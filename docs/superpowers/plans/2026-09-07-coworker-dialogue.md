@@ -99,7 +99,8 @@ runIssueDialogue({state,journal,seats,renderInput,inspect,revise,persist,budget,
 // -> {state,approved,reason,action,messages,rounds,resources}
 // seats[seat]({input,action,state,operationId}) -> transport result with content,
 // observed delivery and observations, usage (null when unavailable)
-// revise({state,seat,operationId}) -> {artifactDigest,snapshot,response}
+// revise({state,seat,operationId,response,envelope}) -> {artifactDigest,snapshot,response}
+// Consumes the saved provider result; performs no provider launch.
 // inspect({requests,seat,operationId,state}) -> {evidence,receipts}
 // persist({state}) before effects/final transitions
 // budget({state,account,nextAction}) -> {allowed,reason?}, before EVERY launch
@@ -145,6 +146,8 @@ Actions: propose, ask, answer, inspect, challenge, rebut, withdraw, revise, veri
 Verification: claimId, evidenceIds, inspectionReceiptIds, result (supports|contradicts|insufficient), reason. Receipt IDs exist in harness-owned state for the receiving seat; a model echo is not a receipt. Collect real source/tool/command observations where transport exposes them. Explicit inspect requests can have the harness read an authorized source, journal the operation, deliver it, then receive substantive interpretation from that seat. Record observable inspection separately from semantic assessment; never claim to prove model comprehension. No mandatory extra inspection call when suitable observed evidence already exists.
 
 State schemaVersion:2 includes run/project/phase/mode/authority, snapshot and artifact identity, messages, issues/dispositions, approval, next action, proposalCycles/correctionCycles, explicit limits, resources, pendingDecision, technicalPause and operation identities. All open blocking issues need explicit authorized dispositions. New artifact/material context clears approval; audit growth does not.
+
+For both propose and revise, the dispatcher owns the single provider launch. Validate the returned envelope against the operation's saved INPUT artifact/context identities before applying the result. The revise callback receives that saved transport response and envelope, launches no provider, and computes the resulting artifact/context identities from actual parsed/applied output. Its returned response, if any, is a local projection of the same outcome, not another provider reply. Durably journal any local application effect; persist the resulting identity and invalidate approval before reviewer dispatch. Q&A invokes no artifact application callback.
 
 Optional envelope memoryProposals entries contain id, content, kind, claimIds, optional issueId and tags. The harness binds proposer/message/run/context provenance; validate referenced claims/issues and retain proposals in state. Model-supplied status cannot promote a proposal. Phase integration curates notebook records only after the relevant explicit issue disposition or current-artifact approval, retaining disputed/unsupported status rather than calling agreement a verified fact. A clean decision can be proposed for memory without inventing an objection just to obtain an issueId.
 
@@ -235,6 +238,8 @@ Fake-provider dispatch scenarios: first clean review ends without extra call; as
 Exercise either seat proposing a notebook update, unknown claim/issue references rejected, and proposal provenance bound by the harness. Task2 stores validated attributed proposals only; Tasks3-4 perform notebook recall/promotion at real phase boundaries.
 
 Distinguish routine reviewer sign-off from final unresolved-dispute authority: decisionAuthority returns human in manual mode, but a clean evidenced review must still finish without an unnecessary human checkpoint. Add a clean-manual-review case alongside unresolved-manual-dispute routing.
+
+Test the single-launch revision contract explicitly: the proposal envelope echoes saved input identity, revise receives the exact completed response without launching a provider, the harness installs the new identity before review, old approval becomes stale, and Q&A never invokes artifact application.
 
 - [ ] **Step 2: Run RED.**
 ~~~powershell
