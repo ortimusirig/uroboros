@@ -320,6 +320,13 @@ For a saved manual decision, use the direct CLI:
 
 Read `uro-checkpoint.json` in that run's isolated workspace (or its durable artifact directory).
 For standalone planning or decomposition, the checkpoint is in the reported output directory.
+Create the answer file in an external directory, outside both the target source tree and the
+execution workspace, and pass its absolute path. For a Git target, keep it outside the whole
+repository even if the selected target is a subfolder. A durable artifact directory is suitable
+only when it is outside both trees. An answer file created inside a hashed tree changes that
+tree's identity and is rejected with a placement diagnostic before model use. Move only the
+new answer file outside and resolve remaining drift; preserve other files and never bypass
+source identity validation with arbitrary exclusions.
 Copy its current `runId`, top-level `artifactDigest`, and every `pending.questions[].id` into
 the answer file. This decision digest also binds the exact pending questions and revision;
 it is distinct from the plan/diff approval digest. The JSON shape is:
@@ -339,6 +346,15 @@ human's exact answer. Planning accepts `approve`, `revise`, or `stop`, optionall
 settles only that named issue on unchanged code and evidence. `Require a correction`,
 `Clarify requirements`, and other prose are correction context, not blanket approval. Both
 agents receive the human ruling; actual execution review and unrelated issues still matter.
+
+For a recorded execution-pivot question, copy an exact option: `correction`, `fresh plan`, or
+`stop`, optionally followed by `: explanation`. `stop` is terminal without another model call
+or landing. `correction` and other prose are targeted correction context. `fresh plan` means
+a genuinely revised Claude-authored/Codex-reviewed plan over the saved workspace; it preserves
+current code, diff, history and protected evidence, with no reset to the pre-debate base.
+Implementation waits for current plan approval. If this planning debate raises another manual
+question, read the new checkpoint and resume that saved proposal with the same command; do not
+redraft candidates or repeat completed execution. Autonomous fresh-reset behavior is unchanged.
 
 Resume continues the saved phase and existing workspace. The saved manual mode is immutable:
 there is no resume `--mode` flag. Re-running the original task creates new work and is not resume.

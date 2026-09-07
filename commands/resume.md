@@ -8,6 +8,12 @@ especially its manual resume guidance. Preserve the saved phase, workspace and h
 Do not author replacement implementation, invent answers, change the saved mode or restart
 the original task. Inspect `$ARGUMENTS` for the existing `--run` and `--decision-file` paths;
 ask for missing human answers rather than treating unresolved questions as approval.
+The answer file belongs outside both the whole target repository/source tree and the execution
+workspace; a durable artifact directory is suitable only if outside both. Report placement
+errors without excluding arbitrary source files. Follow the saved pivot's exact choices:
+`stop` makes no further model call or landing; `fresh plan` requires a reviewed replacement
+plan over preserved current work, not a reset. Resume any further planning question from its
+new checkpoint rather than redrafting or repeating execution.
 
 Run the real CLI from the user's current working directory:
 

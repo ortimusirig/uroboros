@@ -157,7 +157,7 @@ export async function assertCleanTarget(target, {
 } = {}) {
   const resolvedTarget = resolve(target);
   const result = await runCommand('git', [
-    '-C', resolvedTarget, 'status', '--porcelain=v1', '-z', '--untracked-files=normal',
+    '-C', resolvedTarget, 'status', '--porcelain=v1', '-z', '--untracked-files=all',
   ], { timeoutMs: GIT_TIMEOUT_MS });
   if (result.code !== 0) {
     throw new Error(`cannot inspect target working tree: ${messageFrom(result, `git exited ${result.code}`)}`);

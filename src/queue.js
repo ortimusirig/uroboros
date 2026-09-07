@@ -8,6 +8,7 @@ import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { assertCurrentPlanApproval, assertPlanOutputAvailable, resolveGoal } from './plan.js';
 import { detectReview, reviewDigest } from './review.js';
 import { attachQueueCheckpoint, checkpointDigest, readCheckpoint } from './checkpoint.js';
+import { recoverQueueLanding } from './queue-runtime.js';
 
 const QUEUE_UNIT_KEYS = new Set(['name', 'task', 'gate', 'goal', 'out']);
 const QUEUE_MODES = new Set(['manual', 'autonomous']);
@@ -327,6 +328,23 @@ export async function continueQueue({ context, phaseResult, runDirectory, depend
     continuation: { ...context, phaseResult, runDirectory, journal, persistJournal }, dependencies });
 }
 
+// Exact generated files only. Never exempt the output directory or unrelated
+// untracked source; revalidate the saved plan receipt before each use.
+export function queueContinuationPaths(context) {
+  const paths = [context.queue.logPath];
+  for (const unit of context.queue.units.filter(unit => unit.kind === 'goal')) {
+    const result = context.journal?.units?.[unit.index]?.planResult
+      ?? (unit.index === context.unitIndex ? (context.phase === 'planning' ? context.phaseResult : context.planResult) : null);
+    if (!result?.approved) continue;
+    assertCurrentPlanApproval({ unit, result, mode: context.options?.mode ?? 'manual' });
+    paths.push(join(unit.out, 'plan.md'), join(unit.out, 'gate.json'));
+    if (existsSync(join(unit.out, 'uro-checkpoint.json')) && readCheckpoint(unit.out).runId === result.runId) {
+      paths.push(join(unit.out, 'uro-checkpoint.json'), join(unit.out, 'uro-resume.lock'));
+    }
+  }
+  return paths;
+}
+
 async function executeQueue({
   file,
   target,
@@ -376,14 +394,14 @@ async function executeQueue({
   const appendLog = dependencies.appendLog ?? appendQueueLog;
   const now = dependencies.now ?? (() => Date.now());
 
-  await assertCleanTarget(target, { allowedPaths: [queue.logPath] });
+  const allowedQueuePaths = continuation ? queueContinuationPaths(continuation) : [queue.logPath];
+  await assertCleanTarget(target, { allowedPaths: allowedQueuePaths });
 
   let attemptedCount = continuation?.attemptedCount ?? 0;
   let landedCount = continuation?.landedCount ?? 0;
   let totalTokens = continuation?.totalTokens ?? zeroTokens;
   let stop = null;
   const assumedDecisions = [];
-  const allowedQueuePaths = [queue.logPath];
 
   for (const unit of queue.units) {
     if (continuation && unit.index < continuation.unitIndex) continue;
@@ -610,15 +628,28 @@ async function executeQueue({
           landed = true;
           landedCount++;
         } catch (error) {
-          const reason = error?.message ?? String(error);
-          stop = {
-            kind: 'apply-failed',
-            unit: unit.name,
-            unitIndex: unit.index,
-            reason,
-            outcome: facts?.outcome ?? null,
-            questions: [],
-          };
+          if (unitJournal.operationId) {
+            // Once an operation was dispatched, failure to return its SHA is
+            // not proof it did not commit. Reconcile or leave phase-complete.
+            const recovered = await recoverQueueLanding({ target, operationId: unitJournal.operationId,
+              diffPath: join(launch.runDirectory, 'CHANGES.diff'), allowedDirtyPaths: allowedQueuePaths });
+            if (!recovered) throw error;
+            landing = recovered;
+            unitJournal.landing = recovered;
+            persist();
+            landed = true;
+            landedCount++;
+          } else {
+            const reason = error?.message ?? String(error);
+            stop = {
+              kind: 'apply-failed',
+              unit: unit.name,
+              unitIndex: unit.index,
+              reason,
+              outcome: facts?.outcome ?? null,
+              questions: [],
+            };
+          }
         }
       } else {
         stop = {
@@ -688,10 +719,13 @@ async function executeQueue({
     const logged = unitJournal.operationId && existsSync(queue.logPath)
       ? readFileSync(queue.logPath, 'utf8').split(/\r?\n/).filter(Boolean).map(line => JSON.parse(line))
         .filter(row => row.operationId === unitJournal.operationId) : [];
-    if (logged.length > 1 || (logged.length === 1 && (logged[0].commit !== record.commit || logged[0].name !== record.name))) {
+    const confirmed = logged.filter(row => row.landed);
+    if (confirmed.length > 1 || logged.some(row => row.name !== record.name)
+      || confirmed.some(row => row.commit !== record.commit)
+      || logged.some(row => !row.landed && row.commit)) {
       throw new Error('queue operation log conflicts with saved landing');
     }
-    if (!logged.length) appendLog(queue.logPath, record);
+    if (!confirmed.length) appendLog(queue.logPath, { ...record, ...(logged.length ? { reconcilesOperation: unitJournal.operationId } : {}) });
     if (journal && landed) {
       unitJournal.logged = true;
       unitJournal.afterUnit = { attemptedCount, landedCount, totalTokens };

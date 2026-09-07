@@ -130,8 +130,9 @@ export async function saveCheckpoint({ directory, checkpointState, references = 
     for (const key of ['env', 'environment', 'adapters', 'credentials', 'apiKey', 'accessToken']) delete state.options[key];
   }
   mkdirSync(directory, { recursive: true });
-  const target = state.phase === 'execution' ? state.workspace.targetPath : state.planningContext.request.target;
-  const workspace = state.phase === 'execution' ? identity(state.workspace.dir, true) : null;
+  const execution = state.phase === 'execution' ? state : state.executionContinuation;
+  const target = execution ? execution.workspace.targetPath : state.planningContext.request.target;
+  const workspace = execution ? identity(execution.workspace.dir, true) : null;
   const checkpoint = { schemaVersion: 1, revision: (previous?.revision ?? (existsSync(join(directory, CHECKPOINT_FILE))
     ? readCheckpoint(directory).revision : 0)) + 1, runId: state.runId, phase: state.phase,
     interactionMode: 'manual', status: 'needs-decision', directory: canonical(directory),
@@ -184,6 +185,13 @@ export function checkpointPhaseIdentity(checkpoint) {
   return { workspace: checkpoint.workspace ? identity(checkpoint.workspace.directory, true) : null,
     target: identity(checkpoint.target.directory, false, checkpoint.target.ignoredPaths) };
 }
+export function validateDecisionFilePlacement(checkpoint, path) {
+  const file = canonical(path);
+  const roots = [checkpoint.target.repository?.top ?? checkpoint.target.directory, checkpoint.workspace?.directory].filter(Boolean);
+  if (roots.some(root => inside(root, file))) {
+    throw new Error('answer file must be outside the target repository/source tree and execution workspace; move it to an external directory and restore the saved source tree before resuming');
+  }
+}
 export function resolveCheckpointDirectory(checkpoint, directory) {
   validateCheckpoint(checkpoint);
   const supplied = canonical(directory);
@@ -204,7 +212,7 @@ export async function validateCheckpointWorkspace(checkpoint, directory, { compl
   if (checkpoint.workspace) {
     const current = identity(checkpoint.workspace.directory, true);
     if (checkpointDigest(current) !== checkpointDigest(expectedWorkspace)) throw new Error('workspace identity or content changed; approval invalidated');
-    const state = checkpoint.continuation;
+    const state = checkpoint.continuation.executionContinuation ?? checkpoint.continuation;
     if (canonical(state.workspace.dir) !== current.directory || canonical(state.workspace.targetPath) !== checkpoint.target.directory) throw new Error('checkpoint workspace reference mismatch');
     const scratch = canonical(state.options.scratchRoot);
     assertSafeScratchRoot(scratch);

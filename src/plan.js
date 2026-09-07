@@ -423,7 +423,7 @@ export async function runPlanCandidateSet({
   claudeModel, codexModel, codexEffort, plannerModel,
   timeoutMs = resolveStageTimeouts().arbiter, executorTimeout = resolveStageTimeouts().executor,
   runId = `plan-candidates-${randomUUID()}`, env = process.env, reporter,
-  draft, select, review,
+  draft, select, review, priorMessages = [],
 } = {}) {
   decisionAuthority({ interactionMode, phase: 'planning' });
   validatePlanCandidateCount(count, mode === 'fresh' ? 'pivotCandidates' : 'candidates');
@@ -435,7 +435,7 @@ export async function runPlanCandidateSet({
   const perspectives = mode === 'fresh' ? FRESH_PERSPECTIVES : INITIAL_PERSPECTIVES;
   const common = { goal, target, round, mode, interactionMode, ledger, failedPlan,
     claudeModel, codexModel, codexEffort, timeoutMs, executorTimeout, runId, env };
-  const messages = [], roundHistory = [];
+  const messages = [...priorMessages], roundHistory = [];
   let draftingUsage = EMPTY_USAGE, artifactRepairs = 0;
   const messageFor = (response, speaker, role, extra = {}) => {
     const content = typeof response === 'string' ? response
@@ -567,6 +567,27 @@ export async function runPlanCandidateSet({
   result.checkpointState.candidateState = { mode, selectedCandidateId: selected.id, candidates, selection };
   return { mode, interactionMode, candidates, surviving, selected: null, exhausted: false,
     ...result, ...(selectionUsage === undefined ? {} : { selectionUsage }) };
+}
+
+/** Resume the selected in-memory candidate debate; no new candidates or disk writer. */
+export async function continuePlanCandidateSet({ checkpointState: state, humanRuling, target,
+  claudeModel, codexModel, codexEffort, executorTimeout, timeoutMs, env, reporter, draft, review }) {
+  const selected = state.candidateState.candidates.find(candidate => candidate.id === state.candidateState.selectedCandidateId);
+  if (!selected) throw new Error('saved fresh planning candidate is missing');
+  const seats = createPlanningSeats({ target, claudeModel, codexModel, codexEffort, executorTimeout,
+    arbiterTimeout: timeoutMs, runId: state.runId, env, reporter,
+    adapters: { ...(draft ? { author: request => draft({ ...request, target, candidateId: selected.id,
+      input: draftingPrompt({ goal: state.requirements, round: request.round,
+        previousPlan: request.previousProposal, feedback: request.feedback }) }) } : {}),
+      ...(review ? { reviewer: review } : {}) },
+    authorPrompt: request => draftingPrompt({ goal: state.requirements, round: request.round,
+      previousPlan: request.previousProposal, feedback: request.feedback }), reviewPrompt: reviewSeatPrompt });
+  const result = await runConversation({ runId: state.runId, tier: 'plan', interactionMode: state.interactionMode,
+    requirements: state.requirements, rounds: state.roundsLimit ?? undefined, continuation: state, humanRuling, seats, reporter,
+    strategy: { parseProposal: parsePlanProposal,
+      reviewRequests: ({ proposal, round }) => ({ codex: { goal: state.requirements, ...proposal, round } }),
+      writeConverged: proposal => ({ selected: { ...selected, ...proposal } }) } });
+  return { mode: state.candidateState.mode, candidates: state.candidateState.candidates, selected: null, ...result };
 }
 
 

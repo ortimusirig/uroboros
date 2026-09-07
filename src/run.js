@@ -87,6 +87,7 @@ import {
   DEFAULT_PLAN_CANDIDATES,
   planCandidateFacts,
   runPlanCandidateSet,
+  continuePlanCandidateSet,
   validatePlanCandidateCount,
 } from './plan.js';
 
@@ -327,12 +328,94 @@ function executorRequestedApproval(result) {
 
 // Called only after Task 4 validates the durable envelope/workspace. This entry
 // point attaches to the saved controller state; it never invokes isolation.
+function recordManualRuling(state, humanRuling, phase = 'execution') {
+  if (!state.messages.some(message => message.speaker === 'human' && message.decisionId === humanRuling.decisionId)) {
+    state.messages.push({ speaker: 'human', role: 'decision-authority', phase, turn: state.messages.length + 1,
+      decisionId: humanRuling.decisionId, content: JSON.stringify(humanRuling), response: humanRuling });
+  }
+}
+
+function stopManualExecution(state, humanRuling, reason = 'human-stopped', planning) {
+  recordManualRuling(state, humanRuling);
+  const facts = JSON.parse(readFileSync(join(state.workspace.dir, 'uro-runfacts.json'), 'utf8'));
+  if (facts.runId !== state.runId || resolve(facts.dir) !== resolve(state.workspace.dir)) throw new Error('saved execution facts do not match the stopped phase');
+  delete facts.checkpointState;
+  delete facts.checkpoint;
+  return { ...facts, phase: 'execution', outcome: 'needs-pivot', reason, approved: false, approval: null,
+    messages: state.messages, ...(planning ? { planningMessages: planning.messages } : {}),
+    ...(planning ? { tokens: { ...facts.tokens, planning: addUsage(facts.tokens.planning, planning.tokens.total),
+      total: addUsage(facts.tokens.total, planning.tokens.total) } } : {}),
+    decision: { ...state.decision, ...humanRuling, answeredBy: 'human' },
+    debate: { ...facts.debate, stopReason: reason,
+      ...(planning ? { pivotHistory: [...facts.debate.pivotHistory,
+        { decision: PIVOT_FRESH, preservedWorkspace: true, reason, planning }] } : {}) } };
+}
+
+function manualPlanningOptions(state, adapters, env, reporter) {
+  return { target: state.workspace.dir, claudeModel: state.options.arbiterModel,
+    codexModel: state.options.executorModel, codexEffort: state.options.executorEffort,
+    executorTimeout: state.stageTimeouts.executor, timeoutMs: state.stageTimeouts.arbiter,
+    runId: state.runId, env, reporter,
+    ...(adapters.draftPlanCandidate ? { draft: adapters.draftPlanCandidate }
+      : adapters.runExecutor ? { draft: async () => { throw new Error('fresh planning author adapter unavailable'); } } : {}),
+    ...(adapters.reviewPlanCandidate ? { review: adapters.reviewPlanCandidate } : {}),
+    ...(adapters.selectPlanCandidate ? { select: adapters.selectPlanCandidate } : {}) };
+}
+
+async function finishManualPlanning(state, generated, { adapters, reporter, env }) {
+  if (generated.reason === 'needs-decision') {
+    return { ...generated, phase: 'planning', outcome: 'needs-decision', dir: state.workspace.dir,
+      checkpointState: { ...generated.checkpointState, executionContinuation: state } };
+  }
+  const approved = generated.approved === true && generated.selected
+    && generated.approval?.artifactDigest === planningArtifactDigest(state.originalPlan,
+      { plan: generated.selected.plan, gate: generated.selected.gate });
+  if (!approved || generated.selected.plan.trim() === state.plan.trim()) {
+    return stopManualExecution(state, state.manualPivotRuling,
+      !approved ? generated.reason ?? 'fresh-plan-unapproved' : 'fresh-plan-unchanged', generated);
+  }
+  state.plan = generated.selected.plan;
+  state.commands = generated.selected.gate;
+  state.planningCheckpoint = generated.checkpointState;
+  state.tokens.planning = addUsage(state.tokens.planning, generated.tokens.total);
+  state.debate.pivotHistory.push({ decision: PIVOT_FRESH, reason: 'Human requested a reviewed replacement plan over the saved workspace.',
+    preservedWorkspace: true, planning: generated, selectedCandidateId: generated.selected.id });
+  for (const message of generated.messages.filter(message => message.speaker === 'human')) {
+    if (!state.messages.some(existing => existing.decisionId === message.decisionId)) state.messages.push(message);
+  }
+  state.stage = 'executor-challenge';
+  return continueExecution({ checkpointState: state, humanRuling: state.manualPivotRuling, adapters, reporter, env });
+}
+
+export async function continueExecutionPlanning({ checkpointState, humanRuling, adapters = {}, reporter, env }) {
+  const state = structuredClone(checkpointState.executionContinuation);
+  const generated = await continuePlanCandidateSet({ checkpointState, humanRuling,
+    ...manualPlanningOptions(state, adapters, env, reporter) });
+  return finishManualPlanning(state, generated, { adapters, reporter, env });
+}
+
 export async function continueExecution({ checkpointState, humanRuling, adapters = {}, reporter, env }) {
   const state = JSON.parse(JSON.stringify(checkpointState));
   if (state?.version !== 1 || state.phase !== 'execution' || state.interactionMode !== 'manual'
     || !state.workspace?.dir || !state.decision?.questions?.length) throw new Error('invalid execution continuation');
   const resolution = validatedResolution(state.decision.questions, humanRuling);
   if (!resolution) throw new Error('manual continuation requires answers to every pending question');
+  if (state.stage === 'execution-pivot') {
+    const question = state.decision.questions.find(question => question.id === 'pivot');
+    const answer = resolution.answers.find(answer => answer.id === 'pivot')?.answer.trim() ?? '';
+    const disposition = question?.options?.find(option => answer === option || answer.startsWith(`${option}:`));
+    if (disposition === 'stop') return stopManualExecution(state, humanRuling);
+    if (disposition === 'fresh plan') {
+      recordManualRuling(state, humanRuling);
+      state.manualPivotRuling = humanRuling;
+      const generated = await runPlanCandidateSet({ ...manualPlanningOptions(state, adapters, env, reporter),
+        goal: state.originalPlan, count: state.options.pivotCandidates, mode: 'fresh', interactionMode: 'manual',
+        failedPlan: state.plan, feedback: `Authoritative human ruling: ${answer}`,
+        pivot: 'Author a genuinely revised plan over the existing saved workspace. Preserve its code and evidence; do not reset to the pre-debate base.',
+        priorMessages: state.messages });
+      return finishManualPlanning(state, generated, { adapters, reporter, env });
+    }
+  }
   return run({ ...state.options, task: state.originalPlan, gate: state.commands, runId: state.runId,
     merge: state.mergeState?.merge,
     mode: state.interactionMode, adapters, reporter, ...(env ? { env } : {}),
@@ -620,8 +703,7 @@ export async function run(opts) {
         }
       }
     }
-    executionMessages.push({ speaker: 'human', role: 'decision-authority', phase: 'execution',
-      turn: executionMessages.length + 1, response: opts.humanRuling, content: JSON.stringify(opts.humanRuling) });
+    recordManualRuling({ messages: executionMessages }, opts.humanRuling);
     plan = planWithDecision(plan, continuation.decision.questions, opts.humanRuling)
       + '\n\nContinue from the existing implementation and evidence. Address this human ruling and the open findings.\n'
       + JSON.stringify([...openFindings.values()]);
@@ -1318,6 +1400,8 @@ export async function run(opts) {
             checkpointStage = 'execution-pivot';
             decision = { mode, phase: 'execution', authority: 'human',
               questions: [{ id: 'pivot', text: 'The execution debate remains unresolved. Choose a correction, fresh plan, or stop.',
+                options: ['correction', 'fresh plan', 'stop'],
+                freshPlanEffect: 'Review a genuinely revised plan over this saved workspace; preserve current code and evidence, without resetting to the pre-debate base.',
                 openFindingIds: [...openFindings.keys()], diffDigest: reviewDigest(diff) }] };
             outcome = 'needs-decision'; debateStopReason = 'needs-decision'; break;
           }

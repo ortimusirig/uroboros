@@ -239,7 +239,7 @@ test('landing checks first, applies to the index, and commits only touched paths
   }, { runCommand });
 
   assert.deepEqual(calls.map(({ args }) => args), [
-    ['-C', resolve('C:/repo'), 'status', '--porcelain=v1', '-z', '--untracked-files=normal'],
+    ['-C', resolve('C:/repo'), 'status', '--porcelain=v1', '-z', '--untracked-files=all'],
     ['-C', resolve('C:/repo'), 'apply', '--numstat', '-z', '--', 'C:/scratch/run/CHANGES.diff'],
     ['-C', resolve('C:/repo'), 'apply', '--check', '--index', '--', 'C:/scratch/run/CHANGES.diff'],
     ['-C', resolve('C:/repo'), 'apply', '--index', '--', 'C:/scratch/run/CHANGES.diff'],

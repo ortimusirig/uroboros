@@ -86,6 +86,14 @@ Use the execution workspace or its durable artifact directory; standalone planni
 decomposition use their reported output directory. Read `uro-checkpoint.json` and copy
 its current top-level `runId`, `artifactDigest` and all `pending.questions[].id` values:
 
+Create the answer file **outside both the target source tree and execution workspace**.
+For a target inside a Git repository, this means outside the entire repository, not merely
+outside the selected subfolder. Use an external directory and pass its absolute path to
+`--decision-file`. A durable artifact directory is suitable only if it is outside both trees.
+Creating `answers.json` in either hashed tree changes its identity; resume reports a placement
+error before model use. Move only that newly created answer file outside, preserve other
+artifacts, and resolve any remaining drift instead of exempting source files from validation.
+
 ```json
 {"schemaVersion":1,"runId":"run-1","artifactDigest":"copy-current-checkpoint-digest","answers":[{"id":"Q1","answer":"Use the existing schema."}]}
 ```
@@ -97,6 +105,15 @@ the approval digest separately identifies the reviewed artifact. Planning dispos
 `Accept Codex rebuttal` settles that named issue on unchanged code/evidence. Other text is
 delivered as correction context and does not automatically approve anything. Human rulings
 reach both agents; a human approval retains actual Claude review evidence and unrelated issues.
+
+A saved execution-pivot question records the exact options `correction`, `fresh plan`, and
+`stop` (optionally append `: explanation`). `stop` is terminal without another model call or
+landing. `correction` and other prose remain targeted work in the saved workspace. `fresh plan`
+asks Claude to author a genuinely revised plan and Codex to review it over the **existing code**;
+it does not reset to the pre-debate base or discard code/history/protected evidence. Implementation
+continues only after current plan approval. If planning raises another manual question, answer
+the new checkpoint using the same resume command; the saved proposal resumes without redrafting
+candidates or replaying execution. Autonomous fresh-reset behavior is unchanged.
 
 The saved manual mode cannot be changed. Completed answer replay returns its recorded result
 without another implementation, commit or queue advance. A completed queue phase can recover

@@ -14,7 +14,7 @@ import { materializeReviewBundle } from '../src/review.js';
 import { execFileSync } from 'node:child_process';
 import { parseArgs } from '../src/args.js';
 import { runQueue } from '../src/queue.js';
-import { landQueueDiff } from '../src/queue-runtime.js';
+import { assertCleanTarget, landQueueDiff } from '../src/queue-runtime.js';
 const resume = await import('../src/resume.js').catch(() => ({}));
 
 test('resume CLI accepts only the saved run and answer file, never a mode override', () => {
@@ -96,7 +96,7 @@ test('a further planning dispute atomically replaces pending state without a fal
   assert.deepEqual(replay.checkpoint, next.checkpoint);
 });
 
-test('an explicit human acceptance resumes the edited Git isolate and overrides unchanged Claude dissent', async () => {
+for (const interruption of ['log', 'return']) test(`an explicit human acceptance resumes the edited Git isolate and recovers ${interruption} interruption`, async () => {
   const base = process.platform === 'win32' ? 'C:/ccc-test' : tmpdir();
   mkdirSync(base, { recursive: true });
   const root = mkdtempSync(join(base, 'uro-resume-exec-'));
@@ -138,7 +138,7 @@ test('an explicit human acceptance resumes the edited Git isolate and overrides 
     { name: 'second', task: 'plan.md', gate: 'gate.json' }]));
   let judged = 0, landed = 0, launched = 0, pending, crashAfterCommit = true;
   const queueDependencies = {
-    assertCleanTarget: async () => {},
+    assertCleanTarget,
     launchRun: async () => {
       launched++;
       pending = await run(withVerifiedSuperpowers({ task: 'Change the value.', target, gate: [],
@@ -147,9 +147,22 @@ test('an explicit human acceptance resumes the edited Git isolate and overrides 
     },
     readRunFacts: async () => pending,
     judgeLanding: async ({ facts }) => { judged++; assert.equal(facts.approval.basis, facts.runId === 'execution-1' ? 'reviewer' : 'human'); return { approved: true }; },
-    landDiff: async request => { landed++; return landQueueDiff(request); },
+    landDiff: async request => {
+      landed++;
+      const result = await landQueueDiff(request);
+      if (request.operationId && interruption === 'return' && crashAfterCommit) {
+        crashAfterCommit = false;
+        throw new Error('simulated lost return after real commit');
+      }
+      return result;
+    },
     appendLog: (path, row) => {
-      if (row.landed && row.runId === 'execution-2' && crashAfterCommit) { crashAfterCommit = false; throw new Error('simulated crash after commit before queue log'); }
+      if (row.landed && row.runId === 'execution-2' && interruption === 'log' && crashAfterCommit) {
+        crashAfterCommit = false;
+        // A legacy uncertain failure row is retained, then explicitly reconciled.
+        appendFileSync(path, `${JSON.stringify({ ...row, landed: false, commit: null })}\n`);
+        throw new Error('simulated crash after commit before queue log');
+      }
       appendFileSync(path, `${JSON.stringify(row)}\n`);
     },
   };
@@ -169,7 +182,7 @@ test('an explicit human acceptance resumes the edited Git isolate and overrides 
   assert.equal(implementations.length, 3);
   assert.equal(judged, 1);
   const priorCalls = implementations.length;
-  await assert.rejects(resume.resumeRun({ runDirectory: pending.dir, decisionFile, adapters, queueDependencies }), /simulated crash/);
+  if (interruption === 'log') await assert.rejects(resume.resumeRun({ runDirectory: pending.dir, decisionFile, adapters, queueDependencies }), /simulated crash/);
   const done = await resume.resumeRun({ runDirectory: pending.dir, decisionFile, adapters, queueDependencies });
   assert.equal(done.dir, pending.dir);
   assert.equal(isolates, 2);
@@ -191,5 +204,145 @@ test('an explicit human acceptance resumes the edited Git isolate and overrides 
   assert.equal(judged, 2);
   assert.equal(landed, 2);
   assert.equal(launched, 2);
+  const operationRows = readFileSync(join(root, 'queue-log.jsonl'), 'utf8').trim().split(/\r?\n/)
+    .map(line => JSON.parse(line)).filter(row => row.operationId);
+  assert.equal(operationRows.filter(row => !row.landed).length, interruption === 'log' ? 1 : 0);
+  assert.equal(operationRows.filter(row => row.landed).length, 1);
+  if (interruption === 'log') assert.equal(operationRows.at(-1).reconcilesOperation, operationRows[0].operationId);
   assert.equal(execFileSync('git', ['-C', target, 'rev-list', '--count', 'HEAD'], { encoding: 'utf8' }).trim(), '3');
+});
+
+test('queued saved planning inside the target resumes with real cleanliness and exact generated-path allowances', async () => {
+  const root = mkdtempSync(join(process.platform === 'win32' ? 'C:/ccc-test' : tmpdir(), 'uro-goal-attach-'));
+  const target = join(root, 'target'), out = join(target, 'planned');
+  mkdirSync(target);
+  const git = (...args) => execFileSync('git', ['-C', target, ...args], { encoding: 'utf8' });
+  git('init', '-q'); git('config', 'user.name', 'Test'); git('config', 'user.email', 'test@local'); git('config', 'core.autocrlf', 'false');
+  writeFileSync(join(target, 'source.js'), 'original\n'); git('add', '.'); git('commit', '-qm', 'baseline');
+  const queueFile = join(root, 'queue.json');
+  writeFileSync(queueFile, JSON.stringify([{ name: 'goal', goal: 'Change source', out: 'target/planned' }]));
+  let implementations = 0, drafts = 0, facts;
+  const planningAdapters = { author: async () => { drafts++; return { plan: 'Change source.\n', gate: [], agree: false, readable: true }; },
+    reviewer: async r => ({ agree: false, readable: true, artifactDigest: r.artifactDigest, suggestions: [{ id: 'S1', text: 'Prefer another change.' }] }) };
+  const dependencies = { assertCleanTarget,
+    launchPlan: ({ unit }) => runPlan(withVerifiedSuperpowers({ goal: unit.goal, target, out: unit.out, candidates: 1, adapters: planningAdapters })),
+    launchRun: async ({ unit }) => {
+      implementations++;
+      facts = await run(withVerifiedSuperpowers({ task: unit.task, gate: unit.gate, target, scratchRoot: join(root, 'scratch'), runId: 'goal-run',
+        adapters: { runExecutor: async ({ cwd }) => { writeFileSync(join(cwd, 'source.js'), 'changed\n'); return { exitCode: 0, changedFiles: ['source.js'], lastMessage: 'Done' }; },
+          runGate: async () => ({ results: [] }), runReview: async options => {
+            const bundle = { version: 1, report: 'No blockers.', tests: [] };
+            return { artifact: await materializeReviewBundle({ ...options, bundle }), answer: JSON.stringify(bundle) };
+          } } }));
+      return { runDirectory: facts.dir };
+    }, readRunFacts: async () => facts, judgeLanding: async () => ({ approved: true }), landDiff: landQueueDiff };
+  const pending = await runQueue({ file: queueFile, target, dependencies });
+  assert.equal(pending.stop.kind, 'plan-not-approved');
+  const checkpoint = JSON.parse(readFileSync(join(out, 'uro-checkpoint.json'), 'utf8'));
+  const decisionFile = join(root, 'answers.json');
+  writeFileSync(decisionFile, JSON.stringify({ schemaVersion: 1, runId: checkpoint.runId, artifactDigest: checkpoint.artifactDigest,
+    answers: [{ id: checkpoint.pending.questions[0].id, answer: 'approve' }] }));
+  const result = await resume.resumeRun({ runDirectory: out, decisionFile, adapters: planningAdapters, queueDependencies: dependencies });
+  assert.equal(result.queueResult.landedCount, 1, result.queueResult.stop?.reason);
+  assert.equal(implementations, 1);
+  assert.equal(drafts, 3);
+  assert.equal(readFileSync(join(target, 'source.js'), 'utf8'), 'changed\n');
+  await resume.resumeRun({ runDirectory: out, decisionFile, adapters: planningAdapters, queueDependencies: dependencies });
+  assert.equal(implementations, 1);
+  writeFileSync(join(out, 'unrelated.js'), 'must not be allowed');
+  await assert.rejects(assertCleanTarget(target, { allowedPaths: [join(out, 'plan.md'), join(out, 'gate.json'), join(out, 'uro-checkpoint.json')] }), /unrelated.js/);
+});
+
+test('answer files inside hashed source get a placement diagnostic before model work', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'uro-answer-placement-')), target = join(root, 'target'), out = join(root, 'plan');
+  mkdirSync(target);
+  let calls = 0;
+  const adapters = { author: async () => { calls++; return { plan: 'A plan.', gate: [], agree: false, readable: true }; },
+    reviewer: async r => { calls++; return { agree: false, readable: true, artifactDigest: r.artifactDigest, suggestions: [{ id: 'S1', text: 'Dispute.' }] }; } };
+  const pending = await runPlan(withVerifiedSuperpowers({ goal: 'A goal.', target, out, candidates: 1, adapters }));
+  const before = calls, inside = join(target, 'answers.json'), outside = join(root, 'answers.json');
+  writeFileSync(inside, JSON.stringify({ schemaVersion: 1, runId: pending.runId, artifactDigest: pending.checkpoint.artifactDigest,
+    answers: [{ id: pending.pendingDecision.id, answer: 'approve' }] }));
+  await assert.rejects(resume.resumeRun({ runDirectory: out, decisionFile: inside, adapters }), /answer.*outside.*target|decision file.*outside.*target/i);
+  assert.equal(calls, before);
+  fs.renameSync(inside, outside);
+  assert.equal((await resume.resumeRun({ runDirectory: out, decisionFile: outside, adapters })).approved, true);
+});
+
+for (const choice of ['stop', 'correction', 'fresh plan', 'further planning dispute', 'unchanged fresh plan', 'arbitrary prose']) test(`saved actual execution pivot honors ${choice} without replaying completed work`, async () => {
+  const root = mkdtempSync(join(process.platform === 'win32' ? 'C:/ccc-test' : tmpdir(), 'uro-manual-pivot-'));
+  const target = join(root, 'target'); mkdirSync(target);
+  writeFileSync(join(target, 'source.js'), 'original\n');
+  let implementations = 0, reviews = 0, initialDrafts = 0, authors = 0, planningReviews = 0, resumed = false, isolates = 0;
+  const deliveredPlans = [], planningRequests = [];
+  const proof = { path: 'tests/f1.test.js', content: 'throw Error("retained proof");\n' };
+  const adapters = { isolate: async options => { isolates++; return isolate(options); }, detectCircling: () => true,
+    runExecutor: async options => {
+      implementations++; deliveredPlans.push(options.plan);
+      if (implementations > 1) assert.equal(readFileSync(join(options.cwd, 'source.js'), 'utf8'), 'saved implementation\n');
+      writeFileSync(join(options.cwd, 'source.js'), 'saved implementation\n');
+      return { exitCode: 0, changedFiles: ['source.js'], lastMessage: 'Implemented the requested strategy.' };
+    }, runGate: async ({ onEvidence }) => { onEvidence?.({ bin: 'node', args: ['test.js'], code: 1, stdout: 'Retained full evidence.' }); return { results: [] }; },
+    runReview: async options => {
+      reviews++;
+      const bundle = { version: 1, report: resumed ? 'No remaining blockers.'
+        : '## F1\nSeverity: blocking\nDescription: Strategy misses a case.\nTest: __uro_review/tests/f1.test.js\n', tests: [proof],
+        dispositions: resumed ? [{ id: 'F1', status: 'resolved', reason: 'Correction meets the requirement.' }] : [] };
+      return { artifact: await materializeReviewBundle({ ...options, bundle }), answer: JSON.stringify(bundle) };
+    },
+    draftPlanCandidate: async request => {
+      authors++; if (request.candidateIndex) initialDrafts++;
+      planningRequests.push(request);
+      return { plan: choice === 'unchanged fresh plan' ? 'Implement the original strategy.' : 'Use a replacement strategy over the saved implementation.\n',
+        gate: [], readable: true, usage: { inputTokens: 1, outputTokens: 1 },
+        agree: choice !== 'further planning dispute', content: 'A replacement strategy over retained work.' };
+    }, reviewPlanCandidate: async request => {
+      planningReviews++; planningRequests.push(request);
+      return { readable: true, agree: choice !== 'further planning dispute', artifactDigest: request.artifactDigest,
+        usage: { inputTokens: 1, outputTokens: 1 },
+        suggestions: choice === 'further planning dispute' ? [{ id: 'P1', text: 'Retain the existing strategy instead.' }] : [], content: 'Current strategy review.' };
+    }, createFreshPivotBranch: () => assert.fail('manual fresh plan must not reset or delete saved work'),
+  };
+  const pending = await run(withVerifiedSuperpowers({ task: 'Implement the original strategy.', target, gate: [],
+    scratchRoot: join(root, 'scratch'), runId: 'manual-pivot', debateRounds: 8, pivotCandidates: 1, adapters }));
+  assert.equal(pending.checkpointState.stage, 'execution-pivot');
+  const checkpoint = JSON.parse(readFileSync(join(pending.dir, 'uro-checkpoint.json'), 'utf8'));
+  const decisionFile = join(root, 'answers.json');
+  const answer = ['further planning dispute', 'unchanged fresh plan'].includes(choice) ? 'fresh plan'
+    : choice === 'arbitrary prose' ? 'Please consider a fresh plan later; correct this implementation now.' : choice;
+  writeFileSync(decisionFile, JSON.stringify({ schemaVersion: 1, runId: pending.runId, artifactDigest: checkpoint.artifactDigest,
+    answers: [{ id: 'pivot', answer }] }));
+  const beforeDiff = readFileSync(join(pending.dir, 'CHANGES.diff'), 'utf8');
+  resumed = true;
+  let done = await resume.resumeRun({ runDirectory: pending.dir, decisionFile, adapters });
+  if (choice === 'further planning dispute') {
+    assert.equal(done.reason, 'needs-decision');
+    assert.equal(implementations, 1);
+    assert.equal(done.checkpointState.phase, 'planning');
+    assert.equal(readFileSync(join(pending.dir, 'CHANGES.diff'), 'utf8'), beforeDiff);
+    const next = JSON.parse(readFileSync(join(pending.dir, 'uro-checkpoint.json'), 'utf8'));
+    const nextAnswers = join(root, 'plan-answers.json');
+    writeFileSync(nextAnswers, JSON.stringify({ schemaVersion: 1, runId: pending.runId, artifactDigest: next.artifactDigest,
+      answers: [{ id: next.pending.questions[0].id, answer: 'approve: Use the replacement strategy.' }] }));
+    done = await resume.resumeRun({ runDirectory: pending.dir, decisionFile: nextAnswers, adapters });
+    const count = implementations + authors + planningReviews + reviews;
+    await resume.resumeRun({ runDirectory: pending.dir, decisionFile: nextAnswers, adapters });
+    assert.equal(implementations + authors + planningReviews + reviews, count);
+  }
+  assert.equal(isolates, 1);
+  const stopped = ['stop', 'unchanged fresh plan'].includes(choice);
+  assert.equal(implementations, stopped ? 1 : 2);
+  assert.equal(reviews, stopped ? 1 : 2);
+  assert.equal(readFileSync(join(pending.dir, '__uro_review', 'tests', 'f1.test.js'), 'utf8'), proof.content);
+  if (stopped) { assert.equal(done.reason, choice === 'stop' ? 'human-stopped' : 'fresh-plan-unchanged'); assert.equal(done.approved, false); }
+  else assert.equal(done.outcome, 'review-ready');
+  if (answer === 'fresh plan') {
+    assert.equal(initialDrafts, 1);
+    if (!stopped) assert.match(deliveredPlans.at(-1), /replacement strategy/);
+    assert.equal(done.tokens.planning?.inputTokens, authors + planningReviews, 'retain all fresh-planning usage even when unchanged plans stop');
+    assert.ok(planningRequests.every(request => JSON.stringify(request.messages).includes('fresh plan')));
+  } else assert.equal(authors, 0);
+  const total = implementations + reviews + authors + planningReviews;
+  await resume.resumeRun({ runDirectory: pending.dir, decisionFile, adapters });
+  assert.equal(implementations + reviews + authors + planningReviews, total);
 });
