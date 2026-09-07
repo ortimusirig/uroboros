@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { run } from '../src/run.js';
 import { EMPTY_USAGE } from '../src/usage.js';
+import { verifyCodexSuperpowers } from '../src/superpowers.js';
 
 const VERIFIED = Object.freeze({
   ok: true,
@@ -119,6 +120,25 @@ test('run refuses an unverified seat before isolation or executor dispatch', asy
   }), /Claude.*[.]claude-plugin/i);
   assert.equal(isolateCalls, 0);
   assert.equal(executorCalls, 0);
+});
+
+test('run accepts the verified remote registry without bypassing the Superpowers requirement', async () => {
+  const codex = await verifyCodexSuperpowers({
+    spawn: async () => ({
+      code: 0, timedOut: false,
+      stdout: 'superpowers@openai-curated-remote  installed, enabled  6.3.0  C:/plugins/superpowers\n',
+      stderr: '',
+    }),
+  });
+  const { facts, executorCalls } = await runWithVerification({
+    ok: codex.verified,
+    seats: { codex, claude: VERIFIED.seats.claude },
+  }, { env: { URO_REQUIRE_SUPERPOWERS: '1' } });
+
+  assert.equal(executorCalls.length, 1);
+  assert.equal(facts.superpowers.bypassed, false);
+  assert.equal(facts.superpowers.seats.codex.verified, true);
+  assert.match(facts.superpowers.seats.codex.evidence, /superpowers@openai-curated-remote/);
 });
 
 test('URO_REQUIRE_SUPERPOWERS=0 permits a run and discloses the bypass in facts and report', async () => {

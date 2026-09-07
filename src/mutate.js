@@ -5,6 +5,7 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   rmSync,
   symlinkSync,
   unlinkSync,
@@ -14,6 +15,7 @@ import { tmpdir } from 'node:os';
 import {
   dirname,
   extname,
+  isAbsolute,
   join,
   relative,
   resolve,
@@ -614,7 +616,13 @@ export async function discoverMutationPlan({
     throw new TypeError('base must be a non-empty Git ref and may not start with a dash');
   }
   const root = await repositoryRoot(target, { signal, runCommand });
-  const scoped = posixPath(relative(root, resolve(target))) || '.';
+  // Native realpath expands Windows 8.3 names as well as junctions/symlinks;
+  // plain realpathSync can retain short names that differ from Git's root.
+  const targetFromRoot = relative(realpathSync.native(root), realpathSync.native(resolve(target)));
+  if (targetFromRoot === '..' || targetFromRoot.startsWith(`..${sep}`) || isAbsolute(targetFromRoot)) {
+    throw new Error(`target is outside repository: ${target}`);
+  }
+  const scoped = posixPath(targetFromRoot) || '.';
   const tracked = await git(root, [
     'diff', '--no-ext-diff', '--no-color', '--unified=3', base, '--', scoped,
   ], { signal, runCommand });

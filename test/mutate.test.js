@@ -6,16 +6,20 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
+  symlinkSync,
+  unlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import {
   applyStatementDeletion,
   createMutationJudge,
+  discoverMutationPlan,
   filterMutableAddedLines,
   formatMutationSummary,
   groupMutationStatements,
@@ -956,11 +960,110 @@ test('loop mutate prints the human summary, not only the JSON result', () => {
 
     // formatMutationSummary was unreachable dead code until it was wired here;
     // asserting through the CLI is what keeps it reachable.
+    assert.equal(result.status, 0, result.stderr);
     assert.match(result.stderr, /Mutation dry run: \d+ unit\(s\); no commands executed\./);
     assert.match(result.stdout, /"status": "dry-run"/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+async function withMutationRepository(callback) {
+  const directory = realpathSync.native(mkdtempSync(join(tmpdir(), 'uro-mutate-path-')));
+  const root = join(directory, 'canonical-repository');
+  const alias = join(directory, 'alias-repository');
+  const git = (...args) => execFileSync('git', ['-C', root, ...args], { stdio: 'pipe' });
+  try {
+    mkdirSync(root);
+    git('init', '-q');
+    git('config', 'core.autocrlf', 'false');
+    for (const folder of ['src', 'other', '..data']) {
+      mkdirSync(join(root, folder));
+      writeFileSync(join(root, folder, 'work.js'), 'export function work() {\n  return 1;\n}\n');
+    }
+    git('add', '-A');
+    git('-c', 'user.email=test@example.com', '-c', 'user.name=uro test', 'commit', '-qm', 'base');
+    for (const folder of ['src', 'other', '..data']) {
+      writeFileSync(join(root, folder, 'work.js'),
+        'export function work() {\n  recordFact();\n  return 1;\n}\n');
+      writeFileSync(join(root, folder, 'new.js'), 'export function added() {\n  return 2;\n}\n');
+    }
+    await callback({ root, alias, directory });
+  } finally {
+    // Remove the known link itself before deleting this owned fixture directory.
+    if (existsSync(alias)) unlinkSync(alias);
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+test('mutation discovery accepts an aliased repository root', async () => {
+  await withMutationRepository(async ({ root, alias }) => {
+    symlinkSync(root, alias, process.platform === 'win32' ? 'junction' : 'dir');
+    const plan = await discoverMutationPlan({ target: alias });
+    assert.equal(plan.scopedPath, '.');
+    assert.equal(plan.target, alias, 'reported target retains the caller\'s spelling');
+    assert.deepEqual(plan.changedFiles.toSorted(), [
+      '..data/new.js', '..data/work.js', 'other/new.js', 'other/work.js', 'src/new.js', 'src/work.js',
+    ]);
+  });
+});
+
+test('mutation discovery confines aliased subdirectories to their tracked and untracked changes', async () => {
+  await withMutationRepository(async ({ root, alias }) => {
+    symlinkSync(root, alias, process.platform === 'win32' ? 'junction' : 'dir');
+    const plan = await discoverMutationPlan({ target: join(alias, 'src') });
+    assert.equal(plan.scopedPath, 'src');
+    assert.deepEqual(plan.changedFiles.toSorted(), ['src/new.js', 'src/work.js']);
+    assert.doesNotMatch(plan.diff, /(?:other|\.\.data)\//);
+  });
+});
+
+test('mutation discovery accepts real Windows short paths without widening a subtree', {
+  skip: process.platform !== 'win32',
+}, async (t) => {
+  await withMutationRepository(async ({ root }) => {
+    const short = execFileSync('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command',
+      '$taskFso = New-Object -ComObject Scripting.FileSystemObject; $taskFso.GetFolder($env:URO_TEST_ALIAS_TARGET).ShortPath',
+    ], { encoding: 'utf8', env: { ...process.env, URO_TEST_ALIAS_TARGET: root } }).trim();
+    if (resolve(short).toLowerCase() === root.toLowerCase()) {
+      t.skip('this volume does not expose a distinct Windows 8.3 path');
+      return;
+    }
+    assert.equal(realpathSync.native(short).toLowerCase(), root.toLowerCase());
+    const whole = await discoverMutationPlan({ target: short });
+    assert.equal(whole.scopedPath, '.');
+    assert.equal(whole.changedFiles.length, 6);
+    assert.equal(whole.target, resolve(short));
+    const subtree = await discoverMutationPlan({ target: join(short, 'src') });
+    assert.deepEqual(subtree.changedFiles.toSorted(), ['src/new.js', 'src/work.js']);
+    assert.doesNotMatch(subtree.diff, /(?:other|\.\.data)\//);
+  });
+});
+
+test('mutation discovery rejects a target outside the discovered root before reading changes', async () => {
+  await withMutationRepository(async ({ root, directory }) => {
+    const unrelatedRoot = join(directory, 'unrelated-repository');
+    mkdirSync(unrelatedRoot);
+    const commands = [];
+    await assert.rejects(discoverMutationPlan({
+      target: join(root, 'src'),
+      runCommand: async (bin, args) => {
+        assert.equal(bin, 'git');
+        commands.push(args[2]);
+        if (args[2] !== 'rev-parse') throw new Error('Git change discovery reached an unrelated root');
+        return { code: 0, stdout: `${unrelatedRoot}\n`, stderr: '' };
+      },
+    }), /target is outside repository/);
+    assert.deepEqual(commands, ['rev-parse']);
+  });
+});
+
+test('mutation discovery permits a legitimate directory beginning with two dots', async () => {
+  await withMutationRepository(async ({ root }) => {
+    const plan = await discoverMutationPlan({ target: join(root, '..data') });
+    assert.equal(plan.scopedPath, '..data');
+    assert.deepEqual(plan.changedFiles.toSorted(), ['..data/new.js', '..data/work.js']);
+  });
 });
 
 test('a golden fixture under test/ is not selected as a runnable test', () => {

@@ -205,19 +205,22 @@ export function verifyDirectorySuperpowers({ seat, env, home }) {
 }
 
 export function parseCodexSuperpowersList(output) {
-  const line = String(output).split(/\r?\n/)
-    .find((candidate) => /^\s*superpowers@openai-curated(?:\s{2,}|\s*$)/i.test(candidate));
-  if (!line) return { found: false, status: null, version: null, line: null };
-  const columns = line.trim().split(/\s{2,}/);
-  const status = columns[1] ?? '';
-  const verified = /^installed,\s*enabled$/i.test(status);
-  return {
-    found: true,
-    verified,
-    status,
-    version: verified && columns[2] ? columns[2] : null,
-    line: line.trim(),
-  };
+  const registrations = String(output).split(/\r?\n/)
+    .filter((candidate) => /^\s*superpowers@openai-curated(?:-remote)?(?:\s{2,}|\s*$)/i.test(candidate))
+    .map((line) => {
+      const columns = line.trim().split(/\s{2,}/);
+      const status = columns[1] ?? '';
+      const verified = /^installed,\s*enabled$/i.test(status);
+      return {
+        found: true,
+        verified,
+        status,
+        version: verified && columns[2] ? columns[2] : null,
+        line: line.trim(),
+      };
+    });
+  return registrations.find((entry) => entry.verified) ?? registrations[0]
+    ?? { found: false, status: null, version: null, line: null };
 }
 
 export async function verifyCodexSuperpowers({
