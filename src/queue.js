@@ -334,7 +334,8 @@ export function queueContinuationPaths(context) {
   const paths = [context.queue.logPath];
   for (const unit of context.queue.units.filter(unit => unit.kind === 'goal')) {
     const result = context.journal?.units?.[unit.index]?.planResult
-      ?? (unit.index === context.unitIndex ? (context.phase === 'planning' ? context.phaseResult : context.planResult) : null);
+      ?? (unit.index === context.unitIndex ? (context.phase === 'planning' ? context.phaseResult : context.planResult) : null)
+      ?? context.approvedPlans?.[unit.index];
     if (!result?.approved) continue;
     assertCurrentPlanApproval({ unit, result, mode: context.options?.mode ?? 'manual' });
     paths.push(join(unit.out, 'plan.md'), join(unit.out, 'gate.json'));
@@ -394,8 +395,11 @@ async function executeQueue({
   const appendLog = dependencies.appendLog ?? appendQueueLog;
   const now = dependencies.now ?? (() => Date.now());
 
-  const allowedQueuePaths = continuation ? queueContinuationPaths(continuation) : [queue.logPath];
+  let allowedQueuePaths = continuation ? queueContinuationPaths(continuation) : [queue.logPath];
   await assertCleanTarget(target, { allowedPaths: allowedQueuePaths });
+  // Preserve only validated output provenance, not arbitrary existing files or
+  // whole output directories. Earlier goals must survive a later suspension.
+  const approvedPlans = { ...continuation?.approvedPlans };
 
   let attemptedCount = continuation?.attemptedCount ?? 0;
   let landedCount = continuation?.landedCount ?? 0;
@@ -412,6 +416,10 @@ async function executeQueue({
     const unitJournal = journal ? (journal.units[unit.index] ??= {}) : {};
     const persist = () => continuation?.persistJournal(journal);
     if (unitJournal.logged) {
+      if (unitJournal.planResult?.approved) {
+        const { runId, planPath, gatePath, approval } = unitJournal.planResult;
+        approvedPlans[unit.index] = { approved: true, runId, planPath, gatePath, approval };
+      }
       ({ attemptedCount, landedCount, totalTokens } = unitJournal.afterUnit);
       continue;
     }
@@ -419,7 +427,7 @@ async function executeQueue({
       if (!directory || !existsSync(join(directory, 'uro-checkpoint.json'))) return;
       const checkpoint = await attachQueueCheckpoint(directory, { version: 1, queue,
         fileDigest: checkpointDigest(readFileSync(queue.path, 'utf8')), unitIndex: unit.index, phase,
-        ...beforeUnit, planResult, options: { file, target: resolve(target), mode,
+        ...beforeUnit, planResult, approvedPlans, options: { file, target: resolve(target), mode,
           claudeModel, codexModel, codexEffort, maxRuns, tokenBudget, acceptGoalSpec } });
       if (stop) stop.checkpoint = { directory, artifactDigest: checkpoint.artifactDigest, questions: checkpoint.pending.questions };
     };
@@ -500,6 +508,8 @@ async function executeQueue({
           break;
         }
         assertCurrentPlanApproval({ unit, result: planResult, mode });
+        approvedPlans[unit.index] = { approved: true, runId: planResult.runId,
+          planPath: planResult.planPath, gatePath: planResult.gatePath, approval: planResult.approval };
         implementationUnit = {
           ...unit,
           approval: planResult.approval,
@@ -611,6 +621,7 @@ async function executeQueue({
         try {
           if (unit.kind === 'goal') assertCurrentPlanApproval({ unit, result: planResult, mode });
           assertCurrentExecutionApproval(facts, launch.runDirectory);
+          allowedQueuePaths = queueContinuationPaths({ queue, options: { mode }, approvedPlans, journal });
           if (journal) {
             unitJournal.operationId ??= checkpointDigest({ queue: continuation.fileDigest, unit: unit.index,
               runId: facts.runId, diff: facts.approval.artifactDigest });
