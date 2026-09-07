@@ -49,7 +49,7 @@ test('standalone candidate count authors distinct alternatives and reviews the C
    return {answer:artifact('Approach '+r.request.candidateId)};
   },
   review:async r=>{
-   if(r.plan.includes('SELECTED_CANDIDATE')) return {exitCode:0,lastMessage:'<SELECTED_CANDIDATE>candidate-3</SELECTED_CANDIDATE>'};
+   if(r.plan.includes('# STORM plan selection seat')) return {exitCode:0,lastMessage:'<SELECTED_CANDIDATE>candidate-3</SELECTED_CANDIDATE>'};
    assert.match(r.plan,/Approach candidate-3/);
    return {exitCode:0,lastMessage:'AGREE: yes\nARTIFACT_DIGEST: '+/ARTIFACT_DIGEST: ([a-f0-9]{64})/.exec(r.plan)?.[1]};
   },
@@ -112,7 +112,159 @@ test('a malformed candidate keeps its delivered artifact and usage for diagnosis
  });
  assert.equal(result.approved,false);
  assert.equal(result.candidates[0].response.answer,'Broken <PLAN_MD> with no gate');
- assert.equal(result.tokens.total.inputTokens,11);
+ assert.equal(result.candidates[0].attempts.length,6);
+ assert.equal(result.tokens.total.inputTokens,66);
+});
+
+
+test('production final-ruling parser rejects echoed, conflicting, and malformed decision fields', async t => {
+  const rulings = [
+    'DECISION: approve, DECISION: revise, or DECISION: stop',
+    'DECISION: approve\nDECISION: stop',
+    'DECISION: approve\nDECISION: approve',
+    'DECISION: approve if the revision works',
+    'DECISION: stop\nDECISION: approve',
+    'DECISION: approve\nDECISION : stop',
+  ];
+  for (const ruling of rulings) {
+    const options = setup(t);
+    let finalReply;
+    const result = await runPlan({ ...options, interactionMode: 'autonomous', adapters: adapters({
+      author: async () => ({ answer: artifact().replace('AGREE: yes', 'AGREE: no') }),
+      review: async r => {
+        const digest = /ARTIFACT_DIGEST: ([a-f0-9]{64})/.exec(r.plan)?.[1];
+        if (!r.plan.includes('Return DECISION:')) {
+          return { exitCode: 0, lastMessage: 'AGREE: no\nS1 P1: Continuing dispute\nARTIFACT_DIGEST: ' + digest };
+        }
+        finalReply = ruling + '\nREASON: This resolves the dispute.\nARTIFACT_DIGEST: ' + digest;
+        return { exitCode: 0, lastMessage: finalReply };
+      },
+    }) });
+    assert.equal(result.approved, false, ruling);
+    assert.equal(result.reason, 'decision-unreadable', ruling);
+    assert.equal(result.messages.at(-1).content, finalReply);
+    assert.equal(existsSync(join(options.out, 'plan.md')), false);
+  }
+});
+
+
+test('production selector retains the delivered selection and all failed-call usage before classification', async t => {
+  for (const outcome of ['valid', 'invalid', 'failed', 'timeout']) {
+    await t.test(outcome, async () => {
+    const options = { ...setup(t), candidates: 2 };
+    const selectionText = outcome === 'invalid'
+      ? 'Neither option addresses the invariant.\n<SELECTED_CANDIDATE>missing</SELECTED_CANDIDATE>'
+      : 'Choose the second approach because it preserves compatibility.\n<SELECTED_CANDIDATE>candidate-2</SELECTED_CANDIDATE>';
+    const stderr = 'Complete selector diagnostic: ' + outcome;
+    let reviews = 0;
+    const result = await runPlan({ ...options, adapters: adapters({
+      author: async r => ({ answer: artifact(r.request.candidateId), usage: { inputTokens: 10, outputTokens: 2 } }),
+      review: async r => {
+        if (r.plan.includes('# STORM plan selection seat')) return {
+          exitCode: outcome === 'failed' ? 1 : outcome === 'timeout' ? null : 0,
+          timedOut: outcome === 'timeout', lastMessage: selectionText, stderr,
+          usage: { inputTokens: 7, outputTokens: 1 },
+        };
+        reviews++;
+        return { exitCode: 0, lastMessage: 'AGREE: yes\nARTIFACT_DIGEST: '
+          + /ARTIFACT_DIGEST: ([a-f0-9]{64})/.exec(r.plan)?.[1] };
+      },
+    }) });
+    assert.equal(result.tokens.total.inputTokens, 27, outcome);
+    assert.equal(result.checkpointState.candidateState.selection.lastMessage, selectionText, outcome);
+    assert.equal(result.checkpointState.candidateState.selection.stderr, stderr, outcome);
+    assert.equal(result.approved, outcome === 'valid', outcome);
+    assert.equal(reviews, outcome === 'valid' ? 1 : 0, outcome);
+    if (outcome !== 'valid') assert.equal(existsSync(join(options.out, 'plan.md')), false);
+    });
+  }
+});
+
+
+test('default candidate drafts repair delivered malformed artifacts before selection without spending a round', async t => {
+  const options = { ...setup(t), candidates: undefined, rounds: 1 };
+  const attempts = new Map(), brokenReplies = [];
+  let authors = 0, reviews = 0;
+  const result = await runPlan({ ...options, adapters: adapters({
+    author: async r => {
+      authors++;
+      const id = r.request.candidateId, attempt = (attempts.get(id) ?? 0) + 1;
+      attempts.set(id, attempt);
+      const broken = '<PLAN_MD>' + id + ' missing gate</PLAN_MD>';
+      if (attempt === 1) {
+        brokenReplies.push(broken);
+        return { answer: broken, usage: { inputTokens: 10 } };
+      }
+      assert.match(r.prompt, /planner did not return PLAN_MD and GATE_JSON artifacts/);
+      assert.ok(r.prompt.includes(broken));
+      return { answer: artifact(id + ' repaired'), usage: { inputTokens: 10 } };
+    },
+    review: async r => {
+      reviews++;
+      if (r.plan.includes('# STORM plan selection seat')) return {
+        exitCode: 0, lastMessage: '<SELECTED_CANDIDATE>candidate-2</SELECTED_CANDIDATE>',
+        usage: { inputTokens: 7 },
+      };
+      assert.match(r.plan, /candidate-2 repaired/);
+      return { exitCode: 0, lastMessage: 'AGREE: yes\nARTIFACT_DIGEST: '
+        + /ARTIFACT_DIGEST: ([a-f0-9]{64})/.exec(r.plan)?.[1], usage: { inputTokens: 3 } };
+    },
+  }) });
+  assert.equal(result.approved, true);
+  assert.equal(result.rounds, 1);
+  assert.equal(authors, 6);
+  assert.equal(reviews, 2);
+  assert.equal(result.tokens.total.inputTokens, 70);
+  for (const reply of brokenReplies) assert.ok(result.messages.some(message => message.content === reply));
+  assert.equal(result.messages.filter(message => message.role === 'author').length, 6);
+  assert.equal(result.checkpointState.artifactRepairs, 3);
+});
+test('default perpetually malformed candidates exhaust one shared repair budget and retain delivered evidence', async t => {
+  const options = { ...setup(t), candidates: undefined };
+  let authors = 0, reviews = 0;
+  const result = await runPlan({ ...options, adapters: adapters({
+    author: async () => {
+      authors++;
+      return { answer: '<PLAN_MD>Missing evidence artifact</PLAN_MD>', usage: { inputTokens: 10 } };
+    },
+    review: async () => { reviews++; return { exitCode: 0, lastMessage: 'unused' }; },
+  }) });
+  assert.equal(result.reason, 'proposal-irreparable');
+  assert.equal(result.approved, false);
+  assert.equal(authors, 8, 'three initial candidates and at most five repair calls');
+  assert.equal(reviews, 0);
+  assert.equal(result.tokens.total.inputTokens, 80);
+  assert.equal(result.messages.length, 8);
+  assert.equal(result.checkpointState.artifactRepairs, 6);
+  assert.ok(result.messages.every(message => message.content === '<PLAN_MD>Missing evidence artifact</PLAN_MD>'));
+  assert.equal(existsSync(join(options.out, 'plan.md')), false);
+});
+test('candidate repairs and later proposal repairs consume the same five-repair allowance', async t => {
+  const options = { ...setup(t), candidates: undefined };
+  let candidateOneCalls = 0, authorCalls = 0, reviews = 0;
+  const result = await runPlan({ ...options, adapters: adapters({
+    author: async r => {
+      authorCalls++;
+      if (r.request.previousProposal) return { answer: '<PLAN_MD>Malformed revision</PLAN_MD>' };
+      if (r.request.candidateId === 'candidate-1' && ++candidateOneCalls <= 4) {
+        return { answer: '<PLAN_MD>Malformed first alternative</PLAN_MD>' };
+      }
+      return { answer: artifact(r.request.candidateId) };
+    },
+    review: async r => {
+      if (r.plan.includes('# STORM plan selection seat')) return {
+        exitCode: 0, lastMessage: '<SELECTED_CANDIDATE>candidate-1</SELECTED_CANDIDATE>',
+      };
+      reviews++;
+      return { exitCode: 0, lastMessage: 'AGREE: no\nS1 P1: Revise it\nARTIFACT_DIGEST: '
+        + /ARTIFACT_DIGEST: ([a-f0-9]{64})/.exec(r.plan)?.[1] };
+    },
+  }) });
+  assert.equal(result.approved, false);
+  assert.equal(result.reason, 'proposal-irreparable');
+  assert.equal(result.checkpointState.artifactRepairs, 6);
+  assert.equal(authorCalls, 9);
+  assert.equal(reviews, 1);
 });
 
 const superpowers = { seats: { codex: { verified:true }, claude: { verified:true } } };

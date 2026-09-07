@@ -196,16 +196,17 @@ function unavailable(response) {
  */
 export async function runConversation({
   runId, reporter, rounds, tier, requirements = '', interactionMode = 'manual',
-  seats = {}, strategy = {},
+  seats = {}, strategy = {}, prelude = {},
 } = {}) {
   const authority = decisionAuthority({ interactionMode, phase: 'planning' });
   if (rounds !== undefined && (!Number.isSafeInteger(rounds) || rounds < 1)) {
     throw new TypeError('rounds must be a positive integer');
   }
-  const messages = [], roundHistory = [];
-  let usageTotal = EMPTY_USAGE;
+  const messages = [...(prelude.messages ?? [])], roundHistory = [...(prelude.roundHistory ?? [])];
+  let usageTotal = addUsage(EMPTY_USAGE, prelude.usage);
   let proposal = null, artifactDigest = null, approval = null, pendingDecision = null;
-  let openIssues = [], feedback = '', artifactRepairs = 0, revisionDigest = null;
+  let openIssues = [], feedback = '', artifactRepairs = prelude.artifactRepairs ?? 0, revisionDigest = null;
+  let initialAuthor = prelude.author;
   let round = 0;
   const author = seats.author ?? seats.arbitrate;
   const reviewer = seats.reviewCodex;
@@ -291,7 +292,13 @@ export async function runConversation({
       requirements, artifactDigest, interactionMode, phase: 'planning',
       reconciliation: round > 1,
     };
-    const authored = await call(author, authorRequest, 'claude', 'author');
+    // Candidate drafting already delivered and recorded the selected response.
+    // Reuse that receipt once rather than invent another call or charge its usage twice.
+    const reusedAuthor = initialAuthor !== undefined;
+    const authored = reusedAuthor
+      ? { ...initialAuthor, parsed: stance(initialAuthor.response) }
+      : await call(author, authorRequest, 'claude', 'author');
+    initialAuthor = undefined;
     if (unavailable(authored.response)) return finish('author-unavailable');
     let nextProposal;
     try { nextProposal = strategy.parseProposal(authored.response); }
@@ -305,7 +312,7 @@ export async function runConversation({
     proposal = nextProposal;
     artifactDigest = planningArtifactDigest(requirements, proposal);
     authored.message.artifactDigest = artifactDigest;
-    reportEvent(reporter, runId, 'plan', 'proposal', { tier, ...authored.message });
+    if (!reusedAuthor) reportEvent(reporter, runId, 'plan', 'proposal', { tier, ...authored.message });
     approval = null;
     if (revisionDigest === artifactDigest) {
       feedback = 'The reviewer required a revision, but the artifact bytes did not change. Implement the recorded revision.';

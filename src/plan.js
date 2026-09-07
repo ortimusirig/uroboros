@@ -4,7 +4,8 @@ import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { buildArbiterPrompt, DEFAULT_ARBITER_MODEL, runArbiter } from './arbiter.js';
 import { CONVERSATION_DNA, conversationText, parseSeatReview, RepairableArtifactError,
-  runConversation, seatLaunchFailure, stanceRepairLines } from './conversation.js';
+  runConversation, seatLaunchFailure, stanceRepairLines, MAX_ARTIFACT_REPAIRS,
+  planningArtifactDigest } from './conversation.js';
 import { decisionAuthority } from './decision-policy.js';
 import { reportEvent } from './events.js';
 import { addUsage, EMPTY_USAGE } from './usage.js';
@@ -280,9 +281,13 @@ export function planningReviewPrompt(prompt, request) {
 
 function parsePlanningReview(result) {
   const source = String(result.lastMessage ?? '');
+  const decisions = [...source.matchAll(/^[ \t]*DECISION[ \t]*:[ \t]*([^\r\n]*)/gim)]
+    .map(match => match[1].trim().toLowerCase());
+  const decision = decisions.length === 1 && ['approve', 'revise', 'stop'].includes(decisions[0])
+    ? decisions[0] : undefined;
   return { ...parseSeatReview(source), usage: result.usage,
     artifactDigest: /(?:^|\n)\s*ARTIFACT_DIGEST:\s*([a-f0-9]{64})\b/i.exec(source)?.[1]?.toLowerCase(),
-    decision: /(?:^|\n)\s*DECISION:\s*(approve|revise|stop)\b/i.exec(source)?.[1]?.toLowerCase(),
+    decision,
     reason: /(?:^|\n)\s*REASON:\s*([^\n]+)/i.exec(source)?.[1] ?? '',
     addressedIssueIds: /(?:^|\n)\s*ADDRESSED:\s*([^\n]+)/i.exec(source)?.[1]?.split(',').map(id => id.trim()) ?? [],
   };
@@ -337,9 +342,9 @@ async function productionDraft(request) {
     runId: request.runId, env: request.env,
   });
   if (result?.verdict === 'UNVERIFIED' || result?.launchFailed || result?.timedOut) {
-    throw new Error(seatLaunchFailure('claude author', result));
+    return { ...result, unavailable: true, error: seatLaunchFailure('claude author', result) };
   }
-  return { ...parsePlanProposal(result), ...parseSeatReview(result.answer), usage: result.usage };
+  return result;
 }
 
 function selectionPrompt({ candidates, ledger, failedPlan }) {
@@ -382,8 +387,10 @@ async function productionSelect(request, execute = runExecutor) {
     effort: request.codexEffort, sandbox: 'read-only', timeoutMs: request.executorTimeout,
     runId: request.runId, env: request.env,
   });
-  if (result.exitCode !== 0 || result.timedOut) throw new Error(seatLaunchFailure('codex selector', result));
-  return { selectedCandidateId: selectedCandidateId(result.lastMessage), usage: result.usage };
+  if (result.exitCode !== 0 || result.timedOut || result.launchFailed) {
+    return { ...result, unavailable: true, error: seatLaunchFailure('codex selector', result) };
+  }
+  return { ...result, selectedCandidateId: selectedCandidateId(result.lastMessage) };
 }
 
 export async function runPlanCandidateSet({
@@ -405,34 +412,90 @@ export async function runPlanCandidateSet({
   const perspectives = mode === 'fresh' ? FRESH_PERSPECTIVES : INITIAL_PERSPECTIVES;
   const common = { goal, target, round, mode, interactionMode, ledger, failedPlan,
     claudeModel, codexModel, codexEffort, timeoutMs, executorTimeout, runId, env };
-  const candidates = await Promise.all(Array.from({ length: count }, async (_, index) => {
-    const definition = { id: `candidate-${index + 1}`, perspective: perspectives[index], author: 'claude' };
-    const input = draftingPrompt({ goal, round, previousPlan, feedback, pivot, ...definition,
-      candidateId: definition.id, candidateCount: count, ledger, failedPlan });
+  const messages = [], roundHistory = [];
+  let draftingUsage = EMPTY_USAGE, artifactRepairs = 0;
+  const messageFor = (response, speaker, role, extra = {}) => {
+    const content = typeof response === 'string' ? response
+      : response?.content ?? response?.answer ?? response?.lastMessage ?? '';
+    const parsed = { ...parseSeatReview(content), ...(typeof response === 'object' ? response : {}) };
+    const message = {
+      speaker, role, phase: 'planning', round, turn: messages.length + 1,
+      artifactDigest: null,
+      stance: response?.unavailable || response?.launchFailed || response?.timedOut
+        ? 'unavailable' : parsed.readable ? (parsed.agree ? 'agree' : 'disagree') : 'stance-unreadable',
+      content,
+      transport: Object.fromEntries(['stderr', 'stdout', 'exitCode', 'launchFailed', 'timedOut', 'usage']
+        .filter(key => response?.[key] !== undefined).map(key => [key, response[key]])),
+      ...(response?.error ? { error: response.error } : {}),
+      ...extra,
+    };
+    messages.push(message);
+    return message;
+  };
+  const attemptDraft = async (candidate, repairFeedback = '') => {
+    const input = draftingPrompt({ goal, round, previousPlan, feedback: repairFeedback || feedback, pivot,
+      candidateId: candidate.id, candidateCount: count, perspective: candidate.perspective, ledger, failedPlan });
     let response;
     try {
-      response = await draftCandidate({ ...common, input, candidateId: definition.id,
-        candidateIndex: index + 1, candidateCount: count, perspective: definition.perspective });
-      const artifact = parsePlanProposal(response);
-      return { ...definition, ...artifact, response, input, gateResult: { passed: true, failures: [] } };
+      response = await draftCandidate({ ...common, input, candidateId: candidate.id,
+        candidateIndex: candidate.index + 1, candidateCount: count, perspective: candidate.perspective,
+        feedback: repairFeedback || feedback, messages: [...messages] });
     } catch (error) {
-      return { ...definition, input, response, gateResult: candidateFailure(error) };
+      response = { unavailable: true, error: error instanceof Error ? error.message : String(error) };
     }
+    draftingUsage = addUsage(draftingUsage, response?.usage);
+    const message = messageFor(response, 'claude', 'author', { candidateId: candidate.id });
+    const attempt = { response, message };
+    candidate.attempts.push(attempt);
+    Object.assign(candidate, { input, response, message });
+    try {
+      if (response?.unavailable || response?.launchFailed || response?.timedOut || response?.verdict === 'UNVERIFIED') {
+        throw new Error(response.error || seatLaunchFailure('claude author', response));
+      }
+      const artifact = parsePlanProposal(response);
+      message.artifactDigest = planningArtifactDigest(goal, artifact);
+      Object.assign(candidate, artifact, { gateResult: { passed: true, failures: [] }, repairable: false });
+    } catch (error) {
+      attempt.parseError = error.message;
+      candidate.repairable = error instanceof RepairableArtifactError;
+      candidate.gateResult = candidateFailure(error);
+      message.parseError = error.message;
+      if (!candidate.repairable) message.stance = 'unavailable';
+    }
+    reportEvent(reporter, runId, 'plan', 'proposal', { tier: 'plan', ...message });
+  };
+  // Every requested alternative receives its initial author call. Repairs then
+  // share the same budget as later proposal/writer repairs, rather than resetting
+  // an allowance per candidate or skipping malformed delivered artifacts.
+  const candidates = Array.from({ length: count }, (_, index) => ({
+    id: `candidate-${index + 1}`, index, perspective: perspectives[index], author: 'claude', attempts: [],
   }));
+  await Promise.all(candidates.map(candidate => attemptDraft(candidate)));
+  let irreparable = false;
+  for (const candidate of candidates) {
+    while (candidate.repairable) {
+      const parseError = candidate.attempts.at(-1).parseError;
+      roundHistory.push({ round, candidateId: candidate.id, repair: parseError });
+      if (++artifactRepairs > MAX_ARTIFACT_REPAIRS) { irreparable = true; break; }
+      await attemptDraft(candidate, [parseError, 'Previous delivered response:', candidate.message.content].join('\n'));
+    }
+    if (irreparable) break;
+  }
   const surviving = candidates.filter(candidate => candidate.gateResult.passed);
   let selected = surviving[0], selectionUsage, selection;
   const failure = reason => {
-    const usage = candidates.reduce((total, candidate) => addUsage(total, candidate.response?.usage),
-      selectionUsage ?? EMPTY_USAGE);
-    return { mode, interactionMode, candidates, surviving, selected: null,
+    const usage = addUsage(draftingUsage, selectionUsage);
+    return { mode, interactionMode, candidates, surviving, selected: null, messages, roundHistory,
       exhausted: surviving.length === 0, approved: false, converged: false, approval: null, reason,
       tokens: { total: usage }, checkpointState: {
         version: 1, phase: 'planning', tier: 'plan', runId, interactionMode,
         authority: decisionAuthority({ interactionMode, phase: 'planning' }), requirements: goal,
-        proposal: null, artifactDigest: null, approval: null, messages: [], openIssues: [], usage,
+        proposal: null, artifactDigest: null, approval: null, messages, roundHistory, openIssues: [], usage,
+        artifactRepairs, roundsLimit: rounds ?? null,
         candidateState: { mode, selectedCandidateId: null, candidates, selection },
       } };
   };
+  if (irreparable) return failure('proposal-irreparable');
   if (!surviving.length) return failure('author-unavailable');
   if (surviving.length > 1) {
     const choose = select ?? (draft ? null : productionSelect);
@@ -441,9 +504,14 @@ export async function runPlanCandidateSet({
     try {
       answer = await choose({ ...common, candidates: surviving,
         input: selectionPrompt({ candidates: surviving, ledger, failedPlan }) });
-    } catch { return failure('reviewer-unavailable'); }
+    } catch (error) {
+      answer = { unavailable: true, error: error instanceof Error ? error.message : String(error) };
+    }
     selectionUsage = answer?.usage;
     selection = answer;
+    const selectionMessage = messageFor(answer, 'codex', 'reviewer', { kind: 'candidate-selection' });
+    reportEvent(reporter, runId, 'plan', 'review', { tier: 'plan', ...selectionMessage });
+    if (answer?.unavailable || answer?.launchFailed || answer?.timedOut) return failure('reviewer-unavailable');
     selected = surviving.find(candidate => candidate.id === selectedCandidateId(answer));
     if (!selected) return failure('selection-unreadable');
   }
@@ -454,12 +522,12 @@ export async function runPlanCandidateSet({
     authorPrompt: request => draftingPrompt({ goal, round: request.round, feedback: request.feedback }),
     reviewPrompt: request => reviewSeatPrompt(request),
   });
-  let first = true;
   const result = await runConversation({
     runId, reporter, tier: 'plan', interactionMode, requirements: goal, rounds,
+    prelude: { messages, roundHistory, usage: addUsage(draftingUsage, selectionUsage), artifactRepairs,
+      author: { response: selected.response, message: selected.message } },
     seats: {
       author: async request => {
-        if (first) { first = false; return selected.response; }
         if (draft) return draft({ ...common, ...request,
           input: draftingPrompt({ goal, round: request.round, feedback: request.feedback,
             previousPlan: request.previousProposal }), candidateId: selected.id });
@@ -473,10 +541,6 @@ export async function runPlanCandidateSet({
       writeConverged: proposal => ({ selected: { ...selected, ...proposal } }),
     },
   });
-  const earlierUsage = candidates.filter(candidate => candidate.id !== selected.id)
-    .reduce((total, candidate) => addUsage(total, candidate.response?.usage), selectionUsage ?? EMPTY_USAGE);
-  result.tokens.total = addUsage(result.tokens.total, earlierUsage);
-  result.checkpointState.usage = { ...result.tokens.total };
   result.checkpointState.candidateState = { mode, selectedCandidateId: selected.id, candidates, selection };
   return { mode, interactionMode, candidates, surviving, selected: null, exhausted: false,
     ...result, ...(selectionUsage === undefined ? {} : { selectionUsage }) };
