@@ -146,6 +146,10 @@ Verification: claimId, evidenceIds, inspectionReceiptIds, result (supports|contr
 
 State schemaVersion:2 includes run/project/phase/mode/authority, snapshot and artifact identity, messages, issues/dispositions, approval, next action, proposalCycles/correctionCycles, explicit limits, resources, pendingDecision, technicalPause and operation identities. All open blocking issues need explicit authorized dispositions. New artifact/material context clears approval; audit growth does not.
 
+Optional envelope memoryProposals entries contain id, content, kind, claimIds, issueId and tags. The harness binds proposer/message/run/context provenance; validate referenced claims/issues and retain proposals in state. Model-supplied status cannot promote a proposal. Phase integration curates notebook records only after the relevant explicit disposition, retaining disputed/unsupported status rather than calling agreement a verified fact.
+
+Controller scope is explicit: createDialogueState also accepts scope:{sourceRoots,evidenceRoots}, supplied from validated project/artifact roots by the harness, never inferred from a seat's evidence locator. Persist and revalidate this scope on resume. An inspect request may name an authorized source before its digest is known; capture computes identity from actual bytes, then the seat assesses that evidence. Unknown narration is not an inspection receipt.
+
 ## Task 1: Shared snapshots, scoped evidence and project notebook
 
 **Files:** Create src/shared-context.js, src/context-evidence.js, src/project-memory.js, test/shared-context.test.js, test/context-evidence.test.js, test/project-memory.test.js. Modify src/artifacts.js only for __uro_context/ recursive retention/exclusion.
@@ -228,6 +232,8 @@ Import the real functions in each file; use literal requirement/evidence fixture
 
 Fake-provider dispatch scenarios: first clean review ends without extra call; ask-answer-verify keeps bytes/cycles; >3 valid exchanges and >2 challenges are not cut off; rounds=1 allows Q&A but refuses second proposal; reviewer progress/stop judgment retained; budget stops before even final decision; one format repair then unreadable. Track failed and repair launches, null usage and separate message/proposal counts.
 
+Exercise either seat proposing a notebook update, unknown claim/issue references rejected, and proposal provenance bound by the harness. Task2 stores validated attributed proposals only; Tasks3-4 perform notebook recall/promotion at real phase boundaries.
+
 - [ ] **Step 2: Run RED.**
 ~~~powershell
 node --test test/dialogue-journal.test.js test/dialogue.test.js test/dialogue-dispatch.test.js
@@ -259,7 +265,7 @@ git commit -m "feat: add durable evidence-led coworker dialogue"
 
 ## Task 3: Shared planning and decomposition conversations
 
-**Files:** Create src/planning-dialogue.js, test/planning-dialogue.test.js. Modify src/plan.js, src/decompose.js, src/conversation.js (compatibility/rendering only), src/args.js (affected defaults/validation), src/executor.js and src/arbiter.js (observed tool receipts), test/plan.test.js, test/decompose.test.js, test/candidate-campaign.test.js and affected transport/args tests.
+**Files:** Create src/planning-dialogue.js, test/planning-dialogue.test.js. Modify src/plan.js, src/decompose.js, src/conversation.js (compatibility/prompt consistency/rendering), src/args.js (affected defaults/validation), src/executor.js and src/arbiter.js (observed tool receipts), src/review-protection.js and src/isolation.js (context/dialogue sidecar protections/exclusions), test/plan.test.js, test/decompose.test.js, test/candidate-campaign.test.js and affected transport/args/protection/isolation tests.
 
 **Interfaces:** Consumes Tasks 1-2; produces runPlanningDialogue and existing runPlan/runPlanCandidateSet/decompose results plus sharedContext/dialogue/resources. Existing integer rounds, artifact validators/writer, output paths and legacy readers preserved.
 
@@ -288,9 +294,13 @@ const input = [rolePrompt,renderSharedContext({snapshot}),
 ~~~
 Build grounding from validated user goal/briefing, target identity, constitution, repoMap, failed/previous plans, ledger and pivot. Persist before draft/select/review. Material discoveries extend snapshot before review; author-only selector input is insufficient. Default candidate breadth becomes one; preserve explicit supported breadth. Record each alternative/selection operation and usage. Serialize journaled candidate calls unless safely independent operation accounting is established.
 
+Wire the Task1 notebook into these actual entry points, not only unit-test its storage API. Resolve verified project identity and the existing durable artifact-root convention; retrieve relevant deterministic text/tag matches, freeze the selected attributed records and selection manifest into the common snapshot, and never make required user constraints depend on search ranking. After explicit disposition, the harness alone writes validated proposed decisions/lessons with their evidence and status. Recalled material is historical, not automatically a current fact. Cover two work items sharing one notebook, separate-project isolation and visible optional-recall failure without losing current requirements. Keep these lifecycle helpers in the planned phase/context/notebook modules; add src/project-memory.js/test/project-memory.test.js to Task3 ownership only if shared helper extraction is needed.
+
 Author answer/rebut uses read-only seat without parsePlanProposal or writeArtifacts. Explicit propose/revise creates a new cycle. Only current plan/gate/context approval writes once through existing rollback-safe writer. Retain legacy runConversation/historical readers explicitly; do not infer legacy mode from invalid new response or injected adapters. Update stale test fixtures intentionally, not by weakening authority assertions. Transport parsers retain actual tool/source observations; narration is not a tool observation.
 
 Preserve explicit candidates and pivot-candidates 1..5. Split DEFAULT_PIVOT_CANDIDATES from the initial default: initial becomes one, existing omitted fresh-pivot breadth remains three. This avoids changing an unspecified default merely because the old code shared one constant.
+
+Reconcile the existing exactly-two-artifact-tags prompt with the extra dialogue envelope. New-mode standing instructions must not demand an extra reviewer-written test on every review. Preserve explicitly required checks. Keep context/journal sidecars out of Git changes without treating model edits to correctness-critical records as trustworthy; validate their integrity/identity before subsequent decisions.
 
 - [ ] **Step 4: GREEN focused and whole suite.**
 ~~~powershell
@@ -338,6 +348,8 @@ Update snapshot with actual diff and command evidence before Claude review. Reta
 
 Fresh planning retains parent issue, novelty evidence, original scope, completed work and consumed budgets; Claude revises, Codex approves, then Codex executes. Reuse amend/fresh/conclude and existing decision-resolver semantics. Legacy readers remain unchanged.
 
+Reuse Task3 notebook lifecycle for execution work items and execution-derived memory proposals: either seat may propose; the harness validates provenance/evidence/disposition before writing. Retain selected history in execution/replan snapshots. Do not leave notebook recall or promotion disconnected from the real run path.
+
 - [ ] **Step 4: GREEN focused and whole suite.**
 ~~~powershell
 node --test test/execution-dialogue.test.js test/run.test.js test/review-loop.test.js test/reviewer-gate.test.js test/fresh-pivot.test.js test/claude-review-transport.test.js test/review-protection.test.js test/verifier-evidence.test.js test/executor.test.js test/decision-resolver.test.js
@@ -355,6 +367,8 @@ git commit -m "feat: converse during execution and replan from retained evidence
 **Files:** Modify src/checkpoint.js, src/resume.js, src/queue.js, src/queue-runtime.js, src/queue-cli.js, src/campaign.js, src/args.js, bin/loop.js, src/artifacts.js and phase continuation seams from Tasks 3-4. Add test/dialogue-recovery.test.js; extend test/checkpoint.test.js, test/resume.test.js, test/queue-runtime.test.js, test/queue.test.js, test/queue-cli.test.js, test/campaign.test.js, test/artifact-retention.test.js and CLI/args tests.
 
 **Interfaces:** Consumes stored snapshot/state/journal receipts; produces checkpoint schemaVersion:2 and mutually exclusive technical resume --continue, preserving v1 reader/answer identities.
+
+Preserve the actual resumeRun({runDirectory,decisionFile,...}) signature and add technicalContinue:false; map public --continue to technicalContinue:true. Keep validated scope roots in the saved state and do not infer permission from resumed model references.
 
 - [ ] **Step 1: Write RED real-file resume and queue tests.**
 ~~~js
@@ -381,6 +395,8 @@ if (continueRequested && checkpoint.technicalPause?.kind === 'budget-exhausted')
 Keep v1 validation intact, then copy original envelope and create new v2 revision/digest. Never mutate old accepted answer identities or fabricate delivery/usage. V2 integrity covers continuation, questions, queue, budgets and operation receipts. Validate workspace/reference identity before effects. --continue is only for a saved technical pause with known-safe next effect, no human pending and unchanged mode/limits; uncertain external mutation/inference requires reconciliation, not automatic retry. Do not add budget-raising flag.
 
 Queue carries validated project/run/unit context refs via existing stdin/file input, not huge argv or outer MCP. Archive context/journal recursively before disposable cleanup. Required persistence errors stop; optional historical search can visibly fall back to complete current records. Reuse completed outcomes instead of inference/edits/landing/accounting twice.
+
+Retain notebook proposal/promotion operation identities so accepted recovery cannot append a duplicate lesson; the saved current snapshot and selection manifest remain authoritative if optional recall is unavailable on resume.
 
 - [ ] **Step 4: GREEN affected and full suite.**
 ~~~powershell
