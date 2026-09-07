@@ -1,8 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   rmSync,
   unlinkSync,
   writeFileSync,
@@ -169,6 +171,78 @@ test('false inspection receipts cannot verify a factual claim', () => {
   }
 });
 
+test('verification evidence must be nonempty and linked to the assessed claim', () => {
+  const { base, root, directory } = fixture();
+  try {
+    writeFileSync(join(root, 'src', 'other.js'), 'export const other = true;\n');
+    writeFileSync(join(root, 'src', 'independent.js'), 'export const independent = true;\n');
+    const claimed = captureEvidence({
+      projectId: 'p1', root, directory, evidence: codeEvidence(),
+    });
+    const unrelated = captureEvidence({
+      projectId: 'p1',
+      root,
+      directory,
+      evidence: codeEvidence({
+        id: 'code-2',
+        claimIds: ['other-claim'],
+        locator: { path: 'src/other.js', line: 1 },
+      }),
+    });
+    const independent = captureEvidence({
+      projectId: 'p1',
+      root,
+      directory,
+      evidence: codeEvidence({
+        id: 'code-3',
+        claimIds: ['claim-1'],
+        locator: { path: 'src/independent.js', line: 1 },
+      }),
+    });
+    const claim = {
+      id: 'claim-1', kind: 'fact', text: 'The feature is enabled', evidenceIds: ['code-1'],
+    };
+    const receiptFor = (item, operationId) => createInspectionReceipt({
+      operationId, seat: 'codex', evidence: [item], inspected: true, result: 'supports',
+    });
+    const check = (verification) => validateClaims({
+      claims: [claim],
+      evidence: [claimed, unrelated, independent],
+      projectId: 'p1',
+      roots: [root, directory],
+      verifications: [verification],
+      seat: 'codex',
+    });
+
+    const unrelatedResult = check({
+      claimId: 'claim-1',
+      evidenceIds: ['code-2'],
+      result: 'supports',
+      inspectionReceipts: [receiptFor(unrelated, 'op-unrelated')],
+    });
+    assert.equal(unrelatedResult.valid, false);
+    assert.match(unrelatedResult.errors.join('\n'), /does not identify claim|unrelated/i);
+
+    const emptyResult = check({
+      claimId: 'claim-1',
+      evidenceIds: [],
+      result: 'supports',
+      inspectionReceipts: [receiptFor(unrelated, 'op-empty')],
+    });
+    assert.equal(emptyResult.valid, false);
+    assert.match(emptyResult.errors.join('\n'), /nonempty|evidence/i);
+
+    assert.equal(check({
+      claimId: 'claim-1',
+      evidenceIds: ['code-3'],
+      result: 'supports',
+      inspectionReceipts: [receiptFor(independent, 'op-independent')],
+    }).valid, true, 'separately discovered evidence remains valid when it links to the claim');
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
 test('inference evidence without identified premises is rejected', () => {
   const { base, root, directory } = fixture();
   try {
@@ -208,6 +282,19 @@ test('capturing a required briefing redacts known secret values and reports inco
     assert.doesNotMatch(JSON.stringify(captured), /hunter2/);
     assert.equal(captured.contextIncomplete, true);
     assert.equal(supplied.text, 'Use password=hunter2 while preserving offline use');
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('code evidence containing a credential is refused before any durable copy is written', () => {
+  const { base, root, directory } = fixture();
+  try {
+    writeFileSync(join(root, 'src', 'feature.js'), 'export const password = "hunter2";\n');
+    assert.throws(() => captureEvidence({
+      projectId: 'p1', root, directory, evidence: codeEvidence(),
+    }), /credential|sensitive/i);
+    assert.equal(existsSync(directory) ? readdirSync(directory).length : 0, 0);
   } finally {
     rmSync(base, { recursive: true, force: true });
   }

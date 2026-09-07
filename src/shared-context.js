@@ -108,9 +108,15 @@ function buildSnapshot(input, inheritedReasons = []) {
   const sanitizedEvidence = redact(rawEvidence);
   const sanitizedRecalled = redact(rawRecalled);
   const requiredRedacted = rawEntries.some((entry, index) => entry.status === 'required'
-    && JSON.stringify(rawEntries[index]) !== JSON.stringify(sanitizedEntries.value[index]));
+    && JSON.stringify(entry) !== JSON.stringify(sanitizedEntries.value[index]))
+    || rawEvidence.some((item, index) => item.required === true
+      && JSON.stringify(item) !== JSON.stringify(sanitizedEvidence.value[index]))
+    || rawRecalled.some((item, index) => (item.required === true || item.status === 'required')
+      && JSON.stringify(item) !== JSON.stringify(sanitizedRecalled.value[index]));
+  const incompleteEvidence = rawEvidence.some((item) => item.contextIncomplete === true);
   const reasons = [...new Set([
     ...inheritedReasons,
+    ...(incompleteEvidence ? ['included required evidence is incomplete'] : []),
     ...(requiredRedacted ? ['required context contained redacted sensitive material'] : []),
   ])];
   const material = {

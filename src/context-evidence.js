@@ -172,16 +172,19 @@ export function captureEvidence({ projectId, root, directory, evidence }) {
     const commandCwd = nativePath(value.cwd);
     if (!segmentInside(canonicalRoot, commandCwd)) throw new Error('command cwd is outside the project scope');
   }
+  let bytes;
+  if (value.kind === 'code') {
+    bytes = readFileSync(scopedExistingFile(root, value.locator.path));
+    if (redactString(bytes.toString('utf8')).redacted) {
+      throw new Error('code evidence contains sensitive credential material and cannot be captured exactly');
+    }
+  } else {
+    bytes = Buffer.from(`${JSON.stringify(canonical(value), null, 2)}\n`, 'utf8');
+  }
   mkdirSync(directory, { recursive: true });
   const safeId = digest(value.id);
   const extension = value.kind === 'code' ? '.source' : '.json';
   const capturedPath = join(nativePath(directory), `${safeId}${extension}`);
-  let bytes;
-  if (value.kind === 'code') {
-    bytes = readFileSync(scopedExistingFile(root, value.locator.path));
-  } else {
-    bytes = Buffer.from(`${JSON.stringify(canonical(value), null, 2)}\n`, 'utf8');
-  }
   writeImmutable(capturedPath, bytes);
   const captured = {
     ...value,
@@ -292,6 +295,25 @@ export function validateClaims({ claims, evidence, projectId, roots, verificatio
       }
     }
     for (const verification of verifications.filter((item) => item?.claimId === claim.id)) {
+      const requestedIds = verification.evidenceIds ?? evidenceIds;
+      if (!Array.isArray(requestedIds) || requestedIds.length === 0) {
+        errors.push(`verification for claim ${claim.id} requires nonempty evidence`);
+        continue;
+      }
+      for (const evidenceId of requestedIds) {
+        const item = evidenceById.get(evidenceId);
+        if (!item) {
+          errors.push(`verification for claim ${claim.id} references missing evidence ${evidenceId}`);
+          continue;
+        }
+        const checked = validateEvidence({ evidence: item, projectId, roots });
+        if (!checked.valid) {
+          errors.push(`verification for claim ${claim.id} evidence ${evidenceId}: ${checked.reason}`);
+        }
+        if (!item.claimIds?.includes(claim.id)) {
+          errors.push(`verification evidence ${evidenceId} does not identify claim ${claim.id}`);
+        }
+      }
       const receiptList = verification.inspectionReceipts ?? verification.receipts ?? [];
       if (!Array.isArray(receiptList) || receiptList.length === 0) {
         errors.push(`verification for claim ${claim.id} has no available inspection receipt`);
@@ -305,7 +327,6 @@ export function validateClaims({ claims, evidence, projectId, roots, verificatio
         if (verification.result === 'supports' && receipt.result !== 'supports') {
           errors.push(`inspection receipt does not support claim ${claim.id}`);
         }
-        const requestedIds = verification.evidenceIds ?? evidenceIds;
         if (!requestedIds.every((id) => receipt.evidenceIds?.includes(id))) {
           errors.push(`inspection receipt omits evidence for claim ${claim.id}`);
         }

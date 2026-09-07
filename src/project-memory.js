@@ -103,6 +103,9 @@ function validateProject(project) {
 
 function validateEntry(entry) {
   if (!entry || typeof entry !== 'object' || Array.isArray(entry)) throw new TypeError('memory entry is required');
+  for (const field of ['schemaVersion', 'projectId']) {
+    if (Object.hasOwn(entry, field)) throw new TypeError(`memory entry ${field} is reserved`);
+  }
   for (const name of ['id', 'kind', 'content', 'sourceIdentity', 'status']) {
     requireString(entry[name], `memory entry ${name}`);
   }

@@ -111,6 +111,24 @@ test('the notebook refuses a caller-forged project identity before creating reco
   }
 });
 
+test('the notebook rejects caller ownership fields without poisoning later records', () => {
+  const { base, target, artifactRoot } = repository();
+  try {
+    const memory = openProjectMemory({ artifactRoot, project: resolveProjectIdentity({ target }) });
+    for (const [field, value] of [['schemaVersion', 999], ['projectId', 'other-project']]) {
+      assert.throws(() => memory.append({
+        entry: memoryEntry({ [field]: value }),
+      }), new RegExp(`reserved|${field}`, 'i'));
+    }
+    memory.append({ entry: memoryEntry() });
+    assert.deepEqual(memory.list().map(({ id, version }) => ({ id, version })), [
+      { id: 'decision-1', version: 1 },
+    ]);
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
 test('project listing and text/tag search are deterministic and preserve caller objects', () => {
   const { base, target, artifactRoot } = repository();
   try {

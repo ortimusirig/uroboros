@@ -104,6 +104,43 @@ test('required credential redaction is visible as incomplete context without mut
   assert.equal(entry.content, 'Use Authorization: Bearer secret-session-token');
 });
 
+test('every required material collection propagates incomplete context', () => {
+  const incompleteEvidence = snapshot({
+    evidence: [{
+      id: 'brief-evidence',
+      kind: 'requirement',
+      sourceIdentity: 'brief-2',
+      required: true,
+      contextIncomplete: true,
+    }],
+  });
+  assert.equal(incompleteEvidence.completeness.complete, false);
+  assert.match(incompleteEvidence.completeness.reasons.join('\n'), /evidence.*incomplete/i);
+
+  const redactedEvidence = snapshot({
+    evidence: [{
+      id: 'secret-evidence',
+      kind: 'requirement',
+      sourceIdentity: 'brief-3',
+      required: true,
+      text: 'Use password=hunter2',
+    }],
+  });
+  assert.equal(redactedEvidence.completeness.complete, false);
+  assert.doesNotMatch(JSON.stringify(redactedEvidence), /hunter2/);
+
+  const redactedRecall = snapshot({
+    recalled: [requirement({
+      id: 'recalled-required',
+      sourceIdentity: 'prior-1',
+      provenance: { source: 'prior-run', id: 'prior-1' },
+      content: 'Use Authorization: Bearer old-secret',
+    })],
+  });
+  assert.equal(redactedRecall.completeness.complete, false);
+  assert.doesNotMatch(JSON.stringify(redactedRecall), /old-secret/);
+});
+
 test('snapshot persistence refuses an overwrite even when the bytes are identical', () => {
   const directory = mkdtempSync(join(tmpdir(), 'uro-context-persist-'));
   try {
