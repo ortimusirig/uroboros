@@ -34,6 +34,12 @@ import {
 } from './stall-watchdog.js';
 import { archiveRunArtifacts, HARNESS_ARTIFACTS, resolveArtifactRoot } from './artifacts.js';
 import { saveCheckpoint } from './checkpoint.js';
+import { runExecutionDialogue } from './execution-dialogue.js';
+import { canApproveDialogue, parseDialogueEnvelope } from './dialogue.js';
+import { captureEvidence } from './context-evidence.js';
+import { contextDigest } from './shared-context.js';
+import { contextLifecycle } from './planning-dialogue.js';
+import { EXECUTION_REVIEW_PROMPT } from './verifier.js';
 import { createRunMarker, releaseRunMarker } from './prune.js';
 import { physicalRunIdFor } from './run-id.js';
 import {
@@ -424,6 +430,13 @@ export async function continueExecution({ checkpointState, humanRuling, adapters
 
 export async function run(opts) {
   const continuation = opts.continuation ?? null;
+  if (continuation && (continuation.version !== 1 || continuation.phase !== 'execution'
+    || continuation.interactionMode !== 'manual' || !continuation.workspace?.dir
+    || !continuation.decision?.questions?.length
+    || !validatedResolution(continuation.decision.questions, opts.humanRuling))) {
+    throw new Error('invalid execution continuation; native recovery requires the validated Task5 bridge');
+  }
+  const nativeExecution = continuation === null;
   const startedAt = new Date();
   const {
     task, target, gate, gateRetries, scratchRoot, runId,
@@ -436,7 +449,7 @@ export async function run(opts) {
     verifierBin = 'claude', verifierProbeCompleted = false,
     arbiterModel = DEFAULT_ARBITER_MODEL,
     arbiterBin = 'claude',
-    mode = 'manual', decisionResolver, challengeRounds = 2,
+    mode = 'manual', decisionResolver, challengeRounds,
     debateRounds, tokenBudget, pivotCandidates = DEFAULT_PIVOT_CANDIDATES,
     adapters = {}, reporter,
   } = opts;
@@ -444,7 +457,7 @@ export async function run(opts) {
   if (mode !== 'manual' && mode !== 'autonomous') {
     throw new Error(`invalid mode: ${mode}; expected manual or autonomous`);
   }
-  if (!Number.isInteger(challengeRounds) || challengeRounds < 1) {
+  if (challengeRounds !== undefined && (!Number.isInteger(challengeRounds) || challengeRounds < 1)) {
     throw new Error(`invalid challengeRounds: ${challengeRounds}; expected a positive integer`);
   }
   if (tokenBudget !== undefined
@@ -452,7 +465,7 @@ export async function run(opts) {
     throw new Error('tokenBudget must be a positive safe integer');
   }
   validatePlanCandidateCount(pivotCandidates, 'pivotCandidates');
-  const maxChallengeRounds = Math.min(challengeRounds, 2);
+  const maxChallengeRounds = Math.min(challengeRounds ?? 2, 2); // Explicit v1 reader only.
   const runExecutor = adapters.runExecutor ?? realExecutor;
   const runGate = adapters.runGate ?? realGate;
   // Hermetic guard, same pattern as the arbiter and reviewer seats: a test that
@@ -501,7 +514,7 @@ export async function run(opts) {
   const claudeSuperpowersDir = verifiedSeats.claude?.verified
     ? verifiedSeats.claude.path
     : null;
-  const productionLivenessJudge = adapters.runExecutor === undefined;
+  const productionLivenessJudge = !nativeExecution && adapters.runExecutor === undefined;
   const livenessJudgeConfigured = typeof adapters.judgeLiveness === 'function'
     || productionLivenessJudge;
   let judgeLiveness = adapters.judgeLiveness ?? null;
@@ -551,7 +564,7 @@ export async function run(opts) {
       onStall: async (event) => {
         let action = 'report';
         const executorSlot = activeExecutor;
-        if (!livenessJudgeConfigured
+        if (!nativeExecution && !livenessJudgeConfigured
           && stallConfig.policy === 'restart'
           && executorSlot?.controller
           && stallRestartCount < stallConfig.restartLimit) {
@@ -645,12 +658,12 @@ export async function run(opts) {
     if (!merge.testCounts || !Number.isSafeInteger(merge.testCounts.required)) {
       throw new Error('merge unit requires derived test counts');
     }
-    if (!continuation) mergeProgress = await observedAdvanceMerge({
+    if (!continuation && !nativeExecution) mergeProgress = await observedAdvanceMerge({
       cwd: iso.dir,
       parents: merge.parents,
       unitId: runId,
     });
-    if (!continuation) {
+    if (!continuation && !nativeExecution) {
       activeConflict = mergeProgress.conflict;
       if (activeConflict) mergeConflicts.push(activeConflict);
       plan = buildMergeTask(originalPlan, merge, activeConflict);
@@ -893,6 +906,137 @@ export async function run(opts) {
   let exec;
   let conflictingIntent = continuation?.mergeState?.conflictingIntent ?? false;
   let mergePreparationFailure = continuation?.mergeState?.mergePreparationFailure ?? null;
+  let challengeRound = continuation?.challengeRound ?? 0;
+  let decision = null;
+  let resolvedDecision = continuation ? { ...continuation.decision, ...opts.humanRuling, answeredBy: 'human' } : null;
+  let assumedDecision = continuation?.assumedDecision ?? null;
+  let gateResult = null;
+  let iter;
+  let nativeResult = null;
+  const nativeEvidence = [];
+  if (nativeExecution) {
+    const capture = async () => {
+      currentDiff = await createDiff(iso.dir, iso.baseCommit);
+      writeFileSync(join(iso.dir, 'CHANGES.diff'), currentDiff);
+      return { artifactDigest: reviewDigest(currentDiff), diff: currentDiff };
+    };
+    const checkSelection = () => {
+      const required = [...commands, ...buildReviewerTestCommands(commands, [...accumulatedReviewTests])];
+      return { identity: contextDigest({ commands: required, policy: 'required-exit-zero',
+        reviewerTests: [...accumulatedReviewTests].sort().map(path => ({ path, digest: reviewDigest(readFileSync(join(iso.dir, path))) })) }), commands: required };
+    };
+    const providerResults = [];
+    const execute = async request => {
+      const attempt = ++executorLaunchCount;
+      writeFileSync(join(iso.dir, 'TASK.md'), request.input);
+      let preservation;
+      const beforeKill = () => preservation ??= preservePartialExecutorWork(iso.dir, iso.baseCommit, createDiff);
+      const response = await runExecutor({ ...request, plan: request.input, model: executorModel, effort: executorEffort,
+        bin: opts.codexBin ?? 'codex', env: runEnvironment, ownedTmpDir: true,
+        timeoutMs: stageTimeouts.executor, reporter: eventReporter, runId, attempt, beforeKill,
+        onLiveness: () => watchdog?.touch('executor'),
+        livenessThresholdMs: executorThresholds.thresholdMs, progressThresholdMs: executorThresholds.progressThresholdMs });
+      if (response.timedOut || response.aborted) await beforeKill();
+      recordExecutorTimeout(response, request.state.proposalCycles, attempt);
+      providerResults.push({ seat: 'codex', operationId: request.operationId, response });
+      if (['propose', 'revise'].includes(request.action)) {
+        iterations.push({ n: request.state.proposalCycles, operationId: request.operationId,
+          remainingWork: request.remainingWork, changedFiles: response.changedFiles ?? [], lastMessage: response.lastMessage ?? response.content ?? '',
+          executorUsage: response.usage ?? null, executor: { exitCode: response.exitCode ?? null, timedOut: Boolean(response.timedOut), timeoutMs: stageTimeouts.executor }, gate: null });
+      }
+      return response;
+    };
+    const review = async request => {
+      if (typeof runReview !== 'function') throw new Error('missing native Claude reviewer transport');
+      const response = await runReview({ ...request, prompt: request.input,
+        originalRequirements: originalPlan, diff: currentDiff, diffDigest: reviewDigest(currentDiff),
+        round: request.state.proposalCycles, messages: request.state.messages, evidence: request.state.evidence,
+        model: verifierModel, bin: verifierBin, env: runEnvironment, superpowersDir: claudeSuperpowersDir,
+        timeoutMs: stageTimeouts.verifier, reporter: eventReporter, runId });
+      providerResults.push({ seat: 'claude', operationId: request.operationId, response });
+      if (response?.artifact) {
+        const artifact = detectReview({ dir: iso.dir, artifact: response.artifact, round: request.state.proposalCycles, diffDigest: reviewDigest(currentDiff) });
+        if (!artifact.reviewed) return { ...response, artifactFailed: true, error: 'native review artifact is missing or stale' };
+        for (const file of artifact.testFiles ?? []) accumulatedReviewTests.add(file);
+        if (iterations.length) iterations.at(-1).reviewer = response;
+      }
+      let envelope;
+      try { envelope = parseDialogueEnvelope({ response }); } catch { /* Native dispatcher owns protocol repair. */ }
+      if (envelope?.action === 'approve' && (!gateResult || !request.state.executionChecks || !Array.isArray(gateResult.results)
+        || gateResult.results.some(result => result.code !== 0 || result.timedOut))) {
+        return { ...response, error: 'current required checks are incomplete or failed' };
+      }
+      if (envelope?.action === 'approve' && opts.mutation !== undefined) {
+        return { ...response, error: 'WIP mutation effect integration pending' };
+      }
+      return response;
+    };
+    try {
+      const initial = await capture();
+      nativeResult = await runExecutionDialogue({ target: iso.dir, directory: iso.dir, runId,
+        artifactRoot: resolveArtifactRoot({ scratchRoot, artifactRoot: opts.artifactRoot, env: runEnvironment }),
+        requirements: originalPlan, plan, artifactDigest: initial.artifactDigest, interactionMode: mode,
+        context: { ...(opts.context ?? {}), workspace: { baseCommit: iso.baseCommit, target: resolve(target) }, requiredCommands: commands },
+        limits: { ...(challengeRounds === undefined ? {} : { challenges: challengeRounds }),
+          ...(maxDebateRounds === undefined ? {} : { proposalCycles: maxDebateRounds }) },
+        execute, discuss: execute, review, capture, selectChecks: checkSelection, reviewInstructions: EXECUTION_REVIEW_PROMPT,
+        runChecks: async request => {
+          const captured = [];
+          gateResult = await runGate({ commands: request.selection.commands, cwd: iso.dir, timeoutMs: stageTimeouts.gate,
+            reporter: eventReporter, runId, attempt: request.state.proposalCycles, captureTestCount, requiredEvidence: true,
+            codeIdentity: async () => (await capture()).artifactDigest,
+            onEvidence: async entry => {
+              const record = await (adapters.captureEvidence ?? captureEvidence)({ projectId: request.state.projectId, root: iso.dir,
+                directory: request.evidenceDirectory, evidence: { ...entry, id: `${request.operationId}-command-${captured.length + 1}`,
+                  kind: 'command', projectId: request.state.projectId, claimIds: [`${request.operationId}-command-result-${captured.length + 1}`], sourceIdentity: entry.codeIdentity } });
+              captured.push(record); nativeEvidence.push(record);
+            } });
+          recordGateTimeout(gateResult, request.state.proposalCycles, 1);
+          if (captured.length !== request.selection.commands.length) throw new Error('required command evidence is incomplete');
+          if (iterations.length) iterations.at(-1).gate = gateResult;
+          return { ...await capture(), evidence: captured };
+        },
+        budget: ({ account }) => merge !== undefined ? { allowed: false, reason: 'WIP merge effect integration pending; paused before initial advance' }
+          : tokenBudget !== undefined && account.usageUnknown ? { allowed: false, reason: 'accounting-incomplete: unknown provider usage' }
+          : tokenBudget !== undefined && account.knownUsage.inputTokens + account.knownUsage.outputTokens >= tokenBudget
+            ? { allowed: false, reason: 'budget-exhausted: token budget reached' } : { allowed: true },
+        reporter: eventReporter, env: runEnvironment });
+      const finalCapture = await capture();
+      if (nativeResult.approved && (finalCapture.artifactDigest !== nativeResult.state.artifactDigest
+        || nativeResult.state.executionChecks?.artifactDigest !== finalCapture.artifactDigest
+        || nativeResult.state.executionChecks?.checkSetIdentity !== checkSelection().identity
+        || !gateResult || gateResult.results?.length !== checkSelection().commands.length
+        || gateResult.results.some(result => result.code !== 0 || result.timedOut))) {
+        nativeResult.approved = false; nativeResult.action = 'paused'; nativeResult.reason = 'current required checks are incomplete, stale or failed';
+      }
+      if (nativeResult.action === 'replan') nativeResult.reason = 'WIP retained replan integration pending; useful work retained';
+      if (nativeResult.approved && opts.mutation !== undefined) {
+        nativeResult.approved = false; nativeResult.action = 'paused'; nativeResult.reason = 'WIP mutation effect integration pending';
+      }
+      const manifest = nativeResult.checkpointState.executionArtifacts;
+      if (!manifest || !nativeResult.checkpointState.journalIdentity) throw new Error('required native execution manifest or journal identity unavailable');
+      const actual = contextLifecycle.manifest({ directory: iso.dir, runId, contextDigest: nativeResult.snapshot.digest,
+        registeredPaths: manifest.files.map(file => join(iso.dir, file.path)) });
+      if (contextDigest({ manifest }) !== contextDigest({ manifest: actual })) throw new Error('required native execution manifest changed');
+    } catch (error) {
+      nativeResult = { ...nativeResult, approved: false, action: 'paused', reason: error.message };
+      await capture(); // Retain uncertain writes without replaying a provider or check.
+    }
+    if (!nativeResult.approved && nativeResult.state) nativeResult.state.approval = null;
+    outcome = nativeResult.approved ? 'review-ready' : nativeResult.action === 'needs-decision' ? 'needs-decision' : 'needs-pivot';
+    debateStopReason = nativeResult.reason;
+    for (const message of nativeResult.state?.messages ?? []) {
+      const observed = providerResults.find(item => item.operationId === message.operationId);
+      executionMessages.push({ ...message, speaker: message.seat ?? message.sender,
+        role: (message.seat ?? message.sender) === 'codex' ? 'implementation-author' : 'execution-reviewer', response: observed?.response });
+    }
+    // Journal resources are authoritative; these role totals are compatible projections only.
+    for (const item of providerResults) {
+      observeUsage(item.response, { seat: item.seat, operationId: item.operationId });
+      if (item.seat === 'codex') executorUsage = addUsage(executorUsage, item.response?.usage);
+      else verifierUsage = addUsage(verifierUsage, item.response?.usage);
+    }
+  } else {
   while (true) {
     exec = await executePlan(plan);
     if (exec.timedOut || !activeConflict) break;
@@ -969,10 +1113,6 @@ export async function run(opts) {
   }
   let retries = 0;
   let executorTimedOut = Boolean(exec.timedOut);
-  let challengeRound = continuation?.challengeRound ?? 0;
-  let decision = null;
-  let resolvedDecision = continuation ? { ...continuation.decision, ...opts.humanRuling, answeredBy: 'human' } : null;
-  let assumedDecision = continuation?.assumedDecision ?? null;
   const effectiveDecisionResolver = decisionResolver
     ?? (mode === 'autonomous'
       ? createAutonomousDecisionResolver({ reviewer: arbitrate, phase: 'execution', interactionMode: mode })
@@ -1044,7 +1184,6 @@ export async function run(opts) {
   };
   await routeChallenges();
   // Gate retries rerun the executor within this single controller-driven pass.
-  let gateResult = null;
   const gateCommands = () => [
     ...commands,
     ...buildReviewerTestCommands(commands, [...accumulatedReviewTests]),
@@ -1092,7 +1231,7 @@ export async function run(opts) {
     },
     gate: iterationGate,
   });
-  let iter = makeIteration(n, exec, gateResult, executorTimedOut);
+  iter = makeIteration(n, exec, gateResult, executorTimedOut);
 
   if (executorTimedOut) {
     outcome = 'timed-out';
@@ -1690,6 +1829,7 @@ export async function run(opts) {
     }
   }
 
+  } // Explicit validated v1 execution reader.
   const tokens = {
     executor: executorUsage,
     verifier: verifierUsage,
@@ -1765,7 +1905,7 @@ export async function run(opts) {
     },
   };
   let mutation = null;
-  if (outcome === 'review-ready' && opts.mutation !== undefined) {
+  if (!nativeExecution && outcome === 'review-ready' && opts.mutation !== undefined) {
     const mutationOptions = opts.mutation === true ? {} : opts.mutation;
     try {
       mutation = await runMutation({
@@ -1788,7 +1928,10 @@ export async function run(opts) {
   const planningMessages = pivotHistory.flatMap(pivot => pivot.planning?.messages ?? []);
   const dissent = executionMessages.filter(message => message.speaker === 'codex'
     && executorFindingResponses(message.response).some(response => response.disposition === 'dispute'));
-  const approved = outcome === 'review-ready' && executionMessages.some(message => message.speaker === 'claude');
+  const approved = nativeExecution ? nativeResult.approved === true && outcome === 'review-ready'
+    && !nativeResult.state.pendingOperation && !nativeResult.state.executionCycle?.open
+    && canApproveDialogue({ state: nativeResult.state, seat: 'claude' }).approved
+    : outcome === 'review-ready' && executionMessages.some(message => message.speaker === 'claude');
   const currentHumanRulings = humanRulings.filter(ruling => ruling.diffDigest === reviewDigest(currentDiff)
     && ruling.evidenceTestDigest === evidenceTestDigest && ruling.evidenceDigest === rulingEvidenceDigest(gateResult)
     && ruling.applied && resolvedFindingIds.has(ruling.id));
@@ -1801,13 +1944,15 @@ export async function run(opts) {
     phase: 'execution', interactionMode: mode, authority: decisionAuthority({ interactionMode: mode, phase: 'execution' }),
     messages: executionMessages, planningMessages, dissent, approved, converged: null,
     approval: humanApproval ?? (approved ? { artifactDigest: reviewDigest(currentDiff), decidedBy: 'claude', basis: 'reviewer',
+      ...(nativeExecution ? { nativeArtifactDigest: nativeResult.state.artifactDigest, contextDigest: nativeResult.snapshot.digest,
+        messageId: nativeResult.state.approval.messageId } : {}),
       reason: 'The current implementation passed Claude review with all blocking findings explicitly closed.' } : null),
     ...(physicalRunId === runId ? {} : { physicalRunId }),
     target, targetPath: resolve(target),
     dir: iso.dir, isRepo: iso.isRepo,
     baseRef: iso.baseRef, baseCommit: iso.baseCommit, branch: activeBranch,
     iterations,
-    evidence: evidence.records(),
+    evidence: nativeExecution ? nativeEvidence : evidence.records(),
     tokens, usageConsistency, outcome, debate,
     ...(noOpReason === undefined ? {} : { noOpReason }),
     timeouts: stageTimeouts, timeoutEvents,
@@ -1842,7 +1987,20 @@ export async function run(opts) {
   facts.phase = 'execution';
   facts.authority = decisionAuthority({ interactionMode: mode, phase: 'execution' });
 
-  if (outcome === 'needs-decision') {
+  if (nativeExecution) {
+    facts.dialogue = nativeResult.state ?? null;
+    facts.resources = nativeResult.resources ?? null;
+    facts.reason = nativeResult.reason;
+    facts.nextAction = nativeResult.action;
+    facts.checkpointState = { ...nativeResult.checkpointState, version: 2, phase: 'execution', runId,
+      interactionMode: mode, action: nativeResult.action, reason: nativeResult.reason, approved,
+      workspace: { ...iso, targetPath: resolve(target), diff: currentDiff, diffDigest: reviewDigest(currentDiff) },
+      originalPlan, plan, commands, resources: nativeResult.resources,
+      options: { target, scratchRoot, artifactRoot: opts.artifactRoot, baseRef, executorModel, executorEffort, verifierModel,
+        challengeRounds, debateRounds: maxDebateRounds, tokenBudget, pivotCandidates, superpowers },
+    };
+  }
+  if (!nativeExecution && outcome === 'needs-decision') {
     currentDiff = await createDiff(iso.dir, merge === undefined ? iso.baseCommit : merge.mergeBase);
     // Task 4 owns durable envelopes and identity validation. Keep the live
     // controller state here instead of reconstructing it from report summaries.
@@ -1880,7 +2038,7 @@ export async function run(opts) {
     reviewerRestorations,
     executorRestorations,
   };
-  if (facts.checkpointState && !continuation) {
+  if (facts.checkpointState?.version === 1 && !continuation) {
     try {
       const checkpoint = await saveCheckpoint({ directory: iso.dir, checkpointState: facts.checkpointState,
         references: [typeof task === 'string' && existsSync(task) ? task : null,

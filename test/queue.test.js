@@ -14,6 +14,12 @@ import { planningArtifactDigest } from '../src/conversation.js';
 import { runQueue, continueQueue, loadQueueFile } from '../src/queue.js';
 import { checkpointDigest } from '../src/checkpoint.js';
 import { reviewDigest } from '../src/review.js';
+import { execFileSync } from 'node:child_process';
+import { tmpdir, homedir } from 'node:os';
+import { run as runExecution } from '../src/run.js';
+import { landQueueDiff, assertCleanTarget } from '../src/queue-runtime.js';
+import { withVerifiedSuperpowers } from '../fixtures/verified-superpowers.mjs';
+import { createInspectionReceipt } from '../src/context-evidence.js';
 
 const APPROVED_DIFF = 'diff --git a/x b/x\n+reviewed change\n';
 
@@ -195,6 +201,47 @@ test('queue requires explicit execution approval bound to the actual diff before
       if (mutation !== 'valid') assert.match(result.stop.reason, /execution approval/i, mutation);
     } finally { fixture.cleanup(); }
   }
+});
+
+test('queue consumes native ordinary execution approval and lands the actual reviewed diff', async t => {
+  const root = mkdtempSync(join(tmpdir(), 'native-queue-'));
+  const scratchBase = process.platform === 'win32' ? 'C:/ccc-test' : join(homedir(), '.ccc-test');
+  mkdirSync(scratchBase, { recursive: true });
+  const scratchRoot = mkdtempSync(join(scratchBase, 'native-queue-'));
+  t.after(() => { rmSync(root, { recursive: true, force: true }); rmSync(scratchRoot, { recursive: true, force: true }); });
+  const target = join(root, 'target'); mkdirSync(target);
+  execFileSync('git', ['init', '-q', target]);
+  execFileSync('git', ['-C', target, 'config', 'core.autocrlf', 'false']);
+  execFileSync('git', ['-C', target, 'config', 'user.name', 'Fixture']);
+  execFileSync('git', ['-C', target, 'config', 'user.email', 'fixture@example.test']);
+  writeFileSync(join(target, 'seed.txt'), 'base\n');
+  execFileSync('git', ['-C', target, 'add', '.']); execFileSync('git', ['-C', target, 'commit', '-qm', 'base']);
+  writeFileSync(join(root, 'plan.md'), 'Create the reviewed file'); writeFileSync(join(root, 'gate.json'), '[]');
+  const file = join(root, 'queue.json'); writeFileSync(file, JSON.stringify([{ name: 'native', task: 'plan.md', gate: 'gate.json' }]));
+  const envelope = (r, action, extra = {}) => ({ schemaVersion: 1, action, artifactDigest: r.state.artifactDigest,
+    contextDigest: r.state.snapshot.digest, replyTo: null, content: 'Review current fixture work', claims: [], issues: [], evidence: [], verifications: [], next: null, ...extra });
+  let facts;
+  const result = await runQueue({ file, target, dependencies: {
+    assertCleanTarget,
+    launchRun: async () => {
+      facts = await runExecution(withVerifiedSuperpowers({ target, scratchRoot, artifactRoot: join(root, 'artifacts'), runId: 'native-queue', task: 'Create the reviewed file', gate: [],
+        adapters: { runExecutor: r => { writeFileSync(join(r.cwd, 'reviewed.txt'), 'reviewed native bytes\n'); return { dialogue: envelope(r, 'propose'), usage: { inputTokens: 1, outputTokens: 1 } }; },
+          runReview: r => {
+            const evidence = r.state.evidence.find(e => e.id === 'requirement-briefing');
+            const receipt = createInspectionReceipt({ operationId: r.operationId, seat: 'claude', evidence: [evidence], inspected: true, result: 'read' });
+            return { usage: { inputTokens: 1, outputTokens: 1 }, observations: { evidence: [], receipts: [receipt] }, dialogue: envelope(r, 'approve', {
+              claims: [{ id: 'briefing-requirement', kind: 'fact', text: 'Saved briefing read', evidenceIds: [evidence.id] }],
+              verifications: [{ claimId: 'briefing-requirement', evidenceIds: [evidence.id], inspectionReceiptIds: [receipt.id], result: 'supports', reason: 'Read briefing' }],
+            }) };
+          } },
+      }));
+      return { runDirectory: facts.dir };
+    }, readRunFacts: async () => facts, judgeLanding: async () => ({ approved: true, reasoning: 'Reviewed native fixture diff' }), landDiff: landQueueDiff,
+  } });
+  assert.equal(result.stop, null, result.stop?.reason);
+  assert.equal(readFileSync(join(target, 'reviewed.txt'), 'utf8'), 'reviewed native bytes\n');
+  assert.equal(execFileSync('git', ['-C', target, 'status', '--porcelain'], { encoding: 'utf8' }), '');
+  assert.equal(facts.approval.contextDigest, facts.dialogue.snapshot.digest);
 });
 
 test('queue rechecks execution approval after final review before applying a changed diff', async () => {

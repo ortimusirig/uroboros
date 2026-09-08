@@ -13,6 +13,8 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
 import { run as executeRun } from '../src/run.js';
+import { execFileSync } from 'node:child_process';
+import { createInspectionReceipt } from '../src/context-evidence.js';
 import { withVerifiedSuperpowers } from '../fixtures/verified-superpowers.mjs';
 import { generateRunJournal } from '../src/run-journal.js';
 import { exitCodeFor } from '../src/exit.js';
@@ -43,26 +45,40 @@ function eventReporter(eventsPath) {
 }
 
 function adapters(scratchRoot, runId, diff = 'diff --git a/a.txt b/a.txt\n') {
+  const envelope = (r, action, extra = {}) => ({ schemaVersion: 1, action, artifactDigest: r.state.artifactDigest,
+    contextDigest: r.state.snapshot.digest, replyTo: null, content: 'Archive fixture work', claims: [], issues: [], evidence: [], verifications: [], next: null, ...extra });
   return {
     isolate: async ({ physicalRunId } = {}) => {
       const dir = join(scratchRoot, physicalRunId ?? runId, 'w');
       mkdirSync(dir, { recursive: true });
+      execFileSync('git', ['init', '-q', dir]);
+      execFileSync('git', ['-C', dir, 'config', 'core.autocrlf', 'false']);
+      writeFileSync(join(dir, 'seed.txt'), 'base\n');
+      execFileSync('git', ['-C', dir, 'add', 'seed.txt']);
+      execFileSync('git', ['-C', dir, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.test', 'commit', '-qm', 'base']);
       return {
         dir,
         isRepo: false,
         branch: `uro/${runId}`,
         baseRef: 'HEAD',
-        baseCommit: '0123456789012345678901234567890123456789',
+        baseCommit: execFileSync('git', ['-C', dir, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(),
         cleanup: async () => {},
       };
     },
-    diffText: async () => diff,
-    runExecutor: async () => ({
-      changedFiles: diff === '' ? [] : ['a.txt'],
-      lastMessage: diff === '' ? 'nothing to do' : 'changed a.txt',
-      exitCode: 0,
-    }),
-    runGate: async () => ({ passed: true, results: [] }),
+    runExecutor: async r => {
+      if (diff !== '') writeFileSync(join(r.cwd, 'a.txt'), 'actual fixture change\n');
+      return { changedFiles: diff === '' ? [] : ['a.txt'], exitCode: 0,
+        dialogue: envelope(r, diff === '' ? 'ask' : 'propose', diff === '' ? { issues: [{ id: 'Q1', title: 'Product decision',
+          kind: 'product', needsHuman: true, blocking: true, status: 'awaiting-answer' }] } : {}) };
+    },
+    runReview: async r => {
+      const evidence = r.state.evidence.find(e => e.id === 'requirement-briefing');
+      const receipt = createInspectionReceipt({ operationId: r.operationId, seat: 'claude', evidence: [evidence], inspected: true, result: 'read' });
+      return { observations: { evidence: [], receipts: [receipt] }, dialogue: envelope(r, 'approve', {
+        claims: [{ id: 'briefing-requirement', kind: 'fact', text: 'Saved briefing read', evidenceIds: [evidence.id] }],
+        verifications: [{ claimId: 'briefing-requirement', evidenceIds: [evidence.id], inspectionReceiptIds: [receipt.id], result: 'supports', reason: 'Read briefing' }],
+      }) };
+    },
   };
 }
 
@@ -73,10 +89,11 @@ test('run archives its complete record to the default root and preserves its jou
   const notePath = join(PROJECT_RUNS, `${runId}.md`);
   try {
     const runAdapters = adapters(scratchRoot, runId);
-    runAdapters.runExecutor = async () => {
+    const execute = runAdapters.runExecutor;
+    runAdapters.runExecutor = async r => {
       assert.equal(existsSync(join(scratchRoot, runId, '.uro-running')), true,
         'the active-run marker must protect the worktree while execution is in progress');
-      return { changedFiles: ['a.txt'], lastMessage: 'changed a.txt', exitCode: 0 };
+      return execute(r);
     };
     const facts = await run({
       task: 'change a.txt',
@@ -101,6 +118,7 @@ test('run archives its complete record to the default root and preserves its jou
       'the completed run and durable-copy positive controls make marker release observable');
     for (const filename of [
       'TASK.md', 'events.jsonl', 'uro-report.md', 'uro-runfacts.json', 'CHANGES.diff',
+      '__uro_dialogue/journal.jsonl', '__uro_dialogue/journal-tail.jsonl',
     ]) {
       assert.equal(existsSync(join(durableDirectory, filename)), true,
         `${filename} must exist at the default durable root`);
@@ -127,7 +145,7 @@ test('run archives its complete record to the default root and preserves its jou
   }
 });
 
-test('run no-diff archiving has positive controls and skips only CHANGES.diff', async () => {
+test('native paused no-diff run archives its actual empty diff and pending decision', async () => {
   const scratchRoot = temporaryDirectory('no-diff-');
   const artifactRoot = temporaryDirectory('no-diff-records-');
   const runId = '2026-08-29T06-00-00-000Z-no-diff';
@@ -147,26 +165,34 @@ test('run no-diff archiving has positive controls and skips only CHANGES.diff', 
     });
 
     const durableDirectory = join(artifactRoot, runId);
-    assert.equal(facts.outcome, 'no-op');
+    assert.equal(facts.outcome, 'needs-decision');
+    assert.equal(facts.approved, false);
     assert.equal(facts.artifacts.status, 'ok');
     assert.equal(existsSync(durableDirectory), true);
     for (const filename of ['TASK.md', 'events.jsonl', 'uro-report.md', 'uro-runfacts.json']) {
       assert.equal(existsSync(join(durableDirectory, filename)), true,
         `${filename} proves no-diff archiving occurred`);
     }
-    assert.equal(existsSync(join(durableDirectory, 'CHANGES.diff')), false);
+    assert.equal(readFileSync(join(durableDirectory, 'CHANGES.diff'), 'utf8'), '');
+    assert.equal(facts.checkpointState.version, 2);
   } finally {
     rmSync(scratchRoot, { recursive: true, force: true });
     rmSync(artifactRoot, { recursive: true, force: true });
   }
 });
 
-test('run records an artifact-root failure without changing its outcome', async () => {
+test('run records an optional archive-copy failure without losing intact native source approval', async () => {
   const scratchRoot = temporaryDirectory('blocked-');
   const runId = '2026-08-29T07-00-00-000Z-blocked';
   const blockedRoot = join(scratchRoot, 'blocked-root');
   try {
-    writeFileSync(blockedRoot, 'not a directory');
+    const runAdapters = adapters(scratchRoot, runId);
+    const review = runAdapters.runReview;
+    runAdapters.runReview = async r => {
+      // Only the optional archive destination fails; required native source and notebook stay intact.
+      writeFileSync(join(blockedRoot, runId), 'not a directory');
+      return review(r);
+    };
     const facts = await run({
       task: 'change a.txt',
       target: 'adapter-target',
@@ -176,12 +202,14 @@ test('run records an artifact-root failure without changing its outcome', async 
       artifactRoot: blockedRoot,
       runId,
       env: {},
-      adapters: adapters(scratchRoot, runId),
+      adapters: runAdapters,
     });
     assert.equal(facts.outcome, 'review-ready');
     assert.equal(Object.hasOwn(facts, 'correctnessVerdict'), false,
       'the verdict surface stays gone even on artifact failure');
     assert.equal(facts.artifacts.status, 'failed');
+    assert.equal(facts.approved, true);
+    assert.equal(existsSync(join(facts.dir, '__uro_dialogue', 'journal-tail.jsonl')), true);
     assert.equal(exitCodeFor(facts.outcome), 0,
       'best-effort artifact failure must not change the process exit mapping');
   } finally {
@@ -198,10 +226,11 @@ test('a path-like campaign runId uses one safe physical directory without changi
     const eventsPath = join(scratchRoot, physicalRunId, 'w', 'events.jsonl');
     try {
       const runAdapters = adapters(scratchRoot, runId);
-      runAdapters.runExecutor = async () => {
+      const execute = runAdapters.runExecutor;
+      runAdapters.runExecutor = async r => {
         assert.equal(existsSync(join(scratchRoot, physicalRunId, '.uro-running')), true,
           'the physical run directory receives the active marker');
-        return { changedFiles: ['a.txt'], lastMessage: 'changed a.txt', exitCode: 0 };
+        return execute(r);
       };
       const facts = await run({
         task: 'change a.txt',

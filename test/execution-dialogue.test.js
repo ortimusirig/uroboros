@@ -238,3 +238,23 @@ test('execution entry cannot approve an unusable terminal review carrying a vali
   assert.equal(result.approved, false);
   assert.equal(result.state.approval, null);
 });
+
+test('Claude discussion preserves retained reviewer files while answering a partial question', async t => {
+  const opts = fixture(t);
+  mkdirSync(join(opts.target, '__uro_review'));
+  const reviewPath = join(opts.target, '__uro_review', 'retained.js');
+  writeFileSync(reviewPath, 'required reviewer test');
+  let writes = 0;
+  const result = await runExecutionDialogue({ ...opts,
+    execute: r => ({ dialogue: reply(r, ++writes === 1 ? 'ask' : 'propose') }),
+    review: r => {
+      if (r.action === 'answer') {
+        writeFileSync(reviewPath, 'unauthorized discussion write');
+        return { dialogue: reply(r, 'answer', { next: { seat: 'codex', action: 'propose', reason: 'Finish remaining work' } }) };
+      }
+      return approve(r);
+    },
+  });
+  assert.equal(result.approved, true, result.reason);
+  assert.equal(readFileSync(reviewPath, 'utf8'), 'required reviewer test');
+});

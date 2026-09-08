@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
+import { createHash } from 'node:crypto';
 import {
   chmodSync,
   existsSync,
@@ -81,6 +82,27 @@ function withDashboardEnabled(env) {
   delete enabled.URO_NO_DASHBOARD;
   return enabled;
 }
+
+test('normal CLI native execution writes files checks them and approves with retained source identity', async t => {
+  const fixture = cliFixture();
+  writeFileSync(join(fixture.root, 'gate.json'), JSON.stringify([{ bin: process.execPath, args: ['-e', "if(!require('node:fs').existsSync('a.py'))process.exit(4)"] }]));
+  t.after(() => { rmSync(fixture.root, { recursive: true, force: true }); rmSync(fixture.scratchRoot, { recursive: true, force: true }); });
+  const result = await spawnCapture(process.execPath, [...fixture.args, '--quiet'], { env: fixture.env });
+  assert.equal(result.code, 0, result.stderr);
+  const facts = JSON.parse(result.stdout);
+  assert.equal(facts.outcome, 'review-ready', facts.reason);
+  assert.equal(facts.approved, true);
+  assert.equal(readFileSync(join(facts.dir, 'a.py'), 'utf8'), '# actual native fixture write\n');
+  assert.equal(facts.dialogue.proposalCycles, 1);
+  assert.equal(facts.resources.providerLaunches, 3, 'one writer and reviewer inspection then approval');
+  assert.equal(facts.messages.filter(m => m.sender === 'claude').length, 2);
+  assert.equal(facts.checkpointState.executionArtifacts.files.some(f => f.path.endsWith('journal-tail.jsonl')), true);
+  const events = readFileSync(join(facts.dir, '__uro_dialogue', 'journal.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  for (const operation of events.filter(e => e.type === 'prepare' && ['provider', 'repair'].includes(e.effect))) {
+    const completed = events.find(e => e.type === 'complete' && e.operationId === operation.operationId);
+    assert.equal(completed.delivery.sha256, createHash('sha256').update(operation.input).digest('hex'), 'the prepared input must be the actual submitted CLI input');
+  }
+});
 
 function listen(server) {
   return new Promise((resolve, reject) => {
@@ -186,7 +208,7 @@ test('a real CLI run announces a read-only dashboard before executor events and 
     const facts = JSON.parse(r.stdout);
     assert.equal(r.stdout, `${JSON.stringify(facts, null, 2)}\n`,
       'stdout must contain exactly the one formatted run-facts document');
-    assert.equal(facts.outcome, 'no-op');
+    assert.equal(facts.outcome, 'review-ready');
     assert.deepEqual(facts.limits.timeoutsMs,
       { executor: 60001, verifier: 60002, arbiter: 60002, gate: 60003 });
     assert.match(r.stderr, /^\[uroboros\].*isolate\/start/m,
@@ -265,7 +287,7 @@ test('--no-dashboard performs no HTTP probe and announces no dashboard URL', asy
       [...fixture.args, '--no-dashboard', '--port', String(port)],
       { env: withDashboardEnabled(fixture.env) });
     assert.equal(r.code, 0, r.stderr);
-    assert.equal(JSON.parse(r.stdout).outcome, 'no-op');
+    assert.equal(JSON.parse(r.stdout).outcome, 'review-ready');
     assert.equal(requests, 0, 'the opt-out must skip even the initial port probe');
     assert.doesNotMatch(r.stderr, /CCC DASHBOARD|Watch live:|127[.]0[.]0[.]1/);
     assert.match(r.stderr, /^\[uroboros\].*executor\/start/m,
@@ -289,7 +311,7 @@ test('a foreign dashboard port reports the conflict but cannot change run outcom
       { env: withDashboardEnabled(fixture.env) });
     assert.equal(r.code, 0, r.stderr);
     const facts = JSON.parse(r.stdout);
-    assert.equal(facts.outcome, 'no-op');
+    assert.equal(facts.outcome, 'review-ready');
     assert.equal(r.stdout, `${JSON.stringify(facts, null, 2)}\n`);
     assert.match(r.stderr, new RegExp(`port ${port}.*other than a CCC dashboard`, 'i'));
     assert.match(r.stderr, /Start it manually:/);

@@ -27,7 +27,8 @@ import {
 } from '../src/verifier.js';
 import { spawnCapture } from '../src/spawn.js';
 import { exitCodeFor } from '../src/exit.js';
-import { reviewDigest } from '../src/review.js';
+import { reviewDigest, materializeReviewBundle } from '../src/review.js';
+import { createInspectionReceipt } from '../src/context-evidence.js';
 
 const run = (options) => executeRun(withVerifiedSuperpowers(options));
 
@@ -36,6 +37,239 @@ function executionEnvelope(request, action, extra = {}) {
     contextDigest: request.state.snapshot.digest, replyTo: null, content: 'Current execution dialogue',
     claims: [], issues: [], evidence: [], verifications: [], next: null, ...extra };
 }
+
+function nativeApproval(r, extra = {}) {
+  const item = r.state.evidence.find(e => e.id === 'requirement-briefing');
+  const receipt = createInspectionReceipt({ operationId: r.operationId, seat: 'claude', evidence: [item], inspected: true, result: 'read' });
+  return { usage: { inputTokens: 3, outputTokens: 2 }, observations: { evidence: [], receipts: [receipt] },
+    dialogue: executionEnvelope(r, 'approve', { claims: [{ id: 'briefing-requirement', kind: 'fact', text: 'The saved briefing is present.', evidenceIds: [item.id] }],
+      verifications: [{ claimId: 'briefing-requirement', evidenceIds: [item.id], inspectionReceiptIds: [receipt.id], result: 'supports', reason: 'Read saved briefing' }], ...extra }) };
+}
+
+function nativeFixture(t, name, adapters = {}, gate = []) {
+  const scr = scratch(), target = makeTarget();
+  t.after(() => { rmSync(scr, { recursive: true, force: true }); rmSync(target, { recursive: true, force: true }); });
+  return { task: 'Write completed work', target, gate, scratchRoot: scr, artifactRoot: join(scr, 'artifacts'), runId: name, mode: 'autonomous',
+    adapters: { runExecutor: r => { writeFileSync(join(r.cwd, 'completed.txt'), '1'); return { exitCode: 0, changedFiles: ['completed.txt'], usage: { inputTokens: 5, outputTokens: 1 }, dialogue: executionEnvelope(r, r.action) }; },
+      runReview: nativeApproval, ...adapters } };
+}
+
+test('native ordinary run binds actual writes and required command evidence to current approval and facts', async t => {
+  const command = { bin: process.execPath, args: ['-e', "if(require('node:fs').readFileSync('completed.txt','utf8')!=='1')process.exit(4);process.stdout.write('x'.repeat(16000))"] };
+  const facts = await run(nativeFixture(t, 'native-complete', { runReview: r => {
+    const check = r.state.evidence.find(e => e.kind === 'command');
+    assert.equal(check.stdout.length, 16000); assert.equal(check.exitCode, 0);
+    assert.deepEqual(check.argv, [process.execPath, ...command.args]);
+    assert.equal(check.claimIds.length, 1, 'observed command evidence must be available for factual verification');
+    return nativeApproval(r);
+  } }, [command]));
+  assert.equal(facts.approved, true, facts.reason);
+  assert.equal(facts.outcome, 'review-ready');
+  assert.equal(facts.approval.artifactDigest, reviewDigest(readFileSync(join(facts.dir, 'CHANGES.diff'))));
+  assert.equal(facts.approval.contextDigest, facts.dialogue.snapshot.digest);
+  assert.equal(facts.resources.providerLaunches, 2);
+  assert.equal(facts.tokens.total.inputTokens, 8);
+  assert.equal(facts.dialogue.proposalCycles, 1);
+  assert.equal(facts.checkpointState.executionArtifacts.files.some(f => f.path.endsWith('journal-tail.jsonl')), true);
+  assert.equal(facts.iterations.length, 1);
+});
+
+test('native ordinary partial question resumes only remaining work with no gate at the yield', async t => {
+  let writes = 0, reviews = 0;
+  const facts = await run(nativeFixture(t, 'native-remaining', {
+    runExecutor: r => {
+      if (++writes === 1) { writeFileSync(join(r.cwd, 'completed.txt'), '1'); return { dialogue: executionEnvelope(r, 'ask') }; }
+      assert.equal(r.remainingWork, true); assert.equal(readFileSync(join(r.cwd, 'completed.txt'), 'utf8'), '1');
+      writeFileSync(join(r.cwd, 'remaining.txt'), 'done'); return { dialogue: executionEnvelope(r, 'propose') };
+    }, runReview: r => {
+      if (++reviews === 1) { assert.equal(r.state.executionChecks, undefined); return { dialogue: executionEnvelope(r, 'answer', { next: { seat: 'codex', action: 'propose', reason: 'Finish remaining work' } }) }; }
+      return nativeApproval(r);
+    },
+  }));
+  assert.equal(facts.approved, true, facts.reason); assert.equal(writes, 2);
+  assert.equal(facts.dialogue.proposalCycles, 1); assert.equal(facts.dialogue.correctionCycles, 0);
+  assert.equal(readFileSync(join(facts.dir, 'remaining.txt'), 'utf8'), 'done');
+});
+
+test('native ordinary failed required checks cannot become approval', async t => {
+  const facts = await run(nativeFixture(t, 'native-red-command', {}, [{ bin: process.execPath, args: ['-e', 'process.exit(7)'] }]));
+  assert.equal(facts.approved, false); assert.notEqual(facts.outcome, 'review-ready');
+  assert.match(facts.reason, /required checks/);
+  assert.equal(facts.evidence[0].exitCode, 7);
+  const states = readFileSync(join(facts.dir, '__uro_dialogue', 'journal.jsonl'), 'utf8').trim().split('\n').map(JSON.parse).filter(e => e.type === 'state');
+  assert.equal(states.at(-1).state.approval, null, 'failed checks must not durably finalize native approval');
+});
+
+test('native ordinary dialogue permits four challenges and enforces an explicit separate challenge limit', async t => {
+  for (const limit of [undefined, 2]) {
+    let exchanges = 0, coding = 0;
+    const options = nativeFixture(t, `native-exchanges-${limit}`, {
+      runExecutor: r => {
+        if (r.action === 'challenge') { exchanges++; return { dialogue: executionEnvelope(r, 'challenge', { evidence: ['requirement-briefing'] }) }; }
+        coding++; writeFileSync(join(r.cwd, 'completed.txt'), '1'); return { dialogue: executionEnvelope(r, 'propose') };
+      }, runReview: r => exchanges < 4 ? { dialogue: executionEnvelope(r, 'ask', { next: { seat: 'codex', action: 'challenge', reason: 'Discuss evidence' } }) } : nativeApproval(r),
+    });
+    options.challengeRounds = limit;
+    const facts = await run(options);
+    assert.equal(coding, 1); assert.equal(exchanges, limit ?? 4);
+    assert.equal(facts.approved, limit === undefined, facts.reason);
+    assert.equal(facts.dialogue.proposalCycles, 1);
+  }
+});
+
+test('native ordinary uncertain writer retains bytes without another provider even with restart configured', async t => {
+  let calls = 0, reviews = 0;
+  const options = nativeFixture(t, 'native-timeout', {
+    runExecutor: r => { calls++; writeFileSync(join(r.cwd, 'partial.txt'), 'retained'); return { timedOut: true, exitCode: 1, lastMessage: '' }; },
+    runReview: () => { reviews++; },
+  });
+  options.stallPolicy = 'restart'; options.stallRestartLimit = 3;
+  const facts = await run(options);
+  assert.equal(facts.approved, false); assert.equal(calls, 1); assert.equal(reviews, 0);
+  assert.match(readFileSync(join(facts.dir, 'CHANGES.diff'), 'utf8'), /retained/);
+  assert.equal(facts.resources.providerLaunches, 1);
+});
+
+test('native ordinary empty malformed output and absent or legacy reviewer never imply approval', async t => {
+  for (const shape of ['empty', 'missing-review', 'legacy-review']) {
+    const options = nativeFixture(t, `native-negative-${shape}`);
+    if (shape === 'empty') options.adapters.runExecutor = () => ({ exitCode: 0, changedFiles: [], lastMessage: '' });
+    if (shape === 'missing-review') delete options.adapters.runReview;
+    if (shape === 'legacy-review') options.adapters.runReview = () => ({ conclusion: 'clean', artifact: null });
+    const facts = await run(options);
+    assert.equal(facts.approved, false); assert.notEqual(facts.outcome, 'no-op');
+    assert.notEqual(exitCodeFor(facts), 0);
+  }
+});
+
+test('native ordinary retained manifest corruption is unapproved before another seat', async t => {
+  let reviews = 0;
+  const facts = await run(nativeFixture(t, 'native-manifest', {
+    runExecutor: r => { writeFileSync(join(r.cwd, 'completed.txt'), '1');
+      writeFileSync(join(r.cwd, '__uro_context', `${r.state.snapshot.id}.json`), '{}');
+      return { dialogue: executionEnvelope(r, 'propose') }; }, runReview: () => { reviews++; },
+  }));
+  assert.equal(facts.approved, false); assert.equal(reviews, 0);
+  assert.equal(facts.checkpointState.executionArtifacts, undefined);
+  assert.match(readFileSync(join(facts.dir, 'CHANGES.diff'), 'utf8'), /completed.txt/);
+});
+
+test('native ordinary merge guard precedes initial Git advance and every provider', async t => {
+  let calls = 0;
+  const options = nativeFixture(t, 'native-merge-pause', { runExecutor: () => { calls++; } });
+  options.unitKind = 'merge'; options.merge = { parents: [{ unitId: 'a', commit: 'does-not-exist' }, { unitId: 'b', commit: 'also-absent' }],
+    parentOrder: ['a', 'b'], mergeBase: 'missing', testCounts: { required: 0, parents: [] } };
+  const facts = await run(options);
+  assert.equal(facts.approved, false); assert.match(facts.reason, /merge.*initial advance/);
+  assert.equal(calls, 0); assert.equal(facts.resources.providerLaunches, 0);
+});
+
+test('native ordinary reviewer mistake is rebutted and disposed without another edit', async t => {
+  let coding = 0, reviews = 0;
+  const facts = await run(nativeFixture(t, 'native-rebuttal', {
+    runExecutor: r => {
+      if (r.action === 'rebut') return { dialogue: executionEnvelope(r, 'rebut', { evidence: ['requirement-briefing'], content: 'The requirement already specifies this behavior.' }) };
+      coding++; writeFileSync(join(r.cwd, 'completed.txt'), '1'); return { dialogue: executionEnvelope(r, 'propose') };
+    }, runReview: r => ++reviews === 1 ? { dialogue: executionEnvelope(r, 'ask', {
+      issues: [{ id: 'I1', title: 'Possible requirement mismatch', status: 'awaiting-answer', blocking: true }],
+      next: { seat: 'codex', action: 'rebut', reason: 'Explain the requirement' },
+    }) } : nativeApproval(r, { issues: [{ id: 'I1', status: 'resolved', disposition: { kind: 'rejected', reason: 'The briefing already specifies it.', claimIds: ['briefing-requirement'] } }] }),
+  }));
+  assert.equal(facts.approved, true, facts.reason); assert.equal(coding, 1);
+  assert.equal(facts.dialogue.issues.I1.disposition.kind, 'rejected');
+  assert.equal(facts.messages.some(m => m.action === 'rebut'), true);
+});
+
+test('native ordinary final code change invalidates the current approval instead of relabelling it', async t => {
+  let captures = 0;
+  const facts = await run(nativeFixture(t, 'native-stale-final', { diffText: async (cwd, base) => {
+    if (++captures === 4) writeFileSync(join(cwd, 'completed.txt'), 'changed after review');
+    return diffText(cwd, base);
+  } }));
+  assert.equal(facts.approved, false); assert.match(facts.reason, /stale/);
+  assert.match(readFileSync(join(facts.dir, 'CHANGES.diff'), 'utf8'), /changed after review/);
+});
+
+test('native ordinary reviewer check addition runs independently and invalidates the earlier approval', async t => {
+  let reviews = 0;
+  const facts = await run(nativeFixture(t, 'native-added-check', { runReview: async r => {
+    reviews++;
+    if (reviews > 1) {
+      assert.equal(r.state.approval, null);
+      assert.equal(r.state.evidence.some(e => e.kind === 'command' && e.argv.includes('--test')), true);
+      return nativeApproval(r);
+    }
+    const artifact = await materializeReviewBundle({ cwd: r.cwd, round: r.round, diffDigest: r.diffDigest,
+      bundle: { version: 1, conclusion: 'clean', report: 'Check the existing implementation.', tests: [{ path: 'tests/current.test.js', content: "require('node:assert/strict').equal(require('node:fs').readFileSync('completed.txt','utf8'),'1');" }] } });
+    return { ...nativeApproval(r), artifact };
+  } }, [{ bin: process.execPath, args: ['--test'] }]));
+  assert.equal(facts.approved, true, facts.reason); assert.equal(reviews, 2);
+  assert.equal(facts.dialogue.proposalCycles, 1);
+});
+
+test('native ordinary correction starts one new cycle and rechecks actual changed files', async t => {
+  let coding = 0, reviews = 0;
+  const facts = await run(nativeFixture(t, 'native-correction', {
+    runExecutor: r => { coding++; writeFileSync(join(r.cwd, 'completed.txt'), coding === 1 ? 'first' : 'corrected'); return { dialogue: executionEnvelope(r, r.action) }; },
+    runReview: r => ++reviews === 1 ? { dialogue: executionEnvelope(r, 'ask', { next: { seat: 'codex', action: 'revise', reason: 'Correct the implementation using current evidence' } }) } : nativeApproval(r),
+  }));
+  assert.equal(facts.approved, true, facts.reason); assert.equal(coding, 2);
+  assert.equal(facts.dialogue.proposalCycles, 2); assert.equal(facts.dialogue.correctionCycles, 1);
+  assert.match(readFileSync(join(facts.dir, 'CHANGES.diff'), 'utf8'), /corrected/);
+});
+
+test('native ordinary discussion bundle restored by isolation cannot support approval', async t => {
+  let reviews = 0;
+  const facts = await run(nativeFixture(t, 'native-restored-bundle', {
+    runExecutor: r => {
+      if (r.action === 'answer') return { dialogue: executionEnvelope(r, 'answer', { next: { seat: 'claude', action: 'answer', reason: 'Discuss the explanation' } }) };
+      writeFileSync(join(r.cwd, 'completed.txt'), '1'); return { dialogue: executionEnvelope(r, 'propose') };
+    }, runReview: async r => {
+      if (++reviews === 1) return { dialogue: executionEnvelope(r, 'ask', { next: { seat: 'codex', action: 'answer', reason: 'Explain the work' } }) };
+      assert.equal(r.action, 'answer');
+      const artifact = await materializeReviewBundle({ cwd: r.cwd, round: r.round, diffDigest: r.diffDigest,
+        bundle: { version: 1, conclusion: 'clean', report: 'Discussion emitted a new report.', tests: [] } });
+      return { ...nativeApproval(r), artifact };
+    },
+  }));
+  assert.equal(facts.approved, false);
+  assert.match(facts.reason, /retained review artifact/);
+  assert.equal(facts.resources.providerLaunches, 4);
+});
+
+test('native ordinary budget stops before the next provider using journal usage once', async t => {
+  let reviews = 0;
+  const options = nativeFixture(t, 'native-budget', { runReview: () => { reviews++; } });
+  options.tokenBudget = 6;
+  const facts = await run(options);
+  assert.equal(facts.approved, false); assert.equal(reviews, 0);
+  assert.equal(facts.resources.providerLaunches, 1); assert.equal(facts.tokens.total.inputTokens, 5);
+  assert.match(facts.reason, /budget-exhausted/);
+});
+
+test('native ordinary required sink failure prevents second command and next reviewer', async t => {
+  let reviews = 0;
+  const facts = await run(nativeFixture(t, 'native-sink', { captureEvidence: () => { throw new Error('required sink unavailable'); },
+    runReview: r => { reviews++; return nativeApproval(r); } }, [
+    { bin: process.execPath, args: ['-e', "require('node:fs').writeFileSync('first-command','1')"] },
+    { bin: process.execPath, args: ['-e', "require('node:fs').writeFileSync('second-command','1')"] },
+  ]));
+  assert.equal(facts.approved, false); assert.match(facts.reason, /required sink unavailable/);
+  assert.equal(existsSync(join(facts.dir, 'first-command')), true);
+  assert.equal(existsSync(join(facts.dir, 'second-command')), false); assert.equal(reviews, 0);
+});
+
+test('native ordinary replan and requested mutation pause before later effects', async t => {
+  for (const effect of ['replan', 'mutation']) {
+    let later = 0;
+    const options = nativeFixture(t, `native-wip-${effect}`, { runPlanCandidateSet: () => { later++; }, runMutation: () => { later++; },
+      runReview: r => effect === 'replan' ? { dialogue: executionEnvelope(r, 'replan') } : nativeApproval(r) });
+    if (effect === 'mutation') options.mutation = true;
+    const facts = await run(options);
+    assert.equal(facts.approved, false); assert.match(facts.reason, new RegExp(effect));
+    assert.equal(later, 0); assert.equal(readFileSync(join(facts.dir, 'completed.txt'), 'utf8'), '1');
+  }
+});
 
 test('default run captures partial execution before a human question and launches no gate or reviewer', async t => {
   const scr = scratch(), target = makeTarget();
