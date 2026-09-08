@@ -206,6 +206,7 @@ export async function runExecutor({
   attempt,
   signal,
   beforeKill,
+  beforeKillRequired,
   onLiveness,
   livenessThresholdMs,
   progressThresholdMs,
@@ -219,6 +220,7 @@ export async function runExecutor({
   getProcessTree,
   getWorktreeActivity,
   onLivenessDecision,
+  onLivenessDecisionRequired,
   env = process.env,
   ownedTmpDir = false,
 }) {
@@ -297,6 +299,7 @@ export async function runExecutor({
       timeoutMs: resolvedTimeoutMs,
       signal,
       beforeKill,
+      beforeKillRequired,
       timeoutSetting: 'URO_EXECUTOR_TIMEOUT_MS',
       now,
       setTimer,
@@ -333,6 +336,7 @@ export async function runExecutor({
           }
         },
         onDecision: onLivenessDecision,
+        onDecisionRequired: onLivenessDecisionRequired,
         getLiveness: () => ({
           gapMs: nowMs() - (lastByteAt ?? startedAt),
           lastEvent: lastObservedEvent,
@@ -353,6 +357,8 @@ export async function runExecutor({
   const result = annotateUsageConsistency({
     ...parsed,
     stdout: r.stdout, delivery,
+    launch: r.launch,
+    ...(beforeKillRequired ? { preservation: r.preservation, preservationError: r.preservationError } : {}),
     exitCode: r.code,
     timedOut: r.timedOut,
     // When the executor dies, its stderr is usually the only account of why.

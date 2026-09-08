@@ -246,10 +246,13 @@ export async function diffText(dir, baseRef = 'HEAD', { timeoutMs } = {}) {
   return r.stdout;
 }
 
-async function preservePartialExecutorWork(dir, baseRef = 'HEAD', createDiff = diffText) {
+async function preservePartialExecutorWork(dir, baseRef = 'HEAD', createDiff = diffText, receipt = false) {
   const diff = await createDiff(dir, baseRef, { timeoutMs: PARTIAL_WORK_GIT_TIMEOUT_MS });
-  if (diff.trim() === '') return null;
+  if (!receipt && diff.trim() === '') return null;
   writeFileSync(join(dir, 'CHANGES.diff'), diff);
+  const staged = receipt ? await spawnCapture('git', ['-C', dir, 'diff', '--cached', '--quiet'], { timeoutMs: PARTIAL_WORK_GIT_TIMEOUT_MS }) : null;
+  if (staged && ![0, 1].includes(staged.code)) throw new Error('cannot observe staged partial work');
+  if (!staged || staged.code === 1) {
   const commit = await spawnCapture('git', [
     '-C', dir,
     '-c', 'user.email=ccc@local',
@@ -258,6 +261,13 @@ async function preservePartialExecutorWork(dir, baseRef = 'HEAD', createDiff = d
   ], { timeoutMs: PARTIAL_WORK_GIT_TIMEOUT_MS });
   if (commit.code !== 0) {
     throw new Error(`git commit failed while preserving executor work: ${commit.stderr.trim()}`);
+  }
+  }
+  if (receipt) {
+    const head = execFileSync('git', ['-C', dir, 'rev-parse', 'HEAD'], { encoding: 'utf8', windowsHide: true }).trim();
+    const affectedFiles = execFileSync('git', ['-C', dir, 'diff', '--name-only', baseRef, '--', '.', ...HARNESS_ARTIFACTS.map(path => `:(exclude)${path}`)], { encoding: 'utf8', windowsHide: true }).trim().split('\n').filter(Boolean);
+    return { status: 'completed', cwd: dir, baseCommit: baseRef, head, diff, diffDigest: reviewDigest(diff), affectedFiles,
+      committed: staged.code === 1, writerOutcome: 'unknown' };
   }
   return diff;
 }
@@ -517,7 +527,7 @@ export async function run(opts) {
   const claudeSuperpowersDir = verifiedSeats.claude?.verified
     ? verifiedSeats.claude.path
     : null;
-  const productionLivenessJudge = !nativeExecution && adapters.runExecutor === undefined;
+  const productionLivenessJudge = adapters.runExecutor === undefined;
   const livenessJudgeConfigured = typeof adapters.judgeLiveness === 'function'
     || productionLivenessJudge;
   let judgeLiveness = adapters.judgeLiveness ?? null;
@@ -567,6 +577,7 @@ export async function run(opts) {
       onStall: async (event) => {
         let action = 'report';
         const executorSlot = activeExecutor;
+        if (nativeExecution && !livenessJudgeConfigured && stallConfig.policy === 'restart' && executorSlot?.stop) action = 'pause';
         if (!nativeExecution && !livenessJudgeConfigured
           && stallConfig.policy === 'restart'
           && executorSlot?.controller
@@ -590,6 +601,7 @@ export async function run(opts) {
           await executorSlot.beforeKill(event);
           if (activeExecutor === executorSlot) executorSlot.controller.abort(event);
         }
+        if (action === 'pause') await executorSlot.stop(event);
       },
     });
     eventReporter = watchdog.reporter;
@@ -1091,14 +1103,29 @@ export async function run(opts) {
     const execute = async request => {
       const attempt = ++executorLaunchCount;
       writeFileSync(join(iso.dir, 'TASK.md'), request.input);
-      let preservation;
-      const beforeKill = () => preservation ??= preservePartialExecutorWork(iso.dir, iso.baseCommit, createDiff);
-      const response = await runExecutor({ ...request, plan: request.input, model: executorModel, effort: executorEffort,
+      const controller = stallConfig?.policy === 'restart' ? new AbortController() : null;
+      const slot = { stop: event => slot.stopping ??= (async () => {
+        try {
+          await request.onLivenessDecisionRequired({ ...event, status: 'stuck', judged: false, reasoning: 'Explicit stall policy requested termination; writer outcome remains unknown' });
+          await request.beforeKillRequired(event);
+        } catch (error) { slot.failure = error; }
+        finally { controller?.abort(slot.failure ? { ...event, persistenceFailure: slot.failure.message } : event); }
+      })() };
+      if (controller) activeExecutor = slot;
+      let response;
+      try { response = await runExecutor({ ...request, plan: request.input, model: executorModel, effort: executorEffort,
         bin: opts.codexBin ?? 'codex', env: runEnvironment, ownedTmpDir: true,
-        timeoutMs: stageTimeouts.executor, reporter: eventReporter, runId: request.state.runId, attempt, beforeKill,
+        timeoutMs: stageTimeouts.executor, reporter: eventReporter, runId: request.state.runId, attempt,
+        ...(controller ? { signal: controller.signal } : {}),
+        onLivenessDecision: decision => { livenessChecks ??= []; livenessChecks.push({ attempt, iteration: request.state.proposalCycles, ...decision }); },
         onLiveness: () => watchdog?.touch('executor'),
         livenessThresholdMs: executorThresholds.thresholdMs, progressThresholdMs: executorThresholds.progressThresholdMs });
-      if (response.timedOut || response.aborted) await beforeKill();
+      } finally { await slot.stopping; if (activeExecutor === slot) activeExecutor = null; }
+      if (response.timedOut || response.aborted) {
+        try { await request.beforeKillRequired(response.timeoutReason ?? { kind: 'aborted' }); }
+        catch (error) { response.error = error.message; }
+      }
+      if (slot.failure || response.preservationError) response.error = slot.failure?.message ?? response.preservationError;
       recordExecutorTimeout(response, request.state.proposalCycles, attempt);
       providerResults.push({ seat: 'codex', operationId: request.operationId, response });
       if (['propose', 'revise'].includes(request.action)) {
@@ -1156,6 +1183,12 @@ export async function run(opts) {
           ...(maxDebateRounds === undefined ? {} : { proposalCycles: maxDebateRounds }) },
         execute, discuss: execute, review, completeReview, capture, selectChecks: checkSelection, reviewInstructions: EXECUTION_REVIEW_PROMPT,
         selectMerge: mergeSelection, runMerge: runMergeSequence,
+        judgeLiveness,
+        selectPreservation: async () => ({ cwd: realpathSync.native(iso.dir), baseCommit: merge?.mergeBase ?? iso.baseCommit,
+          head: execFileSync('git', ['-C', iso.dir, 'rev-parse', 'HEAD'], { encoding: 'utf8', windowsHide: true }).trim(),
+          index: execFileSync('git', ['-C', iso.dir, 'ls-files', '--stage'], { encoding: 'utf8', windowsHide: true }),
+          mergeHead: readMergeHead() }),
+        preserveExecutorWork: ({ selection }) => preservePartialExecutorWork(iso.dir, selection.baseCommit, createDiff, true),
         runChecks: async request => {
           const captured = [];
           gateResult = await runGate({ commands: request.selection.commands, cwd: iso.dir, timeoutMs: stageTimeouts.gate,
@@ -1176,7 +1209,7 @@ export async function run(opts) {
           : tokenBudget !== undefined && prior.knownUsage.inputTokens + prior.knownUsage.outputTokens + account.knownUsage.inputTokens + account.knownUsage.outputTokens >= tokenBudget
             ? { allowed: false, reason: 'budget-exhausted: token budget reached' } : { allowed: true },
         reporter: eventReporter, env: runEnvironment });
-      const finalCapture = await capture({ readOnly: merge !== undefined });
+      const finalCapture = await capture({ readOnly: merge !== undefined || nativeResult.action === 'paused' });
       if (nativeResult.approved && (observedMergeWorkspace?.diffComplete === false || finalCapture.artifactDigest !== nativeResult.state.artifactDigest
         || nativeResult.state.executionChecks?.artifactDigest !== finalCapture.artifactDigest
         || nativeResult.state.executionChecks?.checkSetIdentity !== checkSelection().identity
@@ -1280,7 +1313,7 @@ export async function run(opts) {
         nativeResult.resources = nativePhases.at(-1).resources;
         planningUsage = addUsage(planningUsage, nativeResult.resources.knownUsage);
       }
-      await capture({ readOnly: merge !== undefined }); // Observe uncertain merge effects without restaging them.
+      await capture({ readOnly: true }); // Observe interrupted effects without a second staging mutation.
     }
     if (!nativeResult.approved && nativeResult.state) nativeResult.state.approval = null;
     nativeResult.phaseResources = nativeResult.resources;
@@ -2272,6 +2305,8 @@ export async function run(opts) {
       workspace: { ...iso, targetPath: resolve(target), diff: currentDiff, diffDigest: reviewDigest(currentDiff) },
       originalPlan, plan, approvedExecutionPlan, commands, resources: nativeResult.resources,
       phaseResources: nativeResult.phaseResources, phaseChain: nativePhases, phaseLinks: nativeLinks,
+      supervision: { ...nativeResult.checkpointState?.supervision, stallConfig, executorThresholds, stallRestartCount, stallRecords, livenessChecks,
+        observedWorkspace: observedMergeWorkspace },
       ...(merge === undefined ? {} : { mergeState: { merge, mergeProgress: nativeResult.state?.mergeProgress ?? null,
         activeConflict, mergeConflicts, mergeResolutions, conflictingIntent, mergePreparationFailure,
         observedWorkspace: observedMergeWorkspace, pendingOperation: nativeResult.state?.pendingOperation,

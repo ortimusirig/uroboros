@@ -4,11 +4,15 @@ import { openPlanningContext, contextLifecycle } from './planning-dialogue.js';
 import { extendSharedContext } from './shared-context.js';
 import { runProtectedOperation, captureReviewSnapshot, restoreReviewSnapshot } from './review-protection.js';
 import { detectReview } from './review.js';
+import { buildLivenessJudgePrompt, DEFAULT_LIVENESS_JUDGE_TIMEOUT_MS } from './liveness-judge.js';
+import { resolve } from 'node:path';
 
 /** Phase adapter; the native dispatcher is the sole dialogue/effect controller. */
 export async function runExecutionDialogue({ state, journal, snapshot, artifactDigest, directory, target,
   requirements, plan = requirements, task = plan, runId, artifactRoot, interactionMode = 'manual', context = {}, limits = {},
-  execute, review, completeReview, discuss, inspect, capture, selectChecks, runChecks, selectMerge, runMerge, budget, reporter, env, searchIndex, retained, reviewInstructions = '', session: suppliedSession }) {
+  execute, review, completeReview, discuss, inspect, capture, selectChecks, runChecks, selectMerge, runMerge,
+  judgeLiveness, selectPreservation, preserveExecutorWork, livenessJudgeTimeoutMs = DEFAULT_LIVENESS_JUDGE_TIMEOUT_MS,
+  budget, reporter, env, searchIndex, retained, reviewInstructions = '', session: suppliedSession }) {
   // A retained handoff initializes a distinct phase; it is never a supplied-session reopening.
   if (retained && (state || journal || snapshot || suppliedSession)) throw new Error('retained successor must start a new execution phase');
   if (retained) {
@@ -43,22 +47,157 @@ export async function runExecutionDialogue({ state, journal, snapshot, artifactD
     contextLifecycle.checkContext(session);
     contextLifecycle.persistContext(session, state.snapshot);
   };
+  const providerObservations = [];
   const callSeat = seat => async request => {
     retained?.validate();
     contextLifecycle.checkContext(session);
     const writing = seat === 'codex' && ['propose', 'revise'].includes(request.action);
     const call = writing ? execute : seat === 'claude' ? review : discuss;
     if (typeof call !== 'function') throw new Error(`missing ${writing ? 'execution' : seat + ' discussion'} transport`);
-    const invoke = () => call({ ...request, seat, dialogueMode: true, plan: request.state.executionTask ?? plan, approvedPlan: plan, cwd: target,
-      remainingWork: Boolean(retained || request.state.executionCycle?.open && request.state.executionCycle.completedOperationIds?.length) });
-    const protectedResult = await runProtectedOperation({ cwd: target, scope: writing ? 'inside' : 'outside',
+    let accepting = true, failure = null, preservation = null, interrupted = false, judgeSequence = 0;
+    const judges = new Map(), cancellations = new Set(), settlements = new Set();
+    const ensureRecording = () => { contextLifecycle.checkContext(session); journal.read(); if (failure) throw failure; };
+    const append = event => {
+      try { ensureRecording(); return journal.append({ ...event, providerOperationId: request.operationId }); }
+      catch (error) { failure = error; throw error; }
+    };
+    const prepare = (operationId, effect, purpose, input, extra = {}) => {
+      ensureRecording();
+      return journal.prepare({ operationId, effect, purpose, seat: effect === 'provider' ? 'codex' : 'harness',
+        input, providerOperationId: request.operationId, contextDigest: request.state.snapshot.digest,
+        artifactDigest: request.state.artifactDigest, evidenceIds: request.state.evidence.map(item => item.id),
+        unreadMessageIds: request.state.messages.filter(item => item.sender !== 'codex').map(item => item.id), ...extra });
+    };
+    const supervision = writing ? {
+      judgeLiveness: evidence => {
+        if (!accepting) return Promise.resolve({ available: false, reason: 'writer supervision has closed' });
+        const operationId = `${request.operationId}:liveness:${evidence.checkCount ?? ++judgeSequence}`;
+        if (judges.has(operationId)) return judges.get(operationId);
+        const work = (async () => {
+          ensureRecording();
+          const observed = { ...evidence, phase: { runId, phase: 'execution', providerOperationId: request.operationId,
+            artifactDigest: request.state.artifactDigest, contextDigest: request.state.snapshot.digest,
+            approvedPlan: plan, task: request.state.executionTask ?? plan, input: request.input } };
+          const input = buildLivenessJudgePrompt(observed);
+          const existing = journal.operation(operationId);
+          if (existing) {
+            if (existing.status !== 'completed') throw new Error('uncertain liveness provider; replay refused');
+            return prepare(operationId, 'provider', 'liveness', input).result;
+          }
+          const allowed = budget ? await budget({ state: structuredClone(request.state), account: journal.account(),
+            nextAction: { seat: 'codex', action: 'liveness' } }) : { allowed: true };
+          if (!accepting) return { available: false, reason: 'writer supervision has closed' };
+          if (allowed?.allowed !== true || typeof judgeLiveness !== 'function') {
+            const result = { available: false, reason: allowed?.allowed !== true ? allowed.reason ?? 'liveness budget denied' : 'no liveness judge was available' };
+            append({ type: 'liveness-denied', operationId, result });
+            return result;
+          }
+          prepare(operationId, 'provider', 'liveness', input);
+          const controller = new AbortController(); cancellations.add(controller);
+          let timer, expired = false;
+          const timeout = new Promise(resolve => { timer = setTimeout(() => {
+            expired = true; controller.abort({ kind: 'liveness-judge-timeout' });
+            resolve({ available: false, reason: 'liveness judge settlement uncertain at its existing timeout bound', uncertain: true });
+          }, livenessJudgeTimeoutMs); });
+          const actual = Promise.resolve().then(() => judgeLiveness(observed, { input, signal: controller.signal }))
+            .catch(error => ({ available: false, reason: error.message, error: error.message, usage: null, delivery: null }));
+          const settlement = (async () => { try {
+            const result = await Promise.race([actual, timeout]);
+            if (expired) {
+              append({ type: 'liveness-uncertain', operationId, result });
+              failure = new Error(result.reason);
+            }
+            else {
+              providerObservations.push({ operationId, seat: 'codex', purpose: 'liveness', usage: result?.usage ?? null,
+                delivery: result?.delivery ?? null, launch: result?.launch ?? null });
+              ensureRecording();
+              journal.complete({ operationId, result: result?.available === false ? { ...result, error: result.reason } : result,
+                usage: result?.usage ?? null, delivery: result?.delivery ?? null });
+            }
+            return result;
+          } finally { clearTimeout(timer); cancellations.delete(controller); }
+          })().catch(error => { failure = error; throw error; });
+          settlements.add(settlement);
+          return settlement;
+        })().catch(error => { failure = error; throw error; });
+        judges.set(operationId, work);
+        return work;
+      },
+      onLivenessDecisionRequired: async decision => {
+        append({ type: 'liveness-decision', decision });
+      },
+      beforeKillRequired: reason => {
+        interrupted = true;
+        if (preservation) return preservation;
+        preservation = (async () => {
+          if (reason?.persistenceFailure) throw new Error(reason.persistenceFailure);
+          ensureRecording();
+          if (typeof selectPreservation !== 'function' || typeof preserveExecutorWork !== 'function') throw new Error('required partial-work preservation unavailable');
+          const operationId = `${request.operationId}:preservation`;
+          const existing = journal.operation(operationId);
+          if (existing) {
+            if (existing.status !== 'completed') throw new Error('uncertain preservation; replay refused');
+            if (existing.providerOperationId !== request.operationId) throw new Error('preservation writer identity mismatch');
+            return existing.result;
+          }
+          const selection = await selectPreservation({ ...request, reason });
+          prepare(operationId, 'preserve-partial-work', 'preservation', JSON.stringify({ reason, selection }), { selection, reason });
+          const result = await preserveExecutorWork({ ...request, reason, selection, operationId });
+          ensureRecording();
+          journal.complete({ operationId, result });
+          return result;
+        })().catch(error => { failure = error; throw error; });
+        return preservation;
+      },
+    } : {};
+    let observedResponse;
+    const invoke = async () => {
+      let response;
+      try { response = await call({ ...request, ...supervision, seat, dialogueMode: true, plan: request.state.executionTask ?? plan, approvedPlan: plan, cwd: target,
+        remainingWork: Boolean(retained || request.state.executionCycle?.open && request.state.executionCycle.completedOperationIds?.length) });
+        observedResponse = response;
+        providerObservations.push({ operationId: request.operationId, seat, usage: response?.usage ?? null,
+          delivery: response?.delivery ?? null, launch: response?.launch ?? null });
+      }
+      finally {
+        accepting = false;
+        for (const controller of cancellations) controller.abort({ kind: 'writer-closed' });
+        await Promise.allSettled(settlements);
+        if (preservation) await Promise.allSettled([preservation]);
+      }
+      if (failure || interrupted || response?.timedOut || response?.aborted) {
+        const reason = failure?.message ?? 'interrupted writer outcome is unknown; retained work requires reconciliation';
+        try { append({ type: 'executor-interruption', outcome: 'unknown', reason }); } catch { /* The failed required record cannot be invented. */ }
+        return { ...response, error: reason, writerOutcome: 'unknown' };
+      }
+      return response;
+    };
+    let protectedResult;
+    try { protectedResult = await runProtectedOperation({ cwd: target, scope: writing ? 'inside' : 'outside',
       prefix: '__uro_review', stage: 'execution-dialogue', role: seat, runId, reporter,
       ...(writing ? { captureSnapshot: captureReviewSnapshot, restoreSnapshot: restoreReviewSnapshot } : {}),
+      ...(writing ? { validateCritical: ({ changedPaths }) => {
+        const allowed = resolve(directory) === resolve(target) ? ['__uro_dialogue/journal.jsonl', '__uro_dialogue/journal-tail.jsonl'] : [];
+        if (changedPaths.some(path => !allowed.includes(path.replaceAll('\\', '/')))) throw new Error('unowned correctness-critical paths changed during provider access');
+        contextLifecycle.checkContext(session);
+        journal.read();
+        return true;
+      } } : {}),
       operation: !writing ? async () => (await runProtectedOperation({
         cwd: target, scope: 'inside', prefix: '__uro_review', stage: 'execution-dialogue', role: seat, runId, reporter,
         captureSnapshot: captureReviewSnapshot, restoreSnapshot: restoreReviewSnapshot, operation: invoke,
       })).result : invoke,
-    });
+    }); } catch (error) {
+      const observation = providerObservations.find(item => item.operationId === request.operationId);
+      if (observation) observation.restoration = { status: 'failed-or-unverified', reason: error.message };
+      return { ...observedResponse, error: error.message, protectionFailure: true };
+    }
+    const observation = providerObservations.find(item => item.operationId === request.operationId);
+    if (observation) observation.restoration = { status: 'completed', paths: protectedResult.restoredPaths };
+    if (writing && interrupted) {
+      try { append({ type: 'executor-restoration', status: 'completed', paths: protectedResult.restoredPaths }); }
+      catch (error) { protectedResult.result = { ...protectedResult.result, error: error.message }; }
+    }
     let response = protectedResult.result;
     contextLifecycle.checkContext(session);
     retained?.validate();
@@ -95,7 +234,12 @@ export async function runExecutionDialogue({ state, journal, snapshot, artifactD
       ...(observed.mergeProgress ? { mergeProgress: observed.mergeProgress } : {}) };
   };
   try {
-    const result = await runIssueDialogue({ state, journal, seats: { codex: callSeat('codex'), claude: callSeat('claude') },
+    const uncertain = journal.read().find(event => event.type === 'prepare' && ['liveness', 'preservation'].includes(event.purpose)
+      && journal.operation(event.operationId).status !== 'completed');
+    const result = uncertain ? { state: { ...state, approval: null,
+      technicalPause: { reason: `uncertain ${uncertain.purpose}; replay refused`, operationId: uncertain.operationId } },
+      approved: false, action: 'paused', reason: `uncertain ${uncertain.purpose}; replay refused`, resources: journal.account(), messages: state.messages }
+      : await runIssueDialogue({ state, journal, seats: { codex: callSeat('codex'), claude: callSeat('claude') },
       inspect, budget, reporter, persist,
       selectChecks,
       selectMerge,
@@ -143,6 +287,18 @@ export async function runExecutionDialogue({ state, journal, snapshot, artifactD
       directory, artifactRoot: session.artifactRoot, dialogue: result.state,
       artifactDigest: result.state.artifactDigest, pendingDecision: result.state.pendingDecision,
       journalIdentity: tail ? { sequence: tail.sequence, hash: tail.hash } : null, recall: session.recall };
+    checkpointState.supervision = { observations: providerObservations };
+    if (integrityValid) {
+      const events = journal.read();
+      checkpointState.supervision = {
+        observations: providerObservations,
+        operations: events.filter(event => event.type === 'prepare' && ['liveness', 'preservation'].includes(event.purpose)).map(event => journal.operation(event.operationId)),
+        decisions: events.filter(event => event.type === 'liveness-decision'),
+        denials: events.filter(event => event.type === 'liveness-denied'),
+        uncertainty: events.filter(event => ['liveness-uncertain', 'executor-interruption'].includes(event.type)),
+        restoration: events.filter(event => event.type === 'executor-restoration'),
+      };
+    }
     journal.close();
     try {
       if (integrityValid) checkpointState.executionArtifacts = contextLifecycle.manifest({ directory, runId,

@@ -36,6 +36,19 @@ test('correctness-critical context and dialogue edits fail even when normal harn
   }), /correctness-critical/);
 });
 
+test('trusted journal byte validation cannot waive changed critical file permissions', async t => {
+  const cwd = mkdtempSync(join(tmpdir(), 'uro-critical-mode-'));
+  t.after(() => rmSync(cwd, { recursive: true, force: true }));
+  mkdirSync(join(cwd, '__uro_dialogue'));
+  const path = join(cwd, '__uro_dialogue', 'journal.jsonl');
+  writeFileSync(path, 'record\n');
+  await assert.rejects(runProtectedOperation({ cwd, scope: 'inside', prefix: '__uro_review', role: 'executor',
+    captureSnapshot: captureReviewSnapshot, restoreSnapshot: restoreReviewSnapshot,
+    validateCritical: () => true,
+    operation: () => { chmodSync(path, 0o444); },
+  }), /correctness-critical/);
+});
+
 function filesIn(root) {
   const files = new Map();
   const visit = (directory) => {

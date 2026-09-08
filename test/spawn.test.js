@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { EventEmitter } from 'node:events';
+import { spawn } from 'node:child_process';
 import { createLivenessDeadline, spawnCapture, commandExists } from '../src/spawn.js';
 
 function controlledClock() {
@@ -244,6 +245,35 @@ test('captures stdout and exit code 0', async () => {
   const r = await spawnCapture(process.execPath, ['-e', 'process.stdout.write("hi")']);
   assert.equal(r.code, 0);
   assert.equal(r.stdout, 'hi');
+});
+
+test('required preservation failure contains the owned child and exposes the failure', async () => {
+  const controller = new AbortController();
+  let calls = 0;
+  const result = await spawnCapture(process.execPath, ['-e', 'process.stdout.write("ready"); setInterval(() => {}, 100);'], {
+    signal: controller.signal,
+    onStdout: () => controller.abort({ kind: 'test-stop' }),
+    beforeKillRequired: async () => { calls++; throw new Error('required preservation sink failed'); },
+  });
+  assert.equal(calls, 1);
+  assert.equal(result.aborted, true);
+  assert.match(result.preservationError, /required preservation sink failed/);
+  assert.equal(result.preservation, null);
+});
+
+test('actual child close during required preservation records the result without signalling its closed pid', async () => {
+  const controller = new AbortController(); let closeChild, kills = 0;
+  const closed = new Promise(resolve => { closeChild = resolve; });
+  const result = await spawnCapture(process.execPath, ['-e', 'process.stdout.write("ready");'], {
+    signal: controller.signal, onStdout: () => controller.abort({ kind: 'test-stop' }),
+    spawnProcess: (bin, args, opts) => { const child = spawn(bin, args, opts); child.once('close', closeChild); return child; },
+    beforeKillRequired: async () => { await closed; return { status: 'completed', retained: true }; },
+    killProcessTree: child => { kills++; child.kill(); },
+  });
+  assert.equal(kills, 0);
+  assert.equal(result.aborted, true);
+  assert.deepEqual(result.preservation, { status: 'completed', retained: true });
+  assert.equal(result.preservationError, null);
 });
 
 test('captures a non-zero exit code without throwing', async () => {

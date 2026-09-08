@@ -418,13 +418,21 @@ test('native ordinary empty malformed output and absent or legacy reviewer never
 test('native ordinary retained manifest corruption is unapproved before another seat', async t => {
   let reviews = 0;
   const facts = await run(nativeFixture(t, 'native-manifest', {
-    runExecutor: r => { writeFileSync(join(r.cwd, 'completed.txt'), '1');
+    judgeLiveness: async () => ({ status: 'working', reasoning: 'Observed current progress', usage: { inputTokens: 4, outputTokens: 2 } }),
+    runExecutor: async r => { await r.judgeLiveness({ checkCount: 1 }); writeFileSync(join(r.cwd, 'completed.txt'), '1');
       writeFileSync(join(r.cwd, '__uro_context', `${r.state.snapshot.id}.json`), '{}');
-      return { dialogue: executionEnvelope(r, 'propose') }; }, runReview: () => { reviews++; },
+      return { dialogue: executionEnvelope(r, 'propose'), usage: { inputTokens: 7, outputTokens: 3 } }; }, runReview: () => { reviews++; },
   }));
   assert.equal(facts.approved, false); assert.equal(reviews, 0);
   assert.equal(facts.checkpointState.executionArtifacts, undefined);
-  assert.match(readFileSync(join(facts.dir, 'CHANGES.diff'), 'utf8'), /completed.txt/);
+  assert.equal(readFileSync(join(facts.dir, 'completed.txt'), 'utf8'), '1');
+  assert.equal(facts.checkpointState.supervision.observedWorkspace.diffComplete, false);
+  assert.ok(facts.checkpointState.supervision.observedWorkspace.untrackedFiles.some(file => file.path === 'completed.txt'));
+  assert.equal((await spawnCapture('git', ['-C', facts.dir, 'ls-files', '--', 'completed.txt'])).stdout, '');
+  assert.equal(facts.resources.providerLaunches, 2);
+  assert.partialDeepStrictEqual(facts.resources.knownUsage, { inputTokens: 11, outputTokens: 5 });
+  assert.equal(facts.checkpointState.phaseChain.at(-1).checkpointState.executionArtifacts, undefined);
+  assert.ok(facts.requiredSourceFailure);
 });
 
 test('native ordinary invalid merge identities stop before initial Git advance and every provider', async t => {
@@ -1562,7 +1570,8 @@ test('a timed-out executor stops the run, is recorded, and maps to a non-zero pr
       runReview: async () => { verifierCalls++; return { launchFailed: false, timedOut: false }; },
     },
   });
-  assert.equal(facts.outcome, 'timed-out');
+  assert.equal(facts.nextAction, 'paused');
+  assert.equal(facts.approved, false);
   assert.notEqual(exitCodeFor(facts.outcome), 0);
   assert.equal(gateCalls, 0, 'a timed-out executor must not advance to the gate');
   assert.equal(verifierCalls, 0);
@@ -1584,7 +1593,7 @@ test('a timed-out executor commits partial work and writes an artifact-free diff
       runExecutor: async (opts) => {
         writeFileSync(join(opts.cwd, 'partial.js'), 'export const partial = true;\n');
         writeFileSync(join(opts.cwd, 'events.jsonl'), '{"harness":true}\n');
-        await opts.beforeKill({
+        await opts.beforeKillRequired({
           kind: 'deadline', timeoutMs: 25, gapMs: 25,
           lastEvent: { stage: 'executor', type: 'start', attempt: opts.attempt },
           setting: 'URO_STALL_THRESHOLD_MS',
@@ -1604,7 +1613,8 @@ test('a timed-out executor commits partial work and writes an artifact-free diff
     },
   });
 
-  assert.equal(facts.outcome, 'timed-out');
+  assert.equal(facts.nextAction, 'paused');
+  assert.equal(facts.approved, false);
   const diff = readFileSync(join(facts.dir, 'CHANGES.diff'), 'utf8');
   assert.match(diff, /partial[.]js/);
   for (const artifact of HARNESS_ARTIFACTS) {
@@ -1622,7 +1632,7 @@ test('a timed-out executor commits partial work and writes an artifact-free diff
   rmSync(scr, { recursive: true, force: true });
 });
 
-test('a failed partial-work commit is non-fatal and cannot suppress the timeout outcome', async () => {
+test('a failed partial-work commit preserves bytes and reports a required unapproved pause', async () => {
   const scr = scratch();
   const facts = await run({
     task: 'Keep timeout outcome when preservation fails.', target: makeTarget(), gate: [],
@@ -1634,8 +1644,8 @@ test('a failed partial-work commit is non-fatal and cannot suppress the timeout 
         mkdirSync(refDirectory, { recursive: true });
         writeFileSync(join(refDirectory, 'partial-commit-fails.lock'),
           'force the commit ref update to fail\n');
-        await opts.beforeKill({ kind: 'liveness', timeoutMs: 50, gapMs: 50,
-          setting: 'URO_STALL_THRESHOLD_MS' });
+        await assert.rejects(opts.beforeKillRequired({ kind: 'liveness', timeoutMs: 50, gapMs: 50,
+          setting: 'URO_STALL_THRESHOLD_MS' }), /git commit failed/);
         return { changedFiles: ['partial.js'], lastMessage: 'partial work', timedOut: true,
           timeoutMs: 25, exitCode: -1,
           timeoutReason: {
@@ -1648,7 +1658,10 @@ test('a failed partial-work commit is non-fatal and cannot suppress the timeout 
     },
   });
 
-  assert.equal(facts.outcome, 'timed-out');
+  assert.equal(facts.nextAction, 'paused');
+  assert.equal(facts.approved, false);
+  assert.match(facts.reason, /git commit failed/);
+  assert.equal(facts.checkpointState.supervision.operations.find(item => item.purpose === 'preservation').status, 'prepared');
   assert.equal(facts.timeoutEvents[0].timeoutMs, 50,
     'the silence threshold is the recorded limit');
   assert.equal(facts.timeoutEvents[0].gapMs, 50);

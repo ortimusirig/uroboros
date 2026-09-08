@@ -134,6 +134,7 @@ export async function runProtectedOperation({
   reporter,
   operation,
   onRestore,
+  validateCritical,
   captureSnapshot = captureWorktreeSnapshot,
   restoreSnapshot = restoreWorktreeSnapshot,
 }) {
@@ -144,10 +145,16 @@ export async function runProtectedOperation({
   try {
     result = await operation();
   } finally {
-    const changedCritical = critical.some(before => {
+    let changedCriticalMetadata = false;
+    const changedCriticalPaths = critical.flatMap(before => {
       const after = reviewFiles(cwd, relative(cwd, before.root));
       return [...new Set([...before.entries.keys(), ...after.entries.keys()])]
-        .some(path => !entriesEqual(before.entries.get(path), after.entries.get(path)));
+        .filter(path => {
+          const original = before.entries.get(path), current = after.entries.get(path);
+          if (entriesEqual(original, current)) return false;
+          if (original?.type !== 'file' || current?.type !== 'file' || original.mode !== current.mode) changedCriticalMetadata = true;
+          return true;
+        });
     });
     let restoration;
     try {
@@ -167,7 +174,10 @@ export async function runProtectedOperation({
         action: 'restored',
       });
     }
-    if (changedCritical) throw new WorktreeRestorationError('correctness-critical shared context or dialogue records changed during provider access');
+    if (changedCriticalPaths.length && (changedCriticalMetadata || typeof validateCritical !== 'function'
+      || await validateCritical({ changedPaths: changedCriticalPaths }) !== true)) {
+      throw new WorktreeRestorationError('correctness-critical shared context or dialogue records changed during provider access');
+    }
   }
   return { result, restoredPaths };
 }
