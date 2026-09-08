@@ -276,7 +276,7 @@ git commit -m "feat: add durable evidence-led coworker dialogue"
 
 ## Task 3: Shared planning and decomposition conversations
 
-**Files:** Create src/planning-dialogue.js, test/planning-dialogue.test.js. Modify src/plan.js, src/decompose.js, src/conversation.js (compatibility/prompt consistency/rendering), src/args.js (affected defaults/validation), src/executor.js and src/arbiter.js (observed tool receipts), src/review-protection.js and src/isolation.js (context/dialogue sidecar protections/exclusions), test/plan.test.js, test/decompose.test.js, test/candidate-campaign.test.js, test/events.test.js and the fresh-planning fixture portions of test/resume.test.js, plus affected transport/args/protection/isolation tests. Task5 still owns recovery semantics and the remaining resume test changes.
+**Files:** Create src/planning-dialogue.js, test/planning-dialogue.test.js. Modify src/plan.js, src/decompose.js, src/conversation.js (compatibility/prompt consistency/rendering), src/args.js (affected defaults/validation), src/run.js (pivot-default import/parameter only), src/executor.js and src/arbiter.js (observed tool receipts), src/review-protection.js and src/isolation.js (context/dialogue sidecar protections/exclusions), test/plan.test.js, test/decompose.test.js, test/candidate-campaign.test.js, test/events.test.js and the fresh-planning fixture portions of test/resume.test.js, plus affected transport/args/protection/isolation and fresh-pivot default tests. Task5 still owns recovery semantics and the remaining resume test changes; Task4 owns all other execution dialogue changes.
 
 **Interfaces:** Consumes Tasks 1-2; produces runPlanningDialogue and existing runPlan/runPlanCandidateSet/decompose results plus sharedContext/dialogue/resources. Existing integer rounds, artifact validators/writer, output paths and legacy readers preserved.
 
@@ -310,6 +310,8 @@ Wire the Task1 notebook into these actual entry points, not only unit-test its s
 Author answer/rebut uses read-only seat without parsePlanProposal or writeArtifacts. Explicit propose/revise creates a new cycle. Only current plan/gate/context approval writes once through existing rollback-safe writer. Retain legacy runConversation/historical readers explicitly; do not infer legacy mode from invalid new response or injected adapters. Update stale test fixtures intentionally, not by weakening authority assertions. Transport parsers retain actual tool/source observations; narration is not a tool observation.
 
 Preserve explicit candidates and pivot-candidates 1..5. Split DEFAULT_PIVOT_CANDIDATES from the initial default: initial becomes one, existing omitted fresh-pivot breadth remains three. This avoids changing an unspecified default merely because the old code shared one constant.
+
+The existing run.js import and omitted pivotCandidates parameter also use DEFAULT_PLAN_CANDIDATES. Change only that import/default seam in this task so direct execution preserves the separate pivot default before Task4 integrates execution dialogue.
 
 Reconcile the existing exactly-two-artifact-tags prompt with the extra dialogue envelope. New-mode standing instructions must not demand an extra reviewer-written test on every review. Preserve explicitly required checks. Keep context/journal sidecars out of Git changes without treating model edits to correctness-critical records as trustworthy; validate their integrity/identity before subsequent decisions.
 
