@@ -349,6 +349,8 @@ Task4 also owns the existing CLI fake paths fixtures/fake-codex.mjs, fixtures/fa
 
 The ordinary-run WIP slice also owns focused test/run-artifacts.test.js and the existing test/queue.test.js landing compatibility fixture for native result/retention/approval mapping; broader queue recovery remainsTask5. Reuse task-4-ordinary-run-brief.md and task-4-run-slice-map.md for dependent slice boundaries. Existing optional mutation-analysis and stall-liveness provider/effect boundaries require explicit native journal/budget/identity integration before whole-Task4 completion; while unfinished, pause before their effects, without changing the legacy readers or redesigning those subsystems.
 
+The stall/liveness slice owns the narrow required-decision and native judge cancellation/settlement seams in existing spawn/executor/run/liveness code. An outer judge timeout/dispose must not allow late gathered work to launch another provider or write completion into a closed phase journal. Await actual launched-judge settlement or retain explicit uncertainty, without unbounded joins, fabricated cancellation or new dialogue caps; preserve legacy callbacks when required hooks are absent and contain only owned processes on sink failure. An in-flight writer's unknown usage under an enforced budget denies a concurrent paid judge; record that outcome without invented reservations or live usage.
+
 - [ ] **Step 1: Write RED using real retained files and fake seat transports.**
 ~~~js
 // Counter file is changed only in the first fake executor's actual write step.
