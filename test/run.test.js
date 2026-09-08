@@ -24,7 +24,7 @@ import { exitCodeFor } from '../src/exit.js';
 import { reviewDigest, materializeReviewBundle } from '../src/review.js';
 import { captureEvidence, createInspectionReceipt } from '../src/context-evidence.js';
 import { planningEnvelope, planningApproval } from './fixtures/planning-responses.js';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { deriveMergeContext, MERGE_LEDGER_FILENAME } from '../src/merge.js';
 import { landQueueDiff } from '../src/queue-runtime.js';
 import { isolate } from '../src/isolation.js';
@@ -726,6 +726,105 @@ test('native ordinary invalid merge identities stop before initial Git advance a
   const facts = await run(options);
   assert.equal(facts.approved, false); assert.match(facts.reason, /bad revision|unknown revision|Command failed|ambiguous argument/);
   assert.equal(calls, 0); assert.equal(facts.resources.providerLaunches, 0);
+});
+
+for (const discussionAction of ['answer', 'rebut', 'challenge']) test(`native Codex ${discussionAction} and protocol repair pin actual child argv to read-only`, async t => {
+  const hadSandbox = Object.hasOwn(process.env, 'URO_CODEX_SANDBOX');
+  const previousSandbox = process.env.URO_CODEX_SANDBOX;
+  process.env.URO_CODEX_SANDBOX = 'danger-full-access';
+  try {
+    const { runExecutor } = await import(`../src/executor.js?discussion-sandbox=${discussionAction}`);
+    const launches = [];
+    let reviews = 0;
+    const facts = await run(nativeFixture(t, `sandbox-${discussionAction}`, {
+      runExecutor: async request => {
+        const writing = ['propose', 'revise'].includes(request.action);
+        const reply = request.action === discussionAction ? 'malformed discussion reply'
+          : `<UROBOROS_DIALOGUE>${JSON.stringify(executionEnvelope(request,
+            request.action === 'repair' ? discussionAction : request.action,
+            { evidence: ['requirement-briefing'] }))}</UROBOROS_DIALOGUE>`;
+        // The hermetic child reports the argv it actually received. Production
+        // runExecutor still builds and launches the Codex argument vector.
+        const script = [
+          "process.stdin.resume();process.stdin.on('end',()=>{",
+          writing ? `require('node:fs').writeFileSync('completed.txt',${JSON.stringify(request.action)});` : '',
+          "const emit=e=>process.stdout.write(JSON.stringify(e)+'\\n');",
+          "emit({type:'item.completed',item:{type:'agent_message',text:JSON.stringify({argv:process.argv.slice(1)})}});",
+          `emit({type:'item.completed',item:{type:'agent_message',text:${JSON.stringify(reply)}}});`,
+          "emit({type:'turn.completed',usage:{input_tokens:2,output_tokens:1}});});",
+        ].join('');
+        const response = await runExecutor({ ...request, bin: process.execPath,
+          spawnProcess: (_bin, args, options) => spawn(process.execPath, ['-e', script, '--', ...args], options) });
+        launches.push({ action: request.action, ...JSON.parse(response.agentMessages[0]) });
+        return response;
+      },
+      runReview: request => ++reviews < 3 ? { dialogue: executionEnvelope(request, 'ask', {
+        next: { seat: 'codex', action: reviews === 1 ? discussionAction : 'revise',
+          reason: reviews === 1 ? 'Explain the implemented behavior.' : 'Apply the requested correction.' },
+      }) } : nativeApproval(request),
+    }));
+    assert.equal(facts.approved, true, facts.reason);
+    assert.deepEqual(launches.map(launch => [launch.action, launch.argv[launch.argv.indexOf('-s') + 1]]), [
+      ['propose', 'danger-full-access'], [discussionAction, 'read-only'],
+      ['repair', 'read-only'], ['revise', 'danger-full-access'],
+    ]);
+    assert.ok(launches.every(launch => launch.argv.includes('exec') && launch.argv.includes('--json')));
+    assert.equal(readFileSync(join(facts.dir, 'completed.txt'), 'utf8'), 'revise');
+    assert.equal(facts.dialogue.proposalCycles, 2);
+    assert.equal(facts.dialogue.correctionCycles, 1);
+    assert.equal(facts.resources.providerLaunches, 7);
+    assert.equal(facts.resources.repairLaunches, 1);
+  } finally {
+    if (hadSandbox) process.env.URO_CODEX_SANDBOX = previousSandbox;
+    else delete process.env.URO_CODEX_SANDBOX;
+  }
+});
+
+test('native Codex partial-work ask retains its authorized implementation sandbox', async t => {
+  const hadSandbox = Object.hasOwn(process.env, 'URO_CODEX_SANDBOX');
+  const previousSandbox = process.env.URO_CODEX_SANDBOX;
+  process.env.URO_CODEX_SANDBOX = 'workspace-write';
+  try {
+    const { runExecutor } = await import('../src/executor.js?partial-ask-sandbox');
+    const launches = [];
+    let reviews = 0;
+    const facts = await run(nativeFixture(t, 'sandbox-partial-ask', {
+      runExecutor: async request => {
+        const first = launches.length === 0;
+        const reply = executionEnvelope(request, first ? 'ask' : 'propose', first ? {
+          content: 'Partial work is saved; which convention should finish it?', evidence: ['requirement-briefing'],
+          next: { seat: 'claude', action: 'answer', reason: 'Clarify the existing convention.' },
+        } : {});
+        const script = [
+          "process.stdin.resume();process.stdin.on('end',()=>{",
+          first ? "require('node:fs').writeFileSync('partial.txt','retained');"
+            : "require('node:assert/strict').equal(require('node:fs').readFileSync('partial.txt','utf8'),'retained');require('node:fs').writeFileSync('completed.txt','finished');",
+          "const emit=e=>process.stdout.write(JSON.stringify(e)+'\\n');",
+          "emit({type:'item.completed',item:{type:'agent_message',text:JSON.stringify({argv:process.argv.slice(1)})}});",
+          `emit({type:'item.completed',item:{type:'agent_message',text:${JSON.stringify(`<UROBOROS_DIALOGUE>${JSON.stringify(reply)}</UROBOROS_DIALOGUE>`)}}});`,
+          "emit({type:'turn.completed',usage:{input_tokens:2,output_tokens:1}});});",
+        ].join('');
+        const response = await runExecutor({ ...request, bin: process.execPath,
+          spawnProcess: (_bin, args, options) => spawn(process.execPath, ['-e', script, '--', ...args], options) });
+        launches.push({ action: request.action, remainingWork: request.remainingWork, ...JSON.parse(response.agentMessages[0]) });
+        return response;
+      },
+      runReview: request => ++reviews === 1 ? { dialogue: executionEnvelope(request, 'answer', {
+        content: 'Follow the existing convention.', next: { seat: 'codex', action: 'propose', reason: 'Complete only remaining work.' },
+      }) } : nativeApproval(request),
+    }));
+    assert.equal(facts.approved, true, facts.reason);
+    assert.deepEqual(launches.map(launch => [launch.action, launch.argv[launch.argv.indexOf('-s') + 1], launch.remainingWork]), [
+      ['propose', 'workspace-write', false], ['propose', 'workspace-write', true],
+    ]);
+    assert.equal(readFileSync(join(facts.dir, 'partial.txt'), 'utf8'), 'retained');
+    assert.equal(readFileSync(join(facts.dir, 'completed.txt'), 'utf8'), 'finished');
+    assert.equal(facts.dialogue.proposalCycles, 1);
+    assert.equal(facts.resources.providerLaunches, 4);
+  } finally {
+    if (hadSandbox) process.env.URO_CODEX_SANDBOX = previousSandbox;
+    else delete process.env.URO_CODEX_SANDBOX;
+  }
 });
 
 test('native ordinary reviewer mistake is rebutted and disposed without another edit', async t => {

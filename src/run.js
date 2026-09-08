@@ -1246,7 +1246,8 @@ export async function run(opts) {
         context: { ...(opts.context ?? {}), workspace: { baseCommit: iso.baseCommit, target: resolve(target) }, requiredCommands: commands },
         limits: { ...(challengeRounds === undefined ? {} : { challenges: challengeRounds }),
           ...(maxDebateRounds === undefined ? {} : { proposalCycles: maxDebateRounds }) },
-        execute, discuss: execute, review, completeReview, capture, selectChecks: checkSelection, reviewInstructions: EXECUTION_REVIEW_PROMPT,
+        execute, discuss: request => execute({ ...request, sandbox: 'read-only' }),
+        review, completeReview, capture, selectChecks: checkSelection, reviewInstructions: EXECUTION_REVIEW_PROMPT,
         ...(mutationPolicy === null ? {} : {
           selectMutation, observeMutationSource,
           runMutation: request => realMutation({ ...mutationPolicy, target: iso.dir, base: request.selection.base,
