@@ -343,6 +343,8 @@ Before commit explicitly git add each changed path from this task Files list. Re
 
 **Interfaces:** Consumes approved planning context/history/resources; produces runExecutionDialogue and serializable execution continuation. Existing landing and human authority remain.
 
+Controller handoff within Task4: the first implementer may retain a focused-tested WIP foundation commit and report before a fresh successor finishes normal run.js/default CLI integration and retained replanning. This does not complete Task4 or add a separate full-suite gate: the successor consumes the recorded native interfaces, finishes all requirements, runs the initial full suite, and the independent Task4 review covers the whole range from de8b0cbc7f01b84966bb4398ae5b2e4ed48e7594. Do not mark foundation-only behavior as the new default, duplicate the run controller, synthesize approval envelopes from old fixture prose or silently select legacy mode.
+
 Task4 also owns the existing CLI fake paths fixtures/fake-codex.mjs, fixtures/fake-agent.mjs and test/cli.test.js for explicit/context-aware new-mode responses. Existing version1 review bundles are not dialogue envelopes. Preserve explicit historical-reader fixture modes; no injected-adapter or malformed-response legacy fallback. Reuse task-4-execution-fixture-map.md for actual helper/call-count boundaries.
 
 - [ ] **Step 1: Write RED using real retained files and fake seat transports.**
@@ -405,6 +407,8 @@ git commit -m "feat: converse during execution and replan from retained evidence
 **Interfaces:** Consumes stored snapshot/state/journal receipts; produces checkpoint schemaVersion:2 and mutually exclusive technical resume --continue, preserving v1 reader/answer identities.
 
 Extend the minimum v2 planning/decision-file bridge implemented in Task3. Do not replace its fresh-run state with legacy records or discard its answer/operation receipts; this task completes the migration, technical continuation, execution, queue and resource contracts.
+
+For Task4's explicit missing-user-decision product/permission checkpoints, retain the saved autonomous/manual mode. Distinguish these questions from legacy manual dispute approval using the validated native pending record, not answer prose. A scoped human answer is not whole-artifact approval; material clarification enters parent-linked current context and returns to the phase reviewer with stale approval invalidated. Preserve original question/answer identities, and keep --continue blocked by any human pending. Reuse task-5-human-checkpoint-map.md for exact save/validate/answer-routing seams; preserve its source-observed versus required-behavior distinction.
 
 Preserve the actual resumeRun({runDirectory,decisionFile,...}) signature and add technicalContinue:false; map public --continue to technicalContinue:true. Keep validated scope roots in the saved state and do not infer permission from resumed model references.
 
