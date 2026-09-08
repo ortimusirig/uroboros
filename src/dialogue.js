@@ -185,6 +185,14 @@ export function applyDialogueEnvelope({ state, envelope, seat, evidence = [], ve
     if (seenIssues.has(update.id)) throw new Error('duplicate issue id');
     seenIssues.add(update.id);
     const old = next.issues[update.id];
+    if (update.kind !== undefined && !['technical', 'product', 'permission'].includes(update.kind)) throw new Error('invalid issue kind');
+    if (old?.kind && update.kind !== undefined && update.kind !== old.kind) throw new Error('issue kind cannot be relabelled');
+    if (update.needsHuman !== undefined && typeof update.needsHuman !== 'boolean') throw new Error('invalid human decision flag');
+    if (old?.needsHuman && update.needsHuman === false) throw new Error('pending human authority cannot be cleared by a model');
+    const kind = old?.kind ?? update.kind;
+    if (update.needsHuman === true && !old?.needsHuman
+      && (envelope.action !== 'ask' || !OPEN.has(update.status) || update.blocking !== true
+        || !['product', 'permission'].includes(kind))) throw new Error('missing human decision requires an open blocking product or permission ask');
     if (!old) { string(update.title, 'issue title'); if (typeof update.blocking !== 'boolean') throw new Error('issue blocking flag required'); }
     for (const id of update.claimIds ?? []) if (!Object.hasOwn(next.claims, id) || next.claims[id].status === 'retired') throw new Error('unknown or retired issue claim reference');
     if (!OPEN.has(update.status) && !['resolved', 'withdrawn'].includes(update.status)) throw new Error('invented issue disposition or status');
@@ -210,7 +218,13 @@ export function applyDialogueEnvelope({ state, envelope, seat, evidence = [], ve
         disposition: { kind: disposition.kind, reason: disposition.reason, claimIds: disposition.claimIds ?? [], by: seat, messageId, ...identity } };
     } else {
       next.issues[update.id] = { ...old, id: update.id, title: old?.title ?? update.title, status: old?.status === 'disputed' ? 'disputed' : update.status,
-        blocking: old?.blocking ?? update.blocking, claimIds: update.claimIds ?? old?.claimIds ?? [], openedBy: old?.openedBy ?? seat };
+        blocking: old?.blocking ?? update.blocking, claimIds: update.claimIds ?? old?.claimIds ?? [], openedBy: old?.openedBy ?? seat,
+        ...(kind === undefined ? {} : { kind }),
+        ...(update.needsHuman === undefined && old?.needsHuman === undefined ? {} : { needsHuman: old?.needsHuman === true || update.needsHuman === true }) };
+      if (next.issues[update.id].needsHuman) {
+        next.pendingDecision ??= { authority: 'human', messageId, issueIds: [], kind, reason: envelope.content, ...identity };
+        next.pendingDecision.issueIds = [...new Set([...(next.pendingDecision.issueIds ?? []), update.id])];
+      }
       next.approval = null;
     }
   }

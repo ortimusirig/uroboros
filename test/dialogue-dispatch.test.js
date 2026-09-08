@@ -21,6 +21,134 @@ function approve(state) {
   return envelope(state, 'approve', { claims: [claim], verifications: [support(receipt)] });
 }
 
+test('completed execution question adopts retained writes before answering and resumes the same cycle', async t => {
+  const { state, journal, root } = setup(t, { phase: 'execution', limits: { rounds: 1, corrections: 0 } });
+  state.next = { seat: 'codex', action: 'propose', reason: 'Implement' };
+  const counter = join(root, 'counter');
+  let writes = 0, captures = 0;
+  const result = await runIssueDialogue({ state, journal, persist: async () => {},
+    captureExecution: ({ state: s }) => {
+      captures++;
+      return { artifactDigest: `actual-${readFileSync(counter, 'utf8')}-${existsSync(join(root, 'remaining'))}`,
+        snapshot: extendSharedContext({ snapshot: s.snapshot, entries: [{ id: `retained-${captures}`, kind: 'execution',
+          content: readFileSync(counter, 'utf8'), sourceIdentity: 'actual-files', provenance: { origin: 'harness' }, status: 'required' }] }) };
+    }, seats: {
+      codex: async ({ state: s, action, input }) => {
+        assert.equal(action, 'propose');
+        assert.match(input, /"proposalCycles": 1/);
+        if (!existsSync(counter)) {
+          writeFileSync(counter, String(++writes));
+          return response(envelope(s, 'ask', { evidence: ['E1'],
+            next: { seat: 'claude', action: 'answer', reason: 'Clarify remaining work' } }));
+        }
+        assert.equal(s.proposalCycles, 1);
+        writeFileSync(join(root, 'remaining'), 'done');
+        return response(envelope(s, 'propose'));
+      },
+      claude: async ({ state: s, action }) => {
+        if (action === 'answer') {
+          assert.equal(s.artifactDigest, 'actual-1-false');
+          assert.equal(s.snapshot.entries.at(-1).content, '1');
+          return response(envelope(s, 'answer', { next: { seat: 'codex', action: 'propose', reason: 'Continue only remaining work' } }));
+        }
+        if (!Object.values(s.inspectionReceipts).length) return response(envelope(s, 'inspect', { requests: [{ evidenceId: 'E1' }] }));
+        return response(approve(s));
+      },
+    } });
+  assert.equal(result.approved, true, result.reason);
+  assert.equal(result.state.authority, 'claude');
+  assert.equal(readFileSync(counter, 'utf8'), '1');
+  assert.equal(readFileSync(join(root, 'remaining'), 'utf8'), 'done');
+  assert.equal(result.state.proposalCycles, 1);
+  assert.equal(result.state.correctionCycles, 0);
+  assert.equal(captures, 2);
+  assert.equal(journal.read().filter(event => event.type === 'prepare' && event.effect === 'capture-execution').length, 2);
+});
+
+test('failed retained execution capture pauses without another provider or repeated writes', async t => {
+  const { state, journal, root } = setup(t, { phase: 'execution' });
+  state.next = { seat: 'codex', action: 'propose', reason: 'Implement' };
+  let nextCalls = 0;
+  const result = await runIssueDialogue({ state, journal, persist: async () => {},
+    captureExecution: () => { throw new Error('required capture failed'); }, seats: {
+      codex: async ({ state: s }) => { writeFileSync(join(root, 'counter'), '1'); return response(envelope(s, 'ask')); },
+      claude: async () => { nextCalls++; },
+    } });
+  assert.equal(result.action, 'paused');
+  assert.match(result.reason, /required capture failed/);
+  assert.equal(nextCalls, 0);
+  assert.equal(readFileSync(join(root, 'counter'), 'utf8'), '1');
+  assert.equal(result.state.pendingOperation.effect, 'capture-execution');
+});
+
+test('completed retained capture recovery adopts saved output without replaying code or capture', async t => {
+  const { state, journal, root } = setup(t, { phase: 'execution', limits: { rounds: 1 } });
+  writeFileSync(join(root, 'counter'), '1');
+  state.executionCycle = { id: 'cycle-1', cycle: 1, action: 'propose', open: true };
+  state.proposalCycles = 1;
+  const provider = { operationId: 'saved-executor', seat: 'codex', action: 'propose', effect: 'provider', executionCycle: state.executionCycle };
+  const input = { artifactDigest: state.artifactDigest, contextDigest: state.snapshot.digest, evidenceIds: ['E1'], unreadMessageIds: [] };
+  journal.prepare({ ...provider, ...input, input: 'Implement' });
+  journal.complete({ operationId: provider.operationId, result: response(envelope(state, 'propose')) });
+  state.pendingExecutionCapture = { providerOperationId: provider.operationId, returnedAction: 'propose', executionCycleId: 'cycle-1', next: state.next };
+  state.pendingOperation = { operationId: 'saved-capture', seat: 'codex', action: 'propose', effect: 'capture-execution', providerOperationId: provider.operationId };
+  journal.prepare({ ...state.pendingOperation, ...input, input: 'Capture actual completed work' });
+  journal.complete({ operationId: 'saved-capture', result: { artifactDigest: 'retained-1', snapshot: state.snapshot } });
+  const result = await runIssueDialogue({ state, journal, persist: async () => {},
+    captureExecution: () => assert.fail('completed capture must not replay'),
+    seats: { codex: () => assert.fail('completed writer must not replay'), claude: ({ state: s }) => {
+      assert.equal(s.artifactDigest, 'retained-1');
+      return Object.keys(s.inspectionReceipts).length ? response(approve(s))
+        : response(envelope(s, 'inspect', { requests: [{ evidenceId: 'E1' }] }));
+    } } });
+  assert.equal(result.approved, true, result.reason);
+  assert.equal(result.state.proposalCycles, 1);
+  assert.equal(result.state.executionCycle.open, false);
+  assert.equal(result.resources.providerLaunches, 3);
+  assert.equal(readFileSync(join(root, 'counter'), 'utf8'), '1');
+});
+
+test('read-only Codex answer never enters the completed-execution capture seam', async t => {
+  const { state, journal } = setup(t, { phase: 'execution' });
+  state.next = { seat: 'codex', action: 'answer', reason: 'Explain only' };
+  const result = await runIssueDialogue({ state, journal, persist: async () => {},
+    captureExecution: () => assert.fail('read-only response cannot capture an execution'),
+    seats: { codex: ({ state: s }) => response(envelope(s, 'answer')),
+      claude: ({ state: s }) => response(envelope(s, 'stop')) } });
+  assert.equal(result.action, 'stop');
+  assert.equal(result.state.proposalCycles, 0);
+  assert.equal(journal.read().some(e => e.effect === 'capture-execution'), false);
+});
+
+test('malformed completed executor output retains actual writes and pauses before any format repair launch', async t => {
+  const { state, journal, root } = setup(t, { phase: 'execution' });
+  state.next = { seat: 'codex', action: 'propose', reason: 'Implement' };
+  let calls = 0;
+  const result = await runIssueDialogue({ state, journal, persist: async () => {},
+    captureExecution: () => assert.fail('unvalidated output cannot be adopted'),
+    seats: { codex: () => { calls++; writeFileSync(join(root, 'counter'), String(calls)); return { content: 'unreadable execution output' }; } } });
+  assert.equal(result.action, 'paused');
+  assert.equal(calls, 1);
+  assert.equal(readFileSync(join(root, 'counter'), 'utf8'), '1');
+  assert.equal(result.resources.repairLaunches, 0);
+});
+
+test('reviewer approval cannot land a yielded execution cycle with unfinished remaining work', async t => {
+  const { state, journal } = setup(t, { phase: 'execution' });
+  state.next = { seat: 'codex', action: 'propose', reason: 'Implement' };
+  const result = await runIssueDialogue({ state, journal, persist: async () => {},
+    captureExecution: ({ state: s }) => ({ artifactDigest: 'partial', snapshot: s.snapshot }),
+    seats: { codex: ({ state: s }) => response(envelope(s, 'ask')),
+      claude: ({ state: s, operationId }) => {
+        const receipt = createInspectionReceipt({ operationId, seat: 'claude', evidence: s.evidence, inspected: true, result: 'read' });
+        return { ...response(envelope(s, 'approve', { claims: [claim], verifications: [support(receipt)] })),
+          observations: { evidence: [], receipts: [receipt] } };
+      } } });
+  assert.equal(result.approved, false);
+  assert.equal(result.action, 'paused');
+  assert.match(result.reason, /unfinished execution/);
+});
+
 test('artifact repair respects budget and recovers a completed no-application without a second application', async t => {
   const { state, journal } = setup(t, { limits: { rounds: 1, artifactRepairs: 5 } });
   state.proposalCycles = 1;

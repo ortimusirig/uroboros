@@ -58,7 +58,7 @@ export function assertPlanningSidecars({ directory, runId, approval, manifest })
 
 /** Create required common grounding before any author, selector or reviewer launch. */
 export function openPlanningContext({ requirements, target, directory, runId, tier = 'plan', context = {},
-  artifactRoot, env = process.env, searchIndex }) {
+  artifactRoot, env = process.env, searchIndex, phase = 'planning' }) {
   mkdirSync(directory, { recursive: true });
   assertSidecarInventory({ directory, registeredPaths: [] });
   const project = resolveProjectIdentity({ target });
@@ -85,7 +85,7 @@ export function openPlanningContext({ requirements, target, directory, runId, ti
     evidence: { id: 'requirement-briefing', kind: 'requirement', projectId: project.projectId, claimIds: ['briefing-requirement'],
       text, locator: { briefingId: `${runId}:${tier}` }, sourceIdentity } });
   const snapshot = createSharedContext({ projectId: project.projectId, runId, unitId: `${runId}:${tier}`,
-    phase: 'planning', sourceRevision, entries, evidence: [evidence], recalled: recalled.map(record => ({
+    phase, sourceRevision, entries, evidence: [evidence], recalled: recalled.map(record => ({
       ...record, id: record.versionId, notebookEntryId: record.id, status: 'historical', notebookStatus: record.status,
     })) });
   const path = persistSharedContext({ directory, snapshot });
@@ -300,6 +300,10 @@ function promoteMemory(session, state) {
     session.journal.complete({ operationId, result, usage: null, delivery: null });
   }
 }
+
+// Execution shares the same exact-file provenance and notebook disposition checks.
+export const contextLifecycle = Object.freeze({ checkContext, registerEvidenceFiles, persistContext, promoteMemory,
+  manifest: planningSidecarManifest });
 
 /** New runs use explicit dialogue; historical runConversation remains a separate reader. */
 export async function runPlanningDialogue({ requirements, target, directory, tier = 'plan', interactionMode = 'manual',

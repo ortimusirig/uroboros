@@ -72,6 +72,17 @@ function fakeChild() {
   return child;
 }
 
+test('spawn capture records requested and actual child launch identities separately', async () => {
+  const child = fakeChild();
+  let actual;
+  child.stdin.end = () => queueMicrotask(() => child.emit('close', 0));
+  const result = await spawnCapture(process.execPath, ['-e', 'process.exit(0)'], {
+    cwd: tmpdir(), spawnProcess: (bin, args, options) => { actual = { argv: [bin, ...args], cwd: options.cwd }; return child; },
+  });
+  assert.deepEqual(result.launch, { requested: { bin: process.execPath, args: ['-e', 'process.exit(0)'] },
+    argv: actual.argv, cwd: actual.cwd });
+});
+
 test('stdin submission observation follows end and never asserts child consumption', async () => {
   const child = fakeChild(), seen = [];
   child.stdin.end = value => { assert.equal(value, 'hello'); seen.push('end'); queueMicrotask(() => child.emit('close', 0)); };
@@ -299,6 +310,11 @@ test('runs a .cmd on Windows and preserves space-bearing args', { skip: process.
   assert.equal(r.code, 0);
   assert.match(r.stdout, /ARG=\[hello\]/);
   assert.match(r.stdout, /ARG=\[a b c\]/, 'space-bearing arg must survive as one arg');
+  assert.deepEqual(r.launch.requested, { bin: cmd, args: ['hello', 'a b c'] });
+  assert.match(r.launch.argv[0], /cmd\.exe$/i);
+  assert.deepEqual(r.launch.argv.slice(1, 4), ['/d', '/s', '/c']);
+  assert.ok(r.launch.argv[4].includes('a b c'));
+  assert.equal(r.launch.cwd, process.cwd());
 });
 
 test('a short timeout kills a clearly slower child and marks the result', async () => {

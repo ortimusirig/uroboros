@@ -23,7 +23,7 @@ function excerptOf(stdout, stderr) {
   return combined.length <= EXCERPT_LIMIT ? combined : combined.slice(-EXCERPT_LIMIT);
 }
 
-export function createEvidenceWriter({ dir, round = 1 } = {}) {
+export function createEvidenceWriter({ dir, round = 1, required = false } = {}) {
   if (typeof dir !== 'string' || dir.trim() === '') {
     throw new TypeError('evidence writer requires a worktree directory');
   }
@@ -58,6 +58,7 @@ export function createEvidenceWriter({ dir, round = 1 } = {}) {
       writeFileSync(errPath, String(stderr), 'utf8');
     } catch (error) {
       record.writeError = error instanceof Error ? error.message : String(error);
+      if (required) throw error;
     }
     records.push(record);
     return record;

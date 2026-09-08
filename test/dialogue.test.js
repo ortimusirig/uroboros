@@ -6,6 +6,41 @@ import { captureEvidence } from '../src/context-evidence.js';
 import { createDialogueState, parseDialogueEnvelope, applyDialogueEnvelope, canApproveDialogue } from '../src/dialogue.js';
 import { fixture, envelope, claim, observe, support } from './fixtures/dialogue-fixture.js';
 
+test('product clarification and autonomous technical disputes do not invent missing human decisions', t => {
+  const { state } = fixture(t, { phase: 'execution' });
+  for (const [kind, status] of [['product', 'awaiting-answer'], ['technical', 'disputed']]) {
+    const result = applyDialogueEnvelope({ state, seat: 'codex', envelope: envelope(state, 'ask', {
+      evidence: ['E1'], issues: [{ id: 'Q1', kind, title: 'Explain existing evidence', blocking: true, status, needsHuman: false }],
+    }) });
+    assert.equal(result.pendingDecision, null);
+  }
+});
+
+test('a missing human decision cannot be silently relabelled by a counterpart answer', t => {
+  const { state } = fixture(t, { phase: 'execution' });
+  const pending = applyDialogueEnvelope({ state, seat: 'codex', envelope: envelope(state, 'ask', {
+    issues: [{ id: 'Q1', kind: 'permission', needsHuman: true, title: 'Missing user permission', blocking: true, status: 'awaiting-answer' }],
+  }) });
+  assert.equal(pending.pendingDecision?.authority, 'human');
+  assert.throws(() => applyDialogueEnvelope({ state: pending, seat: 'claude', envelope: envelope(pending, 'answer', {
+    issues: [{ id: 'Q1', kind: 'technical', needsHuman: false, status: 'open' }],
+  }) }), /human|kind/);
+  assert.equal(pending.pendingDecision.authority, 'human');
+});
+
+test('a later explicit missing decision retains every affected human question', t => {
+  const { state } = fixture(t, { phase: 'execution' });
+  const clarification = applyDialogueEnvelope({ state, seat: 'codex', envelope: envelope(state, 'ask', {
+    issues: [{ id: 'Q1', kind: 'product', needsHuman: false, title: 'Clarification', blocking: true, status: 'awaiting-answer' }],
+  }) });
+  const pending = applyDialogueEnvelope({ state: clarification, seat: 'codex', envelope: envelope(clarification, 'ask', {
+    issues: [{ id: 'Q1', kind: 'product', needsHuman: true, blocking: true, status: 'awaiting-answer' },
+      { id: 'Q2', kind: 'permission', needsHuman: true, title: 'Permission', blocking: true, status: 'awaiting-answer' }],
+  }) });
+  assert.equal(pending.issues.Q1.needsHuman, true);
+  assert.deepEqual(pending.pendingDecision.issueIds, ['Q1', 'Q2']);
+});
+
 test('acknowledgment cannot approve and clean reviewer sign-off can finish in either mode', (t) => {
   for (const interactionMode of ['manual', 'autonomous']) {
     const { state } = fixture(t, { interactionMode });

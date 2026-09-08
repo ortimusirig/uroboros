@@ -482,6 +482,7 @@ export async function spawnCapture(bin, args, opts = {}) {
       detached: (timeoutMs !== undefined || opts.livenessSupervision !== undefined)
         && process.platform !== 'win32',
     });
+    const launch = { requested: { bin, args: [...args] }, argv: [cmd, ...cmdArgs], cwd: opts.cwd ?? process.cwd() };
     const outChunks = [];
     const errChunks = [];
     let timedOut = false;
@@ -584,6 +585,7 @@ export async function spawnCapture(bin, args, opts = {}) {
         settled = true;
         if (inputFailure) { reject(inputFailure); return; }
         resolve({
+          launch,
           code: code ?? -1,
           signal: closeSignal ?? null,
           stdout: Buffer.concat(outChunks).toString('utf8'),

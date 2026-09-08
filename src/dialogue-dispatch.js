@@ -10,7 +10,7 @@ const actions = new Set(['propose', 'ask', 'answer', 'inspect', 'challenge', 're
 const SCHEMA = `Return one <UROBOROS_DIALOGUE>JSON</UROBOROS_DIALOGUE> block (or adapter dialogue object).
 Schema: {schemaVersion:1,action,artifactDigest,contextDigest,replyTo:null|messageId,content,
 claims:[{id,kind:fact|inference|hypothesis|question|preference,text,evidenceIds:[]}],
-issues:[{id,title,status:open|awaiting-answer|awaiting-verification|disputed|resolved|withdrawn,blocking,claimIds:[],
+issues:[{id,title,status:open|awaiting-answer|awaiting-verification|disputed|resolved|withdrawn,blocking,claimIds:[],kind?:technical|product|permission,needsHuman?:boolean,
 disposition:{kind:accepted|rejected|corrected|withdrawn|deferred,reason,claimIds:[]}}],evidence:[],
 verifications:[{claimId,evidenceIds:[],inspectionReceiptIds:[],result:supports|contradicts|insufficient,reason}],
 next:null|{seat:claude|codex,action,reason},requests:[{evidenceId}|{path,line,claimIds:[]}],
@@ -22,7 +22,9 @@ harness operations; receipt acknowledgment is separate from semantic verificatio
 current artifact with evidenced premises and explicit dispositions for blocking issues. Questions do not
 consume a proposal cycle. The reviewer judges progress and may stop or request further dialogue.
 The decide action settles issues but never implies artifact sign-off. An approve envelope may contain
-all authorized issue dispositions and current-artifact approval together, in this same response.`;
+all authorized issue dispositions and current-artifact approval together, in this same response.
+Use needsHuman:true only on an open blocking product/permission ask requiring a genuinely missing user decision.
+A product question answerable from existing user evidence remains coworker clarification. Labels never grant permission.`;
 
 function inside(root, file) {
   const rel = relative(root, file);
@@ -106,7 +108,7 @@ async function defaultInspect({ requests, seat, operationId, state }) {
   return { evidence, receipts: [createInspectionReceipt({ operationId, seat, evidence, inspected: true, result: 'read' })] };
 }
 
-export async function runIssueDialogue({ state: initial, journal, seats, renderInput, inspect = defaultInspect, revise,
+export async function runIssueDialogue({ state: initial, journal, seats, renderInput, inspect = defaultInspect, revise, captureExecution,
   persist, budget, reporter }) {
   let state = structuredClone(initial);
   const resources = () => { try { return journal.account(); } catch { return state.resources; } };
@@ -127,7 +129,9 @@ export async function runIssueDialogue({ state: initial, journal, seats, renderI
   };
   const launchAllowed = async (nextAction) => {
     if (mutations.has(nextAction.action)) {
-      const repairing = state.artifactRepair?.cycle === state.proposalCycles && state.artifactRepair?.action === nextAction.action;
+      const repairing = (state.artifactRepair?.cycle === state.proposalCycles && state.artifactRepair?.action === nextAction.action)
+        || (state.phase === 'execution' && captureExecution && state.executionCycle?.open
+          && state.executionCycle.action === nextAction.action && state.executionCycle.cycle === state.proposalCycles);
       const rounds = state.limits.rounds ?? state.limits.proposalCycles;
       if (!repairing && rounds !== undefined && state.proposalCycles >= rounds) return { allowed: false, reason: 'explicit proposal-cycle limit reached' };
       if (!repairing && nextAction.action === 'revise' && state.limits.corrections !== undefined && state.correctionCycles >= state.limits.corrections) return { allowed: false, reason: 'explicit correction-cycle limit reached' };
@@ -184,8 +188,25 @@ export async function runIssueDialogue({ state: initial, journal, seats, renderI
     state.pendingOperation = null;
     state.artifactRepair = null;
     state.operations[operation.operationId] = { status: 'completed', seat: operation.seat, effect: 'apply', evidenceIds: [], receiptIds: [] };
-    state.next = { seat: state.reviewer, action: 'verify', reason: 'Review applied artifact' };
+    state.next = operation.effect === 'capture-execution' && state.pendingExecutionCapture?.returnedAction === 'ask'
+      ? state.pendingExecutionCapture.next : { seat: state.reviewer, action: 'verify', reason: 'Review applied artifact' };
+    if (operation.effect === 'capture-execution') {
+      state.executionCycle.completedOperationIds ??= [];
+      if (!state.executionCycle.completedOperationIds.includes(state.pendingExecutionCapture.providerOperationId)) {
+        state.executionCycle.completedOperationIds.push(state.pendingExecutionCapture.providerOperationId);
+      }
+      if (state.pendingExecutionCapture.returnedAction !== 'ask') state.executionCycle.open = false;
+      state.operations[operation.operationId].effect = 'capture-execution';
+      state.operations[operation.operationId].providerOperationId = state.pendingExecutionCapture.providerOperationId;
+      state.pendingExecutionCapture = null;
+    }
     installMaterialEvidence(state);
+    if (operation.effect === 'capture-execution' && state.pendingDecision) {
+      state.pendingDecision.questionIdentity ??= { artifactDigest: state.pendingDecision.artifactDigest,
+        contextDigest: state.pendingDecision.contextDigest };
+      state.pendingDecision.artifactDigest = state.artifactDigest;
+      state.pendingDecision.contextDigest = state.snapshot.digest;
+    }
     await save();
   };
   try {
@@ -199,6 +220,32 @@ export async function runIssueDialogue({ state: initial, journal, seats, renderI
     if (state.technicalPause) return result(false, 'paused', state.technicalPause.reason);
     while (true) {
       if (state.technicalPause) return result(false, 'paused', state.technicalPause.reason);
+      if (state.pendingExecutionCapture) {
+        const retained = state.pendingExecutionCapture;
+        const provider = journal.operation(retained.providerOperationId);
+        if (state.phase !== 'execution' || typeof captureExecution !== 'function'
+          || provider?.status !== 'completed' || provider.seat !== state.author || !mutations.has(provider.action)
+          || provider.executionCycle?.id !== state.executionCycle?.id
+          || provider.artifactDigest !== state.artifactDigest || provider.contextDigest !== state.snapshot.digest) {
+          throw new Error('retained execution capture lacks authorized completed input');
+        }
+        let capture = state.pendingOperation;
+        if (capture) {
+          if (capture.effect !== 'capture-execution') throw new Error('unexpected pending execution capture operation');
+          const completed = savedOperation(capture);
+          await installArtifact(completed, completed.result);
+        } else {
+          capture = await prepare({ seat: state.author, action: provider.action, effect: 'capture-execution',
+            input: JSON.stringify({ providerOperationId: provider.operationId, returnedAction: retained.returnedAction }),
+            providerOperationId: provider.operationId });
+          const output = await captureExecution({ state: structuredClone(state), seat: state.author,
+            operationId: capture.operationId, providerOperationId: provider.operationId,
+            response: structuredClone(provider.result), envelope: parseDialogueEnvelope({ response: provider.result }) });
+          journal.complete({ operationId: capture.operationId, result: output, usage: null, delivery: null });
+          await installArtifact(capture, output);
+        }
+        continue;
+      }
       if (state.pendingDecision) { await save(); return result(false, 'needs-decision', state.pendingDecision.reason); }
       if (state.terminalAction) { await save(); return result(false, state.terminalAction, state.stopReason); }
       if (!state.pendingOperation && !mutations.has(state.next?.action)
@@ -263,6 +310,15 @@ export async function runIssueDialogue({ state: initial, journal, seats, renderI
         if (mutations.has(next.action) && next.seat !== state.author) throw new Error('only designated author can apply artifacts');
         const allowed = await launchAllowed(next);
         if (allowed?.allowed !== true) return await pause(allowed?.reason ?? 'dialogue budget exhausted');
+        const execution = state.phase === 'execution' && typeof captureExecution === 'function'
+          && next.seat === state.author && mutations.has(next.action);
+        if (execution && !state.executionCycle?.open) {
+          state.proposalCycles++;
+          if (next.action === 'revise') state.correctionCycles++;
+          state.executionCycle = { id: `${state.runId}:execution-cycle:${randomUUID()}`, cycle: state.proposalCycles,
+            action: next.action, open: true, completedOperationIds: [] };
+        }
+        if (execution && state.executionCycle.action !== next.action) throw new Error('remaining execution must continue its allocated action');
         const capturedEvidence = state.evidence.map(item => {
           const historical = state.historicalEvidenceIds.includes(item.id);
           if (!historical) validateObservedEvidence(state, item);
@@ -285,7 +341,8 @@ export async function runIssueDialogue({ state: initial, journal, seats, renderI
           state.formatRepair ? `FORMAT REPAIR ONLY. Preserve the prior substance and return the required envelope. Previous response:\n${JSON.stringify(state.formatRepair.response)}` : '',
           state.artifactRepair ? `ARTIFACT FORMAT REPAIR in the same proposal cycle: ${state.artifactRepair.reason}\nPrevious saved response:\n${JSON.stringify(journal.operation(state.artifactRepair.providerOperationId)?.result)}` : '',
         ].join('\n\n');
-        pending = await prepare({ seat: next.seat, action: next.action, effect: state.formatRepair ? 'repair' : 'provider', input });
+        pending = await prepare({ seat: next.seat, action: next.action, effect: state.formatRepair ? 'repair' : 'provider', input,
+          ...(execution ? { executionCycle: structuredClone(state.executionCycle) } : {}) });
         if (typeof seats?.[pending.seat] !== 'function') throw new Error(`missing transport for seat ${pending.seat}`);
         let response;
         try { response = await seats[pending.seat]({ input, action: state.formatRepair ? 'repair' : next.action,
@@ -299,6 +356,8 @@ export async function runIssueDialogue({ state: initial, journal, seats, renderI
       let envelope;
       try { envelope = parseDialogueEnvelope({ response: operation.result }); }
       catch (error) {
+        if (state.phase === 'execution' && operation.executionCycle && operation.seat === state.author
+          && mutations.has(operation.action)) return await pause(`unreadable execution outcome; retained writes require reconciliation: ${error.message}`);
         if (operation.effect === 'repair' || state.formatRepair) return await pause(`unreadable dialogue after one format repair: ${error.message}`);
         state.formatRepair = { operationId: operation.operationId, response: operation.result };
         state.pendingOperation = null;
@@ -306,8 +365,17 @@ export async function runIssueDialogue({ state: initial, journal, seats, renderI
         continue;
       }
       if (mutations.has(envelope.action) && envelope.action !== operation.action) throw new Error('unsolicited artifact application outside explicit proposal/revision operation');
+      if (state.phase === 'execution' && state.executionCycle?.open && envelope.action === 'approve') throw new Error('unfinished execution cycle cannot be approved');
       // Reducer checks the saved INPUT identities, before the local artifact callback can change them.
       let reductionState = state;
+      const execution = state.phase === 'execution' && captureExecution && operation.seat === state.author
+        && mutations.has(operation.action) && operation.executionCycle?.id === state.executionCycle?.id;
+      if (execution && !['ask', operation.action].includes(envelope.action)) throw new Error('execution outcome must complete its requested action or ask at safe yield');
+      if (execution && mutations.has(envelope.action)) {
+        reductionState = structuredClone(state);
+        reductionState.proposalCycles--;
+        if (envelope.action === 'revise') reductionState.correctionCycles--;
+      }
       if (state.artifactRepair && mutations.has(envelope.action)) {
         if (state.artifactRepair.action !== envelope.action || state.artifactRepair.cycle !== state.proposalCycles
           || operation.seat !== state.author) throw new Error('artifact repair cycle binding mismatch');
@@ -316,7 +384,11 @@ export async function runIssueDialogue({ state: initial, journal, seats, renderI
         if (envelope.action === 'revise') reductionState.correctionCycles--;
       }
       state = applyDialogueEnvelope({ state: reductionState, envelope, seat: operation.seat });
-      if (!state.pendingArtifact) installMaterialEvidence(state);
+      if (execution) {
+        state.pendingArtifact = null;
+        state.pendingExecutionCapture = { providerOperationId: operation.operationId, returnedAction: envelope.action,
+          next: structuredClone(state.next), executionCycleId: state.executionCycle.id };
+      } else if (!state.pendingArtifact) installMaterialEvidence(state);
       state.formatRepair = null;
       state.pendingOperation = null;
       await save();
