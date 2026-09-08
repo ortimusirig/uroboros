@@ -6,6 +6,20 @@ import { captureEvidence } from '../src/context-evidence.js';
 import { createDialogueState, parseDialogueEnvelope, applyDialogueEnvelope, canApproveDialogue } from '../src/dialogue.js';
 import { fixture, envelope, claim, observe, support } from './fixtures/dialogue-fixture.js';
 
+test('manual disputed replan preserves the terminal request behind a human decision', t => {
+  for (const [interactionMode, status, pending] of [['manual', 'disputed', true], ['manual', 'open', false], ['autonomous', 'disputed', false]]) {
+    const { state } = fixture(t, { phase: 'execution', interactionMode });
+    const next = applyDialogueEnvelope({ state, seat: 'claude', envelope: envelope(state, 'replan', {
+      issues: [{ id: 'R1', title: 'Remaining strategy', blocking: true, status }],
+      replan: { issueId: 'R1', evidenceIds: ['E1'], novelty: 'Actual implementation evidence changes the remaining strategy.' },
+    }) });
+    assert.equal(Boolean(next.pendingDecision), pending);
+    assert.equal(next.terminalAction, 'replan');
+    assert.equal(next.messages.at(-1).replan.issueId, 'R1');
+    if (pending) assert.equal(next.pendingDecision.authority, 'human');
+  }
+});
+
 test('product clarification and autonomous technical disputes do not invent missing human decisions', t => {
   const { state } = fixture(t, { phase: 'execution' });
   for (const [kind, status] of [['product', 'awaiting-answer'], ['technical', 'disputed']]) {

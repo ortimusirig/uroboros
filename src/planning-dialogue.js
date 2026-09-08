@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, readFileSync, lstatSync, readdirSync, realpathSy
 import { join, resolve, relative, isAbsolute } from 'node:path';
 import { homedir } from 'node:os';
 import { createSharedContext, extendSharedContext, persistSharedContext, validateSharedContext, contextDigest, renderSharedContext } from './shared-context.js';
-import { captureEvidence } from './context-evidence.js';
+import { captureEvidence, validateEvidence } from './context-evidence.js';
 import { resolveProjectIdentity, openProjectMemory } from './project-memory.js';
 import { resolveArtifactRoot } from './artifacts.js';
 import { readEnv } from './env-compat.js';
@@ -58,7 +58,7 @@ export function assertPlanningSidecars({ directory, runId, approval, manifest })
 
 /** Create required common grounding before any author, selector or reviewer launch. */
 export function openPlanningContext({ requirements, target, directory, runId, tier = 'plan', context = {},
-  artifactRoot, env = process.env, searchIndex, phase = 'planning' }) {
+  artifactRoot, env = process.env, searchIndex, phase = 'planning', retained }) {
   mkdirSync(directory, { recursive: true });
   assertSidecarInventory({ directory, registeredPaths: [] });
   const project = resolveProjectIdentity({ target });
@@ -84,16 +84,36 @@ export function openPlanningContext({ requirements, target, directory, runId, ti
   const evidence = captureEvidence({ projectId: project.projectId, root: target, directory: evidenceDirectory,
     evidence: { id: 'requirement-briefing', kind: 'requirement', projectId: project.projectId, claimIds: ['briefing-requirement'],
       text, locator: { briefingId: `${runId}:${tier}` }, sourceIdentity } });
+  const imported = [];
+  if (retained) {
+    retained.validate();
+    entries.push({ id: 'retained-phase', kind: 'retained-phase', content: JSON.stringify(retained.context),
+      sourceIdentity: retained.context.parent.runId, provenance: { origin: 'validated-phase-handoff', runId }, status: 'historical' });
+    for (const original of retained.evidence) {
+      const valid = validateEvidence({ evidence: original, projectId: project.projectId, roots: [target, ...retained.evidenceRoots] });
+      if (!valid.valid) {
+        if (original.kind !== 'code' || !['evidence is stale: current source digest differs', 'current evidence source is missing'].includes(valid.reason)) throw new Error(valid.reason);
+        entries.push({ id: `historical-${original.id}`, kind: 'historical-source', content: JSON.stringify({
+          evidence: original, bytes: readFileSync(original.capturedPath, 'utf8') }), sourceIdentity: original.sourceDigest,
+          provenance: { origin: 'retained-source-capture', runId: retained.context.parent.runId }, status: 'historical' });
+        continue;
+      }
+      const { capturedPath, sourceDigest, recordDigest, ...record } = original;
+      imported.push(captureEvidence({ projectId: project.projectId, root: target, directory: evidenceDirectory,
+        evidence: { ...record, id: `${retained.context.parent.runId}:${original.id}`,
+          provenance: { origin: 'historical-phase-capture', runId: retained.context.parent.runId, originalEvidence: original }, historical: true } }));
+    }
+  }
   const snapshot = createSharedContext({ projectId: project.projectId, runId, unitId: `${runId}:${tier}`,
-    phase, sourceRevision, entries, evidence: [evidence], recalled: recalled.map(record => ({
+    phase, sourceRevision, entries, evidence: [evidence, ...imported], recalled: recalled.map(record => ({
       ...record, id: record.versionId, notebookEntryId: record.id, status: 'historical', notebookStatus: record.status,
     })) });
   const path = persistSharedContext({ directory, snapshot });
   const journal = openDialogueJournal({ directory, runId, projectId: project.projectId });
   return { snapshot, journal, memory, project, directory, artifactRoot: root, evidenceDirectory, contextPaths: new Map([[path, digestBytes(path)]]),
-    ownedFiles: new Map([[path, digestBytes(path)], [evidence.capturedPath, digestBytes(evidence.capturedPath)],
+    ownedFiles: new Map([[path, digestBytes(path)], ...[evidence, ...imported].map(item => [item.capturedPath, digestBytes(item.capturedPath)]),
       ...['journal.jsonl', 'journal-tail.jsonl'].map(name => [join(directory, '__uro_dialogue', name), null])]),
-    preparationMessages: [],
+    preparationMessages: [], retained,
     recall: { status: recalled.searchStatus, error: recalled.searchError } };
 }
 
@@ -126,6 +146,8 @@ function reopenPlanningContext({ continuation, target, directory }) {
 }
 
 function checkContext(session) {
+  try {
+  session.retained?.validate();
   session.journal.read();
   assertSidecarInventory({ directory: session.directory,
     registeredPaths: [...session.ownedFiles.keys(), join(session.directory, '__uro_dialogue', 'controller.lock')] });
@@ -134,6 +156,10 @@ function checkContext(session) {
     validateSharedContext({ snapshot: JSON.parse(readFileSync(path, 'utf8')), projectId: session.project.projectId });
   }
   for (const [path, digest] of session.ownedFiles) if (digest !== null && digestBytes(path) !== digest) throw new Error('registered planning sidecar bytes changed');
+  } catch (error) {
+    if (session.retained) error.retainedIntegrityFailure = true;
+    throw error;
+  }
 }
 
 function registerEvidenceFiles(session, evidence) {
@@ -243,8 +269,14 @@ export async function callPlanningPreparation({ session, requirements, input, ca
       contextDigest: state.snapshot.digest, artifactDigest: state.artifactDigest,
       evidenceIds: state.evidence.map(e => e.id), unreadMessageIds: [] });
     let response;
-    try { response = await call({ ...request, input: submitted, dialogueMode: true, state: structuredClone(state), operationId, action: attempt ? 'repair' : action }); }
-    catch (error) { response = { error: error.message, unavailable: true }; }
+    try {
+      const invoke = () => call({ ...request, input: submitted, dialogueMode: true, state: structuredClone(state), operationId, action: attempt ? 'repair' : action });
+      response = session.retained?.protect ? await session.retained.protect(invoke, { operationId, seat, effect: attempt ? 'repair' : 'provider' }) : await invoke();
+    }
+    catch (error) {
+      if (error.retainedIntegrityFailure) throw error;
+      response = { error: error.message, unavailable: true };
+    }
     response = typeof response === 'string' ? { content: response, answer: response } : {
       ...response, content: response?.content ?? response?.answer ?? response?.lastMessage ?? '',
     };
@@ -361,9 +393,9 @@ export const contextLifecycle = Object.freeze({ checkContext, registerEvidenceFi
 /** New runs use explicit dialogue; historical runConversation remains a separate reader. */
 export async function runPlanningDialogue({ requirements, target, directory, tier = 'plan', interactionMode = 'manual',
   rounds, runId = `planning-${randomUUID()}`, seats, strategy, reporter, context, artifactRoot, env, searchIndex,
-  session: suppliedSession, continuation, humanRuling, prelude, budget, resourceBudget }) {
+  session: suppliedSession, continuation, humanRuling, prelude, budget, resourceBudget, retained }) {
   const session = suppliedSession ?? (continuation ? reopenPlanningContext({ continuation, target, directory })
-    : openPlanningContext({ requirements, target, directory, runId, tier, context, artifactRoot, env, searchIndex }));
+    : openPlanningContext({ requirements, target, directory, runId, tier, context, retained, artifactRoot, env, searchIndex }));
   let proposal = prelude?.proposal ?? continuation?.proposal ?? null;
   let state = session.dialogue ?? continuation?.dialogue ?? (prelude?.preparationOperationId ? selectedPreparationState(session, prelude, requirements) : createDialogueState({ runId, projectId: session.project.projectId,
     phase: 'planning', interactionMode, snapshot: session.snapshot,
@@ -412,7 +444,8 @@ export async function runPlanningDialogue({ requirements, target, directory, tie
       : await runIssueDialogue({ state, journal: session.journal, budget: budgetGuard,
       seats: Object.fromEntries([['claude', seats.author], ['codex', seats.reviewCodex]].map(([seat, call]) => [seat, async request => {
         checkContext(session);
-        const response = await call(requestFor({ ...request, seat }));
+        const invoke = () => call(requestFor({ ...request, seat }));
+        const response = session.retained?.protect ? await session.retained.protect(invoke, { operationId: request.operationId, seat, effect: request.action === 'repair' ? 'repair' : 'provider' }) : await invoke();
         const observed = structuredClone(request.state);
         registerObservations(observed, session.journal.operation(request.operationId), response?.observations);
         registerEvidenceFiles(session, observed.evidence);

@@ -273,7 +273,7 @@ export function applyDialogueEnvelope({ state, envelope, seat, evidence = [], ve
     next.challengeCycles++;
   }
   if (envelope.action === 'inspect') next.pendingInspection = { messageId, seat, requests: envelope.requests };
-  if (envelope.action === 'decide' && state.authority === 'human' && Object.values(next.issues).some(i => i.status === 'disputed')) {
+  if (['decide', 'replan'].includes(envelope.action) && state.authority === 'human' && Object.values(next.issues).some(i => i.status === 'disputed')) {
     next.pendingDecision ??= { authority: 'human', messageId, reason: envelope.content, ...identity };
   }
   if (envelope.action === 'approve') {

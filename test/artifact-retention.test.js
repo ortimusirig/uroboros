@@ -11,12 +11,52 @@ import {
 } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { tmpdir } from 'node:os';
+import { createHash } from 'node:crypto';
 import {
   archiveRunArtifacts,
   resolveArtifactRoot,
 } from '../src/artifacts.js';
 
 const TEST_ROOT = fileURLToPath(new URL('../.ccc-test-artifacts/', import.meta.url));
+
+test('exact retained phase files archive only registered bytes and required source loss revokes approval', t => {
+  for (const failure of [null, 'stale', 'missing', 'escape', 'unrelated', 'source-link', 'destination-link']) {
+    const root = mkdtempSync(join(tmpdir(), 'uro-retained-archive-'));
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+    const worktree = join(root, 'work'), artifactRoot = join(root, 'archive');
+    writeProducedArtifacts(worktree);
+    const phase = '.uro-tmp/retained-phases/phase-1';
+    const path = `${phase}/__uro_dialogue/journal.jsonl`;
+    mkdirSync(join(worktree, phase, '__uro_dialogue'), { recursive: true });
+    writeFileSync(join(worktree, path), 'journal bytes');
+    writeFileSync(join(worktree, phase, 'unregistered.txt'), 'private unrelated temp');
+    let retainedFiles = [{ path, sha256: createHash('sha256').update('journal bytes').digest('hex') }];
+    if (failure === 'stale') writeFileSync(join(worktree, path), 'changed');
+    if (failure === 'missing') rmSync(join(worktree, path));
+    if (failure === 'escape') retainedFiles[0].path = '../outside.txt';
+    if (failure === 'unrelated') retainedFiles[0].path = '.uro-tmp/unrelated.txt';
+    if (failure === 'source-link') {
+      const outside = join(root, 'outside'); mkdirSync(outside); writeFileSync(join(outside, 'journal.jsonl'), 'journal bytes');
+      rmSync(join(worktree, phase, '__uro_dialogue'), { recursive: true });
+      symlinkSync(outside, join(worktree, phase, '__uro_dialogue'), process.platform === 'win32' ? 'junction' : 'dir');
+    }
+    const runFacts = { ...facts('retained-test'), approved: true, approval: { seat: 'claude' } };
+    if (failure === 'destination-link') {
+      const outside = join(root, 'outside'); mkdirSync(outside);
+      mkdirSync(join(artifactRoot, runFacts.runId), { recursive: true });
+      symlinkSync(outside, join(artifactRoot, runFacts.runId, '.uro-tmp'), process.platform === 'win32' ? 'junction' : 'dir');
+    }
+    const archived = archiveRunArtifacts({ dir: worktree, runId: runFacts.runId, facts: runFacts,
+      scratchRoot: root, artifactRoot, retainedFiles, startedAt: new Date(), endedAt: new Date() });
+    assert.equal(archived.status, failure ? 'failed' : 'ok', failure);
+    assert.equal(runFacts.approved, !failure || failure === 'destination-link', failure);
+    if (!failure) assert.equal(readFileSync(join(artifactRoot, runFacts.runId, path), 'utf8'), 'journal bytes');
+    if (failure && failure !== 'destination-link') assert.equal(archived.requiredSource.status, 'failed');
+    assert.equal(existsSync(join(artifactRoot, runFacts.runId, phase, 'unregistered.txt')), false);
+    if (failure === 'destination-link') assert.equal(existsSync(join(root, 'outside/retained-phases')), false);
+  }
+});
 
 test('evidence directory retention refuses symlink traversal and never copies unrelated directory trees', () => {
   const root = temporaryDirectory('evidence-boundary-');

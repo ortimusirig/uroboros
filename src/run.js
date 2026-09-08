@@ -1,6 +1,8 @@
-import { existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, unlinkSync, writeFileSync, mkdirSync, realpathSync, lstatSync, openSync, fsyncSync, closeSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import { homedir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { join, resolve, relative, isAbsolute } from 'node:path';
 import { isolate } from './isolation.js';
 import {
   DEFAULT_EXECUTOR_EFFORT,
@@ -36,9 +38,9 @@ import { archiveRunArtifacts, HARNESS_ARTIFACTS, resolveArtifactRoot } from './a
 import { saveCheckpoint } from './checkpoint.js';
 import { runExecutionDialogue } from './execution-dialogue.js';
 import { canApproveDialogue, parseDialogueEnvelope } from './dialogue.js';
-import { captureEvidence } from './context-evidence.js';
+import { captureEvidence, validateEvidence } from './context-evidence.js';
 import { contextDigest } from './shared-context.js';
-import { contextLifecycle } from './planning-dialogue.js';
+import { contextLifecycle, assertPlanningSidecars } from './planning-dialogue.js';
 import { EXECUTION_REVIEW_PROMPT, completeReviewPass } from './verifier.js';
 import { createRunMarker, releaseRunMarker } from './prune.js';
 import { physicalRunIdFor } from './run-id.js';
@@ -914,7 +916,92 @@ export async function run(opts) {
   let iter;
   let nativeResult = null;
   const nativeEvidence = [];
+  const nativePhases = [];
+  const nativeLinks = [];
+  let retainedArchiveFiles = [];
+  let validateNativeRetention;
   if (nativeExecution) {
+    let phase = { phase: 'execution', runId, directory: iso.dir };
+    let retained;
+    let interruptedPlanningObservations = [];
+    const totalResources = () => nativePhases.reduce((total, item) => {
+      const account = item.resources;
+      if (!account) return { ...total, usageUnknown: true };
+      for (const key of ['providerLaunches', 'repairLaunches', 'failedLaunches']) total[key] += account[key] ?? 0;
+      total.knownUsage = addUsage(total.knownUsage, account.knownUsage);
+      total.usageUnknown ||= account.usageUnknown;
+      return total;
+    }, { providerLaunches: 0, repairLaunches: 0, failedLaunches: 0, knownUsage: { inputTokens: 0, outputTokens: 0 }, usageUnknown: false });
+    const checkDirectory = directory => {
+      if (directory !== iso.dir) {
+        for (const path of [join(iso.dir, '.uro-tmp'), join(iso.dir, '.uro-tmp', 'retained-phases'), directory]) {
+          const rel = relative(realpathSync.native(iso.dir), realpathSync.native(path));
+          if (lstatSync(path).isSymbolicLink() || rel.startsWith('..') || isAbsolute(rel)) throw new Error('retained phase namespace escape');
+        }
+      }
+    };
+    const checkPhase = item => {
+      checkDirectory(item.directory);
+      const checkpoint = item.checkpointState;
+      const manifest = checkpoint?.executionArtifacts ?? checkpoint?.planningArtifacts;
+      if (!manifest || !checkpoint.journalIdentity) throw new Error('required native phase manifest or journal identity unavailable');
+      const actual = contextLifecycle.manifest({ directory: item.directory, runId: item.runId, contextDigest: manifest.contextDigest,
+        registeredPaths: manifest.files.map(file => join(item.directory, file.path)) });
+      if (contextDigest({ manifest }) !== contextDigest({ manifest: actual })) throw new Error('required native phase manifest changed');
+      const events = readFileSync(join(item.directory, '__uro_dialogue/journal.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+      const tail = events.at(-1);
+      if (tail.sequence !== checkpoint.journalIdentity.sequence || tail.hash !== checkpoint.journalIdentity.hash) throw new Error('required native journal tail changed');
+      return events;
+    };
+    const checkChain = () => {
+      for (const item of nativePhases) checkPhase(item);
+      for (const link of nativeLinks) {
+        checkDirectory(link.directory);
+        if (lstatSync(link.path).isSymbolicLink() || reviewDigest(readFileSync(link.path)) !== link.digest) throw new Error('retained phase handoff changed');
+      }
+    };
+    validateNativeRetention = checkChain;
+    const completePhase = result => {
+      const item = structuredClone({ ...phase, action: result.action, resources: result.resources,
+        checkpointState: result.checkpointState, messages: result.messages ?? result.state?.messages ?? [] });
+      nativePhases.push(item);
+      checkPhase(item);
+      return item;
+    };
+    const allocatePhase = (kind, parent, execution, trigger) => {
+      checkChain();
+      const id = `${runId}-${kind}-${randomUUID()}`;
+      const namespace = join(iso.dir, '.uro-tmp', 'retained-phases');
+      for (const path of [join(iso.dir, '.uro-tmp'), namespace]) {
+        mkdirSync(path, { recursive: true });
+        const rel = relative(realpathSync.native(iso.dir), realpathSync.native(path));
+        if (lstatSync(path).isSymbolicLink() || rel.startsWith('..') || isAbsolute(rel)) throw new Error('retained phase namespace escape');
+      }
+      const directory = join(namespace, randomUUID()); mkdirSync(directory);
+      phase = { phase: kind, runId: id, directory };
+      const parentManifest = parent.checkpointState.executionArtifacts ?? parent.checkpointState.planningArtifacts;
+      const context = { schemaVersion: 1, parent: { phase: parent.phase, runId: parent.runId, directory: parent.directory,
+          journalIdentity: parent.checkpointState.journalIdentity, manifest: parentManifest,
+          stateDigest: contextDigest({ state: parent.checkpointState.dialogue ?? parent.checkpointState.preparationState }),
+          contextDigest: parentManifest.contextDigest }, child: phase, originalRequirements: originalPlan, currentPlan: plan,
+        originalContext: opts.context ?? {}, sourceScope: execution.scope,
+        parentEntries: (parent.checkpointState.dialogue?.snapshot.entries ?? []).filter(entry => entry.kind !== 'retained-phase'),
+        interactionMode: mode, limits: { challengeRounds, debateRounds: maxDebateRounds, tokenBudget, pivotCandidates },
+        workspace: { target: resolve(target), directory: iso.dir, baseCommit: iso.baseCommit,
+          head: execFileSync('git', ['-C', iso.dir, 'rev-parse', 'HEAD'], { encoding: 'utf8', windowsHide: true }).trim(),
+          diff: currentDiff, diffDigest: reviewDigest(currentDiff) }, trigger,
+        history: nativePhases.map(item => ({ runId: item.runId, phase: item.phase, messages: item.messages })),
+        execution: { proposalCycles: execution.proposalCycles, correctionCycles: execution.correctionCycles,
+          challengeCycles: execution.challengeCycles, executionCycle: execution.executionCycle, operations: execution.operations,
+          previous: execution.priorExecution ?? null }, resources: totalResources() };
+      const path = join(directory, 'phase-link.json');
+      const fd = openSync(path, 'wx');
+      try { writeFileSync(fd, JSON.stringify(context)); fsyncSync(fd); } finally { closeSync(fd); }
+      nativeLinks.push({ path, digest: reviewDigest(readFileSync(path)), ...phase });
+      checkChain();
+      return { context, validate: checkChain, evidence: parent.checkpointState.dialogue?.evidence ?? [],
+        evidenceRoots: parent.checkpointState.dialogue?.scope.evidenceRoots ?? [] };
+    };
     const capture = async () => {
       currentDiff = await createDiff(iso.dir, iso.baseCommit);
       writeFileSync(join(iso.dir, 'CHANGES.diff'), currentDiff);
@@ -933,7 +1020,7 @@ export async function run(opts) {
       const beforeKill = () => preservation ??= preservePartialExecutorWork(iso.dir, iso.baseCommit, createDiff);
       const response = await runExecutor({ ...request, plan: request.input, model: executorModel, effort: executorEffort,
         bin: opts.codexBin ?? 'codex', env: runEnvironment, ownedTmpDir: true,
-        timeoutMs: stageTimeouts.executor, reporter: eventReporter, runId, attempt, beforeKill,
+        timeoutMs: stageTimeouts.executor, reporter: eventReporter, runId: request.state.runId, attempt, beforeKill,
         onLiveness: () => watchdog?.touch('executor'),
         livenessThresholdMs: executorThresholds.thresholdMs, progressThresholdMs: executorThresholds.progressThresholdMs });
       if (response.timedOut || response.aborted) await beforeKill();
@@ -952,7 +1039,7 @@ export async function run(opts) {
         originalRequirements: originalPlan, diff: currentDiff, diffDigest: reviewDigest(currentDiff),
         round: request.state.proposalCycles, messages: request.state.messages, evidence: request.state.evidence,
         model: verifierModel, bin: verifierBin, env: runEnvironment, superpowersDir: claudeSuperpowersDir,
-        timeoutMs: stageTimeouts.verifier, reporter: eventReporter, runId });
+        timeoutMs: stageTimeouts.verifier, reporter: eventReporter, runId: request.state.runId });
       providerResults.push({ seat: 'claude', operationId: request.operationId, response });
       return response;
     };
@@ -980,8 +1067,10 @@ export async function run(opts) {
       return response;
     };
     try {
+      while (true) {
       const initial = await capture();
-      nativeResult = await runExecutionDialogue({ target: iso.dir, directory: iso.dir, runId,
+      const prior = totalResources();
+      nativeResult = await runExecutionDialogue({ target: iso.dir, directory: phase.directory, runId: phase.runId, retained,
         artifactRoot: resolveArtifactRoot({ scratchRoot, artifactRoot: opts.artifactRoot, env: runEnvironment }),
         requirements: originalPlan, plan, artifactDigest: initial.artifactDigest, interactionMode: mode,
         context: { ...(opts.context ?? {}), workspace: { baseCommit: iso.baseCommit, target: resolve(target) }, requiredCommands: commands },
@@ -1005,8 +1094,8 @@ export async function run(opts) {
           return { ...await capture(), evidence: captured };
         },
         budget: ({ account }) => merge !== undefined ? { allowed: false, reason: 'WIP merge effect integration pending; paused before initial advance' }
-          : tokenBudget !== undefined && account.usageUnknown ? { allowed: false, reason: 'accounting-incomplete: unknown provider usage' }
-          : tokenBudget !== undefined && account.knownUsage.inputTokens + account.knownUsage.outputTokens >= tokenBudget
+          : tokenBudget !== undefined && (prior.usageUnknown || account.usageUnknown) ? { allowed: false, reason: 'accounting-incomplete: unknown provider usage' }
+          : tokenBudget !== undefined && prior.knownUsage.inputTokens + prior.knownUsage.outputTokens + account.knownUsage.inputTokens + account.knownUsage.outputTokens >= tokenBudget
             ? { allowed: false, reason: 'budget-exhausted: token budget reached' } : { allowed: true },
         reporter: eventReporter, env: runEnvironment });
       const finalCapture = await capture();
@@ -1017,23 +1106,116 @@ export async function run(opts) {
         || gateResult.results.some(result => result.code !== 0 || result.timedOut))) {
         nativeResult.approved = false; nativeResult.action = 'paused'; nativeResult.reason = 'current required checks are incomplete, stale or failed';
       }
-      if (nativeResult.action === 'replan') nativeResult.reason = 'WIP retained replan integration pending; useful work retained';
       if (nativeResult.approved && opts.mutation !== undefined) {
         nativeResult.approved = false; nativeResult.action = 'paused'; nativeResult.reason = 'WIP mutation effect integration pending';
       }
-      const manifest = nativeResult.checkpointState.executionArtifacts;
-      if (!manifest || !nativeResult.checkpointState.journalIdentity) throw new Error('required native execution manifest or journal identity unavailable');
-      const actual = contextLifecycle.manifest({ directory: iso.dir, runId, contextDigest: nativeResult.snapshot.digest,
-        registeredPaths: manifest.files.map(file => join(iso.dir, file.path)) });
-      if (contextDigest({ manifest }) !== contextDigest({ manifest: actual })) throw new Error('required native execution manifest changed');
+      const parent = completePhase(nativeResult);
+      checkChain();
+      if (nativeResult.action !== 'replan') break;
+      const execution = nativeResult.state;
+      const message = execution.messages.at(-1), trigger = message?.replan;
+      if (execution.pendingDecision || message?.sender !== 'claude' || message.action !== 'replan'
+        || !trigger || !(trigger.issueId && Object.hasOwn(execution.issues, trigger.issueId)
+          || trigger.claimId && Object.hasOwn(execution.claims, trigger.claimId))
+        || typeof trigger.novelty !== 'string' || !trigger.novelty.trim()
+        || !Array.isArray(trigger.evidenceIds) || !trigger.evidenceIds.length) throw new Error('retained replan requires an affected issue or claim, trusted evidence and concrete novelty');
+      for (const id of trigger.evidenceIds) {
+        const item = execution.evidence.find(e => e.id === id);
+        const valid = validateEvidence({ evidence: item, projectId: execution.projectId,
+          roots: [...execution.scope.sourceRoots, ...execution.scope.evidenceRoots] });
+        if (!valid.valid) throw new Error(`retained replan evidence invalid: ${valid.reason}`);
+      }
+      retained = allocatePhase('planning', parent, execution, { ...trigger, message });
+      const held = retained;
+      interruptedPlanningObservations = [];
+      held.protect = async (invoke, operation) => {
+        const observedBefore = interruptedPlanningObservations.length;
+        let raw;
+        try {
+        checkChain();
+        if (execFileSync('git', ['-C', iso.dir, 'rev-parse', 'HEAD'], { encoding: 'utf8', windowsHide: true }).trim()
+          !== held.context.workspace.head) throw new Error('retained project HEAD changed during planning');
+        const result = await runProtectedOperation({ cwd: iso.dir, scope: 'outside', prefix: '__uro_review',
+          stage: 'retained-planning', runId: phase.runId, operation: async () => (await runProtectedOperation({
+            cwd: iso.dir, scope: 'inside', prefix: '__uro_review', captureSnapshot: captureReviewSnapshot,
+            restoreSnapshot: restoreReviewSnapshot, operation: async () => {
+              const observed = { ...operation };
+              interruptedPlanningObservations.push(observed);
+              try { raw = await invoke(); observed.usage = raw?.usage ?? null; return raw; }
+              catch (error) { observed.error = error.message; throw error; }
+            } })).result });
+        checkChain();
+        if ((await capture()).artifactDigest !== held.context.workspace.diffDigest) throw new Error('retained project changed during planning');
+        return result.result;
+        } catch (error) {
+          if (interruptedPlanningObservations.length === observedBefore) error.retainedIntegrityFailure = true;
+          if (raw !== undefined) return { ...(typeof raw === 'string' ? { content: raw } : raw), error: error.message };
+          throw error;
+        }
+      };
+      nativeResult = { approved: false, action: 'paused', reason: 'retained planning has not completed',
+        checkpointState: { version: 2, ...phase, interactionMode: mode, requirements: originalPlan } };
+      const generated = await generatePlanCandidates({ goal: originalPlan, target: iso.dir, directory: phase.directory, runId: phase.runId,
+        mode: 'fresh', count: pivotCandidates, interactionMode: mode, failedPlan: plan, previousPlan: originalPlan,
+        pivot: 'Preserve completed work; plan and authorize only remaining work using the retained evidence and decisions.',
+        priorMessages: execution.messages, retained, artifactRoot: resolveArtifactRoot({ scratchRoot, artifactRoot: opts.artifactRoot, env: runEnvironment }),
+        ...(tokenBudget === undefined ? {} : { resourceBudget: { tokenBudget, prior: totalResources() } }),
+        claudeModel: arbiterModel, codexModel: executorModel, codexEffort: executorEffort,
+        timeoutMs: stageTimeouts.arbiter, executorTimeout: stageTimeouts.executor, env: runEnvironment, reporter: eventReporter,
+        ...(adapters.draftPlanCandidate ? { draft: adapters.draftPlanCandidate } : adapters.runExecutor ? { draft: async () => ({ unavailable: true, error: 'retained planner unavailable' }) } : {}),
+        ...(adapters.selectPlanCandidate ? { select: adapters.selectPlanCandidate } : {}),
+        ...(adapters.reviewPlanCandidate ? { review: adapters.reviewPlanCandidate } : {}),
+      });
+      nativeResult = { ...generated, state: generated.dialogue ?? generated.state, snapshot: generated.sharedContext,
+        action: generated.action ?? 'paused' };
+      const planningPhase = completePhase(nativeResult);
+      planningUsage = addUsage(planningUsage, generated.resources?.knownUsage);
+      if (!generated.approved) break;
+      const selected = generated.selected, dialogue = generated.dialogue;
+      if (!selected || generated.runId !== phase.runId || dialogue?.runId !== phase.runId || dialogue.interactionMode !== mode
+        || generated.approval?.decidedBy !== 'codex' || !canApproveDialogue({ state: dialogue, seat: 'codex' }).approved
+        || generated.approval.artifactDigest !== planningArtifactDigest(originalPlan, { plan: selected.plan, gate: selected.gate })
+        || generated.approval.contextDigest !== dialogue.snapshot.digest) throw new Error('retained planning lacks current selected-plan Codex approval');
+      assertPlanningSidecars({ directory: phase.directory, runId: phase.runId, approval: generated.approval, manifest: generated.planningArtifacts });
+      const events = checkPhase(planningPhase);
+      if (pivotCandidates > 1 && !events.some(event => event.type === 'selected-preparation'
+        && event.operationId === selected.response?.preparationOperationId)) throw new Error('retained selected preparation identity missing');
+      const savedState = events.findLast(event => event.type === 'state')?.state;
+      if (!savedState || contextDigest({ state: savedState }) !== contextDigest({ state: dialogue })) throw new Error('retained planning journal state differs from approved result');
+      if ((await capture()).artifactDigest !== held.context.workspace.diffDigest
+        || execFileSync('git', ['-C', iso.dir, 'rev-parse', 'HEAD'], { encoding: 'utf8', windowsHide: true }).trim()
+          !== held.context.workspace.head) throw new Error('retained project changed before planning adoption');
+      plan = selected.plan; commands.splice(0, commands.length, ...selected.gate); gateResult = null;
+      retained = allocatePhase('execution', planningPhase, execution, { ...trigger, message });
+      }
     } catch (error) {
       nativeResult = { ...nativeResult, approved: false, action: 'paused', reason: error.message };
+      if (phase.phase === 'planning' && !nativePhases.some(item => item.runId === phase.runId)) {
+        nativePhases.push({ ...phase, action: 'paused', checkpointState: nativeResult.checkpointState,
+          resources: { providerLaunches: interruptedPlanningObservations.length,
+            repairLaunches: interruptedPlanningObservations.filter(item => item.effect === 'repair').length,
+            failedLaunches: interruptedPlanningObservations.filter(item => item.error).length,
+            knownUsage: interruptedPlanningObservations.reduce((sum, item) => addUsage(sum, item.usage), EMPTY_USAGE),
+            usageUnknown: interruptedPlanningObservations.some(item => !['inputTokens', 'outputTokens'].every(key => Number.isFinite(item.usage?.[key]) && item.usage[key] >= 0)) },
+          observations: interruptedPlanningObservations, integrityFailure: error.message, messages: [] });
+        nativeResult.resources = nativePhases.at(-1).resources;
+        planningUsage = addUsage(planningUsage, nativeResult.resources.knownUsage);
+      }
       await capture(); // Retain uncertain writes without replaying a provider or check.
     }
     if (!nativeResult.approved && nativeResult.state) nativeResult.state.approval = null;
+    nativeResult.phaseResources = nativeResult.resources;
+    nativeResult.resources = totalResources();
+    retainedArchiveFiles = [
+      ...nativePhases.filter(item => item.directory !== iso.dir).flatMap(item => {
+        const manifest = item.checkpointState?.executionArtifacts ?? item.checkpointState?.planningArtifacts;
+        return (manifest?.files ?? []).map(file => ({ path: relative(iso.dir, join(item.directory, file.path)).replaceAll('\\', '/'), sha256: file.sha256 }));
+      }),
+      ...nativeLinks.map(link => ({ path: relative(iso.dir, link.path).replaceAll('\\', '/'), sha256: link.digest })),
+    ];
     outcome = nativeResult.approved ? 'review-ready' : nativeResult.action === 'needs-decision' ? 'needs-decision' : 'needs-pivot';
     debateStopReason = nativeResult.reason;
-    for (const message of nativeResult.state?.messages ?? []) {
+    for (const message of nativePhases.flatMap(item => item.phase === 'execution' ? item.messages : [])) {
       const observed = providerResults.find(item => item.operationId === message.operationId);
       executionMessages.push({ ...message, speaker: message.seat ?? message.sender,
         role: (message.seat ?? message.sender) === 'codex' ? 'implementation-author' : 'execution-reviewer', response: observed?.response });
@@ -1933,7 +2115,9 @@ export async function run(opts) {
       mutation = { status: 'error', reason: error instanceof Error ? error.message : String(error) };
     }
   }
-  const planningMessages = pivotHistory.flatMap(pivot => pivot.planning?.messages ?? []);
+  const planningMessages = nativeExecution ? nativePhases.flatMap(item => item.phase === 'planning'
+    ? item.messages.map(message => ({ ...message, phase: 'planning', runId: item.runId })) : [])
+    : pivotHistory.flatMap(pivot => pivot.planning?.messages ?? []);
   const dissent = executionMessages.filter(message => message.speaker === 'codex'
     && executorFindingResponses(message.response).some(response => response.disposition === 'dispute'));
   const approved = nativeExecution ? nativeResult.approved === true && outcome === 'review-ready'
@@ -1996,14 +2180,18 @@ export async function run(opts) {
   facts.authority = decisionAuthority({ interactionMode: mode, phase: 'execution' });
 
   if (nativeExecution) {
+    facts.phase = nativeResult.checkpointState?.phase ?? 'execution';
+    facts.authority = decisionAuthority({ interactionMode: mode, phase: facts.phase });
     facts.dialogue = nativeResult.state ?? null;
     facts.resources = nativeResult.resources ?? null;
     facts.reason = nativeResult.reason;
     facts.nextAction = nativeResult.action;
-    facts.checkpointState = { ...nativeResult.checkpointState, version: 2, phase: 'execution', runId,
+    facts.checkpointState = { ...nativeResult.checkpointState, version: 2,
+      phase: nativeResult.checkpointState?.phase ?? 'execution', runId: nativeResult.checkpointState?.runId ?? runId, rootRunId: runId,
       interactionMode: mode, action: nativeResult.action, reason: nativeResult.reason, approved,
       workspace: { ...iso, targetPath: resolve(target), diff: currentDiff, diffDigest: reviewDigest(currentDiff) },
       originalPlan, plan, commands, resources: nativeResult.resources,
+      phaseResources: nativeResult.phaseResources, phaseChain: nativePhases, phaseLinks: nativeLinks,
       options: { target, scratchRoot, artifactRoot: opts.artifactRoot, baseRef, executorModel, executorEffort, verifierModel,
         challengeRounds, debateRounds: maxDebateRounds, tokenBudget, pivotCandidates, superpowers },
     };
@@ -2058,6 +2246,15 @@ export async function run(opts) {
     }
   }
   writeReport({ dir: iso.dir, facts, reporter: eventReporter, runId });
+  if (nativeExecution) {
+    try { validateNativeRetention(); }
+    catch (error) {
+      facts.approved = false; facts.approval = null; facts.outcome = 'needs-pivot'; facts.nextAction = 'paused';
+      facts.reason = `required retained source integrity failed: ${error.message}`;
+      facts.requiredSourceFailure = { status: 'failed', error: error.message };
+      Object.assign(facts.checkpointState, { approved: false, action: 'paused', reason: facts.reason, requiredSourceFailure: facts.requiredSourceFailure });
+    }
+  }
   const endedAt = new Date();
   try {
     archiveRunArtifacts({
@@ -2070,6 +2267,7 @@ export async function run(opts) {
       startedAt,
       endedAt,
       refresh: Boolean(continuation),
+      retainedFiles: retainedArchiveFiles,
     });
   } catch (error) {
     facts.artifacts = {

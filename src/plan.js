@@ -448,7 +448,7 @@ export async function runPlanCandidateSet({
   timeoutMs = resolveStageTimeouts().arbiter, executorTimeout = resolveStageTimeouts().executor,
   runId = `plan-candidates-${randomUUID()}`, env = process.env, reporter,
   draft, select, review, priorMessages = [],
-  directory, out, artifactRoot, searchIndex, budget, resourceBudget,
+  directory, out, artifactRoot, searchIndex, budget, resourceBudget, retained,
 } = {}) {
   decisionAuthority({ interactionMode, phase: 'planning' });
   if (count === undefined) count = mode === 'fresh' ? DEFAULT_PIVOT_CANDIDATES : DEFAULT_PLAN_CANDIDATES;
@@ -465,7 +465,7 @@ export async function runPlanCandidateSet({
       authorPrompt: request => draftingPrompt({ ...common, ...request, round: request.round }), reviewPrompt: reviewSeatPrompt });
     const result = await runPlanningDialogue({ requirements: goal, target,
       directory: directory ?? join(target, '.uro-tmp', runId), runId, interactionMode, rounds, budget, resourceBudget,
-      context: { failedPlan, previousPlan, ledger, pivot, feedback, priorMessages }, artifactRoot, env, searchIndex, reporter,
+      context: { failedPlan, previousPlan, ledger, pivot, feedback, priorMessages }, retained, artifactRoot, env, searchIndex, reporter,
       seats: { author: async r => {
         const response = await (draft ?? production.author)({ ...common, ...r, candidateId: candidate.id,
           candidateIndex: r.type === 'draft' ? 1 : undefined, candidateCount: 1, perspective: candidate.perspective,
@@ -486,7 +486,7 @@ export async function runPlanCandidateSet({
   }
   const draftCandidate = draft ?? productionDraft;
   const session = openPlanningContext({ requirements: goal, target, directory: directory ?? join(target, '.uro-tmp', runId),
-    runId, context: { failedPlan, previousPlan, ledger, pivot, feedback, priorMessages }, artifactRoot, env, searchIndex });
+    runId, context: { failedPlan, previousPlan, ledger, pivot, feedback, priorMessages }, retained, artifactRoot, env, searchIndex });
   try {
   const budgetGuard = createPlanningBudgetGuard({ session, resourceBudget, budget });
   let budgetPause = null;
@@ -524,6 +524,7 @@ export async function runPlanCandidateSet({
         candidateIndex: candidate.index + 1, candidateCount: count, perspective: candidate.perspective,
         feedback: repairFeedback || feedback, messages: [...messages] } });
     } catch (error) {
+      if (error.retainedIntegrityFailure) throw error;
       response = { unavailable: true, error: error instanceof Error ? error.message : String(error) };
     }
     if (response?.budgetPaused) { budgetPause = response; candidate.preparationPause = response; return; }
@@ -582,13 +583,14 @@ export async function runPlanCandidateSet({
         artifactRepairs, roundsLimit: rounds ?? null,
         candidateState: { mode, selectedCandidateId: null, candidates, selection },
       } };
-    if (budgetPause) {
+    if (budgetPause || retained) {
       result.action = 'paused';
-      result.exhausted = true;
+      result.exhausted ||= Boolean(budgetPause);
       const tail = session.journal.read().at(-1);
       Object.assign(result.checkpointState, { directory: session.directory, artifactRoot: session.artifactRoot,
         resourceBudget: session.resourceBudget, technicalPause: { reason },
-        preparationState: session.journal.read().findLast(event => event.type === 'preparation-paused')?.state ?? null,
+        preparationState: session.journal.read().findLast(event => ['preparation-paused', 'preparation-state'].includes(event.type))?.state ?? null,
+        preparationHistory: session.journal.read().filter(event => ['prepare', 'complete', 'preparation-state', 'candidate-artifact', 'preparation-paused'].includes(event.type)),
         journalIdentity: tail ? { sequence: tail.sequence, hash: tail.hash } : null });
       contextLifecycle.checkContext(session);
       session.journal.close();
@@ -609,6 +611,7 @@ export async function runPlanCandidateSet({
       answer = await callPlanningPreparation({ session, requirements: goal, call: choose, seat: 'codex', action: 'verify', budget: budgetGuard,
         request: { ...common, candidates: surviving }, input: selectionPrompt({ candidates: surviving, ledger, failedPlan }) });
     } catch (error) {
+      if (error.retainedIntegrityFailure) throw error;
       answer = { unavailable: true, error: error instanceof Error ? error.message : String(error) };
     }
     if (answer?.budgetPaused) { budgetPause = answer; return failure(answer.reason); }

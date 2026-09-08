@@ -16,7 +16,6 @@ import {
   resolveDebateRounds,
 } from '../src/run.js';
 import { VERIFIED_SUPERPOWERS, withVerifiedSuperpowers } from '../fixtures/verified-superpowers.mjs';
-import { planningArtifactDigest } from '../src/conversation.js';
 import { PIVOT_CONCLUDE, PIVOT_FRESH } from '../src/debate.js';
 import { EMPTY_USAGE } from '../src/usage.js';
 import { DEFAULT_ARBITER_MODEL } from '../src/arbiter.js';
@@ -29,6 +28,7 @@ import { spawnCapture } from '../src/spawn.js';
 import { exitCodeFor } from '../src/exit.js';
 import { reviewDigest, materializeReviewBundle } from '../src/review.js';
 import { createInspectionReceipt } from '../src/context-evidence.js';
+import { planningEnvelope, planningApproval } from './fixtures/planning-responses.js';
 
 const run = (options) => executeRun(withVerifiedSuperpowers(options));
 
@@ -98,6 +98,46 @@ test('native ordinary failed required checks cannot become approval', async t =>
   assert.equal(facts.evidence[0].exitCode, 7);
   const states = readFileSync(join(facts.dir, '__uro_dialogue', 'journal.jsonl'), 'utf8').trim().split('\n').map(JSON.parse).filter(e => e.type === 'state');
   assert.equal(states.at(-1).state.approval, null, 'failed checks must not durably finalize native approval');
+});
+
+test('native retained replan continues an open execution cycle without another correction', async t => {
+  let writes = 0, reviews = 0, cycle;
+  const facts = await run({ ...nativeFixture(t, 'native-replan-open-cycle', {
+    runExecutor: r => {
+      if (++writes === 1) {
+        cycle = r.state.executionCycle.id; writeFileSync(join(r.cwd, 'completed.txt'), '1');
+        return { dialogue: executionEnvelope(r, 'ask') };
+      }
+      assert.equal(r.state.executionCycle.id, cycle); assert.equal(r.state.proposalCycles, 1);
+      assert.equal(r.state.correctionCycles, 0); assert.equal(r.remainingWork, true);
+      writeFileSync(join(r.cwd, 'remaining.txt'), 'done'); return { dialogue: executionEnvelope(r, 'propose') };
+    },
+    runReview: r => ++reviews === 1 ? { dialogue: executionEnvelope(r, 'replan', {
+      issues: [{ id: 'R1', title: 'Partial execution needs a remaining plan', status: 'open', blocking: true }],
+      replan: { issueId: 'R1', evidenceIds: ['requirement-briefing'], novelty: 'The completed first segment narrows the remaining work to one file.' },
+    }) } : nativeApproval(r),
+    draftPlanCandidate: r => ({ plan: 'Only finish remaining.txt', gate: [], dialogue: planningEnvelope(r, 'propose') }),
+    reviewPlanCandidate: planningApproval,
+  }), pivotCandidates: 1, debateRounds: 1 });
+  assert.equal(facts.approved, true, facts.reason); assert.equal(writes, 2);
+  assert.equal(facts.dialogue.proposalCycles, 1); assert.equal(facts.dialogue.correctionCycles, 0);
+  assert.equal(facts.dialogue.executionCycle.completedOperationIds.length, 2);
+});
+
+test('native retained replan manual dispute launches no child before human resolution', async t => {
+  let planning = 0;
+  const facts = await run({ ...nativeFixture(t, 'native-replan-manual-dispute', {
+    runReview: r => ({ dialogue: executionEnvelope(r, 'replan', {
+      issues: [{ id: 'R1', title: 'Disputed remaining strategy', status: 'disputed', blocking: true }],
+      replan: { issueId: 'R1', evidenceIds: ['requirement-briefing'], novelty: 'The completed segment raises a disputed remaining-work choice.' },
+    }) }),
+    draftPlanCandidate: () => { planning++; return { unavailable: true }; },
+  }), mode: 'manual' });
+  assert.equal(facts.approved, false); assert.equal(planning, 0);
+  assert.equal(facts.nextAction, 'needs-decision'); assert.equal(facts.phase, 'execution');
+  assert.equal(facts.dialogue.pendingDecision.authority, 'human');
+  assert.equal(facts.dialogue.terminalAction, 'replan');
+  assert.equal(readFileSync(join(facts.dir, 'completed.txt'), 'utf8'), '1');
 });
 
 test('native ordinary dialogue permits four challenges and enforces an explicit separate challenge limit', async t => {
@@ -299,7 +339,7 @@ test('native ordinary required sink failure prevents second command and next rev
   assert.equal(existsSync(join(facts.dir, 'second-command')), false); assert.equal(reviews, 0);
 });
 
-test('native ordinary replan and requested mutation pause before later effects', async t => {
+test('native ordinary missing replan authorization and requested mutation pause before later effects', async t => {
   for (const effect of ['replan', 'mutation']) {
     let later = 0;
     const options = nativeFixture(t, `native-wip-${effect}`, { runPlanCandidateSet: () => { later++; }, runMutation: () => { later++; },
@@ -361,20 +401,6 @@ const writingExecutor = async ({ cwd }) => {
   return { changedFiles: ['new.txt'], lastMessage: 'wrote new.txt' };
 };
 const noopExecutor = async () => ({ changedFiles: [], lastMessage: 'nothing to do' });
-const freshPlanningAdapters = {
-  runPlanCandidateSet: async ({ goal }) => {
-    const proposal = { plan: 'Approved fresh implementation.', gate: [] };
-    const digest = planningArtifactDigest(goal, proposal);
-    return { approved: true, artifactDigest: digest, approval: { artifactDigest: digest },
-      candidates: [{ id: 'candidate-1', ...proposal }], selected: { id: 'candidate-1', ...proposal } };
-  },
-  draftPlanCandidate: async ({ candidateId }) => ({
-    plan: `Fresh implementation plan from ${candidateId}.\n`,
-    gate: [],
-  }),
-  
-  selectPlanCandidate: async () => ({ selectedCandidateId: 'candidate-1' }),
-};
 
 const DECISION_CONTENT = `
 ## Q1
@@ -1687,81 +1713,49 @@ test('circling on the final round suppresses an amend that cannot run', async ()
   }
 });
 
-test('the fresh pivot still acts when circling is detected on the final round', async () => {
-  const scr = scratch();
-  const events = [];
-  let pivots = 0;
-  try {
-    const facts = await run({
-      mode: 'autonomous', task: 'do the task', target: makeTarget(), gate: [], gateRetries: 0,
-      scratchRoot: scr, runId: 'debate-final-fresh', debateRounds: 3,
-      reporter: (event) => events.push(event),
-      adapters: {
-        ...freshPlanningAdapters,
-        runExecutor: writingExecutor,
-        runGate: async () => ({ passed: true, results: [] }),
-        runReview: reviewerForRounds([
-          blockingReview(), blockingReview(), blockingReview(), blockingReview(),
-        ]),
-        runArbiter: async () => ({ decision: ++pivots === 1 ? 'fresh' : 'conclude', reason: 'Reviewed the continued blocker.' }),
-      },
-    });
-
-    assert.equal(facts.outcome, 'needs-pivot');
-    assert.equal(facts.debate.roundsRun, 4);
-    assert.equal(facts.debate.stopReason, 'pivot');
-    assert.equal(facts.debate.finalPivotDecision, 'conclude');
-    assert.equal(facts.debate.pivotCount, 2);
-    assert.deepEqual(facts.debate.ledger.rounds.map((round) => round.findingIds), [
-      ['F1'], ['F1'], ['F1'], ['F1'],
-    ]);
-    assert.equal(facts.debate.pivotHistory[0].decision, PIVOT_FRESH);
-    assert.equal(facts.debate.pivotHistory[0].selectedCandidateId, 'candidate-1');
-    assert.ok(events.some((event) => event.stage === 'debate'
-      && event.type === 'pivot' && event.decision === 'fresh'));
-    assert.ok(events.some((event) => event.stage === 'pivot'
-      && event.type === 'selected' && event.candidateId === 'candidate-1'));
-    assert.notEqual(exitCodeFor(facts.outcome), 0);
-  } finally {
-    rmSync(scr, { recursive: true, force: true });
-  }
+test('native retained replan after the last execution cycle plans but cannot buy another cycle', async t => {
+  let planning = 0, coding = 0;
+  const facts = await run({ ...nativeFixture(t, 'native-replan-final-cycle', {
+    runExecutor: r => { coding++; writeFileSync(join(r.cwd, 'completed.txt'), '1'); return { dialogue: executionEnvelope(r, 'propose') }; },
+    runReview: r => ({ dialogue: executionEnvelope(r, 'replan', {
+      issues: [{ id: 'R1', title: 'Remaining authorized work', status: 'open', blocking: true }],
+      replan: { issueId: 'R1', evidenceIds: ['requirement-briefing'], novelty: 'The completed segment exposes a new remaining-work requirement.' },
+    }) }),
+    draftPlanCandidate: r => { planning++; return { plan: 'Remaining work only', gate: [], dialogue: planningEnvelope(r, 'propose') }; },
+    reviewPlanCandidate: r => { planning++; return planningApproval(r); },
+  }), pivotCandidates: 1, debateRounds: 1 });
+  assert.equal(facts.approved, false); assert.equal(coding, 1); assert.equal(planning, 2);
+  assert.equal(facts.phase, 'execution'); assert.equal(facts.dialogue.proposalCycles, 1);
+  assert.match(facts.reason, /proposal-cycle limit/);
+  assert.equal(readFileSync(join(facts.dir, 'completed.txt'), 'utf8'), '1');
 });
 
-test('a fresh pivot replans and continued circling concludes with the complete ledger', async () => {
-  const scr = scratch();
-  let pivots = 0;
-  try {
-    const facts = await run({
-      mode: 'autonomous', task: 'do the task', target: makeTarget(), gate: [], gateRetries: 0,
-      scratchRoot: scr, runId: 'debate-fresh',
-      adapters: {
-        ...freshPlanningAdapters,
-        runArbiter: async () => ({ decision: ['amend', 'fresh', 'conclude'][pivots++], reason: 'The reviewed approach needs this pivot.' }),
-        runExecutor: writingExecutor,
-        runGate: async () => ({ passed: true, results: [] }),
-        runReview: reviewerForRounds([
-          blockingReview(), blockingReview(), blockingReview(), blockingReview(),
-          blockingReview(),
-        ]),
-      },
-    });
-
-    assert.equal(facts.outcome, 'needs-pivot');
-    assert.equal(facts.debate.roundsRun, 5);
-    assert.equal(facts.debate.pivotCount, 3);
-    assert.equal(facts.debate.finalPivotDecision, 'conclude');
-    assert.equal(facts.debate.stopReason, 'pivot');
-    assert.deepEqual(facts.debate.pivotHistory.map((pivot) => pivot.decision), [
-      'amend', 'fresh', 'conclude',
-    ]);
-    assert.equal(facts.debate.pivotHistory[1].selectedCandidateId, 'candidate-1');
-    assert.deepEqual(facts.debate.ledger.allFindingIds, ['F1']);
-    assert.deepEqual(facts.debate.ledger.recurredFindingIds, ['F1']);
-    assert.equal(facts.debate.ledger.rounds.length, 5);
-    assert.notEqual(exitCodeFor(facts.outcome), 0);
-  } finally {
-    rmSync(scr, { recursive: true, force: true });
-  }
+test('native retained replan preserves explicit challenge use across remaining execution', async t => {
+  let coding = 0, reviewing = 0;
+  const facts = await run({ ...nativeFixture(t, 'native-replan-challenge', {
+    runExecutor: r => {
+      coding++;
+      if (coding === 1) writeFileSync(join(r.cwd, 'completed.txt'), '1');
+      else { assert.equal(r.state.challengeCycles, 1); assert.equal(r.remainingWork, true); writeFileSync(join(r.cwd, 'remaining.txt'), 'done'); }
+      return { usage: { inputTokens: 1, outputTokens: 1 }, dialogue: executionEnvelope(r, r.action) };
+    },
+    runReview: r => {
+      reviewing++;
+      if (reviewing === 1) return { dialogue: executionEnvelope(r, 'challenge', {
+        next: { seat: 'claude', action: 'verify', reason: 'Assess the current evidence' } }) };
+      if (reviewing === 2) return { dialogue: executionEnvelope(r, 'replan', {
+        issues: [{ id: 'R1', title: 'Remaining work', blocking: true, status: 'open' }],
+        replan: { issueId: 'R1', evidenceIds: ['requirement-briefing'], novelty: 'The first completed file settles the first step; remaining.txt still needs implementation.' },
+      }) };
+      return { dialogue: executionEnvelope(r, 'ask', { next: { seat: 'claude', action: 'challenge', reason: 'Another explicit challenge' } }) };
+    },
+    draftPlanCandidate: r => ({ plan: 'Only finish remaining.txt', gate: [], dialogue: planningEnvelope(r, 'propose') }),
+    reviewPlanCandidate: planningApproval,
+  }), pivotCandidates: 1, challengeRounds: 1 });
+  assert.equal(facts.approved, false); assert.match(facts.reason, /challenge limit/);
+  assert.equal(coding, 2); assert.equal(reviewing, 3);
+  assert.equal(facts.dialogue.challengeCycles, 1);
+  assert.equal(readFileSync(join(facts.dir, 'completed.txt'), 'utf8'), '1');
 });
 
 test('the conclude pivot stops without reporting success', async () => {
