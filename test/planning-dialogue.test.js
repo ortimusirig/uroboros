@@ -9,9 +9,66 @@ import { resumeRun } from '../src/resume.js';
 import { openProjectMemory, resolveProjectIdentity } from '../src/project-memory.js';
 import { captureEvidence } from '../src/context-evidence.js';
 import { assertPlanningSidecars } from '../src/planning-dialogue.js';
-import { contextDigest } from '../src/shared-context.js';
+import { contextDigest, renderSharedContext } from '../src/shared-context.js';
 
 const superpowers = { seats: { claude: { verified: true }, codex: { verified: true } } };
+
+for (const staleRepair of [false, true]) test(`protocol repair prepares current discovered context and preserves original provenance (${staleRepair})`, async t => {
+  const opts = fixture(t); let original, repaired, malformed, firstCandidateCalls = 0;
+  const readJournal = () => readFileSync(join(opts.out, '__uro_dialogue', 'journal.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line));
+  const result = await runPlanCandidateSet({ ...opts, directory: opts.out, count: 2,
+    draft: r => {
+      if (r.candidateId !== 'candidate-1') return { plan: r.candidateId, gate: [], dialogue: reply(r, 'propose') };
+      firstCandidateCalls++;
+      if (firstCandidateCalls === 1) {
+        original = readJournal().find(event => event.type === 'prepare' && event.operationId === r.operationId);
+        const evidence = captureEvidence({ projectId: r.state.projectId, root: opts.target, directory: join(opts.out, '__uro_evidence'),
+          evidence: { id: 'repair-discovery', kind: 'code', projectId: r.state.projectId, claimIds: [],
+            locator: { path: 'source.js', line: 1 }, sourceIdentity: r.state.snapshot.sourceRevision } });
+        malformed = { content: 'Malformed original response: preserve this proposal substance.', observations: { evidence: [evidence],
+          receipts: [createInspectionReceipt({ operationId: r.operationId, seat: 'claude', evidence: [evidence], inspected: true, result: 'read' })] } };
+        return malformed;
+      }
+      assert.equal(firstCandidateCalls, 2, 'one protocol repair allowance only');
+      assert.equal(r.action, 'repair');
+      repaired = readJournal().find(event => event.type === 'prepare' && event.operationId === r.operationId);
+      assert.notEqual(repaired.operationId, original.operationId);
+      assert.notEqual(r.state.snapshot.digest, original.contextDigest);
+      assert.equal(r.state.snapshot.parentDigest, original.contextDigest);
+      assert.ok(r.state.snapshot.evidence.some(e => e.id === 'repair-discovery'));
+      assert.ok(r.input.includes(renderSharedContext({ snapshot: r.state.snapshot })));
+      assert.equal(repaired.input, r.input);
+      assert.equal(repaired.contextDigest, r.state.snapshot.digest);
+      assert.ok(repaired.evidenceIds.includes('repair-discovery'));
+      assert.equal(repaired.artifactDigest, original.artifactDigest);
+      assert.deepEqual(repaired.repairOf, { operationId: original.operationId,
+        artifactDigest: original.artifactDigest, contextDigest: original.contextDigest });
+      assert.ok(r.input.includes(JSON.stringify(repaired.repairOf)));
+      assert.ok(r.input.includes(JSON.stringify(malformed)));
+      const persisted = JSON.parse(readFileSync(join(opts.out, '__uro_context', `${r.state.snapshot.id}.json`), 'utf8'));
+      assert.equal(persisted.digest, repaired.contextDigest);
+      return { plan: 'candidate-1', gate: [], dialogue: reply(r, 'propose', staleRepair ? { contextDigest: original.contextDigest } : {}) };
+    },
+    select: r => ({ selectedCandidateId: 'candidate-1', dialogue: reply(r, 'verify') }), review: approve,
+  });
+  assert.equal(result.approved, true, result.reason);
+  assert.equal(result.selected.id, staleRepair ? 'candidate-2' : 'candidate-1');
+  assert.equal(result.resources.providerLaunches, staleRepair ? 4 : 5);
+  assert.equal(result.resources.repairLaunches, 1);
+  assert.equal(result.dialogue.artifactRepairs, 0);
+  assert.equal(result.rounds, 1);
+  assert.equal(firstCandidateCalls, 2);
+  t.diagnostic(JSON.stringify({ originalOperationId: original.operationId, originalContextDigest: original.contextDigest,
+    repairOperationId: repaired.operationId, repairContextDigest: repaired.contextDigest, staleRepair }));
+  const events = readJournal();
+  assert.deepEqual(events.find(event => event.type === 'prepare' && event.operationId === original.operationId), original);
+  assert.deepEqual(events.find(event => event.type === 'complete' && event.operationId === original.operationId).result, malformed);
+  assert.equal(result.candidates[0].gateResult.passed, !staleRepair);
+  if (staleRepair) {
+    assert.match(result.candidates[0].response.error, /stale/);
+    assert.equal(events.some(event => event.type === 'candidate-artifact' && event.operationId === repaired.operationId), false);
+  }
+});
 
 for (const resolveBlocker of [false, true]) test(`selected alternative retains its blocker and requires explicit disposition (${resolveBlocker})`, async t => {
   const opts = fixture(t); let reviewed = false;

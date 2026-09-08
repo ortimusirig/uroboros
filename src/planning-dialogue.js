@@ -172,17 +172,21 @@ export async function callPlanningPreparation({ session, requirements, input, ca
     state.proposalCycles--; // Known artifact-format repair reuses the allocated proposal cycle.
   }
   state.messages = structuredClone(session.preparationMessages);
-  const completeInput = [dialoguePromptText(input), renderSharedContext({ snapshot: session.snapshot }),
-    'Return one UROBOROS_DIALOGUE JSON envelope beside artifact/selection tags. schemaVersion:1; action:' + action +
-      '; replyTo:null; content:explanation; claims:[]; issues:[]; evidence:[]; verifications:[]; next:null.',
-    JSON.stringify({ artifactDigest: state.artifactDigest, contextDigest: state.snapshot.digest,
-      preparationMessages: state.messages, issues: state.issues, claims: state.claims, memoryProposals: state.memoryProposals })].join('\n\n');
-  let failedResponse;
+  let failedResponse, repairOf;
   for (let attempt = 0; attempt < 2; attempt++) {
+    // A completed malformed response may have published authenticated material.
+    // The new operation uses that current context; the old input remains history.
+    state.snapshot = structuredClone(session.snapshot);
+    const completeInput = [dialoguePromptText(input), renderSharedContext({ snapshot: state.snapshot }),
+      'Return one UROBOROS_DIALOGUE JSON envelope beside artifact/selection tags. schemaVersion:1; action:' + action +
+        '; replyTo:null; content:explanation; claims:[]; issues:[]; evidence:[]; verifications:[]; next:null.',
+      JSON.stringify({ artifactDigest: state.artifactDigest, contextDigest: state.snapshot.digest,
+        preparationMessages: state.messages, issues: state.issues, claims: state.claims, memoryProposals: state.memoryProposals })].join('\n\n');
     const operationId = `${state.runId}:candidate:${randomUUID()}`;
-    const submitted = completeInput + (attempt ? `\nFORMAT REPAIR ONLY. Preserve the saved substance and return the required envelope. Previous response:\n${JSON.stringify(failedResponse)}` : '');
+    const submitted = completeInput + (attempt ? `\nFORMAT REPAIR ONLY. Preserve the saved substance and return the required envelope using the current prepared input identities above. Original prepared input provenance (historical): ${JSON.stringify(repairOf)}\nPrevious response:\n${JSON.stringify(failedResponse)}` : '');
     session.journal.prepare({ operationId, seat, effect: attempt ? 'repair' : 'provider', action, input: submitted,
       candidateId: request.candidateId ?? null,
+      ...(attempt ? { repairOf } : {}),
       contextDigest: state.snapshot.digest, artifactDigest: state.artifactDigest,
       evidenceIds: state.evidence.map(e => e.id), unreadMessageIds: [] });
     let response;
@@ -201,7 +205,13 @@ export async function callPlanningPreparation({ session, requirements, input, ca
     }
     let envelope;
     try { envelope = parseDialogueEnvelope({ response }); }
-    catch (error) { publishPreparationMaterial(session, state); if (attempt) throw error; failedResponse = response; continue; }
+    catch (error) {
+      publishPreparationMaterial(session, state);
+      if (attempt) throw error;
+      failedResponse = response;
+      repairOf = { operationId, artifactDigest: operation.artifactDigest, contextDigest: operation.contextDigest };
+      continue;
+    }
     state.pendingOperation = { operationId, seat, effect: operation.effect, action };
     const previousNext = state.next;
     try {
