@@ -351,6 +351,8 @@ The ordinary-run WIP slice also owns focused test/run-artifacts.test.js and the 
 
 The stall/liveness slice owns the narrow required-decision and native judge cancellation/settlement seams in existing spawn/executor/run/liveness code. An outer judge timeout/dispose must not allow late gathered work to launch another provider or write completion into a closed phase journal. Await actual launched-judge settlement or retain explicit uncertainty, without unbounded joins, fabricated cancellation or new dialogue caps; preserve legacy callbacks when required hooks are absent and contain only owned processes on sink failure. An in-flight writer's unknown usage under an enforced budget denies a concurrent paid judge; record that outcome without invented reservations or live usage.
 
+The same slice also owns the minimal src/review-protection.js trusted validator for owner-recorded live journal appends during native writing, plus focused protection/actual same-directory run tests. Restrict changed critical paths to the exact current phase journal.jsonl/journal-tail.jsonl pair; existing phase inventory/immutable context and active accepted-tail checks remain mandatory after normal restoration. Context/lock/unregistered/other-phase changes and unowned journal rewrites still fail, and absent hook preserves unconditional rejection. Do not weaken exclusions, expose the callback to models or treat self-consistent hashes as owner authority; preserve observed usage on required failure.
+
 - [ ] **Step 1: Write RED using real retained files and fake seat transports.**
 ~~~js
 // Counter file is changed only in the first fake executor's actual write step.
