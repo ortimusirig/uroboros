@@ -181,7 +181,7 @@ test('native paused no-diff run archives its actual empty diff and pending decis
   }
 });
 
-test('run records an optional archive-copy failure without losing intact native source approval', async () => {
+test('run pauses when required native archive retention fails while preserving intact source', async () => {
   const scratchRoot = temporaryDirectory('blocked-');
   const runId = '2026-08-29T07-00-00-000Z-blocked';
   const blockedRoot = join(scratchRoot, 'blocked-root');
@@ -189,7 +189,7 @@ test('run records an optional archive-copy failure without losing intact native 
     const runAdapters = adapters(scratchRoot, runId);
     const review = runAdapters.runReview;
     runAdapters.runReview = async r => {
-      // Only the optional archive destination fails; required native source and notebook stay intact.
+      // The entire archive destination fails, including required context/journal retention.
       writeFileSync(join(blockedRoot, runId), 'not a directory');
       return review(r);
     };
@@ -204,14 +204,19 @@ test('run records an optional archive-copy failure without losing intact native 
       env: {},
       adapters: runAdapters,
     });
-    assert.equal(facts.outcome, 'review-ready');
+    assert.equal(facts.outcome, 'needs-pivot');
     assert.equal(Object.hasOwn(facts, 'correctnessVerdict'), false,
       'the verdict surface stays gone even on artifact failure');
     assert.equal(facts.artifacts.status, 'failed');
-    assert.equal(facts.approved, true);
+    assert.equal(facts.approved, false);
+    assert.equal(facts.approval, null);
+    assert.equal(facts.nextAction, 'paused');
+    assert.match(facts.reason, /required artifact retention failed/);
     assert.equal(existsSync(join(facts.dir, '__uro_dialogue', 'journal-tail.jsonl')), true);
-    assert.equal(exitCodeFor(facts.outcome), 0,
-      'best-effort artifact failure must not change the process exit mapping');
+    assert.equal(readFileSync(join(blockedRoot, runId), 'utf8'), 'not a directory');
+    assert.equal(existsSync(join(blockedRoot, runId, '__uro_context')), false);
+    assert.notEqual(exitCodeFor(facts.outcome), 0,
+      'failed required retention must prevent onward success');
   } finally {
     rmSync(scratchRoot, { recursive: true, force: true });
   }

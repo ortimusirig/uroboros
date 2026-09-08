@@ -452,6 +452,11 @@ export async function runIssueDialogue({ state: initial, journal, seats, renderI
         if (envelope.action === 'revise') reductionState.correctionCycles--;
       }
       state = applyDialogueEnvelope({ state: reductionState, envelope, seat: operation.seat });
+      if (state.mergeHumanReview?.status === 'pending' && operation.seat === state.reviewer
+        && ['verify', 'decide', 'stop', 'replan'].includes(envelope.action)
+        && state.mergeHumanReview.contextDigest === envelope.contextDigest) {
+        state.mergeHumanReview = { ...state.mergeHumanReview, status: 'reviewed', reviewerOperationId: operation.operationId };
+      }
       if (execution) {
         state.pendingArtifact = null;
         state.pendingExecutionCapture = { providerOperationId: operation.operationId, returnedAction: envelope.action,

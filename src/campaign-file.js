@@ -22,7 +22,7 @@ const TOP_LEVEL_KEYS = new Set([
 ]);
 const MAX_PLAN_CANDIDATES = 5;
 const UNIT_KEYS = new Set([
-  'id', 'task', 'dependsOn', 'perspective', 'round', 'unitKind',
+  'id', 'task', 'dependsOn', 'perspective', 'round', 'unitKind', 'tokenBudget',
 ]);
 const UNIT_KIND_SET = new Set(UNIT_KINDS);
 const EXECUTOR_EFFORTS = new Set([
@@ -173,6 +173,7 @@ export function loadCampaignFile(file) {
     }
     const task = declaredPath(raw.task, `unit "${raw.id}" task`, directory);
     validateTaskPath(task, raw.id);
+    if (raw.tokenBudget !== undefined) positiveInteger(raw.tokenBudget, `unit "${raw.id}" tokenBudget`);
     const dependsOn = Array.isArray(raw.dependsOn)
       ? (raw.dependsOn.length === 0
         ? undefined
@@ -182,6 +183,7 @@ export function loadCampaignFile(file) {
       task,
       unitKind,
       unitId: raw.id,
+      ...(raw.tokenBudget === undefined ? {} : { tokenBudget: raw.tokenBudget }),
       ...(raw.perspective === undefined ? {} : { perspective: raw.perspective }),
       ...(dependsOn === undefined ? {} : { dependsOn }),
     };

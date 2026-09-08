@@ -20,6 +20,29 @@ import {
 
 const TEST_ROOT = fileURLToPath(new URL('../.ccc-test-artifacts/', import.meta.url));
 
+test('required native archive failure revokes onward approval and retains complete source context', () => {
+  const root = temporaryDirectory('required-context-');
+  try {
+    const worktree = join(root, 'work'), artifactRoot = join(root, 'blocked');
+    writeProducedArtifacts(worktree);
+    mkdirSync(join(worktree, '__uro_context'), { recursive: true });
+    mkdirSync(join(worktree, '__uro_dialogue'), { recursive: true });
+    writeFileSync(join(worktree, '__uro_context', 'current.json'), 'complete current grounding');
+    writeFileSync(join(worktree, '__uro_dialogue', 'journal.jsonl'), 'complete operation history');
+    writeFileSync(artifactRoot, 'not a directory');
+    const runFacts = { ...facts('required-context'), approved: true, approval: { decidedBy: 'claude' }, checkpointState: { version: 2 } };
+    const result = archiveRunArtifacts({ dir: worktree, runId: runFacts.runId, facts: runFacts,
+      scratchRoot: root, artifactRoot, requiredRetention: true, startedAt: new Date(), endedAt: new Date() });
+    assert.equal(result.status, 'failed');
+    assert.equal(runFacts.approved, false);
+    assert.equal(runFacts.approval, null);
+    assert.equal(runFacts.nextAction, 'paused');
+    assert.match(runFacts.reason, /required.*retention|archive/);
+    assert.equal(readFileSync(join(worktree, '__uro_context', 'current.json'), 'utf8'), 'complete current grounding');
+    assert.equal(readFileSync(join(worktree, '__uro_dialogue', 'journal.jsonl'), 'utf8'), 'complete operation history');
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test('exact retained phase files archive only registered bytes and required source loss revokes approval', t => {
   for (const failure of [null, 'stale', 'missing', 'escape', 'unrelated', 'source-link', 'destination-link']) {
     const root = mkdtempSync(join(tmpdir(), 'uro-retained-archive-'));

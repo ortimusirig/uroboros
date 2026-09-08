@@ -45,6 +45,17 @@ function baseDocument(units = [
   return { target: 'target', gate: 'gate.json', units };
 }
 
+test('campaign files retain optional positive safe integer item allowances', () => {
+  const root = makeFixture();
+  try {
+    const load = tokenBudget => loadCampaignFile(writeCampaign(root, 'allowance', baseDocument([
+      { id: 'A', task: 'tasks/a.md', unitKind: 'node', tokenBudget } ])));
+    assert.equal(load(40).tasks[0].tokenBudget, 40);
+    assert.equal(load(undefined).tasks[0].tokenBudget, undefined);
+    for (const value of [0, -1, 1.5, '40', Number.MAX_SAFE_INTEGER + 1]) assert.throws(() => load(value), /tokenBudget|positive|safe integer/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test('campaign files normalize provider aliases and mode and reject obsolete or conflicting choices', () => {
   const root = makeFixture();
   try {

@@ -35,12 +35,12 @@ import {
   resolveStallConfig,
 } from './stall-watchdog.js';
 import { archiveRunArtifacts, HARNESS_ARTIFACTS, resolveArtifactRoot } from './artifacts.js';
-import { saveCheckpoint } from './checkpoint.js';
+import { saveCheckpoint, nativeHumanQuestion } from './checkpoint.js';
 import { runExecutionDialogue } from './execution-dialogue.js';
 import { canApproveDialogue, parseDialogueEnvelope } from './dialogue.js';
 import { captureEvidence, validateEvidence } from './context-evidence.js';
-import { contextDigest } from './shared-context.js';
-import { contextLifecycle, assertPlanningSidecars } from './planning-dialogue.js';
+import { contextDigest, readSharedContextReference } from './shared-context.js';
+import { contextLifecycle, assertPlanningSidecars, reopenPlanningContext, applyScopedHumanRuling, resumeTechnicalDialogue } from './planning-dialogue.js';
 import { EXECUTION_REVIEW_PROMPT, completeReviewPass } from './verifier.js';
 import { createRunMarker, releaseRunMarker } from './prune.js';
 import { physicalRunIdFor } from './run-id.js';
@@ -408,15 +408,29 @@ async function finishManualPlanning(state, generated, { adapters, reporter, env 
   return continueExecution({ checkpointState: state, humanRuling: state.manualPivotRuling, adapters, reporter, env });
 }
 
-export async function continueExecutionPlanning({ checkpointState, humanRuling, adapters = {}, reporter, env }) {
+export async function continueExecutionPlanning({ checkpointState, humanRuling, technicalContinue = false, adapters = {}, reporter, env }) {
+  if (checkpointState.version === 2 && checkpointState.workspace && !checkpointState.executionContinuation) {
+    return resumeNativeExecution({ checkpointState, humanRuling, technicalContinue, adapters, reporter, env });
+  }
   const state = structuredClone(checkpointState.executionContinuation);
   const generated = await continuePlanCandidateSet({ checkpointState, humanRuling,
     ...manualPlanningOptions(state, adapters, env, reporter) });
   return finishManualPlanning(state, generated, { adapters, reporter, env });
 }
 
-export async function continueExecution({ checkpointState, humanRuling, adapters = {}, reporter, env }) {
+const nativeRecovery = Symbol('validated native recovery');
+function resumeNativeExecution({ checkpointState: state, humanRuling, technicalContinue, adapters, reporter, env }) {
+  state = structuredClone(state);
+  if (!['execution', 'planning'].includes(state.phase) || !(state.dialogue?.schemaVersion === 2 || state.preparationSnapshot?.schemaVersion === 1) || !state.workspace?.dir) throw new Error('invalid native execution continuation');
+  return run({ ...state.options, task: state.originalPlan, gate: state.commands, runId: state.rootRunId ?? state.runId,
+    mode: state.interactionMode, merge: state.mergeState?.merge, adapters, reporter, ...(env ? { env } : {}),
+    [nativeRecovery]: { state, humanRuling, technicalContinue }, verifierProbeCompleted: true });
+}
+export async function continueExecution({ checkpointState, humanRuling, technicalContinue = false, adapters = {}, reporter, env }) {
   const state = JSON.parse(JSON.stringify(checkpointState));
+  if (state.version === 2) {
+    return resumeNativeExecution({ checkpointState: state, humanRuling, technicalContinue, adapters, reporter, env });
+  }
   if (state?.version !== 1 || state.phase !== 'execution' || state.interactionMode !== 'manual'
     || !state.workspace?.dir || !state.decision?.questions?.length) throw new Error('invalid execution continuation');
   const resolution = validatedResolution(state.decision.questions, humanRuling);
@@ -444,14 +458,15 @@ export async function continueExecution({ checkpointState, humanRuling, adapters
 }
 
 export async function run(opts) {
-  const continuation = opts.continuation ?? null;
-  if (continuation && (continuation.version !== 1 || continuation.phase !== 'execution'
+  const nativeSaved = opts[nativeRecovery]?.state;
+  const continuation = nativeSaved ?? opts.continuation ?? null;
+  if (continuation && !nativeSaved && (continuation.version !== 1 || continuation.phase !== 'execution'
     || continuation.interactionMode !== 'manual' || !continuation.workspace?.dir
     || !continuation.decision?.questions?.length
     || !validatedResolution(continuation.decision.questions, opts.humanRuling))) {
     throw new Error('invalid execution continuation; native recovery requires the validated Task5 bridge');
   }
-  const nativeExecution = continuation === null;
+  const nativeExecution = continuation === null || Boolean(nativeSaved);
   const startedAt = new Date();
   const {
     task, target, gate, gateRetries, scratchRoot, runId,
@@ -468,6 +483,7 @@ export async function run(opts) {
     debateRounds, tokenBudget, pivotCandidates = DEFAULT_PIVOT_CANDIDATES,
     adapters = {}, reporter,
   } = opts;
+  const parentContext = opts.contextRef ? readSharedContextReference({ reference: opts.contextRef, target }) : null;
   const physicalRunId = physicalRunIdFor(runId);
   if (mode !== 'manual' && mode !== 'autonomous') {
     throw new Error(`invalid mode: ${mode}; expected manual or autonomous`);
@@ -721,7 +737,7 @@ export async function run(opts) {
   const reviewerRestorations = continuation?.reviewProtection?.reviewerRestorations ?? [];
   const executorRestorations = continuation?.reviewProtection?.executorRestorations ?? [];
   const humanRulings = [...(continuation?.humanRulings ?? [])];
-  if (continuation) {
+  if (continuation && !nativeExecution) {
     if (continuation.stage === 'execution-dispute') {
       for (const question of continuation.decision.questions) {
         const answer = opts.humanRuling.answers.find(item => item.id === question.id)?.answer ?? '';
@@ -926,20 +942,29 @@ export async function run(opts) {
   let mergePreparationFailure = continuation?.mergeState?.mergePreparationFailure ?? null;
   let challengeRound = continuation?.challengeRound ?? 0;
   let decision = null;
-  let resolvedDecision = continuation ? { ...continuation.decision, ...opts.humanRuling, answeredBy: 'human' } : null;
+  let resolvedDecision = continuation && !nativeExecution ? { ...continuation.decision, ...opts.humanRuling, answeredBy: 'human' } : null;
   let assumedDecision = continuation?.assumedDecision ?? null;
-  let gateResult = null;
+  let gateResult = nativeSaved?.gateResult ?? null;
   let iter;
   let nativeResult = null;
   let nativeMutationPolicy = null;
-  let approvedExecutionPlan = plan;
+  let approvedExecutionPlan = continuation?.approvedExecutionPlan ?? plan;
   const nativeEvidence = [];
   const nativePhases = [];
   const nativeLinks = [];
   let retainedArchiveFiles = [];
   let validateNativeRetention;
   if (nativeExecution) {
-    let phase = { phase: 'execution', runId, directory: iso.dir };
+    let phase = nativeSaved ? { phase: nativeSaved.phase, runId: nativeSaved.runId, directory: nativeSaved.directory }
+      : { phase: 'execution', runId, directory: iso.dir };
+    let reopened;
+    if (nativeSaved) {
+      reopened = reopenPlanningContext({ continuation: nativeSaved, target: iso.dir, directory: nativeSaved.directory });
+      try {
+        nativePhases.push(...structuredClone(nativeSaved.phaseChain ?? []).filter(item => item.runId !== phase.runId));
+        nativeLinks.push(...structuredClone(nativeSaved.phaseLinks ?? []));
+      } catch (error) { reopened.journal.close(); throw error; }
+    }
     let retained;
     let interruptedPlanningObservations = [];
     const totalResources = () => nativePhases.reduce((total, item) => {
@@ -979,6 +1004,14 @@ export async function run(opts) {
       }
     };
     validateNativeRetention = checkChain;
+    if (reopened) {
+      try {
+        checkChain();
+        if (phase.phase === 'execution' && opts[nativeRecovery].humanRuling) applyScopedHumanRuling({ session: reopened, state: reopened.dialogue,
+          humanRuling: opts[nativeRecovery].humanRuling });
+        if (phase.phase === 'execution' && opts[nativeRecovery].technicalContinue) resumeTechnicalDialogue({ session: reopened, state: reopened.dialogue });
+      } catch (error) { reopened.journal.close(); throw error; }
+    }
     const completePhase = result => {
       const item = structuredClone({ ...phase, action: result.action, resources: result.resources,
         checkpointState: result.checkpointState, messages: result.messages ?? result.state?.messages ?? [] });
@@ -1056,6 +1089,21 @@ export async function run(opts) {
     };
     const mutationPolicy = opts.mutation === undefined ? null : opts.mutation === true ? {} : opts.mutation;
     const mutationTestSupport = new Map();
+    if (nativeSaved && mutationPolicy !== null) {
+      const retainedSupport = [
+        ...(nativeSaved.mutation?.analysis?.selection?.testSupportFiles ?? []),
+        ...iterations.flatMap(item => (item.reviewer?.artifact?.testFiles ?? []).map(path => ({ path,
+          sha256: item.reviewer.artifact.files?.[path.replace(/^__uro_review\//, '')] }))),
+      ];
+      for (const { path, sha256 } of retainedSupport) {
+        if (typeof path !== 'string' || !path.startsWith('__uro_review/tests/')
+          || path.split('/').some(part => !part || part === '.' || part === '..') || typeof sha256 !== 'string') throw new Error('invalid retained mutation test support inventory');
+        const file = join(iso.dir, path), contained = relative(realpathSync.native(iso.dir), realpathSync.native(file));
+        if (isAbsolute(contained) || contained.startsWith('..') || !lstatSync(file).isFile() || lstatSync(file).isSymbolicLink()
+          || reviewDigest(readFileSync(file)) !== sha256 || mutationTestSupport.has(path) && mutationTestSupport.get(path) !== sha256) throw new Error('retained mutation test support changed');
+        mutationTestSupport.set(path, sha256);
+      }
+    }
     const validateMutationPolicy = () => {
       if (adapters.runMutation !== undefined) throw new Error('native mutation rejects opaque runMutation adapters');
       if (!mutationPolicy || typeof mutationPolicy !== 'object' || Array.isArray(mutationPolicy)
@@ -1114,6 +1162,8 @@ export async function run(opts) {
       return { ...selection, identity: contextDigest(selection) };
     };
     const mergeSelection = ({ state }) => {
+      if (state.mergeHumanReview && (state.mergeHumanReview.status !== 'reviewed'
+        || state.mergeHumanReview.artifactDigest === state.artifactDigest)) return null;
       if (merge === undefined || state.mergeProgress?.complete || state.executionCycle?.open
         || state.mergeProgress && !state.executionCycle) return null;
       const progress = state.mergeProgress;
@@ -1236,14 +1286,18 @@ export async function run(opts) {
     };
     try {
       while (true) {
+      let parent, execution, message, trigger;
+      if (phase.phase === 'execution') {
       const initial = await capture({ readOnly: merge !== undefined });
       const prior = totalResources();
       nativeResult = await runExecutionDialogue({ target: iso.dir, directory: phase.directory, runId: phase.runId, retained,
+        ...(reopened ? { session: reopened, state: reopened.dialogue, snapshot: reopened.snapshot, journal: reopened.journal } : {}),
         artifactRoot: resolveArtifactRoot({ scratchRoot, artifactRoot: opts.artifactRoot, env: runEnvironment }),
         requirements: originalPlan, plan: approvedExecutionPlan,
         task: merge !== undefined ? buildMergeTask(approvedExecutionPlan, merge, activeConflict) : approvedExecutionPlan,
         artifactDigest: initial.artifactDigest, interactionMode: mode,
-        context: { ...(opts.context ?? {}), workspace: { baseCommit: iso.baseCommit, target: resolve(target) }, requiredCommands: commands },
+        context: { ...(opts.context ?? {}), ...(parentContext ? { queueParent: parentContext } : {}),
+          workspace: { baseCommit: iso.baseCommit, target: resolve(target) }, requiredCommands: commands },
         limits: { ...(challengeRounds === undefined ? {} : { challenges: challengeRounds }),
           ...(maxDebateRounds === undefined ? {} : { proposalCycles: maxDebateRounds }) },
         execute, discuss: request => execute({ ...request, sandbox: 'read-only' }),
@@ -1325,11 +1379,12 @@ export async function run(opts) {
           nativeResult.approved = false; nativeResult.action = 'paused'; nativeResult.reason = 'current mutation analysis is incomplete or stale';
         }
       }
-      const parent = completePhase(nativeResult);
+      reopened = null;
+      parent = completePhase(nativeResult);
       checkChain();
       if (nativeResult.action !== 'replan') break;
-      const execution = nativeResult.state;
-      const message = execution.messages.at(-1), trigger = message?.replan;
+      execution = nativeResult.state;
+      message = execution.messages.at(-1); trigger = message?.replan;
       if (execution.pendingDecision || message?.sender !== 'claude' || message.action !== 'replan'
         || !trigger || !(trigger.issueId && Object.hasOwn(execution.issues, trigger.issueId)
           || trigger.claimId && Object.hasOwn(execution.claims, trigger.claimId))
@@ -1342,6 +1397,21 @@ export async function run(opts) {
         if (!valid.valid) throw new Error(`retained replan evidence invalid: ${valid.reason}`);
       }
       retained = allocatePhase('planning', parent, execution, { ...trigger, message });
+      } else {
+        parent = nativePhases.at(-1);
+        const link = nativeLinks.find(item => item.runId === phase.runId && item.phase === 'planning');
+        if (!parent || parent.phase !== 'execution' || !link || !reopened) throw new Error('retained planning has no validated execution parent');
+        const context = JSON.parse(readFileSync(link.path, 'utf8'));
+        if (context.child.runId !== phase.runId || context.child.directory !== phase.directory
+          || context.parent.runId !== parent.runId || context.workspace.directory !== iso.dir
+          || context.workspace.baseCommit !== iso.baseCommit
+          || context.parent.stateDigest !== contextDigest({ state: parent.checkpointState.dialogue })
+          || context.parent.contextDigest !== parent.checkpointState.dialogue.snapshot.digest) throw new Error('retained planning parent or workspace identity changed');
+        execution = parent.checkpointState.dialogue;
+        message = context.trigger.message; trigger = context.trigger;
+        if (message?.id !== execution.messages.at(-1)?.id || message.action !== 'replan') throw new Error('retained planning trigger identity changed');
+        retained = { context, validate: checkChain, evidence: execution.evidence, evidenceRoots: execution.scope.evidenceRoots };
+      }
       const held = retained;
       interruptedPlanningObservations = [];
       held.protect = async (invoke, operation) => {
@@ -1371,7 +1441,13 @@ export async function run(opts) {
       };
       nativeResult = { approved: false, action: 'paused', reason: 'retained planning has not completed',
         checkpointState: { version: 2, ...phase, interactionMode: mode, requirements: originalPlan } };
-      const generated = await generatePlanCandidates({ goal: originalPlan, target: iso.dir, directory: phase.directory, runId: phase.runId,
+      if (reopened) reopened.retained = held;
+      const generated = reopened ? await continuePlanCandidateSet({ checkpointState: nativeSaved,
+        target: iso.dir, session: reopened, humanRuling: opts[nativeRecovery].humanRuling, technicalContinue: opts[nativeRecovery].technicalContinue,
+        claudeModel: arbiterModel, codexModel: executorModel, codexEffort: executorEffort,
+        executorTimeout: stageTimeouts.executor, timeoutMs: stageTimeouts.arbiter, env: runEnvironment, reporter: eventReporter,
+        draft: adapters.draftPlanCandidate, select: adapters.selectPlanCandidate, review: adapters.reviewPlanCandidate,
+      }) : await generatePlanCandidates({ goal: originalPlan, target: iso.dir, directory: phase.directory, runId: phase.runId,
         mode: 'fresh', count: pivotCandidates, interactionMode: mode, failedPlan: plan, previousPlan: originalPlan,
         pivot: 'Preserve completed work; plan and authorize only remaining work using the retained evidence and decisions.',
         priorMessages: execution.messages, retained, artifactRoot: resolveArtifactRoot({ scratchRoot, artifactRoot: opts.artifactRoot, env: runEnvironment }),
@@ -1382,14 +1458,21 @@ export async function run(opts) {
         ...(adapters.selectPlanCandidate ? { select: adapters.selectPlanCandidate } : {}),
         ...(adapters.reviewPlanCandidate ? { review: adapters.reviewPlanCandidate } : {}),
       });
+      reopened = null;
       nativeResult = { ...generated, state: generated.dialogue ?? generated.state, snapshot: generated.sharedContext,
         action: generated.action ?? 'paused' };
       const planningPhase = completePhase(nativeResult);
       planningUsage = addUsage(planningUsage, generated.resources?.knownUsage);
       if (!generated.approved) break;
       const selected = generated.selected, dialogue = generated.dialogue;
+      const manualPlanApproval = mode === 'manual' && generated.approval?.decidedBy === 'human'
+        && nativeSaved?.phase === 'planning' && nativeHumanQuestion(nativeSaved)?.decisionKind === 'manual-dispute'
+        && dialogue?.humanRuling?.action === 'approve'
+        && dialogue.humanRuling.decisionId === opts[nativeRecovery]?.humanRuling?.decisionId
+        && dialogue.humanRuling.artifactDigest === dialogue.artifactDigest
+        && dialogue.humanRuling.contextDigest === dialogue.snapshot.digest;
       if (!selected || generated.runId !== phase.runId || dialogue?.runId !== phase.runId || dialogue.interactionMode !== mode
-        || generated.approval?.decidedBy !== 'codex' || !canApproveDialogue({ state: dialogue, seat: 'codex' }).approved
+        || !manualPlanApproval && (generated.approval?.decidedBy !== 'codex' || !canApproveDialogue({ state: dialogue, seat: 'codex' }).approved)
         || generated.approval.artifactDigest !== planningArtifactDigest(originalPlan, { plan: selected.plan, gate: selected.gate })
         || generated.approval.contextDigest !== dialogue.snapshot.digest) throw new Error('retained planning lacks current selected-plan Codex approval');
       assertPlanningSidecars({ directory: phase.directory, runId: phase.runId, approval: generated.approval, manifest: generated.planningArtifacts });
@@ -2411,6 +2494,7 @@ export async function run(opts) {
       interactionMode: mode, action: nativeResult.action, reason: nativeResult.reason, approved,
       workspace: { ...iso, targetPath: resolve(target), diff: currentDiff, diffDigest: reviewDigest(currentDiff) },
       originalPlan, plan, approvedExecutionPlan, commands, resources: nativeResult.resources,
+      gateResult, reviewerTests: [...accumulatedReviewTests], iterations, stageTimeouts,
       phaseResources: nativeResult.phaseResources, phaseChain: nativePhases, phaseLinks: nativeLinks,
       supervision: { ...nativeResult.checkpointState?.supervision, stallConfig, executorThresholds, stallRestartCount, stallRecords, livenessChecks,
         observedWorkspace: observedMergeWorkspace },
@@ -2418,7 +2502,9 @@ export async function run(opts) {
         activeConflict, mergeConflicts, mergeResolutions, conflictingIntent, mergePreparationFailure,
         observedWorkspace: observedMergeWorkspace, pendingOperation: nativeResult.state?.pendingOperation,
         next: nativeResult.state?.next, executionChecks: nativeResult.state?.executionChecks } }),
-      options: { target, scratchRoot, artifactRoot: opts.artifactRoot, baseRef, executorModel, executorEffort, verifierModel,
+      options: { target, scratchRoot, artifactRoot: opts.artifactRoot, baseRef, branch, branchName, gateRetries,
+        correctsRunId, campaignId, campaignBase, round, unitId, campaignUnitKind, perspective, unitKind, captureTestCount,
+        executorModel, executorEffort, verifierModel, verifierBin, arbiterModel, arbiterBin,
         challengeRounds, debateRounds: maxDebateRounds, tokenBudget, pivotCandidates, superpowers,
         ...(opts.mutation === undefined ? {} : { mutation: nativeMutationPolicy, mutationPolicyValid: nativeMutationPolicy !== null }) },
     };
@@ -2461,7 +2547,7 @@ export async function run(opts) {
     reviewerRestorations,
     executorRestorations,
   };
-  if (facts.checkpointState?.version === 1 && !continuation) {
+  if (!continuation && (facts.checkpointState?.version === 1 || nativeExecution && (outcome === 'needs-decision' || nativeResult.state?.technicalPause || nativeResult.checkpointState?.technicalPause))) {
     try {
       const checkpoint = await saveCheckpoint({ directory: iso.dir, checkpointState: facts.checkpointState,
         references: [typeof task === 'string' && existsSync(task) ? task : null,
@@ -2495,12 +2581,17 @@ export async function run(opts) {
       endedAt,
       refresh: Boolean(continuation),
       retainedFiles: retainedArchiveFiles,
+      requiredRetention: nativeExecution,
     });
   } catch (error) {
     facts.artifacts = {
       status: 'failed',
       error: error instanceof Error ? error.message : String(error),
     };
+    if (nativeExecution) {
+      facts.approved = false; facts.approval = null; facts.outcome = 'needs-pivot'; facts.nextAction = 'paused';
+      facts.reason = `required artifact retention failed: ${facts.artifacts.error}`;
+    }
     try { writeFileSync(join(iso.dir, 'uro-runfacts.json'), JSON.stringify(facts, null, 2)); }
     catch { /* artifact retention is non-fatal */ }
   }

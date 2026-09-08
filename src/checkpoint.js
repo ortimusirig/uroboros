@@ -92,7 +92,52 @@ function identity(path, requireGit = false, ignoredPaths = []) {
   })) : undefined;
   return { directory, repository, ignoredPaths, treeDigest: treeDigest(repository?.top ?? directory, ignoredPaths), ...(requireGit ? { artifacts } : {}) };
 }
+export function nativeHumanQuestion(state) {
+  const dialogue = state.dialogue;
+  const pending = dialogue?.pendingDecision;
+  if (!pending) {
+    const progress = dialogue?.mergeProgress;
+    if (progress?.reason !== 'conflicting-intent: merge requires human direction'
+      || dialogue.humanRuling?.question?.operationId === progress.operationId) return null;
+    const operation = dialogue.operations[progress.operationId];
+    if (dialogue.phase !== 'execution' || progress.complete !== false || !progress.conflict
+      || !progress.ledger?.sha256 || progress.artifactDigest !== dialogue.artifactDigest
+      || progress.contextDigest !== dialogue.snapshot.digest || operation?.status !== 'completed'
+      || operation.effect !== 'merge-sequence' || operation.selection?.action !== 'conclude-clear-advance') throw new Error('native merge human decision identity changed');
+    return { id: `${progress.operationId}:decision`, authority: 'human', operationId: progress.operationId,
+      messageId: null, artifactDigest: progress.artifactDigest, contextDigest: progress.contextDigest,
+      question: progress.reason, reason: progress.reason, decisionKind: 'merge-conflicting-intent',
+      ledger: progress.ledger, conflict: progress.conflict, nextParentIndex: progress.nextParentIndex };
+  }
+  if (pending.authority !== 'human' || pending.artifactDigest !== dialogue.artifactDigest
+    || pending.contextDigest !== dialogue.snapshot.digest) throw new Error('native human decision identity changed');
+  const message = dialogue.messages.find(message => message.id === pending.messageId);
+  if (!message) throw new Error('native human question message missing');
+  let kind;
+  if (pending.issueIds?.length) {
+    if (message.action !== 'ask' || !['product', 'permission'].includes(pending.kind)
+      || pending.issueIds.some(id => { const issue = dialogue.issues[id];
+        return !issue || !issue.blocking || !issue.needsHuman || issue.kind !== pending.kind
+          || !['open', 'awaiting-answer', 'disputed'].includes(issue.status); })) throw new Error('native human question scope changed');
+    kind = pending.kind;
+  } else {
+    if (dialogue.interactionMode !== 'manual' || dialogue.authority !== 'human'
+      || !['verify', 'approve', 'decide', 'replan'].includes(message.action) || !Object.values(dialogue.issues).some(issue => issue.status === 'disputed')) {
+      throw new Error('native manual dispute identity changed');
+    }
+    kind = message.action === 'replan' ? 'disputed-replan' : 'manual-dispute';
+  }
+  return { ...pending, id: `${pending.messageId}:decision`, question: pending.reason, decisionKind: kind,
+    ...(kind === 'disputed-replan' ? { disputedIssueIds: Object.values(dialogue.issues).filter(issue => issue.status === 'disputed').map(issue => issue.id) } : {}) };
+}
 function questionsFor(state) {
+  if (state.version === 2 && state.preparationSnapshot && state.technicalPause && !state.dialogue) return [];
+  if (state.version === 2 && state.dialogue) {
+    const question = nativeHumanQuestion(state);
+    if (question) { const { decisionKind, disputedIssueIds, ...saved } = question; return [saved]; }
+    if (state.dialogue.technicalPause) return [];
+    throw new Error('checkpoint has no human or technical pause');
+  }
   const questions = state.phase === 'planning' ? [state.pendingDecision] : state.decision?.questions;
   if (!Array.isArray(questions) || questions.length === 0 || questions.some(q => !q?.id || !(q.question || q.text))) {
     throw new Error('checkpoint has no pending questions');
@@ -102,11 +147,19 @@ function questionsFor(state) {
 }
 export function validateCheckpoint(value) {
   if (value?.checksum !== integrityDigest(value ?? {})) throw new Error('checkpoint checksum is corrupt');
-  const version2Planning = value?.schemaVersion === 2 && value?.continuation?.version === 2
-    && value?.phase === 'planning' && value?.continuation?.dialogue?.schemaVersion === 2;
-  if (!version2Planning && (value?.schemaVersion !== 1 || value?.continuation?.version !== 1)) throw new Error('unsupported checkpoint schema version');
+  const version2 = value?.schemaVersion === 2 && value?.continuation?.version === 2
+    && (value?.continuation?.dialogue?.schemaVersion === 2 || value?.continuation?.preparationSnapshot?.schemaVersion === 1);
+  if (value?.migration) {
+    if (value.migration.from !== 1 || value.migration.original?.schemaVersion !== 1) throw new Error('invalid historical checkpoint migration');
+    validateCheckpoint(value.migration.original);
+  }
+  const migratedV1 = value?.schemaVersion === 2 && value?.continuation?.version === 1 && value?.migration?.from === 1;
+  if (!version2 && !migratedV1 && (value?.schemaVersion !== 1 || value?.continuation?.version !== 1)) throw new Error('unsupported checkpoint schema version');
   if (!['planning', 'execution'].includes(value.phase) || value.phase !== value.continuation.phase) throw new Error('invalid checkpoint phase');
-  if (value.interactionMode !== 'manual' || value.continuation.interactionMode !== 'manual') throw new Error('saved mode is not manual; mode cannot change on resume');
+  if (version2 ? !['manual', 'autonomous'].includes(value.interactionMode)
+    || value.interactionMode !== value.continuation.interactionMode
+    || value.interactionMode !== (value.continuation.dialogue?.interactionMode ?? value.continuation.preparationState?.interactionMode ?? value.continuation.interactionMode)
+    : value.interactionMode !== 'manual' || value.continuation.interactionMode !== 'manual') throw new Error('saved mode changed; mode cannot change on resume');
   if (!value.runId || value.runId !== value.continuation.runId || !Number.isSafeInteger(value.revision) || value.revision < 1) throw new Error('invalid checkpoint identity');
   if (checkpointDigest(value.continuation) !== value.stateDigest) throw new Error('checkpoint state changed or is corrupt');
   if (checkpointDigest({ runId: value.runId, revision: value.revision, stateDigest: value.stateDigest,
@@ -114,35 +167,59 @@ export function validateCheckpoint(value) {
   if (checkpointDigest(questionsFor(value.continuation)) !== checkpointDigest(value.pending.questions)) throw new Error('checkpoint pending questions changed');
   for (const receipt of value.receipts ?? []) {
     if (receipt.result && receipt.resultDigest !== checkpointDigest(receipt.result)) throw new Error('checkpoint result receipt is corrupt');
-    if (receipt.decisionId !== answerIdentity({ schemaVersion: 1, runId: value.runId,
+    if (receipt.envelope && (answerIdentity(receipt.envelope) !== receipt.decisionId
+      || receipt.envelope.artifactDigest !== receipt.artifactDigest
+      || checkpointDigest(receipt.envelope.answers) !== checkpointDigest(receipt.answers))) throw new Error('checkpoint answer envelope differs from receipt');
+    if (receipt.decisionId !== answerIdentity({ schemaVersion: 1, runId: receipt.envelope?.runId ?? value.runId,
       artifactDigest: receipt.artifactDigest, answers: receipt.answers })) throw new Error('checkpoint answer receipt is corrupt');
   }
+  for (const receipt of value.technicalReceipts ?? []) {
+    if (receipt.decisionId !== `continue:${receipt.artifactDigest}`
+      || receipt.result && receipt.resultDigest !== checkpointDigest(receipt.result)) throw new Error('technical continuation receipt is corrupt');
+  }
   return value;
+}
+export function migrateCheckpointV1(value) {
+  // Validate the untouched old checksum and every old receipt before constructing
+  // any new envelope. The old controller contract stays explicit and unchanged.
+  validateCheckpoint(value);
+  if (value.schemaVersion !== 1) return structuredClone(value);
+  const migrated = { ...structuredClone(value), schemaVersion: 2, revision: value.revision + 1,
+    migration: { from: 1, original: structuredClone(value) } };
+  migrated.artifactDigest = checkpointDigest({ runId: migrated.runId, revision: migrated.revision,
+    stateDigest: migrated.stateDigest, questions: migrated.pending.questions, queue: migrated.queue });
+  migrated.checksum = integrityDigest(migrated);
+  return validateCheckpoint(migrated);
 }
 export function readCheckpoint(directory) {
   const path = join(directory, CHECKPOINT_FILE);
   assertRegular(path);
   return validateCheckpoint(JSON.parse(readFileSync(path, 'utf8')));
 }
-export async function saveCheckpoint({ directory, checkpointState, references = [], previous, queue = previous?.queue, persist = true }) {
-  if (checkpointState.interactionMode !== 'manual') throw new Error('only manual decisions can be checkpointed');
+export async function saveCheckpoint({ directory, checkpointState, references = [], previous, queue = previous?.queue,
+  queueJournal = previous?.queueJournal, persist = true }) {
+  if (checkpointState.version !== 2 && checkpointState.interactionMode !== 'manual') throw new Error('only manual decisions can be checkpointed');
   // State has an explicit serializable contract. Never copy adapters or process environments.
   const state = canonicalPlanningArtifact(checkpointState);
   if (state.options) {
     for (const key of ['env', 'environment', 'adapters', 'credentials', 'apiKey', 'accessToken']) delete state.options[key];
   }
   mkdirSync(directory, { recursive: true });
-  const execution = state.phase === 'execution' ? state : state.executionContinuation;
+  const execution = state.workspace ? state : state.executionContinuation;
   const target = execution ? execution.workspace.targetPath : state.planningContext.request.target;
   const workspace = execution ? identity(execution.workspace.dir, true) : null;
-  const checkpoint = { schemaVersion: state.version === 2 && state.phase === 'planning' ? 2 : 1, revision: (previous?.revision ?? (existsSync(join(directory, CHECKPOINT_FILE))
+  const questions = questionsFor(state);
+  const checkpoint = { schemaVersion: state.version === 2 || previous?.migration ? 2 : 1,
+    ...(previous?.migration ? { migration: previous.migration } : {}), revision: (previous?.revision ?? (existsSync(join(directory, CHECKPOINT_FILE))
     ? readCheckpoint(directory).revision : 0)) + 1, runId: state.runId, phase: state.phase,
-    interactionMode: 'manual', status: 'needs-decision', directory: canonical(directory),
+    interactionMode: state.interactionMode, status: questions.length ? 'needs-decision' : 'paused', directory: canonical(directory),
     continuation: state, stateDigest: checkpointDigest(state), workspace, target: identity(target, false,
       [join(directory, CHECKPOINT_FILE), join(directory, 'uro-resume.lock'), ...(queue ? [queue.queue.logPath] : [])].map(path => resolve(path).toLowerCase())),
     ...(queue ? { queue } : {}),
+    ...(queueJournal ? { queueJournal } : {}),
     references: references.map(path => ({ path: canonical(path), digest: checkpointDigest(readFileSync(path).toString('base64')) })),
-    pending: { questions: questionsFor(state) }, receipts: previous?.receipts ?? [],
+    pending: { questions }, receipts: previous?.receipts ?? [],
+    ...(previous?.technicalReceipts ? { technicalReceipts: previous.technicalReceipts } : {}),
     history: [...(previous?.history ?? []), { status: 'needs-decision', at: new Date().toISOString() }] };
   if (workspace && checkpoint.directory !== workspace.directory) throw new Error('execution checkpoint must be written in its recorded workspace');
   checkpoint.artifactDigest = checkpointDigest({ runId: checkpoint.runId, revision: checkpoint.revision,
@@ -153,12 +230,12 @@ export async function saveCheckpoint({ directory, checkpointState, references = 
   return checkpoint;
 }
 
-export async function attachQueueCheckpoint(directory, queue) {
+export async function attachQueueCheckpoint(directory, queue, queueJournal) {
   const previous = readCheckpoint(directory);
   const references = [...new Set([...previous.references.map(item => item.path), queue.queue.path,
     ...(queue.options.acceptGoalSpec ? [resolve(queue.options.acceptGoalSpec)] : []),
     ...queue.queue.units.flatMap(unit => [unit.task, unit.gate].filter(Boolean))])];
-  const checkpoint = await saveCheckpoint({ directory, checkpointState: previous.continuation, previous, references, queue });
+  const checkpoint = await saveCheckpoint({ directory, checkpointState: previous.continuation, previous, references, queue, queueJournal });
   const factsPath = join(directory, 'uro-runfacts.json');
   if (existsSync(factsPath)) {
     const facts = JSON.parse(readFileSync(factsPath, 'utf8'));
@@ -170,7 +247,10 @@ export function validateAnswerEnvelope(checkpoint, envelope) {
   validateCheckpoint(checkpoint);
   if (envelope?.schemaVersion !== 1) throw new Error('unsupported answer schema version');
   if (envelope.runId !== checkpoint.runId) throw new Error('answer runId does not match the saved run');
-  if (envelope.artifactDigest !== checkpoint.artifactDigest) throw new Error('stale answer artifactDigest; use the latest checkpoint');
+  const originalPending = checkpoint.migration?.original;
+  const originalCurrent = originalPending && checkpoint.revision === originalPending.revision + 1
+    && checkpoint.stateDigest === originalPending.stateDigest && envelope.artifactDigest === originalPending.artifactDigest;
+  if (envelope.artifactDigest !== checkpoint.artifactDigest && !originalCurrent) throw new Error('stale answer artifactDigest; use the latest checkpoint');
   if (!Array.isArray(envelope.answers)) throw new Error('answers must be an array');
   const expected = new Set(checkpoint.pending.questions.map(q => q.id)), seen = new Set();
   for (const item of envelope.answers) {
@@ -181,7 +261,7 @@ export function validateAnswerEnvelope(checkpoint, envelope) {
   }
   if (seen.size !== expected.size) throw new Error('missing pending answer IDs');
   return { answers: [...envelope.answers].sort((a, b) => a.id.localeCompare(b.id)),
-    decisionId: answerIdentity(envelope), artifactDigest: checkpoint.artifactDigest };
+    decisionId: answerIdentity(envelope), artifactDigest: envelope.artifactDigest };
 }
 export function checkpointPhaseIdentity(checkpoint) {
   return { workspace: checkpoint.workspace ? identity(checkpoint.workspace.directory, true) : null,
@@ -202,7 +282,7 @@ export function resolveCheckpointDirectory(checkpoint, directory) {
     const factsPath = join(supplied, 'uro-runfacts.json');
     if (!existsSync(factsPath)) throw new Error('checkpoint is outside its recorded artifact directory');
     const facts = JSON.parse(readFileSync(factsPath, 'utf8'));
-    if (facts.runId !== checkpoint.runId || canonical(facts.artifacts?.directory) !== supplied
+    if (facts.runId !== (checkpoint.continuation.rootRunId ?? checkpoint.runId) || canonical(facts.artifacts?.directory) !== supplied
       || canonical(facts.dir) !== checkpoint.directory) throw new Error('checkpoint artifact reference does not match workspace');
   }
   return checkpoint.directory;

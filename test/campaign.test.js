@@ -56,6 +56,35 @@ function nativeCampaignReview(request) {
     }) };
 }
 
+test('campaign child allowance is the minimum of parent remaining and item ceiling without double subtraction', async () => {
+  const children = [];
+  const result = await runCampaign({ campaignId: 'item-budget', tasks: [
+    { task: 'First', tokenBudget: 40 }, { task: 'Second', tokenBudget: 100 } ], target: '.', gate: [],
+    concurrency: 1, tokenBudget: 100, runOptions: { debateRounds: 9 },
+    runUnit: async options => { children.push(options); return { outcome: 'no-op', tokens: { total: { inputTokens: 10, outputTokens: 15 } } }; },
+  });
+  assert.deepEqual(children.map(child => child.tokenBudget), [40, 75]);
+  assert.deepEqual(children.map(child => child.debateRounds), [9, 9]);
+  assert.equal(result.rollup.consumedTokens, 50);
+  for (const value of [0, -1, 1.5, '40', Number.MAX_SAFE_INTEGER + 1]) await assert.rejects(() => runCampaign({
+    campaignId: 'bad-item-budget', tasks: [{ task: 'Invalid', tokenBudget: value }], target: '.', gate: [],
+    runUnit: () => assert.fail('invalid item budget launched'),
+  }), /tokenBudget|positive|safe integer/);
+});
+
+for (const iterative of [false, true]) test(`campaign unknown usage pauses accounting before dispatching a later unit${iterative ? ' across iterative rounds' : ''}`, async () => {
+  let launches = 0;
+  const result = await runCampaign({ campaignId: 'unknown-unit-budget', tasks: ['Unknown spend', 'Must not launch'].map((task, i) => ({ task, perspective: `choice-${i}` })),
+    target: '.', gate: [], concurrency: 1, tokenBudget: 100,
+    ...(iterative ? { campaignShape: 'iterative-sampling', rounds: 2 } : {}), runUnit: async () => {
+      launches++; return { outcome: 'no-op', tokens: { total: { inputTokens: 0, outputTokens: 0 }, usageUnknown: true },
+        resources: { providerLaunches: 1, knownUsage: { inputTokens: 0, outputTokens: 0 }, usageUnknown: true } };
+    } });
+  assert.equal(launches, 1);
+  assert.equal(result.rollup.accountingIncomplete, true);
+  assert.equal(result.rollup.outcome, 'accounting-incomplete');
+});
+
 test('campaign mode and provider options reach child execution and synthesis', async () => {
   const children = [], synthesis = [];
   await runCampaign({ campaignId: 'mode-routing', tasks: ['Implement behavior'], target: '.', gate: [],

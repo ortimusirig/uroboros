@@ -13,6 +13,8 @@ import { createDialogueState, parseDialogueEnvelope, applyDialogueEnvelope } fro
 import { runIssueDialogue, registerObservations, installMaterialEvidence } from './dialogue-dispatch.js';
 import { canonicalPlanningArtifact, planningArtifactDigest, RepairableArtifactError, MAX_ARTIFACT_REPAIRS, dialoguePromptText } from './conversation.js';
 import { reportEvent } from './events.js';
+import { nativeHumanQuestion } from './checkpoint.js';
+import { MERGE_LEDGER_FILENAME } from './merge.js';
 
 const digestBytes = path => createHash('sha256').update(readFileSync(path)).digest('hex');
 
@@ -117,15 +119,15 @@ export function openPlanningContext({ requirements, target, directory, runId, ti
     recall: { status: recalled.searchStatus, error: recalled.searchError } };
 }
 
-function reopenPlanningContext({ continuation, target, directory }) {
-  const snapshot = continuation.dialogue.snapshot;
+export function reopenPlanningContext({ continuation, target, directory }) {
+  const snapshot = continuation.dialogue?.snapshot ?? continuation.preparationSnapshot;
   const project = resolveProjectIdentity({ target });
   if (project.projectId !== snapshot.projectId) throw new Error('saved planning project identity changed');
   const path = join(directory, '__uro_context', `${snapshot.id}.json`);
   const stored = JSON.parse(readFileSync(path, 'utf8'));
   validateSharedContext({ snapshot: stored, projectId: project.projectId });
   if (stored.digest !== snapshot.digest) throw new Error('saved shared context identity changed');
-  const manifest = continuation.planningArtifacts;
+  const manifest = continuation.executionArtifacts ?? continuation.planningArtifacts;
   if (!manifest || manifest.runId !== snapshot.runId || manifest.contextDigest !== snapshot.digest
     || resolve(manifest.directory) !== resolve(directory)) throw new Error('saved planning sidecar provenance missing or stale');
   const registeredPaths = manifest.files.map(file => join(directory, file.path));
@@ -135,14 +137,154 @@ function reopenPlanningContext({ continuation, target, directory }) {
   try {
     const events = journal.read();
     if (events.at(-1)?.hash !== continuation.journalIdentity.hash || events.at(-1)?.sequence !== continuation.journalIdentity.sequence) throw new Error('saved planning journal identity changed');
-    const latest = events.filter(e => e.type === 'state').at(-1)?.state;
-    if (contextDigest({ state: latest }) !== contextDigest({ state: continuation.dialogue })) throw new Error('saved planning dialogue differs from journal');
-    return { snapshot, journal, project, directory, dialogue: latest, artifactRoot: continuation.artifactRoot,
+    const preparing = !continuation.dialogue && Boolean(continuation.preparationSnapshot);
+    const latest = events.filter(e => preparing ? ['preparation-state', 'preparation-paused'].includes(e.type) : e.type === 'state').at(-1)?.state;
+    if (contextDigest({ state: latest ?? null }) !== contextDigest({ state: preparing ? continuation.preparationState : continuation.dialogue })) throw new Error('saved planning dialogue differs from journal');
+    if (latest) createDialogueState({ ...latest, continuation: latest });
+    return { snapshot, journal, project, directory, ...(preparing ? { preparationMessages: latest?.messages ?? [], resourceBudget: continuation.resourceBudget } : { dialogue: latest }), artifactRoot: continuation.artifactRoot,
       memory: openProjectMemory({ artifactRoot: continuation.artifactRoot, project }),
       evidenceDirectory: join(directory, '__uro_evidence'),
       ownedFiles: new Map(manifest.files.map(file => [join(directory, file.path), file.path.startsWith('__uro_dialogue/') ? null : file.sha256])),
       contextPaths: new Map(manifest.files.filter(file => file.path.startsWith('__uro_context/')).map(file => [join(directory, file.path), file.sha256])), recall: continuation.recall };
   } catch (error) { journal.close(); throw error; }
+}
+
+export function applyScopedHumanRuling({ session, state: saved, humanRuling }) {
+  const question = nativeHumanQuestion({ dialogue: saved });
+  if (!question || !humanRuling?.decisionId || humanRuling.answers?.length !== 1
+    || humanRuling.answers[0].id !== question.id) throw new Error('human answer does not match the native question');
+  const state = structuredClone(saved);
+  const entryId = `${state.runId}:human:${humanRuling.decisionId}`;
+  const content = humanRuling.answers[0].answer;
+  state.snapshot = extendSharedContext({ snapshot: state.snapshot, entries: [{ id: entryId,
+    kind: 'human-decision', content, sourceIdentity: humanRuling.decisionId,
+    provenance: { origin: 'validated-human-answer', question, decisionId: humanRuling.decisionId }, status: 'required' }] });
+  state.messages.push({ id: entryId, sender: 'human', speaker: 'human', phase: state.phase,
+    action: 'answer', replyTo: question.messageId, content, artifactDigest: state.artifactDigest,
+    contextDigest: state.snapshot.digest, decisionId: humanRuling.decisionId, sequence: state.messages.length + 1 });
+  state.humanRuling = { ...humanRuling, question, artifactDigest: state.artifactDigest, contextDigest: state.snapshot.digest };
+  if (question.decisionKind === 'merge-conflicting-intent') state.mergeHumanReview = {
+    operationId: question.operationId, decisionId: humanRuling.decisionId, artifactDigest: state.artifactDigest,
+    contextDigest: state.snapshot.digest, status: 'pending' };
+  for (const id of question.issueIds ?? []) state.issues[id].needsHuman = false;
+  state.pendingDecision = null; state.approval = null; state.terminalAction = null;
+  state.technicalPause = null;
+  state.next = { seat: state.reviewer, action: 'verify', reason: 'Assess scoped human direction against current retained work' };
+  persistContext(session, state.snapshot);
+  session.journal.append({ type: 'human-ruling', ruling: state.humanRuling });
+  session.journal.append({ type: 'state', state });
+  session.dialogue = state; session.snapshot = state.snapshot;
+  return state;
+}
+
+function assertCompletedEffects(session, saved) {
+  for (const event of session.journal.read().filter(event => event.type === 'prepare')) {
+    if (session.journal.operation(event.operationId).status !== 'completed') throw new Error('uncertain prepared external effect requires reconciliation; replay refused');
+  }
+  if (saved.pendingOperation && session.journal.operation(saved.pendingOperation.operationId)?.status !== 'completed') {
+    throw new Error('uncertain pending operation requires reconciliation');
+  }
+}
+
+function assertTechnicalContinuation({ session, state: saved, account = session.journal.account(), ceiling = saved.resourceBudget?.tokenBudget,
+  prior = saved.resourceBudget?.prior }) {
+  if (!saved.technicalPause || saved.pendingDecision) throw new Error('technical continuation requires a technical pause without a human decision');
+  assertCompletedEffects(session, saved);
+  if (saved.pendingOperation) {
+    const operation = session.journal.operation(saved.pendingOperation.operationId);
+    if (!operation || operation.status !== 'completed') throw new Error('uncertain pending operation requires reconciliation');
+    if (['provider', 'repair'].includes(operation.effect)) {
+      if (operation.result?.error || operation.result?.timedOut || operation.result?.aborted) throw new Error('uncertain provider outcome requires reconciliation');
+      try { parseDialogueEnvelope({ response: operation.result }); }
+      catch { throw new Error('unreadable saved provider outcome requires reconciliation'); }
+    }
+  }
+  if (!saved.next && !saved.pendingOperation) throw new Error('technical pause has no known safe next effect');
+  if (ceiling !== undefined && (account.usageUnknown || prior?.usageUnknown)) throw new Error('accounting-incomplete: unknown saved usage');
+  if (ceiling !== undefined && account.knownUsage.inputTokens + account.knownUsage.outputTokens
+    + (prior?.knownUsage?.inputTokens ?? 0) + (prior?.knownUsage?.outputTokens ?? 0) >= ceiling) throw new Error('budget-exhausted: saved budget cannot change');
+  if (/limit reached|budget exhausted|budget-exhausted|accounting-incomplete|irreparable|liveness|reconciliation/i.test(saved.technicalPause.reason)) {
+    throw new Error(`unsafe technical continuation: ${saved.technicalPause.reason}`);
+  }
+}
+
+/** Validate the complete native input before accepting an answer or continuation receipt. */
+export function validateNativeContinuation(continuation, { technicalContinue = false } = {}) {
+  if (continuation.version !== 2 || !(continuation.dialogue ?? continuation.preparationSnapshot)) throw new Error('native dialogue or preparation checkpoint required');
+  const workspace = continuation.workspace?.dir ?? continuation.executionContinuation?.workspace?.dir;
+  const question = nativeHumanQuestion(continuation);
+  if (question?.decisionKind === 'merge-conflicting-intent') {
+    const progress = continuation.dialogue.mergeProgress;
+    const operation = continuation.dialogue.operations[question.operationId];
+    const ledger = join(workspace, MERGE_LEDGER_FILENAME);
+    const gitRead = (...args) => execFileSync('git', ['-C', workspace, ...args], { encoding: 'utf8', windowsHide: true,
+      stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+    let mergeHead = null;
+    try { mergeHead = gitRead('rev-parse', '-q', '--verify', 'MERGE_HEAD'); } catch { /* No merge head is also identity. */ }
+    if (!existsSync(ledger) || lstatSync(ledger).isSymbolicLink() || digestBytes(ledger) !== question.ledger.sha256
+      || gitRead('rev-parse', 'HEAD') !== progress.head || mergeHead !== progress.mergeHead
+      || gitRead('ls-files', '--stage') !== operation.selection.index) throw new Error('saved merge ledger or Git identity changed');
+  }
+  const phases = [...(continuation.phaseChain ?? []).filter(item => item.runId !== continuation.runId),
+    { runId: continuation.runId, directory: continuation.directory, phase: continuation.phase, checkpointState: continuation }];
+  const ids = new Set();
+  const total = { knownUsage: { inputTokens: 0, outputTokens: 0 }, usageUnknown: false };
+  for (const phase of phases) {
+    const state = phase.checkpointState, dialogue = state?.dialogue, snapshot = dialogue?.snapshot ?? state?.preparationSnapshot;
+    if (ids.has(phase.runId) || !snapshot || phase.runId !== snapshot.runId || phase.runId !== state.runId
+      || phase.phase !== snapshot.phase || state.phase !== phase.phase || resolve(phase.directory) !== resolve(state.directory)) throw new Error('native phase identity changed');
+    ids.add(phase.runId);
+    if (workspace) {
+      const rel = relative(realpathSync.native(workspace), realpathSync.native(phase.directory));
+      if (rel.startsWith('..') || isAbsolute(rel) || lstatSync(phase.directory).isSymbolicLink()) throw new Error('native phase workspace escape');
+    }
+    const target = workspace ?? continuation.planningContext?.request?.target;
+    const session = reopenPlanningContext({ continuation: state, target, directory: phase.directory });
+    try {
+      assertCompletedEffects(session, session.dialogue ?? state.preparationState ?? {});
+      const account = session.journal.account();
+      total.usageUnknown ||= account.usageUnknown;
+      total.knownUsage.inputTokens += account.knownUsage.inputTokens;
+      total.knownUsage.outputTokens += account.knownUsage.outputTokens;
+      if (phase.runId === continuation.runId && technicalContinue) {
+        const resourceBudget = dialogue?.resourceBudget ?? state.resourceBudget;
+        if (!dialogue) {
+          if (state.technicalPause?.reason !== 'reviewer-unavailable' || state.candidateState?.selection
+            || state.candidateState?.selectedCandidateId || !state.candidateState?.candidates?.length
+            || state.candidateState.candidates.some(candidate => !candidate.gateResult?.passed || candidate.repairable)) {
+            throw new Error(`unsafe preparation continuation requires reconciliation: ${state.technicalPause?.reason}`);
+          }
+          for (const candidate of state.candidateState.candidates) {
+            const operationId = candidate.response?.preparationOperationId;
+            const artifact = session.journal.read().find(event => event.type === 'candidate-artifact' && event.operationId === operationId);
+            if (!artifact || artifact.artifactDigest !== planningArtifactDigest(state.requirements, { plan: candidate.plan, gate: candidate.gate })) throw new Error('saved preparation candidate identity changed');
+          }
+        }
+        assertTechnicalContinuation({ session, state: dialogue ?? { technicalPause: state.technicalPause, next: { seat: 'codex', action: 'verify' } },
+          account: total, ceiling: continuation.options?.tokenBudget ?? resourceBudget?.tokenBudget,
+          prior: workspace ? null : resourceBudget?.prior });
+      }
+    } finally { session.journal.close(); }
+  }
+  for (const link of continuation.phaseLinks ?? []) {
+    if (!workspace || !ids.has(link.runId) || lstatSync(link.path).isSymbolicLink() || digestBytes(link.path) !== link.digest) throw new Error('retained phase handoff changed');
+    const context = JSON.parse(readFileSync(link.path, 'utf8'));
+    const parent = phases.find(phase => phase.runId === context.parent?.runId), child = phases.find(phase => phase.runId === context.child?.runId);
+    if (!parent || !child || child.runId !== link.runId || context.child.directory !== child.directory
+      || context.workspace.directory !== workspace || context.workspace.baseCommit !== continuation.workspace.baseCommit
+      || context.parent.stateDigest !== contextDigest({ state: parent.checkpointState.dialogue })
+      || context.parent.contextDigest !== parent.checkpointState.dialogue.snapshot.digest) throw new Error('retained phase parent identity changed');
+  }
+}
+
+export function resumeTechnicalDialogue({ session, state: saved }) {
+  assertTechnicalContinuation({ session, state: saved });
+  const state = structuredClone(saved);
+  state.technicalPause = null;
+  session.journal.append({ type: 'technical-continue', previousPause: saved.technicalPause });
+  session.journal.append({ type: 'state', state });
+  session.dialogue = state;
+  return state;
 }
 
 function checkContext(session) {
@@ -393,7 +535,7 @@ export const contextLifecycle = Object.freeze({ checkContext, registerEvidenceFi
 /** New runs use explicit dialogue; historical runConversation remains a separate reader. */
 export async function runPlanningDialogue({ requirements, target, directory, tier = 'plan', interactionMode = 'manual',
   rounds, runId = `planning-${randomUUID()}`, seats, strategy, reporter, context, artifactRoot, env, searchIndex,
-  session: suppliedSession, continuation, humanRuling, prelude, budget, resourceBudget, retained }) {
+  session: suppliedSession, continuation, humanRuling, technicalContinue = false, prelude, budget, resourceBudget, retained }) {
   const session = suppliedSession ?? (continuation ? reopenPlanningContext({ continuation, target, directory })
     : openPlanningContext({ requirements, target, directory, runId, tier, context, retained, artifactRoot, env, searchIndex }));
   let proposal = prelude?.proposal ?? continuation?.proposal ?? null;
@@ -424,7 +566,12 @@ export async function runPlanningDialogue({ requirements, target, directory, tie
       resourceBudget: continuation?.resourceBudget ?? resourceBudget, budget });
     if (session.resourceBudget) state.resourceBudget = structuredClone(session.resourceBudget);
     let humanAction = null;
+    if (technicalContinue) state = resumeTechnicalDialogue({ session, state });
     if (humanRuling) {
+      const question = nativeHumanQuestion({ dialogue: state });
+      if (question?.decisionKind !== 'manual-dispute') {
+        state = applyScopedHumanRuling({ session, state, humanRuling });
+      } else {
       if (state.interactionMode !== 'manual' || !state.pendingDecision || !humanRuling.decisionId) throw new Error('human ruling has no current manual decision');
       if (planningArtifactDigest(requirements, proposal) !== state.artifactDigest) throw new Error('saved planning artifact identity changed');
       const content = humanRuling.answers.map(answer => answer.answer).join('\n');
@@ -438,6 +585,7 @@ export async function runPlanningDialogue({ requirements, target, directory, tie
       state.next = { seat: 'codex', action: 'verify', reason: 'Assess the human clarification' };
       session.journal.append({ type: 'human-ruling', ruling: state.humanRuling });
       session.journal.append({ type: 'state', state });
+      }
     }
     const result = humanAction ? { state, approved: humanAction === 'approve', action: humanAction === 'approve' ? 'complete' : 'stop',
       reason: state.messages.at(-1).content, messages: state.messages, rounds: state.proposalCycles, resources: session.journal.account() }

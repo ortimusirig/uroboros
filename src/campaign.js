@@ -408,6 +408,7 @@ async function runCampaignRound(options) {
   let inFlight = 0;
   let concluded = 0;
   let budgetExceeded = false;
+  let accountingIncomplete = false;
   let finished = false;
   const plannerReviews = [];
 
@@ -528,6 +529,7 @@ async function runCampaignRound(options) {
     };
 
     const dispatch = () => {
+      if (consumedTokens >= tokenBudget || accountingIncomplete) budgetExceeded = true;
       if (budgetExceeded) markUndispatched();
       while (!budgetExceeded && inFlight < concurrency && ready.length > 0) {
         const unitIndex = ready.shift();
@@ -611,7 +613,7 @@ async function runCampaignRound(options) {
             ...runOptions,
             // The scheduler remains authoritative for cross-unit dispatch, while the
             // unit uses the currently remaining campaign budget as its per-round backstop.
-            tokenBudget: Math.max(1, tokenBudget - consumedTokens),
+            tokenBudget: Math.min(tokenBudget - consumedTokens, unit.tokenBudget ?? Infinity),
             task: unit.task,
             target,
             gate,
@@ -636,6 +638,8 @@ async function runCampaignRound(options) {
             ? facts
             : { ...facts, perspective: unit.perspective };
           const unitUsage = addUsage(EMPTY_USAGE, entry.facts?.tokens?.total);
+          accountingIncomplete ||= entry.facts?.resources?.usageUnknown === true || entry.facts?.tokens?.usageUnknown === true
+            || !['inputTokens', 'outputTokens'].every(key => Number.isFinite(entry.facts?.tokens?.total?.[key]) && entry.facts.tokens.total[key] >= 0);
           usageChecks.push({
             unitId: unit.unitId,
             ...checkUsageConsistency(unitUsage),
@@ -765,7 +769,7 @@ async function runCampaignRound(options) {
   const undispatchedEntries = entries.filter((entry) => entry.status === 'not-dispatched');
   const everyCandidateFailed = candidateSet
     && failedEntries.length === entries.length;
-  const outcome = candidateSet
+  const outcome = accountingIncomplete ? 'accounting-incomplete' : candidateSet
     ? (everyCandidateFailed
         ? 'campaign-failed'
         : budgetExceeded ? 'budget-exhausted' : 'review-ready')
@@ -790,6 +794,7 @@ async function runCampaignRound(options) {
     usageConsistency: summarizeUsageConsistency(usageChecks),
     consumedTokens,
     budgetExceeded,
+    ...(accountingIncomplete ? { accountingIncomplete: true } : {}),
   };
   const alternatives = candidateSet ? {
     status: 'awaiting-planner-decision',
@@ -1032,8 +1037,9 @@ function iterativeRollup(rounds, tokenBudget, stopReason) {
       && (entry.status === 'failed' || exitCodeFor(entry.facts?.outcome) !== 0)
   ));
   const budgetExceeded = stopReason === CAMPAIGN_STOP_REASONS.BUDGET_EXHAUSTED;
+  const accountingIncomplete = rounds.some(round => round.rollup.accountingIncomplete);
   return {
-    outcome: everyCandidateFailed
+    outcome: accountingIncomplete ? 'accounting-incomplete' : everyCandidateFailed
       ? 'campaign-failed'
       : budgetExceeded ? 'budget-exhausted' : 'review-ready',
     counts,
@@ -1041,6 +1047,7 @@ function iterativeRollup(rounds, tokenBudget, stopReason) {
     usageConsistency: summarizeUsageConsistency(usageChecks),
     consumedTokens,
     budgetExceeded,
+    ...(accountingIncomplete ? { accountingIncomplete: true } : {}),
     tokenBudget,
   };
 }

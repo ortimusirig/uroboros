@@ -161,6 +161,7 @@ export function archiveRunArtifacts({
   endedAt,
   refresh = false,
   retainedFiles = [],
+  requiredRetention = false,
 }) {
   const root = resolveArtifactRoot({ scratchRoot, artifactRoot, env });
   let physicalRunId = null;
@@ -243,7 +244,11 @@ export function archiveRunArtifacts({
       if (lstatSync(source).isDirectory()) {
         mkdirSync(destination, { recursive: true });
         for (const entry of readdirSync(source)) copyEvidenceDirectory(join(source, entry), join(destination, entry), boundary);
-      } else if (lstatSync(source).isFile()) copyFileSync(source, destination);
+      } else if (lstatSync(source).isFile()) {
+        const before = requiredRetention ? digestFile(source) : null;
+        copyFileSync(source, destination);
+        if (requiredRetention && (digestFile(source) !== before || digestFile(destination) !== before)) throw new Error('required context archive copy digest mismatch');
+      }
       else throw new Error('evidence retention refused a nonregular file');
     };
     for (const filename of HARNESS_ARTIFACTS) {
@@ -300,11 +305,22 @@ export function archiveRunArtifacts({
     }
   }
 
+  const revokeRequiredRetention = () => {
+    if (!requiredRetention || result.status === 'ok') return false;
+    result.requiredRetention = { status: 'failed' };
+    facts.approved = false; facts.approval = null; facts.outcome = 'needs-pivot'; facts.nextAction = 'paused';
+    facts.reason = `required artifact retention failed: ${result.error ?? result.copyFailures[0]?.error ?? result.factsWrite?.error ?? result.refresh?.error ?? result.index.error}`;
+    if (facts.checkpointState) Object.assign(facts.checkpointState, { approved: false, action: 'paused', reason: facts.reason,
+      requiredRetentionFailure: result.requiredRetention });
+    return true;
+  };
+  revokeRequiredRetention();
   persistFinalFacts({
     dir,
     durableDirectory: retentionAllowed ? durableDirectory : null,
     facts,
     result,
   });
+  if (revokeRequiredRetention()) persistFinalFacts({ dir, durableDirectory: retentionAllowed ? durableDirectory : null, facts, result });
   return result;
 }

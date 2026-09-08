@@ -3,10 +3,26 @@ import {
   fsyncSync,
   mkdirSync,
   openSync,
+  readFileSync,
+  lstatSync,
   writeFileSync,
 } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
+import { resolveProjectIdentity } from './project-memory.js';
+
+/** A context reference carries grounding, never filesystem or action authority. */
+export function readSharedContextReference({ reference, target }) {
+  if (!reference || reference.schemaVersion !== 1 || typeof reference.path !== 'string'
+    || !lstatSync(reference.path).isFile() || lstatSync(reference.path).isSymbolicLink()) throw new Error('invalid shared context reference');
+  const snapshot = JSON.parse(readFileSync(reference.path, 'utf8'));
+  const project = resolveProjectIdentity({ target });
+  validateSharedContext({ snapshot, projectId: project.projectId });
+  if (reference.projectId !== project.projectId || reference.projectId !== snapshot.projectId
+    || reference.runId !== snapshot.runId || reference.unitId !== snapshot.unitId
+    || reference.contextDigest !== snapshot.digest) throw new Error('shared context reference identity changed');
+  return snapshot;
+}
 
 const IDENTITY_METADATA = new Set(['digest', 'delivery', 'audit']);
 const SENSITIVE_KEY = /(?:password|passwd|secret|token|api[-_]?key|authorization|cookie|credential)/i;

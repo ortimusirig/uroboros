@@ -641,7 +641,7 @@ test('observed native runs and explicit schema constructors cover the exact even
     intentVerdict: 'NO_BLOCKERS',
     intentVerdictSource: 'result',
     intentVerifierFindings: 'intent review',
-    tokens: { total: tokens },
+    tokens: { total: { inputTokens: 0, outputTokens: 0, ...tokens } },
   });
   try {
     const result = await runCampaign({

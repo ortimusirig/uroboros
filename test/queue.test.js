@@ -134,7 +134,7 @@ function fakeRuntime(facts, overrides = {}) {
       // are exercised explicitly below.
       judgeLanding: async (request) => {
         judgements.push(request);
-        return { approved: true, reasoning: 'reviewed first-hand in fixture' };
+        return { approved: true, reasoning: 'reviewed first-hand in fixture', usage: { inputTokens: 0, outputTokens: 0 } };
       },
       // Same declaration for the goal-level review: the default accepts, and
       // its usage is non-zero so the metering assertions have something real
@@ -587,6 +587,69 @@ test('max-runs stops after one landed unit with two remaining', async () => {
   }
 });
 
+test('queue carries current unit context and min parent item allowance with landing usage counted once', async () => {
+  const f = makeFixture(2);
+  try {
+    const units = JSON.parse(readFileSync(f.file, 'utf8'));
+    units[0].tokenBudget = 20; units[1].tokenBudget = 100;
+    writeFileSync(f.file, JSON.stringify(units));
+    const runtime = fakeRuntime([reviewReady('one'), reviewReady('two')], {
+      judgeLanding: async () => ({ approved: true, reasoning: 'observed', usage: { inputTokens: 1, outputTokens: 1 } }),
+    });
+    const result = await runQueue({ file: f.file, target: f.target, tokenBudget: 30, rounds: 9, dependencies: runtime.dependencies });
+    assert.deepEqual(runtime.launches.map(request => request.tokenBudget), [20, 23]);
+    assert.deepEqual(runtime.launches.map(request => request.rounds), [9, 9]);
+    const { readSharedContextReference } = await import('../src/shared-context.js');
+    for (const [index, request] of runtime.launches.entries()) {
+      const snapshot = readSharedContextReference({ reference: request.contextRef, target: f.target });
+      assert.equal(snapshot.unitId, `${snapshot.runId}:${index + 1}`);
+      assert.ok(snapshot.entries.some(entry => entry.kind === 'requirement'));
+    }
+    assert.equal(result.totalTokens.total, 14);
+    assert.equal(result.resources.providerLaunches, 2, 'legacy child launches stay unknown; the two actual landing calls are counted');
+    assert.equal(result.resources.usageUnknown, false);
+  } finally { f.cleanup(); }
+});
+
+test('enforced queue allowance refuses unknown native usage before landing or another child', async () => {
+  const f = makeFixture(2);
+  try {
+    const runtime = fakeRuntime([reviewReady('unknown', { resources: { providerLaunches: 1, usageUnknown: true,
+      knownUsage: { inputTokens: 3, outputTokens: 2 } } }), reviewReady('not-run')]);
+    const result = await runQueue({ file: f.file, target: f.target, tokenBudget: 100, dependencies: runtime.dependencies });
+    assert.equal(result.stop.kind, 'accounting-incomplete');
+    assert.equal(runtime.launches.length, 1); assert.equal(runtime.judgements.length, 0); assert.equal(runtime.landings.length, 0);
+  } finally { f.cleanup(); }
+});
+
+test('an exhausted child allowance starts no landing review and records no phantom reviewer debit', async () => {
+  const f = makeFixture(1);
+  try {
+    const runtime = fakeRuntime([reviewReady('at-ceiling')]);
+    const result = await runQueue({ file: f.file, target: f.target, tokenBudget: 5, dependencies: runtime.dependencies });
+    assert.equal(runtime.judgements.length, 0); assert.equal(runtime.landings.length, 0);
+    assert.equal(result.stop.kind, 'token-budget');
+    assert.equal(result.resources.providerLaunches, 0);
+    assert.equal(result.resources.usageUnknown, false);
+  } finally { f.cleanup(); }
+});
+
+test('queue acceptance preserves unknown usage and cannot claim success under an enforced allowance', async () => {
+  const f = makeFixture(1);
+  try {
+    const runtime = fakeRuntime([reviewReady('one')], {
+      judgeLanding: async () => ({ approved: true, reasoning: 'observed', usage: { inputTokens: 0, outputTokens: 0 } }),
+      acceptGoal: async () => ({ approved: true, reasoning: 'answer with unreported usage', usage: null }),
+    });
+    const result = await runQueue({ file: f.file, target: f.target, tokenBudget: 100,
+      acceptGoalSpec: join(f.directory, 'goal.md'), dependencies: runtime.dependencies });
+    assert.equal(result.stop.kind, 'accounting-incomplete');
+    assert.equal(result.resources.providerLaunches, 2);
+    assert.equal(result.resources.usageUnknown, true);
+    assert.notEqual(result.goalAcceptance.approved, true);
+  } finally { f.cleanup(); }
+});
+
 test('token budget forecasts the next unit and never interrupts an in-flight unit', async () => {
   const fixture = makeFixture();
   try {
@@ -613,7 +676,7 @@ test('token budget forecasts the next unit and never interrupts an in-flight uni
   }
 });
 
-test('a run that itself exceeds the token budget completes and lands before the queue stops', async () => {
+test('a completed child that exceeds the budget is retained without launching a new landing review', async () => {
   const fixture = makeFixture();
   try {
     const runtime = fakeRuntime([
@@ -630,9 +693,10 @@ test('a run that itself exceeds the token budget completes and lands before the 
     });
 
     assert.equal(runtime.launches.length, 1);
-    assert.equal(runtime.landings.length, 1);
+    assert.equal(runtime.judgements.length, 0);
+    assert.equal(runtime.landings.length, 0);
     assert.equal(result.totalTokens.total, 13);
-    assert.match(result.stop.reason, /exceeded.*13.*10/);
+    assert.match(result.stop.reason, /budget-exhausted/);
   } finally {
     fixture.cleanup();
   }
@@ -658,8 +722,8 @@ test('malformed token facts stop safely instead of weakening budget accounting',
 
     assert.equal(runtime.launches.length, 1);
     assert.equal(runtime.landings.length, 0);
-    assert.equal(result.stop.kind, 'token-accounting');
-    assert.match(result.stop.reason, /invalid token accounting/);
+    assert.equal(result.stop.kind, 'accounting-incomplete');
+    assert.match(result.stop.reason, /unknown.*usage/);
     assert.equal(result.totalTokens.total, 0);
     assert.equal(readLog(fixture.logPath)[0].tokenAccounting, 'invalid');
   } finally {
@@ -823,7 +887,7 @@ test('queue-log gains exactly one JSON line for every attempted unit', async () 
   }
 });
 
-test('the beside-queue log is the only dirty-path exception passed to landing', async () => {
+test('only the beside-queue log and exact persisted context files are exempted at landing', async () => {
   const fixture = makeFixture(1);
   try {
     const cleanChecks = [];
@@ -838,7 +902,11 @@ test('the beside-queue log is the only dirty-path exception passed to landing', 
     });
 
     assert.deepEqual(cleanChecks[0].request.allowedPaths, [fixture.logPath]);
-    assert.deepEqual(runtime.landings[0].allowedDirtyPaths, [fixture.logPath]);
+    const paths = runtime.landings[0].allowedDirtyPaths;
+    assert.equal(paths.length, 3);
+    assert.ok(paths.includes(fixture.logPath));
+    assert.ok(paths.includes(runtime.launches[0].contextRef.path));
+    for (const path of paths.filter(path => path !== fixture.logPath)) assert.ok(existsSync(path));
   } finally {
     fixture.cleanup();
   }

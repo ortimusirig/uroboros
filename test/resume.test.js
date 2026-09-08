@@ -11,6 +11,7 @@ const runPlan = options => runNewPlan({ artifactRoot: join(tmpdir(), 'uro-task3-
 import { planningArtifactDigest } from '../src/conversation.js';
 import { withVerifiedSuperpowers } from '../fixtures/verified-superpowers.mjs';
 import { run as executeRun } from '../src/run.js';
+import { savedV1Execution } from './fixtures/saved-v1-execution.js';
 const run = options => executeRun({ ...options, env: { ...process.env, ...options.env,
   URO_ARTIFACT_ROOT: options.artifactRoot ?? join(options.scratchRoot, 'artifacts') }, adapters: scriptedFreshPlanningAdapters(options.adapters) });
 import { isolate } from '../src/isolation.js';
@@ -145,12 +146,13 @@ for (const interruption of ['log', 'return']) test(`an explicit human acceptance
   writeFileSync(join(root, 'gate.json'), '[]');
   writeFileSync(queueFile, JSON.stringify([{ name: 'first', task: 'plan.md', gate: 'gate.json' },
     { name: 'second', task: 'plan.md', gate: 'gate.json' }]));
-  let judged = 0, landed = 0, launched = 0, pending, crashAfterCommit = true;
+  let judged = 0, landed = 0, launched = 0, pending, crashAfterCommit = true, interruptedRunId;
   const queueDependencies = {
     assertCleanTarget,
     launchRun: async () => {
       launched++;
-      pending = await run(withVerifiedSuperpowers({ task: 'Change the value.', target, gate: [],
+      pending = await savedV1Execution(withVerifiedSuperpowers({ task: 'Change the value.', target, gate: [],
+        stage: launched === 1 ? null : 'execution-dispute', setupTurns: launched === 1 ? 1 : 2,
         scratchRoot: join(root, 'scratch'), runId: `execution-${launched}`, debateRounds: 8, adapters }));
       return { runDirectory: pending.dir };
     },
@@ -159,8 +161,9 @@ for (const interruption of ['log', 'return']) test(`an explicit human acceptance
     landDiff: async request => {
       landed++;
       const result = await landQueueDiff(request);
-      if (request.operationId && interruption === 'return' && crashAfterCommit) {
+      if (request.operationId && request.runId === 'execution-2' && interruption === 'return' && crashAfterCommit) {
         crashAfterCommit = false;
+        interruptedRunId = request.runId;
         throw new Error('simulated lost return after real commit');
       }
       return result;
@@ -168,6 +171,7 @@ for (const interruption of ['log', 'return']) test(`an explicit human acceptance
     appendLog: (path, row) => {
       if (row.landed && row.runId === 'execution-2' && interruption === 'log' && crashAfterCommit) {
         crashAfterCommit = false;
+        interruptedRunId = row.runId;
         // A legacy uncertain failure row is retained, then explicitly reconciled.
         appendFileSync(path, `${JSON.stringify({ ...row, landed: false, commit: null })}\n`);
         throw new Error('simulated crash after commit before queue log');
@@ -213,10 +217,15 @@ for (const interruption of ['log', 'return']) test(`an explicit human acceptance
   assert.equal(judged, 2);
   assert.equal(landed, 2);
   assert.equal(launched, 2);
+  assert.equal(interruptedRunId, 'execution-2', 'the injected failure must occur in the resumed second landing');
   const operationRows = readFileSync(join(root, 'queue-log.jsonl'), 'utf8').trim().split(/\r?\n/)
-    .map(line => JSON.parse(line)).filter(row => row.operationId);
+    .map(line => JSON.parse(line)).filter(row => row.operationId && row.runId === 'execution-2');
+  assert.equal(readFileSync(join(root, 'queue-log.jsonl'), 'utf8').trim().split(/\r?\n/)
+    .map(JSON.parse).filter(row => row.runId === 'execution-1' && row.operationId && row.landed).length, 1);
   assert.equal(operationRows.filter(row => !row.landed).length, interruption === 'log' ? 1 : 0);
   assert.equal(operationRows.filter(row => row.landed).length, 1);
+  assert.equal(readFileSync(join(root, 'queue-log.jsonl'), 'utf8').trim().split(/\r?\n/)
+    .map(JSON.parse).filter(row => row.operationId && row.landed).length, 2);
   if (interruption === 'log') assert.equal(operationRows.at(-1).reconcilesOperation, operationRows[0].operationId);
   assert.equal(execFileSync('git', ['-C', target, 'rev-list', '--count', 'HEAD'], { encoding: 'utf8' }).trim(), '3');
 });
@@ -266,7 +275,7 @@ for (const twoGoals of [false, true]) test(`queued saved planning inside the tar
       return { runDirectory: facts.dir };
     }, readRunFacts: async () => facts, judgeLanding: async () => ({ approved: true }), landDiff: landQueueDiff,
     appendLog: (path, row) => {
-      if (twoGoals && row.operationId && row.landed && !interrupted) {
+      if (twoGoals && row.runId === 'goal-run-2' && row.operationId && row.landed && !interrupted) {
         interrupted = true; throw new Error('two-goal interruption after commit before log');
       }
       appendFileSync(path, `${JSON.stringify(row)}\n`);
@@ -305,6 +314,7 @@ for (const twoGoals of [false, true]) test(`queued saved planning inside the tar
   }
   const result = await resume.resumeRun({ runDirectory: out, decisionFile, adapters: planningAdapters, queueDependencies: dependencies });
   assert.equal(result.queueResult.landedCount, twoGoals ? 2 : 1, result.queueResult.stop?.reason);
+  if (twoGoals) assert.equal(interrupted, true, 'the resumed second-run landing fault must actually fire');
   assert.equal(implementations, twoGoals ? 2 : 1);
   // The explicit human approval applies the saved proposal without another author call.
   assert.equal(drafts, twoGoals ? 3 : 2);
@@ -366,7 +376,8 @@ for (const choice of ['stop', 'correction', 'fresh plan', 'further planning disp
         suggestions: choice === 'further planning dispute' ? [{ id: 'P1', text: 'Retain the existing strategy instead.' }] : [], content: 'Current strategy review.' };
     }, createFreshPivotBranch: () => assert.fail('manual fresh plan must not reset or delete saved work'),
   };
-  const pending = await run(withVerifiedSuperpowers({ task: 'Implement the original strategy.', target, gate: [],
+  const pending = await savedV1Execution(withVerifiedSuperpowers({ task: 'Implement the original strategy.', target, gate: [],
+    stage: 'execution-pivot',
     scratchRoot: join(root, 'scratch'), runId: 'manual-pivot', debateRounds: 8, pivotCandidates: 1, adapters }));
   assert.equal(pending.checkpointState.stage, 'execution-pivot');
   const checkpoint = JSON.parse(readFileSync(join(pending.dir, 'uro-checkpoint.json'), 'utf8'));

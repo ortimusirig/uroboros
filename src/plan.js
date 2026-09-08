@@ -13,7 +13,8 @@ import { runExecutor, DEFAULT_EXECUTOR_MODEL, DEFAULT_EXECUTOR_EFFORT } from './
 import { resolveStageTimeouts } from './timeouts.js';
 import { applySuperpowersRequirement, verifySuperpowersSeats } from './superpowers.js';
 import { saveCheckpoint } from './checkpoint.js';
-import { runPlanningDialogue, openPlanningContext, callPlanningPreparation, assertPlanningSidecars, createPlanningBudgetGuard, contextLifecycle } from './planning-dialogue.js';
+import { runPlanningDialogue, openPlanningContext, reopenPlanningContext, callPlanningPreparation, assertPlanningSidecars, createPlanningBudgetGuard, contextLifecycle } from './planning-dialogue.js';
+import { readSharedContextReference } from './shared-context.js';
 export { parseSeatReview };
 
 export const DEFAULT_PLAN_CANDIDATES = 1;
@@ -448,7 +449,7 @@ export async function runPlanCandidateSet({
   timeoutMs = resolveStageTimeouts().arbiter, executorTimeout = resolveStageTimeouts().executor,
   runId = `plan-candidates-${randomUUID()}`, env = process.env, reporter,
   draft, select, review, priorMessages = [],
-  directory, out, artifactRoot, searchIndex, budget, resourceBudget, retained,
+  directory, out, artifactRoot, searchIndex, budget, resourceBudget, retained, context = {}, preparationContinuation, session: savedSession,
 } = {}) {
   decisionAuthority({ interactionMode, phase: 'planning' });
   if (count === undefined) count = mode === 'fresh' ? DEFAULT_PIVOT_CANDIDATES : DEFAULT_PLAN_CANDIDATES;
@@ -465,7 +466,7 @@ export async function runPlanCandidateSet({
       authorPrompt: request => draftingPrompt({ ...common, ...request, round: request.round }), reviewPrompt: reviewSeatPrompt });
     const result = await runPlanningDialogue({ requirements: goal, target,
       directory: directory ?? join(target, '.uro-tmp', runId), runId, interactionMode, rounds, budget, resourceBudget,
-      context: { failedPlan, previousPlan, ledger, pivot, feedback, priorMessages }, retained, artifactRoot, env, searchIndex, reporter,
+      context: { ...context, failedPlan, previousPlan, ledger, pivot, feedback, priorMessages }, retained, artifactRoot, env, searchIndex, reporter,
       seats: { author: async r => {
         const response = await (draft ?? production.author)({ ...common, ...r, candidateId: candidate.id,
           candidateIndex: r.type === 'draft' ? 1 : undefined, candidateCount: 1, perspective: candidate.perspective,
@@ -485,16 +486,16 @@ export async function runPlanCandidateSet({
       selected: null, exhausted: !candidate.plan, ...result };
   }
   const draftCandidate = draft ?? productionDraft;
-  const session = openPlanningContext({ requirements: goal, target, directory: directory ?? join(target, '.uro-tmp', runId),
-    runId, context: { failedPlan, previousPlan, ledger, pivot, feedback, priorMessages }, retained, artifactRoot, env, searchIndex });
+  const session = savedSession ?? openPlanningContext({ requirements: goal, target, directory: directory ?? join(target, '.uro-tmp', runId),
+    runId, context: { ...context, failedPlan, previousPlan, ledger, pivot, feedback, priorMessages }, retained, artifactRoot, env, searchIndex });
   try {
   const budgetGuard = createPlanningBudgetGuard({ session, resourceBudget, budget });
   let budgetPause = null;
   const perspectives = mode === 'fresh' ? FRESH_PERSPECTIVES : INITIAL_PERSPECTIVES;
   const common = { goal, target, round, mode, interactionMode, ledger, failedPlan,
     claudeModel, codexModel, codexEffort, timeoutMs, executorTimeout, runId, env };
-  const messages = [...priorMessages], roundHistory = [];
-  let draftingUsage = EMPTY_USAGE, artifactRepairs = 0;
+  const messages = structuredClone(preparationContinuation?.messages ?? priorMessages), roundHistory = structuredClone(preparationContinuation?.roundHistory ?? []);
+  let draftingUsage = EMPTY_USAGE, artifactRepairs = preparationContinuation?.artifactRepairs ?? 0;
   const messageFor = (response, speaker, role, extra = {}) => {
     const content = typeof response === 'string' ? response
       : response?.content ?? response?.answer ?? response?.lastMessage ?? '';
@@ -553,10 +554,10 @@ export async function runPlanCandidateSet({
   // Every requested alternative receives its initial author call. Repairs then
   // share the same budget as later proposal/writer repairs, rather than resetting
   // an allowance per candidate or skipping malformed delivered artifacts.
-  const candidates = Array.from({ length: count }, (_, index) => ({
+  const candidates = preparationContinuation?.candidateState.candidates ?? Array.from({ length: count }, (_, index) => ({
     id: `candidate-${index + 1}`, index, perspective: perspectives[index], author: 'claude', attempts: [],
   }));
-  for (const candidate of candidates) { await attemptDraft(candidate); if (budgetPause) break; }
+  if (!preparationContinuation) for (const candidate of candidates) { await attemptDraft(candidate); if (budgetPause) break; }
   let irreparable = false;
   for (const candidate of candidates) {
     if (budgetPause) break;
@@ -583,12 +584,13 @@ export async function runPlanCandidateSet({
         artifactRepairs, roundsLimit: rounds ?? null,
         candidateState: { mode, selectedCandidateId: null, candidates, selection },
       } };
-    if (budgetPause || retained) {
+    {
       result.action = 'paused';
       result.exhausted ||= Boolean(budgetPause);
       const tail = session.journal.read().at(-1);
       Object.assign(result.checkpointState, { directory: session.directory, artifactRoot: session.artifactRoot,
-        resourceBudget: session.resourceBudget, technicalPause: { reason },
+        resourceBudget: session.resourceBudget, technicalPause: { reason }, preparationSnapshot: session.snapshot,
+        preparationOptions: { round, failedPlan, previousPlan, feedback, pivot, ledger },
         preparationState: session.journal.read().findLast(event => ['preparation-paused', 'preparation-state'].includes(event.type))?.state ?? null,
         preparationHistory: session.journal.read().filter(event => ['prepare', 'complete', 'preparation-state', 'candidate-artifact', 'preparation-paused'].includes(event.type)),
         journalIdentity: tail ? { sequence: tail.sequence, hash: tail.hash } : null });
@@ -656,7 +658,16 @@ export async function runPlanCandidateSet({
 
 /** Resume the selected in-memory candidate debate; no new candidates or disk writer. */
 export async function continuePlanCandidateSet({ checkpointState: state, humanRuling, target,
-  claudeModel, codexModel, codexEffort, executorTimeout, timeoutMs, env, reporter, draft, review }) {
+  claudeModel, codexModel, codexEffort, executorTimeout, timeoutMs, env, reporter, draft, select, review, session, technicalContinue = false }) {
+  if (!state.dialogue && state.preparationSnapshot) {
+    if (!technicalContinue || humanRuling) throw new Error('saved preparation requires technical continuation');
+    session ??= reopenPlanningContext({ continuation: state, target, directory: state.directory });
+    return runPlanCandidateSet({ ...state.preparationOptions, goal: state.requirements, target, directory: state.directory,
+      runId: state.runId, count: state.candidateState.candidates.length, mode: state.candidateState.mode,
+      interactionMode: state.interactionMode, rounds: state.roundsLimit ?? undefined, resourceBudget: state.resourceBudget,
+      claudeModel, codexModel, codexEffort, executorTimeout, timeoutMs, env, reporter, draft, select, review,
+      session, preparationContinuation: structuredClone(state) });
+  }
   const selected = state.candidateState.candidates.find(candidate => candidate.id === state.candidateState.selectedCandidateId);
   if (!selected) throw new Error('saved fresh planning candidate is missing');
   const seats = createPlanningSeats({ target, claudeModel, codexModel, codexEffort, executorTimeout,
@@ -669,7 +680,7 @@ export async function continuePlanCandidateSet({ checkpointState: state, humanRu
       previousPlan: request.previousProposal, feedback: request.feedback }), reviewPrompt: reviewSeatPrompt });
   const result = await (state.version === 2 ? runPlanningDialogue : runConversation)({ runId: state.runId, tier: 'plan', interactionMode: state.interactionMode,
     ...(state.version === 2 ? { target, directory: state.directory } : {}),
-    requirements: state.requirements, rounds: state.roundsLimit ?? undefined, continuation: state, humanRuling, seats, reporter,
+    requirements: state.requirements, rounds: state.roundsLimit ?? undefined, continuation: state, humanRuling, session, technicalContinue, seats, reporter,
     strategy: { parseProposal: parsePlanProposal,
       reviewRequests: ({ proposal, round }) => ({ codex: { goal: state.requirements, ...proposal, round } }),
       writeConverged: proposal => ({ selected: { ...selected, ...proposal } }) } });
@@ -699,7 +710,7 @@ export async function runPlan({
   arbiterTimeout = resolveStageTimeouts().arbiter,
   dryRun = false, runId = `plan-${randomUUID()}`, reporter,
   baseDirectory = process.cwd(), env = process.env, home = homedir(), superpowers, adapters = {},
-  artifactRoot, searchIndex,
+  artifactRoot, searchIndex, contextRef, tokenBudget,
 } = {}) {
   decisionAuthority({ interactionMode, phase: 'planning' });
   if (plannerModel !== undefined || verifierModel !== undefined) {
@@ -708,6 +719,11 @@ export async function runPlan({
   if (rounds !== undefined && (!Number.isSafeInteger(rounds) || rounds < 1)) throw new TypeError('rounds must be a positive integer');
   validatePlanCandidateCount(candidates, 'candidates');
   validatePlanCandidateCount(pivotCandidates, 'pivotCandidates');
+  const parentContext = contextRef ? readSharedContextReference({ reference: contextRef, target }) : null;
+  const context = parentContext ? { queueParent: parentContext } : {};
+  if (tokenBudget !== undefined && (!Number.isSafeInteger(tokenBudget) || tokenBudget < 1)) throw new Error('tokenBudget must be a positive safe integer');
+  const resourceBudget = tokenBudget === undefined ? undefined : { tokenBudget,
+    prior: { knownUsage: { inputTokens: 0, outputTokens: 0 }, providerLaunches: 0, usageUnknown: false } };
   await planningPreflight({ adapters, superpowers, env, home });
   const request = validatePlanRequest({ goal, target, out, baseDirectory });
   reportEvent(reporter, runId, 'plan', 'start', { tier: 'plan', target: request.target,
@@ -729,6 +745,7 @@ export async function runPlan({
       claudeModel: claudeModel ?? arbiterModel, codexModel, codexEffort,
       timeoutMs: arbiterTimeout, executorTimeout, runId, env, reporter,
       directory: request.out, artifactRoot, searchIndex,
+      context, resourceBudget,
       draft: r => seats.author({ ...r, type: r.previousProposal ? 'propose' : 'draft' }),
       review: seats.reviewCodex,
       select: execute ? r => productionSelect(r, execute)
@@ -739,6 +756,7 @@ export async function runPlan({
     result = await runPlanningDialogue({
       runId, reporter, rounds, tier: 'plan', interactionMode, requirements: request.goal, seats,
       target: request.target, directory: request.out, artifactRoot, env, searchIndex,
+      context, resourceBudget,
       strategy: {
         draftRequest: () => ({ claudeRequest: { type: 'draft', goal: request.goal } }),
         proposeRequest: context => ({ type: 'propose', goal: request.goal, ...context }),
@@ -750,7 +768,7 @@ export async function runPlan({
   }
   result.checkpointState.planningContext = { kind: 'plan', request,
     options: { claudeModel: claudeModel ?? arbiterModel, codexModel, codexEffort, executorTimeout, arbiterTimeout } };
-  if (result.reason === 'needs-decision') {
+  if (result.reason === 'needs-decision' || result.checkpointState.dialogue?.technicalPause || result.checkpointState.technicalPause) {
     const checkpoint = await saveCheckpoint({ directory: request.out, checkpointState: result.checkpointState,
       references: request.goalSource && existsSync(request.goalSource) ? [request.goalSource] : [] });
     result.checkpoint = { directory: request.out, artifactDigest: checkpoint.artifactDigest, questions: checkpoint.pending.questions };
@@ -759,13 +777,24 @@ export async function runPlan({
 }
 
 /** Trusted phase continuation; the public resume layer validates identity first. */
-export async function continuePlanning({ checkpointState, humanRuling, adapters = {}, reporter, env }) {
+export async function continuePlanning({ checkpointState, humanRuling, technicalContinue = false, adapters = {}, reporter, env }) {
   const state = structuredClone(checkpointState);
   const { request, options } = state.planningContext;
+  if (state.version === 2 && state.candidateState) {
+    const seats = createPlanningSeats({ target: request.target, ...options, runId: state.runId, env, reporter, adapters,
+      authorPrompt: r => draftingPrompt({ ...r, goal: request.goal }), reviewPrompt: reviewSeatPrompt });
+    const result = await continuePlanCandidateSet({ checkpointState: state, humanRuling, technicalContinue,
+      target: request.target, ...options, timeoutMs: options.arbiterTimeout, env, reporter,
+      draft: seats.author, review: seats.reviewCodex,
+      select: r => productionSelect(r, adapters.runExecutor ?? runExecutor) });
+    if (result.approved) Object.assign(result, writeArtifacts(request.out, result.selected.plan, result.selected.gate));
+    result.checkpointState.planningContext = state.planningContext;
+    return { ...result, target: request.target, out: request.out };
+  }
   const result = await (state.version === 2 ? runPlanningDialogue : runConversation)({ runId: state.runId, reporter, rounds: state.roundsLimit ?? undefined,
     tier: 'plan', interactionMode: state.interactionMode, requirements: state.requirements,
     ...(state.version === 2 ? { target: request.target, directory: state.directory } : {}),
-    continuation: state, humanRuling,
+    continuation: state, humanRuling, technicalContinue,
     seats: createPlanningSeats({ target: request.target, ...options, runId: state.runId, env, reporter, adapters,
       authorPrompt: r => `${CONVERSATION_DNA}\n\n${buildArbiterPrompt({ ...r, goal: request.goal })}`,
       reviewPrompt: reviewSeatPrompt }),

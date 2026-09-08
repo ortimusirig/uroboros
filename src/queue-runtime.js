@@ -30,6 +30,11 @@ function providerFlags({ claudeModel, codexModel, codexEffort }) {
   return Object.entries({ 'claude-model': claudeModel, 'codex-model': codexModel, 'codex-effort': codexEffort })
     .flatMap(([flag, value]) => value === undefined ? [] : ['--' + flag, value]);
 }
+function childControlFlags({ contextRef, tokenBudget, rounds }) {
+  return [...(contextRef ? ['--context-stdin'] : []),
+    ...(tokenBudget === undefined ? [] : ['--token-budget', String(tokenBudget)]),
+    ...(rounds === undefined ? [] : ['--rounds', String(rounds)])];
+}
 
 function oneLine(value) {
   return String(value).replace(/\s+/g, ' ').trim();
@@ -51,9 +56,11 @@ export async function launchLoopRun({ unit, target, mode = 'manual', ...models }
     '--mode', mode,
     '--no-dashboard',
     ...providerFlags(models),
+    ...childControlFlags(models),
   ], {
     cwd: resolvedTarget,
     env: launchEnvironment(env),
+    ...(models.contextRef ? { input: JSON.stringify(models.contextRef) } : {}),
     // The child's stderr heartbeat streams through LIVE. Buffered-until-exit
     // meant 25-50 silent minutes per unit: an operator could not tell deep
     // deliberation from a hang and babysat by polling artifacts instead.
@@ -94,9 +101,11 @@ export async function launchLoopPlan({ unit, target, mode = 'manual', ...models 
     '--out', unit.out,
     '--mode', mode,
     ...providerFlags(models),
+    ...childControlFlags(models),
   ], {
     cwd: resolvedTarget,
     env: launchEnvironment(env),
+    ...(models.contextRef ? { input: JSON.stringify(models.contextRef) } : {}),
     // Planning heartbeats stream through live, same as runs: the two-agent
     // conversation can deliberate for a long time, and silence must mean
     // stopped, not buffered.
@@ -372,6 +381,7 @@ export async function judgeLandingWithClaude({ unit, facts, runDirectory, claude
     return {
       approved: null,
       reasoning: error instanceof Error ? error.message : String(error),
+      usage: null,
     };
   }
   const judgement = parseLandingJudgement(result);
@@ -379,12 +389,14 @@ export async function judgeLandingWithClaude({ unit, facts, runDirectory, claude
     return {
       approved: null,
       reasoning: result?.error ?? 'no readable landing judgement',
+      usage: result?.usage ?? null,
     };
   }
   return {
     approved: judgement.approved,
     reasoning: judgement.reasoning,
     findings: judgement.findings,
+    usage: result?.usage ?? null,
   };
 }
 

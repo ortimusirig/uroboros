@@ -210,7 +210,10 @@ export function applyDialogueEnvelope({ state, envelope, seat, evidence = [], ve
             || !next.verifications.some(v => v.claimId === id && v.seat === seat && v.result === 'supports' && sameIdentity(v, state))) throw new Error('unsupported or retired disposition claim');
         }
       }
-      if (!withdrawal && old.status === 'disputed' && state.authority === 'human') {
+      const scopedReplanAnswer = state.humanRuling?.question?.decisionKind === 'disputed-replan'
+        && state.humanRuling.question.disputedIssueIds?.includes(update.id)
+        && sameIdentity(state.humanRuling, state);
+      if (!withdrawal && old.status === 'disputed' && state.authority === 'human' && !scopedReplanAnswer) {
         next.pendingDecision = { authority: 'human', messageId, issues: envelope.issues, reason: envelope.content, ...identity };
         continue;
       }

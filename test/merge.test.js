@@ -42,7 +42,7 @@ const successFacts = (runId) => ({
   runId,
   outcome: 'no-op',
   branch: `ccc/${runId}`,
-  tokens: { total: {} },
+  tokens: { total: { inputTokens: 0, outputTokens: 0 } },
 });
 
 async function gitOk(cwd, ...args) {

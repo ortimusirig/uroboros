@@ -70,7 +70,7 @@ export async function runExecutionDialogue({ state, journal, snapshot, artifactD
     const existing = journal.operation(operationId);
     if (existing) {
       if (existing.status !== 'completed' || existing.result?.status !== 'completed') throw new Error('uncertain mutation analysis; replay refused');
-      if (existing.input !== JSON.stringify(selection)) throw new Error('mutation analysis input identity conflict');
+      if (!isDeepStrictEqual(JSON.parse(existing.input), selection)) throw new Error('mutation analysis input identity conflict');
       for (const event of journal.read().filter(e => e.type === 'prepare' && e.analysisOperationId === operationId)) {
         if (journal.operation(event.operationId).status !== 'completed') throw new Error('incomplete mutation operation; replay refused');
       }

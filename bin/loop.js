@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // bin/loop.js
 import { randomUUID } from 'node:crypto';
-import { appendFileSync, existsSync, mkdirSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { readSharedContextReference } from '../src/shared-context.js';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { parseArgs } from '../src/args.js';
@@ -68,6 +69,10 @@ async function main() {
   let opts;
   try {
     opts = parseArgs(argv);
+    if (opts.contextStdin) {
+      opts.contextRef = JSON.parse(readFileSync(0, 'utf8'));
+      readSharedContextReference({ reference: opts.contextRef, target: opts.target });
+    }
   } catch (e) {
     process.stderr.write(`arg error: ${e.message}\n`);
     if (/^unknown command:/.test(e.message)) process.stderr.write(`${CLI_USAGE}\n`);
@@ -114,6 +119,8 @@ async function main() {
         target: opts.target,
         out: opts.out,
         rounds: opts.rounds,
+        contextRef: opts.contextRef,
+        tokenBudget: opts.tokenBudget,
         candidates: opts.candidates,
         pivotCandidates: opts.pivotCandidates,
         interactionMode: opts.interactionMode,
@@ -469,6 +476,9 @@ async function main() {
     verifierProbeCompleted: true,
     mode: opts.mode,
     correctsRunId: opts.correctsRunId,
+    contextRef: opts.contextRef,
+    tokenBudget: opts.tokenBudget,
+    debateRounds: opts.debateRounds,
     ...(opts.mutate ? { mutation: true } : {}),
     scratchRoot: SCRATCH_ROOT,
     superpowers: pf.superpowers,
