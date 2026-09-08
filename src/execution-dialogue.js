@@ -6,11 +6,13 @@ import { runProtectedOperation, captureReviewSnapshot, restoreReviewSnapshot } f
 import { detectReview } from './review.js';
 import { buildLivenessJudgePrompt, DEFAULT_LIVENESS_JUDGE_TIMEOUT_MS } from './liveness-judge.js';
 import { resolve } from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
 
 /** Phase adapter; the native dispatcher is the sole dialogue/effect controller. */
 export async function runExecutionDialogue({ state, journal, snapshot, artifactDigest, directory, target,
   requirements, plan = requirements, task = plan, runId, artifactRoot, interactionMode = 'manual', context = {}, limits = {},
   execute, review, completeReview, discuss, inspect, capture, selectChecks, runChecks, selectMerge, runMerge,
+  selectMutation, runMutation, observeMutationSource, captureMutationEvidence,
   judgeLiveness, selectPreservation, preserveExecutorWork, livenessJudgeTimeoutMs = DEFAULT_LIVENESS_JUDGE_TIMEOUT_MS,
   budget, reporter, env, searchIndex, retained, reviewInstructions = '', session: suppliedSession }) {
   // A retained handoff initializes a distinct phase; it is never a supplied-session reopening.
@@ -48,6 +50,113 @@ export async function runExecutionDialogue({ state, journal, snapshot, artifactD
     contextLifecycle.persistContext(session, state.snapshot);
   };
   const providerObservations = [];
+  const mutationObservations = [];
+  let latestMutation = null;
+  // Only recording is serialized. Actual disposable trial operations may overlap.
+  let mutationRecording = Promise.resolve();
+  const recordMutation = work => {
+    const pending = mutationRecording.then(work);
+    mutationRecording = pending.catch(() => {});
+    return pending;
+  };
+  const mutationError = error => ({ message: error?.message ?? String(error),
+    mutationRequired: Boolean(error?.mutationRequired),
+    observation: error?.mutationObservation ?? null, state: error?.mutationState ?? null,
+    trials: error?.mutationTrials ?? [] });
+  const analyzeMutation = async request => {
+    const selection = await selectMutation(request);
+    const operationId = `${runId}:mutation:${selection.identity}`;
+    contextLifecycle.checkContext(session);
+    const existing = journal.operation(operationId);
+    if (existing) {
+      if (existing.status !== 'completed' || existing.result?.status !== 'completed') throw new Error('uncertain mutation analysis; replay refused');
+      if (existing.input !== JSON.stringify(selection)) throw new Error('mutation analysis input identity conflict');
+      for (const event of journal.read().filter(e => e.type === 'prepare' && e.analysisOperationId === operationId)) {
+        if (journal.operation(event.operationId).status !== 'completed') throw new Error('incomplete mutation operation; replay refused');
+      }
+      latestMutation = existing.result;
+      return latestMutation;
+    }
+    const intent = (id, effect, purpose, input, extra = {}) => journal.prepare({ operationId: id,
+      seat: effect === 'provider' ? 'codex' : 'harness', effect, purpose, input,
+      artifactDigest: request.state.artifactDigest, contextDigest: request.state.snapshot.digest,
+      evidenceIds: request.state.evidence.map(e => e.id), unreadMessageIds: [], ...extra });
+    intent(operationId, 'mutation-analysis', 'mutation-analysis', JSON.stringify(selection), { selection });
+    const evidence = [];
+    let mutationFailure = null;
+    const record = work => recordMutation(async () => {
+      try { return await work(); } catch (error) { mutationFailure ??= error; throw error; }
+    });
+    try {
+      const result = await runMutation({ ...request, selection, effects: {
+        analysisIdentity: selection.identity,
+        codeIdentity: async ({ cwd }) => (await observeMutationSource({ cwd })).codeIdentity,
+        run: async effect => {
+          const id = `${runId}:mutation:${effect.key}`;
+          let before, actual;
+          await record(async () => {
+            if (mutationFailure && !effect.cleanup) throw mutationFailure;
+            contextLifecycle.checkContext(session);
+            if (journal.operation(id)) throw new Error('partial mutation operation replay is unsupported');
+            if (effect.effect === 'provider') {
+              const allowed = budget ? await budget({ state: structuredClone(request.state), account: journal.account(),
+                nextAction: { seat: 'codex', action: effect.purpose } }) : { allowed: true };
+              if (allowed?.allowed !== true) {
+                journal.append({ type: 'mutation-denied', operationId: id, analysisOperationId: operationId, reason: allowed?.reason ?? 'mutation budget denied' });
+                throw new Error(allowed?.reason ?? 'mutation budget denied');
+              }
+            }
+            intent(id, effect.effect, effect.purpose, JSON.stringify(effect.input), {
+              analysisOperationId: operationId, key: effect.key, cleanup: effect.cleanup, selection });
+            if (!effect.cleanup && ['mutation-command', 'mutation-write'].includes(effect.effect))
+              before = await observeMutationSource({ cwd: effect.input.cwd ?? effect.input.directory,
+                beforeOverlay: effect.effect === 'mutation-write' && effect.purpose === 'mutation-overlay',
+                expectedTestSupport: selection.resolvedTestSupport?.map(file => file.path) ?? [] });
+          });
+          try {
+            if (mutationFailure && !effect.cleanup) throw mutationFailure;
+            actual = await effect.operation();
+            mutationObservations.push({ operationId: id, purpose: effect.purpose, result: actual, recording: 'observed' });
+            await record(async () => {
+              contextLifecycle.checkContext(session);
+              const after = !effect.cleanup && ['mutation-command', 'mutation-write'].includes(effect.effect)
+                ? await observeMutationSource({ cwd: effect.input.cwd ?? effect.input.directory }) : null;
+              const sources = { before, after };
+              const records = actual?.evidence || effect.effect === 'mutation-write' ? await captureMutationEvidence({ ...request, operationId: id,
+                effect, result: actual, sources, evidenceDirectory: session.evidenceDirectory }) : [];
+              contextLifecycle.registerEvidenceFiles(session, records);
+              evidence.push(...records.filter(record => record.kind === 'command'));
+              contextLifecycle.checkContext(session);
+              const identity = source => source ? { cwd: source.cwd, codeIdentity: source.codeIdentity,
+                ...(source.supportResolution ? { supportResolution: source.supportResolution } : {}),
+                files: source.files.map(({ path, sha256, missing }) => ({ path, sha256, ...(missing ? { missing } : {}) })) } : null;
+              const saved = { ...actual, ...(before || after ? { sourceObservations: {
+                before: identity(before), after: identity(after), capturedSources: records.filter(record => record.kind === 'code') } } : {}) };
+              if (effect.effect === 'provider' && actual?.available === false) saved.error ??= actual.reason;
+              journal.complete({ operationId: id, result: saved,
+                usage: effect.effect === 'provider' ? actual?.usage ?? null : null,
+                delivery: effect.effect === 'provider' ? actual?.delivery ?? null : null });
+              mutationObservations.find(item => item.operationId === id).recording = 'completed';
+            });
+            return actual;
+          } catch (error) {
+            mutationFailure ??= error;
+            mutationObservations.push({ operationId: id, purpose: effect.purpose, error: error.message,
+              result: actual ?? null, recording: 'unrecorded' });
+            throw error;
+          }
+        },
+      } });
+      contextLifecycle.checkContext(session);
+      latestMutation = { status: 'completed', operationId, selection, result, evidence };
+      journal.complete({ operationId, result: latestMutation });
+      return latestMutation;
+    } catch (error) {
+      latestMutation = { status: 'uncertain', operationId, selection, error: mutationError(error) };
+      try { contextLifecycle.checkContext(session); journal.append({ type: 'mutation-failure', ...latestMutation }); } catch { /* Actual observations remain separate from required recording. */ }
+      throw error;
+    }
+  };
   const callSeat = seat => async request => {
     retained?.validate();
     contextLifecycle.checkContext(session);
@@ -222,20 +331,37 @@ export async function runExecutionDialogue({ state, journal, snapshot, artifactD
   };
   const observedSnapshot = (request, observed, kind) => {
     if (!observed?.artifactDigest || typeof observed.diff !== 'string') throw new Error('actual retained artifact and diff required');
+    const mutationEntries = kind === 'execution-checks' && latestMutation?.status === 'completed' ? [{ id: latestMutation.operationId,
+      kind: 'mutation-analysis', content: JSON.stringify(latestMutation.result), sourceIdentity: latestMutation.selection.identity,
+      provenance: { origin: 'harness', operationId: latestMutation.operationId }, status: 'advisory' }] : [];
+    const newMutationReferences = (current, incoming) => incoming.filter(item => {
+      const existing = current.find(reference => reference.id === item.id);
+      if (!existing) return true;
+      if (!isDeepStrictEqual(existing, item)) throw new Error('reused mutation context reference differs from retained evidence');
+      return false;
+    });
+    const mutationEvidenceIds = new Set(latestMutation?.evidence?.map(item => item.id) ?? []);
     const snapshot = extendSharedContext({ snapshot: request.state.snapshot,
       entries: [{ id: `${kind}-${request.operationId}`, kind,
         content: JSON.stringify({ diff: observed.diff, providerOperationId: request.providerOperationId,
           artifactDigest: observed.artifactDigest, ...(request.selection ? { selection: request.selection } : {}),
           ...(observed.mergeProgress ? { mergeProgress: observed.mergeProgress } : {}) }),
-        sourceIdentity: observed.artifactDigest, provenance: { origin: 'harness', operationId: request.operationId }, status: 'required' }],
-      evidence: observed.evidence ?? [] });
+        sourceIdentity: observed.artifactDigest, provenance: { origin: 'harness', operationId: request.operationId }, status: 'required' },
+        ...newMutationReferences(request.state.snapshot.entries, mutationEntries)],
+      evidence: (observed.evidence ?? []).flatMap(item => mutationEvidenceIds.has(item.id)
+        ? newMutationReferences(request.state.snapshot.evidence, [item]) : [item]) });
     contextLifecycle.registerEvidenceFiles(session, snapshot.evidence);
     return { artifactDigest: observed.artifactDigest, snapshot,
       ...(observed.mergeProgress ? { mergeProgress: observed.mergeProgress } : {}) };
   };
   try {
-    const uncertain = journal.read().find(event => event.type === 'prepare' && ['liveness', 'preservation'].includes(event.purpose)
+    const uncertain = journal.read().find(event => event.type === 'prepare' && (['liveness', 'preservation'].includes(event.purpose) || event.purpose?.startsWith('mutation-'))
       && journal.operation(event.operationId).status !== 'completed');
+    if (!uncertain && typeof selectMutation === 'function' && journal.read().some(event => event.type === 'prepare' && event.effect === 'mutation-analysis')) {
+      const selection = await selectMutation({ state });
+      if (journal.operation(`${runId}:mutation:${selection.identity}`)) await analyzeMutation({ state });
+      else state = { ...state, approval: null, technicalPause: { reason: 'saved mutation analysis inputs changed; reconciliation required' } };
+    }
     const result = uncertain ? { state: { ...state, approval: null,
       technicalPause: { reason: `uncertain ${uncertain.purpose}; replay refused`, operationId: uncertain.operationId } },
       approved: false, action: 'paused', reason: `uncertain ${uncertain.purpose}; replay refused`, resources: journal.account(), messages: state.messages }
@@ -252,7 +378,14 @@ export async function runExecutionDialogue({ state, journal, snapshot, artifactD
       } : undefined,
       runChecks: typeof runChecks === 'function' ? async request => {
         contextLifecycle.checkContext(session);
-        const observed = await runChecks({ ...request, evidenceDirectory: session.evidenceDirectory });
+        let observed = await runChecks({ ...request, evidenceDirectory: session.evidenceDirectory });
+        contextLifecycle.registerEvidenceFiles(session, observed.evidence ?? []);
+        if (observed.passed === true && typeof selectMutation === 'function') {
+          const analysis = await analyzeMutation(request);
+          observed = { ...await capture(request), evidence: [...observed.evidence ?? [], ...analysis.evidence] };
+          if ((await selectMutation(request)).identity !== analysis.selection.identity)
+            throw new Error('mutation changed required source or check inputs; current checks require reconciliation');
+        }
         return observedSnapshot(request, observed, 'execution-checks');
       } : undefined,
       renderInput: ({ state, seat, action }) => [
@@ -288,8 +421,20 @@ export async function runExecutionDialogue({ state, journal, snapshot, artifactD
       artifactDigest: result.state.artifactDigest, pendingDecision: result.state.pendingDecision,
       journalIdentity: tail ? { sequence: tail.sequence, hash: tail.hash } : null, recall: session.recall };
     checkpointState.supervision = { observations: providerObservations };
+    checkpointState.mutation = { analysis: latestMutation, observations: mutationObservations };
     if (integrityValid) {
       const events = journal.read();
+      checkpointState.mutation.operations = events.filter(event => event.type === 'prepare' && event.purpose?.startsWith('mutation-')).map(event => journal.operation(event.operationId));
+      checkpointState.mutation.denials = events.filter(event => event.type === 'mutation-denied');
+      checkpointState.mutation.resources = ['mutation-grouping', 'mutation-survivor'].map(purpose => {
+        const operations = checkpointState.mutation.operations.filter(operation => operation.effect === 'provider' && operation.purpose === purpose);
+        return { provider: 'codex', role: purpose, providerLaunches: operations.length,
+          failedLaunches: operations.filter(operation => operation.result?.error).length,
+          operationIds: operations.map(operation => operation.operationId),
+          knownUsage: Object.fromEntries(['inputTokens', 'outputTokens'].map(key => [key,
+            operations.reduce((sum, operation) => sum + (Number.isFinite(operation.usage?.[key]) && operation.usage[key] >= 0 ? operation.usage[key] : 0), 0)])),
+          usageUnknown: operations.some(operation => ['inputTokens', 'outputTokens'].some(key => !Number.isFinite(operation.usage?.[key]) || operation.usage[key] < 0)) };
+      });
       checkpointState.supervision = {
         observations: providerObservations,
         operations: events.filter(event => event.type === 'prepare' && ['liveness', 'preservation'].includes(event.purpose)).map(event => journal.operation(event.operationId)),
@@ -304,6 +449,6 @@ export async function runExecutionDialogue({ state, journal, snapshot, artifactD
       if (integrityValid) checkpointState.executionArtifacts = contextLifecycle.manifest({ directory, runId,
         contextDigest: result.state.snapshot.digest, registeredPaths: session.ownedFiles.keys() });
     } catch (error) { pause(error); }
-    return { ...result, snapshot: result.state.snapshot, checkpointState, recall: session.recall };
+    return { ...result, mutation: latestMutation, snapshot: result.state.snapshot, checkpointState, recall: session.recall };
   } finally { journal.close(); }
 }

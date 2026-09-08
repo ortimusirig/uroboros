@@ -12,6 +12,65 @@ import { createLivenessJudge } from '../src/liveness-judge.js';
 import { spawnCapture } from '../src/spawn.js';
 import { openPlanningContext } from '../src/planning-dialogue.js';
 import { openDialogueJournal } from '../src/dialogue-journal.js';
+import { runMutate } from '../src/mutate.js';
+import { createHash } from 'node:crypto';
+
+for (const revisit of [false, true]) test(revisit
+  ? 'native completed mutation analysis is reused when a later correction restores earlier source without duplicate context evidence'
+  : 'native completed mutation analysis survives validated phase reopening without effect or usage replay', async t => {
+  const opts = fixture(t), session = openPlanningContext({ ...opts, phase: 'execution', tier: 'execution' });
+  let commands = 0, executions = 0, reviews = 0, commandsAtSecondReview = 0;
+  const observeMutationSource = ({ cwd }) => ({ cwd,
+    codeIdentity: createHash('sha256').update(readFileSync(join(cwd, 'source.js'))).digest('hex'),
+    files: [{ path: 'source.js', text: readFileSync(join(cwd, 'source.js'), 'utf8') }] });
+  const request = { ...opts, session,
+    execute: r => {
+      executions++;
+      if (revisit) writeFileSync(join(opts.target, 'source.js'), `export const enabled = ${executions === 2 ? 'false' : 'true'};\n`);
+      return { dialogue: reply(r, r.action), usage: { inputTokens: 1, outputTokens: 1 } };
+    },
+    review: r => {
+      reviews++;
+      if (reviews === 2) commandsAtSecondReview = commands;
+      if (revisit && reviews < 3) return { dialogue: reply(r, 'answer', {
+        next: { seat: 'codex', action: 'revise', reason: 'Exercise correction restoring the earlier source' } }),
+        usage: { inputTokens: 1, outputTokens: 1 } };
+      return { ...approve(r), usage: { inputTokens: 1, outputTokens: 1 } };
+    },
+    selectChecks: () => ({ identity: 'required-command-set', commands: [] }),
+    runChecks: () => ({ ...opts.capture(), evidence: [], passed: true }),
+    selectMutation: () => ({ identity: observeMutationSource({ cwd: opts.target }).codeIdentity,
+      tests: ['source.js'], policy: 'fixture-real-command' }), observeMutationSource,
+    runMutation: r => runMutate({ target: opts.target, plan: { root: opts.target, target: opts.target, base: 'HEAD', diff: '',
+      statements: [{ id: 'enabled', path: 'source.js', startLine: 1, endLine: 1, lines: [1], content: 'export const enabled = true;', name: 'enabled', functionName: 'module' }],
+      tests: ['source.js'], testsByFile: { 'source.js': ['source.js'] }, changedFiles: ['source.js'] }, effects: r.effects,
+      tests: { command: { bin: process.execPath, args: ['-e', "console.log(require('node:fs').readFileSync('source.js','utf8'))"] } },
+      adapters: { runCommand: (...args) => { commands++; return spawnCapture(...args); } } }),
+    captureMutationEvidence: r => r.effect.effect === 'mutation-write' ? r.result.files.filter(file => !file.missing).map(file =>
+      captureEvidence({ projectId: r.state.projectId, root: r.result.directory, directory: r.evidenceDirectory,
+        evidence: { id: `${r.operationId}-${file.path}`, kind: 'code', projectId: r.state.projectId, claimIds: [],
+          sourceIdentity: r.sources.after.codeIdentity, locator: { path: file.path, line: 1 } } })) : [captureEvidence({ projectId: r.state.projectId, root: r.result.evidence.cwd,
+      directory: r.evidenceDirectory, evidence: { ...r.result.evidence, id: r.operationId, kind: 'command',
+        projectId: r.state.projectId, sourceIdentity: r.result.evidence.codeIdentity, claimIds: [] } })],
+  };
+  const first = await runExecutionDialogue(request);
+  assert.equal(first.approved, true, first.reason);
+  if (revisit) {
+    assert.equal(reviews, 3);
+    assert.equal(commands, commandsAtSecondReview);
+    assert.equal(first.snapshot.entries.filter(entry => entry.kind === 'mutation-analysis').length, 2);
+    assert.equal(new Set(first.snapshot.evidence.map(item => item.id)).size, first.snapshot.evidence.length);
+  }
+  const count = commands;
+  assert.ok(count > 2);
+  session.journal = openDialogueJournal({ directory: opts.directory, runId: opts.runId, projectId: session.snapshot.projectId });
+  const second = await runExecutionDialogue({ ...request, state: first.state });
+  assert.equal(second.approved, true, second.reason);
+  assert.equal(second.mutation?.status, 'completed');
+  assert.equal(second.mutation.result.survivors.length, 1);
+  assert.equal(commands, count);
+  assert.deepEqual(second.resources, first.resources);
+});
 
 function fixture(t) {
   const base = mkdtempSync(join(tmpdir(), 'uro-execution-'));
@@ -222,10 +281,11 @@ for (const tamper of ['journal-rollback', 'context', 'extra', 'lock']) test(`nat
   assert.equal(observations.find(item => !item.purpose)?.usage.inputTokens, 7);
 });
 
-for (const purpose of ['liveness', 'preservation']) test(`native recovered uncertain ${purpose} refuses every new writer and effect`, async t => {
+for (const purpose of ['liveness', 'preservation', 'mutation-analysis', 'mutation-trial-test', 'mutation-survivor', 'mutation-cleanup-command']) test(`native recovered uncertain ${purpose} refuses every new writer and effect`, async t => {
   const opts = fixture(t), session = openPlanningContext({ ...opts, phase: 'execution', tier: 'execution' });
-  session.journal.prepare({ operationId: 'interrupted-auxiliary', seat: purpose === 'liveness' ? 'codex' : 'harness',
-    effect: purpose === 'liveness' ? 'provider' : 'preserve-partial-work', purpose, input: 'saved exact input',
+  const provider = ['liveness', 'mutation-survivor'].includes(purpose);
+  session.journal.prepare({ operationId: 'interrupted-auxiliary', seat: provider ? 'codex' : 'harness',
+    effect: provider ? 'provider' : purpose === 'preservation' ? 'preserve-partial-work' : purpose === 'mutation-analysis' ? purpose : 'mutation-command', purpose, input: 'saved exact input',
     artifactDigest: opts.artifactDigest, contextDigest: session.snapshot.digest, evidenceIds: [], unreadMessageIds: [], providerOperationId: 'interrupted-writer' });
   session.journal.close();
   session.journal = openDialogueJournal({ directory: opts.directory, runId: opts.runId, projectId: session.snapshot.projectId });
@@ -238,7 +298,8 @@ for (const purpose of ['liveness', 'preservation']) test(`native recovered uncer
   assert.match(result.reason, /uncertain.*replay refused/);
   assert.equal(writes, 0);
   assert.equal(effects, 0);
-  assert.equal(result.checkpointState.supervision.operations[0].status, 'uncertain');
+  const operations = purpose.startsWith('mutation-') ? result.checkpointState.mutation.operations : result.checkpointState.supervision.operations;
+  assert.equal(operations[0].status, 'uncertain');
 });
 
 test('native writer close waits for watchdog preservation before closing its journal', async t => {

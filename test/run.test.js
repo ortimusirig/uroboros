@@ -1,8 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, mkdirSync, rmSync, existsSync, readFileSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, mkdirSync, rmSync, existsSync, readFileSync, realpathSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
 import { parseArgs } from '../src/args.js';
 import {
   DEFAULT_EXECUTOR_EFFORT,
@@ -27,11 +27,12 @@ import {
 import { spawnCapture } from '../src/spawn.js';
 import { exitCodeFor } from '../src/exit.js';
 import { reviewDigest, materializeReviewBundle } from '../src/review.js';
-import { createInspectionReceipt } from '../src/context-evidence.js';
+import { captureEvidence, createInspectionReceipt } from '../src/context-evidence.js';
 import { planningEnvelope, planningApproval } from './fixtures/planning-responses.js';
 import { execFileSync } from 'node:child_process';
 import { deriveMergeContext, MERGE_LEDGER_FILENAME } from '../src/merge.js';
 import { landQueueDiff } from '../src/queue-runtime.js';
+import { isolate } from '../src/isolation.js';
 
 const run = (options) => executeRun(withVerifiedSuperpowers(options));
 
@@ -56,6 +57,291 @@ function nativeFixture(t, name, adapters = {}, gate = []) {
     adapters: { runExecutor: r => { writeFileSync(join(r.cwd, 'completed.txt'), '1'); return { exitCode: 0, changedFiles: ['completed.txt'], usage: { inputTokens: 5, outputTokens: 1 }, dialogue: executionEnvelope(r, r.action) }; },
       runReview: nativeApproval, ...adapters } };
 }
+
+function mutationFixture(t, name) {
+  const options = nativeFixture(t, name);
+  execFileSync('git', ['init', '-q', options.target]);
+  execFileSync('git', ['-C', options.target, 'config', 'core.autocrlf', 'false']);
+  writeFileSync(join(options.target, 'work.js'), 'module.exports = function work() {\n  return 1;\n};\n');
+  writeFileSync(join(options.target, 'work.test.cjs'), "require('./work.js'); console.log('mutation test observed');\n");
+  execFileSync('git', ['-C', options.target, 'add', '.']);
+  execFileSync('git', ['-C', options.target, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.test', 'commit', '-qm', 'mutation fixture']);
+  options.mutation = { concurrency: 1, budget: 1, tests: { command: { bin: process.execPath, args: ['work.test.cjs'] } } };
+  options.adapters.runExecutor = r => {
+    writeFileSync(join(r.cwd, 'work.js'), 'module.exports = function work() {\n  return 2;\n};\n');
+    return { exitCode: 0, usage: { inputTokens: 5, outputTokens: 1 }, dialogue: executionEnvelope(r, r.action) };
+  };
+  options.adapters.runMutationSeat = (bin, args, opts) => spawnCapture(process.execPath, ['-e',
+    `process.stdin.resume(); process.stdin.on('end',()=>{console.log(JSON.stringify({type:'item.completed',item:{type:'agent_message',text:JSON.stringify({verdict:'gap',reasoning:'Surviving deletion deserves review'})}}));console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:2,output_tokens:1}}));});`], opts);
+  return options;
+}
+
+test('native mutation records disposable source evidence and both Codex calls before current approval', async t => {
+  const options = mutationFixture(t, 'native-mutation-complete'); let reviews = 0;
+  options.adapters.runReview = r => {
+    reviews++;
+    const command = r.state.evidence.find(e => e.mutation?.purpose === 'mutation-trial-test');
+    assert.ok(command, 'trial command evidence reaches the actual reviewer');
+    assert.equal(existsSync(command.cwd), false, 'owned trial was removed before review');
+    assert.match(JSON.stringify(command.mutation.sourcesBefore), /uro mutation deleted/);
+    return nativeApproval(r);
+  };
+  const facts = await run(options);
+  assert.equal(facts.approved, true, facts.reason);
+  assert.equal(reviews, 1);
+  assert.equal(facts.mutation.survivors.length, 1);
+  assert.equal(facts.resources.providerLaunches, 4);
+  assert.equal(facts.resources.knownUsage.inputTokens, 12);
+  assert.equal(facts.resources.knownUsage.outputTokens, 5);
+  assert.equal(facts.tokens.total.inputTokens, 12);
+  assert.equal(facts.tokens.total.outputTokens, 5);
+  const events = readFileSync(join(facts.dir, '__uro_dialogue', 'journal.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  const aux = events.filter(e => e.type === 'prepare' && e.purpose?.startsWith('mutation-') && e.effect === 'provider');
+  assert.deepEqual(aux.map(e => [e.seat, e.purpose]), [['codex', 'mutation-grouping'], ['codex', 'mutation-survivor']]);
+  assert.ok(events.some(e => e.type === 'prepare' && e.purpose === 'mutation-deletion'));
+  assert.match(readFileSync(join(facts.dir, 'work.js'), 'utf8'), /return 2/);
+});
+
+test('native mutation denied budget stops before a nested provider and retains analysis intent', async t => {
+  const options = mutationFixture(t, 'native-mutation-budget'); let launches = 0, reviews = 0;
+  options.tokenBudget = 6;
+  options.adapters.runMutationSeat = () => { launches++; throw new Error('unbudgeted mutation launch'); };
+  options.adapters.runReview = () => { reviews++; throw new Error('unapproved mutation review'); };
+  const facts = await run(options);
+  assert.equal(facts.approved, false);
+  assert.match(facts.reason, /budget-exhausted/);
+  assert.equal(launches, 0); assert.equal(reviews, 0);
+  assert.equal(facts.resources.providerLaunches, 1);
+  assert.equal(facts.checkpointState.mutation.analysis.status, 'uncertain');
+  assert.equal(facts.checkpointState.mutation.denials.length, 1);
+});
+
+test('native mutation refuses opaque option and outer adapters before mutation operations', async t => {
+  for (const key of ['runMutation', 'plan', 'effects', 'judge', 'adapters']) {
+    const options = mutationFixture(t, `native-mutation-opaque-${key}`); let launches = 0;
+    options.adapters.runMutationSeat = () => { launches++; throw new Error('unexpected launch'); };
+    if (key === 'runMutation') options.adapters.runMutation = () => { launches++; return {}; };
+    else options.mutation[key] = {};
+    const facts = await run(options);
+    assert.equal(facts.approved, false);
+    assert.match(facts.reason, /native mutation/);
+    assert.equal(launches, 0);
+    assert.equal(facts.checkpointState.mutation.operations.length, 0);
+  }
+});
+
+test('native mutation missing option invokes no auxiliary provider or mutation command', async t => {
+  const options = mutationFixture(t, 'native-mutation-absent'); delete options.mutation;
+  options.adapters.runMutationSeat = options.adapters.runMutationCommand = () => { throw new Error('unexpected optional work'); };
+  const facts = await run(options);
+  assert.equal(facts.approved, true, facts.reason);
+  assert.equal(facts.resources.providerLaunches, 2);
+  assert.equal(facts.mutation, undefined);
+  assert.deepEqual(facts.checkpointState.mutation.operations, []);
+});
+
+test('native mutation required baseline sink failure stops later trials and retains actual command output', async t => {
+  const options = mutationFixture(t, 'native-mutation-sink'); let providers = 0;
+  options.adapters.runMutationSeat = () => { providers++; throw new Error('launch after required sink failure'); };
+  options.adapters.captureEvidence = request => {
+    if (request.evidence.mutation?.purpose === 'mutation-baseline') throw new Error('required baseline sink lost');
+    return captureEvidence(request);
+  };
+  const facts = await run(options);
+  assert.equal(facts.approved, false);
+  assert.match(facts.reason, /required baseline sink lost/);
+  assert.equal(providers, 0);
+  const mutation = facts.checkpointState.mutation;
+  assert.equal(mutation.operations.some(e => e.purpose === 'mutation-workspace-allocation'), false);
+  assert.match(mutation.analysis.error.observation.result.evidence.stdout, /mutation test observed/);
+  assert.equal(mutation.analysis.error.observation.recording, 'unrecorded');
+});
+
+test('native mutation changed outer source cannot durably approve prior required checks', async t => {
+  const options = mutationFixture(t, 'native-mutation-source-change'); let reviews = 0;
+  options.adapters.runMutationCommand = async (bin, args, opts) => {
+    const result = await spawnCapture(bin, args, opts);
+    if (bin === process.execPath && opts.cwd.includes('native-mutation-source-change'))
+      writeFileSync(join(opts.cwd, 'work.js'), 'module.exports = function work() {\n  return 3;\n};\n');
+    return result;
+  };
+  options.adapters.runReview = r => { reviews++; return nativeApproval(r); };
+  const facts = await run(options);
+  assert.equal(facts.approved, false);
+  assert.equal(reviews, 0, 'changed check inputs require reconciliation before current approval');
+  const events = readFileSync(join(facts.dir, '__uro_dialogue', 'journal.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  assert.equal(events.some(e => e.type === 'state' && e.state.approval), false);
+  assert.match(readFileSync(join(facts.dir, 'work.js'), 'utf8'), /return 3/);
+});
+
+test('native mutation unknown grouping usage denies the next survivor provider without losing cleanup', async t => {
+  const options = mutationFixture(t, 'native-mutation-unknown'); let launches = 0;
+  options.tokenBudget = 100;
+  options.adapters.runMutationSeat = (bin, args, opts) => {
+    launches++;
+    return spawnCapture(process.execPath, ['-e', "process.stdin.resume(); process.stdin.on('end',()=>console.log(JSON.stringify({type:'item.completed',item:{type:'agent_message',text:'{}'}})));"] , opts);
+  };
+  const facts = await run(options);
+  assert.equal(facts.approved, false);
+  assert.match(facts.reason, /accounting-incomplete/);
+  assert.equal(launches, 1);
+  assert.equal(facts.resources.providerLaunches, 2);
+  assert.equal(facts.resources.usageUnknown, true);
+  const mutation = facts.checkpointState.mutation;
+  const cleanup = mutation.operations.find(e => e.purpose === 'mutation-parent-cleanup');
+  assert.equal(cleanup.status, 'completed');
+  assert.equal(existsSync(cleanup.result.parent), false);
+});
+
+test('native mutation concurrent trial sink failure retains every cleanup and forbids further paid work', async t => {
+  const options = mutationFixture(t, 'native-mutation-concurrent');
+  let failed = false, laterCommands = 0;
+  options.mutation.budget = 2; options.mutation.concurrency = 2;
+  options.adapters.runExecutor = r => {
+    writeFileSync(join(r.cwd, 'work.js'), 'module.exports = function first() {\n  return 2;\n};\nfunction second() {\n  return 3;\n}\n');
+    return { exitCode: 0, usage: { inputTokens: 5, outputTokens: 1 }, dialogue: executionEnvelope(r, r.action) };
+  };
+  options.adapters.captureEvidence = request => {
+    if (request.evidence.mutation?.purpose === 'mutation-trial-test') { failed = true; throw new Error('concurrent trial sink lost'); }
+    return captureEvidence(request);
+  };
+  options.adapters.runMutationCommand = (bin, args, opts) => {
+    if (failed && !(bin === 'git' && args.includes('worktree') && args.includes('remove'))) laterCommands++;
+    return spawnCapture(bin, args, opts);
+  };
+  const facts = await run(options);
+  assert.equal(facts.approved, false);
+  assert.match(facts.reason, /concurrent trial sink lost/);
+  const mutation = facts.checkpointState.mutation;
+  assert.equal(mutation.analysis.error.trials.length, 2);
+  const allocated = mutation.operations.filter(e => e.purpose === 'mutation-workspace-allocation');
+  assert.equal(allocated.length, 2);
+  for (const operation of allocated) assert.equal(existsSync(operation.result.parent), false);
+  assert.equal(mutation.operations.filter(e => e.purpose === 'mutation-parent-cleanup' && e.status === 'completed').length, 2);
+  assert.equal(mutation.operations.some(e => e.purpose === 'mutation-survivor'), false);
+  assert.equal(facts.resources.providerLaunches, 2);
+  assert.equal(laterCommands, 0);
+});
+
+for (const scenario of ['none', 'both', 'helper', 'command-missing', 'entry-missing']) test(scenario.endsWith('-missing')
+  ? `native mutation unresolved reviewer support refuses the actual trial command (${scenario})`
+  : `native mutation explicit reviewer helper changes invalidate analysis before current review (${scenario} ignored)`, async t => {
+  const missingAtCommand = scenario.endsWith('-missing'), ignored = missingAtCommand ? 'none' : scenario;
+  const options = mutationFixture(t, `native-mutation-explicit-support-${ignored}`);
+  const entry = '__uro_review/explicit.test.cjs', helper = '__uro_review/helper.cjs';
+  const execute = options.adapters.runExecutor;
+  let outer, reviews = 0, changed = false;
+  mkdirSync(join(options.target, '__uro_review'), { recursive: true });
+  writeFileSync(join(options.target, entry), "require('../work.js'); require('./helper.cjs');");
+  if (ignored === 'none') writeFileSync(join(options.target, helper), "module.exports='before';");
+  else writeFileSync(join(options.target, '.gitignore'), `${ignored === 'both' ? `${entry}\n` : ''}${helper}\n`);
+  if (ignored !== 'both') execFileSync('git', ['-C', options.target, 'add', '-f', entry]);
+  if (ignored === 'none') execFileSync('git', ['-C', options.target, 'add', '-f', helper]);
+  else execFileSync('git', ['-C', options.target, 'add', '.gitignore']);
+  execFileSync('git', ['-C', options.target, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.test', 'commit', '-qm', 'selected reviewer support']);
+  options.mutation.tests = { files: [entry], command: { bin: process.execPath, args: [entry] } };
+  if (ignored !== 'none') options.adapters.isolate = async request => {
+    const workspace = await isolate(request);
+    mkdirSync(join(workspace.dir, '__uro_review'), { recursive: true });
+    if (ignored === 'both') writeFileSync(join(workspace.dir, entry), "require('../work.js'); require('./helper.cjs');");
+    writeFileSync(join(workspace.dir, helper), "module.exports='before';");
+    assert.equal(execFileSync('git', ['-C', workspace.dir, 'ls-files', '--', helper], { encoding: 'utf8' }), '');
+    assert.equal(execFileSync('git', ['-C', workspace.dir, 'check-ignore', helper], { encoding: 'utf8' }).trim(), helper);
+    if (ignored === 'both') assert.equal(execFileSync('git', ['-C', workspace.dir, 'check-ignore', entry], { encoding: 'utf8' }).trim(), entry);
+    return workspace;
+  };
+  options.adapters.runExecutor = r => {
+    outer = r.cwd;
+    return execute(r);
+  };
+  options.adapters.runReview = r => { reviews++; return nativeApproval(r); };
+  if (missingAtCommand) options.adapters.captureEvidence = request => {
+    const record = captureEvidence(request);
+    if (request.evidence.mutation?.purpose === 'mutation-deletion') rmSync(join(request.root, scenario === 'entry-missing' ? entry : helper));
+    return record;
+  };
+  options.adapters.runMutationCommand = async (bin, args, opts) => {
+    const result = await spawnCapture(bin, args, opts);
+    if (bin === process.execPath && args.includes(entry) && opts.cwd !== outer) {
+      writeFileSync(join(outer, helper), "module.exports='after';");
+      changed = true;
+    }
+    return result;
+  };
+  const facts = await run(options);
+  assert.equal(changed, !missingAtCommand, `actual disposable command launch boundary: ${facts.reason}`);
+  const analysis = facts.checkpointState.mutation.analysis;
+  assert.deepEqual(analysis.selection.resolvedTestSupport.map(file => file.path), [entry, helper, 'work.test.cjs']);
+  assert.equal(analysis.selection.resolvedTestSupport.find(file => file.path === helper).sha256, reviewDigest("module.exports='before';"));
+  const overlay = facts.checkpointState.mutation.operations.find(operation => operation.purpose === 'mutation-overlay');
+  assert.deepEqual(JSON.parse(overlay.input).resolvedTestSupport, analysis.selection.resolvedTestSupport);
+  assert.equal(overlay.result.sourceObservations.before.supportResolution, 'deferred-before-overlay');
+  assert.equal(overlay.result.sourceObservations.after.supportResolution, 'resolved');
+  if (ignored !== 'none') assert.equal(overlay.result.sourceObservations.before.files.find(file => file.path === helper)?.missing, true);
+  assert.equal(facts.approved, false);
+  assert.equal(reviews, 0, 'changed support must be reconciled before current review');
+  assert.match(facts.reason, missingAtCommand ? /unresolved reviewer test support|ENOENT|source is missing/ : /source|check inputs|reconciliation/);
+  if (missingAtCommand) assert.equal(facts.checkpointState.mutation.operations.some(operation => operation.purpose === 'mutation-trial-test'), false);
+});
+
+test('native mutation materialized reviewer bundle preserves verified dynamic support and invalidates prior analysis', async t => {
+  const options = mutationFixture(t, 'native-mutation-review-support'); let reviews = 0;
+  options.gate = [{ bin: process.execPath, args: ['--test'] }];
+  options.adapters.runReview = r => {
+    reviews++;
+    if (reviews === 1) {
+      const response = nativeApproval(r);
+      const bundle = { version: 1, conclusion: 'clean', report: 'Check the current source with its reviewer support.', tests: [
+        { path: 'tests/current.test.cjs', content: "require('../../work.js'); const sibling='./helper.cjs'; require(sibling);" },
+        { path: 'tests/helper.cjs', content: "module.exports='verified dynamic support';" },
+      ] };
+      return { ...response, resultSeen: true, resultUsable: true, materializationDeferred: true,
+        answer: `${JSON.stringify(bundle)}\n<UROBOROS_DIALOGUE>${JSON.stringify(response.dialogue)}</UROBOROS_DIALOGUE>` };
+    }
+    return nativeApproval(r);
+  };
+  const facts = await run(options);
+  assert.equal(facts.approved, true, facts.reason);
+  assert.equal(reviews, 2, 'new required tests require review of the new analysis; no extra clean pass');
+  const operations = facts.checkpointState.mutation.operations;
+  assert.equal(operations.filter(operation => operation.effect === 'mutation-analysis').length, 2);
+  const overlay = operations.filter(operation => operation.purpose === 'mutation-overlay').at(-1);
+  const input = JSON.parse(overlay.input);
+  assert.deepEqual(input.testSupportFiles.map(file => file.path), ['__uro_review/tests/current.test.cjs', '__uro_review/tests/helper.cjs']);
+  const helper = overlay.result.sourceObservations.capturedSources.find(file => file.locator.path.endsWith('/helper.cjs'));
+  assert.equal(readFileSync(helper.capturedPath, 'utf8'), "module.exports='verified dynamic support';");
+  assert.equal(input.files.some(file => file.path.endsWith('manifest.json') || file.path.endsWith('REVIEW.md')), false);
+});
+
+test('native mutation failed owned cleanup retains its real directory registration and command receipt', async t => {
+  const options = mutationFixture(t, 'native-mutation-cleanup-failed'); let facts;
+  options.adapters.runMutationCommand = (bin, args, opts) => bin === 'git' && args.includes('worktree') && args.includes('remove')
+    ? spawnCapture(process.execPath, ['-e', "process.stderr.write('owned cleanup failed'); process.exit(9)"], opts)
+    : spawnCapture(bin, args, opts);
+  try {
+    facts = await run(options);
+    assert.equal(facts.approved, false);
+    const mutation = facts.checkpointState.mutation;
+    const state = mutation.analysis.error.trials[0].state;
+    assert.equal(state.cleanup.status, 'failed');
+    assert.equal(state.cleanup.registration, 'registered');
+    assert.equal(state.cleanup.retained, true);
+    assert.equal(existsSync(state.directory), true);
+    const cleanup = mutation.operations.find(operation => operation.purpose === 'mutation-cleanup-command');
+    assert.equal(cleanup.status, 'completed', 'the failed command result was recorded, not successful removal');
+    assert.equal(cleanup.result.code, 9);
+    assert.match(cleanup.result.stderr, /owned cleanup failed/);
+    assert.equal(mutation.operations.some(operation => operation.purpose === 'mutation-survivor'), false);
+  } finally {
+    for (const trial of facts?.checkpointState?.mutation?.analysis?.error?.trials ?? []) {
+      const state = trial.state;
+      if (state?.cleanup?.retained && dirname(state.parent) === realpathSync.native(tmpdir()) && state.parent.includes('uro-mutate-')) {
+        execFileSync('git', ['-C', facts.dir, 'worktree', 'remove', '--force', state.directory], { stdio: 'pipe', windowsHide: true });
+        rmSync(state.parent, { recursive: true, force: true });
+      }
+    }
+  }
+});
 
 async function nativeMergeFixture(t, name, conflict = false) {
   const options = nativeFixture(t, name);

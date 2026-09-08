@@ -37,6 +37,8 @@ import { run as executeRun } from '../src/run.js';
 import { withVerifiedSuperpowers } from '../fixtures/verified-superpowers.mjs';
 import { spawnCapture } from '../src/spawn.js';
 import { createHash } from 'node:crypto';
+import { createInspectionReceipt } from '../src/context-evidence.js';
+import { runGate } from '../src/gate.js';
 const run = (options) => executeRun(withVerifiedSuperpowers(options));
 
 function statement(id, line, {
@@ -138,6 +140,68 @@ test('mutation observable effects prepare actual disposable writes, commands and
     assert.equal(readFileSync(join(root, 'work.js'), 'utf8'), original);
     assert.equal(existsSync(allocation.input.directory), false);
     assert.equal(result.examined[0].testResult.workspace.cleanup.status, 'completed');
+  });
+});
+
+test('mutation observable overlay excludes live journal appends while retaining selected reviewer test bytes', async () => {
+  await withObservedMutation(async ({ root, plan, effects, events }) => {
+    mkdirSync(join(root, '__uro_dialogue'));
+    writeFileSync(join(root, '__uro_dialogue', 'journal.jsonl'), 'initial journal');
+    mkdirSync(join(root, '__uro_review'));
+    writeFileSync(join(root, '__uro_review', 'selected.test.cjs'), "require('../work.js'); console.log('selected reviewer test ran');");
+    plan.tests = ['__uro_review/selected.test.cjs'];
+    plan.testsByFile['work.js'] = plan.tests;
+    const runEffect = effects.run;
+    effects.run = async request => {
+      if (request.purpose === 'mutation-overlay') writeFileSync(join(root, '__uro_dialogue', 'journal.jsonl'), 'owner appended after intent');
+      if (request.purpose === 'mutation-deletion') {
+        assert.equal(existsSync(join(request.input.directory, '__uro_dialogue', 'journal.jsonl')), false);
+        assert.equal(readFileSync(join(request.input.directory, '__uro_review', 'selected.test.cjs'), 'utf8'), "require('../work.js'); console.log('selected reviewer test ran');");
+      }
+      return runEffect(request);
+    };
+    const result = await runMutate({ plan, effects, tests: { command: { bin: process.execPath, args: ['__uro_review/selected.test.cjs'] } } });
+    assert.equal(result.survivors.length, 1);
+    assert.match(result.examined[0].testResult.stdout, /selected reviewer test ran/);
+    assert.equal(events.find(e => e.purpose === 'mutation-overlay').input.files.some(f => f.path.startsWith('__uro_dialogue/')), false);
+  });
+});
+
+test('mutation observable overlay still refuses source bytes changed after intent', async () => {
+  await withObservedMutation(async ({ root, plan, effects }) => {
+    const runEffect = effects.run;
+    writeFileSync(join(root, 'work.js'), 'module.exports = function work() {\n  return 2;\n};\n');
+    effects.run = async request => {
+      if (request.purpose === 'mutation-overlay') writeFileSync(join(root, 'work.js'), 'unowned post-intent source');
+      return runEffect(request);
+    };
+    await assert.rejects(runMutate({ plan, effects }), /mutation overlay source changed after intent/);
+  });
+});
+
+test('mutation observable selected reviewer test keeps its sibling support module', async () => {
+  await withObservedMutation(async ({ root, plan, effects }) => {
+    mkdirSync(join(root, '__uro_review'));
+    writeFileSync(join(root, '__uro_review', 'selected.test.cjs'), "require('../work.js'); require('./helper.cjs'); console.log('support loaded');");
+    writeFileSync(join(root, '__uro_review', 'helper.cjs'), 'module.exports = true;');
+    plan.tests = ['__uro_review/selected.test.cjs']; plan.testsByFile['work.js'] = plan.tests;
+    const result = await runMutate({ plan, effects, tests: { command: { bin: process.execPath, args: ['__uro_review/selected.test.cjs'] } } });
+    assert.equal(result.baseline.passed, true);
+    assert.equal(result.survivors.length, 1, 'missing support cannot be misclassified as killing a mutant');
+    assert.match(result.examined[0].testResult.stdout, /support loaded/);
+  });
+});
+
+test('mutation observable support inventory rejects stale escaping and nonregular files', async () => {
+  for (const kind of ['stale', 'escape', 'directory', 'metadata']) await withObservedMutation(async ({ root, plan, effects, events }) => {
+    mkdirSync(join(root, '__uro_review', 'tests'), { recursive: true });
+    const path = kind === 'escape' ? '__uro_review/tests/../../work.js' : kind === 'metadata' ? '__uro_review/REVIEW.md' : '__uro_review/tests/helper.cjs';
+    if (kind === 'directory') mkdirSync(join(root, path));
+    else if (kind !== 'escape') writeFileSync(join(root, path), 'module.exports = true;');
+    effects.testSupportFiles = [{ path, sha256: 'not-the-source-digest' }];
+    await assert.rejects(runMutate({ plan, effects, tests: { command: { bin: process.execPath, args: ['check.cjs'] } } }),
+      /support|regular file|unsafe review destination/);
+    assert.equal(events.some(event => event.purpose === 'mutation-deletion'), false);
   });
 });
 
@@ -964,20 +1028,21 @@ test('survivors do not widen a passing gate verdict', async () => {
 });
 
 test('an opted-in passing run records mutation survivors without changing its outcome', async () => {
-  const root = mkdtempSync(join(tmpdir(), 'uro-mutate-run-wiring-'));
+  const scratchBase = process.env.URO_TEST_SCRATCH_ROOT ?? (process.platform === 'win32' ? 'C:/ccc-test' : tmpdir());
+  mkdirSync(scratchBase, { recursive: true });
+  const root = mkdtempSync(join(scratchBase, 'uro-mutate-run-wiring-'));
   const target = join(root, 'target');
-  const isolated = join(root, 'isolated');
   mkdirSync(target, { recursive: true });
-  mkdirSync(isolated, { recursive: true });
   const order = [];
-  const mutation = {
-    status: 'finished',
-    grouping: { method: 'semantic-judge', judged: true },
-    summary: { unitsExamined: 1, survivors: 1, kills: 0, unexamined: 0 },
-    survivors: [{ name: 'unobserved statement' }],
-    kills: [],
-    unexamined: [],
-  };
+  const envelope = (r, action, extra = {}) => ({ schemaVersion: 1, action, artifactDigest: r.state.artifactDigest,
+    contextDigest: r.state.snapshot.digest, replyTo: null, content: 'Review the actual optional measurement',
+    claims: [], issues: [], evidence: [], verifications: [], next: null, ...extra });
+  execFileSync('git', ['init', '-q', target]);
+  execFileSync('git', ['-C', target, 'config', 'core.autocrlf', 'false']);
+  writeFileSync(join(target, 'work.js'), 'module.exports = function work() {\n  return 1;\n};\n');
+  writeFileSync(join(target, 'work.test.cjs'), "require('./work.js'); console.log('real advisory command');");
+  execFileSync('git', ['-C', target, 'add', '.']);
+  execFileSync('git', ['-C', target, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.test', 'commit', '-qm', 'base']);
   try {
     const facts = await run({
       task: 'exercise advisory mutation wiring',
@@ -985,43 +1050,44 @@ test('an opted-in passing run records mutation survivors without changing its ou
       gate: [],
       gateRetries: 0,
       scratchRoot: join(root, 'scratch'),
+      artifactRoot: join(root, 'artifacts'),
       runId: 'mutation-wiring',
-      mutation: true,
+      mode: 'autonomous',
+      mutation: { budget: 1, concurrency: 1, tests: { command: { bin: process.execPath, args: ['work.test.cjs'] } } },
       adapters: {
-        isolate: async () => ({
-          dir: isolated,
-          isRepo: true,
-          baseRef: 'HEAD',
-          baseCommit: 'abc123',
-          branch: 'uro/mutation-wiring',
-        }),
-        runExecutor: async () => {
+        runExecutor: async r => {
           order.push('executor');
-          return { changedFiles: ['src/change.js'], lastMessage: 'implemented change' };
+          writeFileSync(join(r.cwd, 'work.js'), 'module.exports = function work() {\n  return 2;\n};\n');
+          return { exitCode: 0, usage: { inputTokens: 1, outputTokens: 1 }, dialogue: envelope(r, r.action) };
         },
-        runGate: async () => {
+        runGate: async request => {
           order.push('gate');
-          return { passed: true, results: [] };
+          return runGate(request);
         },
-        diffText: async () => 'diff --git a/src/change.js b/src/change.js\n+changed();\n',
-        captureWorktreeSnapshot: async ({ cwd }) => ({ cwd }),
-        restoreWorktreeSnapshot: async () => ({ restoredPaths: [] }),
-        runReview: async ({ cwd }) => {
+        runReview: async r => {
           order.push('reviewer');
-          mkdirSync(join(cwd, '__uro_review'), { recursive: true });
-          writeFileSync(join(cwd, '__uro_review', 'REVIEW.md'), 'Reviewed. No findings.\n');
-          return { conclusion: 'clean', launchFailed: false, timedOut: false };
+          const item = r.state.evidence.find(e => e.id === 'requirement-briefing');
+          const receipt = createInspectionReceipt({ operationId: r.operationId, seat: 'claude', evidence: [item], inspected: true, result: 'read' });
+          assert.ok(r.state.evidence.some(e => e.mutation?.purpose === 'mutation-trial-test'));
+          return { usage: { inputTokens: 1, outputTokens: 1 }, observations: { evidence: [], receipts: [receipt] }, dialogue: envelope(r, 'approve', {
+            claims: [{ id: 'briefing-requirement', kind: 'fact', text: 'Saved briefing is present.', evidenceIds: [item.id] }],
+            verifications: [{ claimId: 'briefing-requirement', evidenceIds: [item.id], inspectionReceiptIds: [receipt.id], result: 'supports', reason: 'Read saved briefing' }] }) };
         },
-        runMutation: async () => {
-          order.push('mutation');
-          return mutation;
+        runMutationSeat: (bin, args, opts) => {
+          if (!order.includes('mutation')) order.push('mutation');
+          return spawnCapture(process.execPath, ['-e', `let input='';process.stdin.on('data',c=>input+=c);process.stdin.on('end',()=>{
+            const value=JSON.parse(input.trim().split('\\n').at(-1));
+            const answer=input.includes('# Mutation grouping judge') ? {units:[{name:'changed return',statementIds:value.statements.map(s=>s.id)}]} : {verdict:'gap',reasoning:'A surviving advisory measurement'};
+            console.log(JSON.stringify({type:'item.completed',item:{type:'agent_message',text:JSON.stringify(answer)}}));
+            console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:1,output_tokens:1}}));});`], opts);
         },
       },
     });
-    assert.deepEqual(order, ['executor', 'gate', 'reviewer', 'mutation']);
+    assert.deepEqual(order, ['executor', 'gate', 'mutation', 'reviewer']);
     assert.equal(facts.outcome, 'review-ready');
-    assert.equal(facts.mutation, mutation);
-    assert.match(readFileSync(join(isolated, 'uro-report.md'), 'utf8'), /Mutation survivors:\*\* 1/);
+    assert.equal(facts.mutation.survivors.length, 1);
+    assert.equal(facts.mutation.grouping.judged, true);
+    assert.match(readFileSync(join(facts.dir, 'uro-report.md'), 'utf8'), /Mutation survivors:\*\* 1/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

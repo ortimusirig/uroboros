@@ -26,6 +26,8 @@ import { buildCodexArgs, parseCodexStream } from './executor.js';
 import { reportEvent } from './events.js';
 import { spawnCapture } from './spawn.js';
 import { createHash, randomUUID } from 'node:crypto';
+import { HARNESS_ARTIFACTS } from './artifacts.js';
+import { assertReviewDestination } from './review.js';
 
 export const DEFAULT_MUTATION_CONCURRENCY = 2;
 export const DEFAULT_MUTATION_BUDGET = 64;
@@ -116,7 +118,7 @@ function mutationEffects(effects) {
         }, cleanup);
     };
   };
-  return { run, commands, check, fail };
+  return { run, commands, check, fail, testSupportFiles: effects.testSupportFiles ?? [] };
 }
 
 function mutationFiles(directory, paths) {
@@ -602,6 +604,50 @@ function resolveImport(from, specifier, existing) {
   return null;
 }
 
+/** Exact selected reviewer code closure; observation grants no copy/evidence authority. */
+export function resolveMutationTestSupport({ root, selectedTests = [], testSupportFiles = [] }) {
+  const support = new Map();
+  for (const file of testSupportFiles) {
+    if (typeof file?.path !== 'string' || !file.path.startsWith('__uro_review/tests/')
+      || file.path.split('/').some(part => !part || part === '.' || part === '..')
+      || typeof file.sha256 !== 'string') throw new Error('invalid verified reviewer test support inventory');
+    assertReviewDestination(root, file.path.slice('__uro_review/'.length));
+    const [observed] = mutationFiles(root, [file.path]);
+    if (observed.sha256 !== file.sha256) throw new Error('verified reviewer test support bytes changed');
+    support.set(file.path, file.sha256);
+  }
+  const selected = unique([...selectedTests, ...support.keys()].map(posixPath));
+  for (let index = 0; index < selected.length; index++) {
+    const current = selected[index];
+    if (current.split('/').some(part => part === '..' || part === '.')) throw new Error('selected mutation test requires a canonical contained path');
+    if (!current.startsWith('__uro_review/')) continue;
+    mutationFiles(root, [current]);
+    if (!sourceExtension(current)) {
+      if (!support.has(current)) throw new Error('unsupported non-code reviewer test support');
+      continue; // The verified bundle inventory, not the JS import parser, supplies these code files.
+    }
+    for (const specifier of importsIn(readFileSync(join(root, current), 'utf8'))) {
+      if (!specifier.startsWith('.')) continue;
+      const base = posixPath(join(dirname(current), specifier));
+      const candidates = [...RESOLVE_EXTENSIONS.map(extension => base + extension),
+        ...RESOLVE_EXTENSIONS.slice(1).map(extension => `${base}/index${extension}`)];
+      const dependency = resolveImport(current, specifier, new Set(candidates.filter(path => existsSync(resolve(root, path)))));
+      if (!dependency) throw new Error(`unresolved reviewer test support: ${current} imports ${specifier}`);
+      mutationFiles(root, [dependency]);
+      if (HARNESS_ARTIFACTS.some(path => path.endsWith('/') ? dependency.startsWith(path) : dependency === path)
+        && !dependency.startsWith('__uro_review/')) throw new Error('reviewer support cannot copy correctness-critical harness files');
+      if (dependency.startsWith('__uro_review/') && !selected.includes(dependency)) selected.push(dependency);
+    }
+  }
+  const files = mutationFiles(root, selected);
+  for (const file of files) {
+    if (file.missing) throw new Error('selected mutation test source is missing');
+    if (HARNESS_ARTIFACTS.some(item => item.endsWith('/') ? file.path.startsWith(item) : file.path === item)
+      && !file.path.startsWith('__uro_review/')) throw new Error('selected mutation test cannot copy correctness-critical harness files');
+  }
+  return { files, testSupportFiles: [...support].map(([path, sha256]) => ({ path, sha256 })) };
+}
+
 export function selectTouchingTests({ root, changedFiles, files = listFiles(root) }) {
   const existing = new Set(files.map(posixPath));
   const dependencies = new Map();
@@ -889,7 +935,8 @@ function overlayChanges(root, workspace, status) {
 }
 
 async function workingTreeChanges(root, options) {
-  const tracked = await git(root, ['diff', '--name-status', '-z', 'HEAD'], options);
+  const scope = options?.excludeHarness ? ['--', '.', ...HARNESS_ARTIFACTS.map(path => `:(exclude)${path}`)] : [];
+  const tracked = await git(root, ['diff', '--name-status', '-z', 'HEAD', ...scope], options);
   const tokens = tracked.split('\0').filter(Boolean);
   const changes = [];
   for (let index = 0; index < tokens.length;) {
@@ -902,7 +949,7 @@ async function workingTreeChanges(root, options) {
       changes.push({ status, path: posixPath(tokens[index++]) });
     }
   }
-  const untracked = await git(root, ['ls-files', '--others', '--exclude-standard', '-z'], options);
+  const untracked = await git(root, ['ls-files', '--others', '--exclude-standard', '-z', ...scope], options);
   for (const path of untracked.split('\0').filter(Boolean)) {
     changes.push({ status: '??', path: posixPath(path) });
   }
@@ -924,8 +971,8 @@ function linkDependencies(root, workspace) {
   return linked;
 }
 
-export async function createMutationWorkspace({ root, signal, runCommand = spawnCapture, effectScope, effectKey }) {
-  if (effectScope) return createObservedMutationWorkspace({ root, signal, runCommand, effectScope, effectKey });
+export async function createMutationWorkspace({ root, signal, runCommand = spawnCapture, effectScope, effectKey, selectedTests }) {
+  if (effectScope) return createObservedMutationWorkspace({ root, signal, runCommand, effectScope, effectKey, selectedTests });
   const parent = mkdtempSync(join(tmpdir(), 'uro-mutate-'));
   const workspace = join(parent, 'w');
   let registered = false;
@@ -976,7 +1023,7 @@ export async function createMutationWorkspace({ root, signal, runCommand = spawn
   }
 }
 
-async function createObservedMutationWorkspace({ root, signal, runCommand, effectScope: scope, effectKey: key }) {
+async function createObservedMutationWorkspace({ root, signal, runCommand, effectScope: scope, effectKey: key, selectedTests = [] }) {
   const tempRoot = realpathSync.native(tmpdir());
   const parent = join(tempRoot, `uro-mutate-${randomUUID()}`), directory = join(parent, 'w');
   let allocated = false, registered = false, registration = 'not-started';
@@ -1024,9 +1071,15 @@ async function createObservedMutationWorkspace({ root, signal, runCommand, effec
     registration = added.code === 0 ? 'registered' : 'uncertain'; registered = added.code === 0;
     if (added.aborted) throw interruptedCommandError('git worktree add', added);
     if (added.code !== 0) throw new Error(`git worktree add failed: ${added.stderr?.trim() || added.code}`);
-    const changes = await workingTreeChanges(root, { signal, runCommand: commands });
+    const changes = await workingTreeChanges(root, { signal, runCommand: commands, excludeHarness: true });
+    const support = resolveMutationTestSupport({ root, selectedTests, testSupportFiles: scope.testSupportFiles });
+    for (const { path } of support.files) {
+      if (!HARNESS_ARTIFACTS.some(item => item.endsWith('/') ? path.startsWith(item) : path === item)) continue;
+      if (!changes.some(change => change.path === path)) changes.push({ status: '??', path });
+    }
     const files = mutationFiles(root, changes.flatMap(change => [change.path, ...(change.oldPath ? [change.oldPath] : [])]));
-    await scope.run(`${key}:overlay`, 'mutation-write', 'mutation-overlay', { root, directory, changes, files }, async () => {
+    await scope.run(`${key}:overlay`, 'mutation-write', 'mutation-overlay', { root, directory, changes, files,
+      selectedTests: [...selectedTests], testSupportFiles: support.testSupportFiles, resolvedTestSupport: support.files }, async () => {
       if (JSON.stringify(mutationFiles(root, files.map(file => file.path))) !== JSON.stringify(files)) throw new Error('mutation overlay source changed after intent');
       mutationFiles(directory, files.map(file => file.path));
       overlayChanges(root, directory, changes);
@@ -1090,7 +1143,8 @@ export async function executeMutationTrial({
   effectKey,
 }) {
   let workspace;
-  try { workspace = await createWorkspace({ root: plan.root, signal, runCommand, effectScope, effectKey }); }
+  try { workspace = await createWorkspace({ root: plan.root, signal, runCommand, effectScope, effectKey,
+    ...(effectScope ? { selectedTests: tests } : {}) }); }
   catch (error) {
     if (error?.aborted !== true || error?.mutationRequired) throw error;
     return interruptedTestResult(error);

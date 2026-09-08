@@ -90,6 +90,8 @@ import { createLivenessJudge } from './liveness-judge.js';
 import {
   createMutationArbiter,
   createMutationJudge,
+  isTestFile,
+  resolveMutationTestSupport,
   runMutate as realMutation,
 } from './mutate.js';
 import {
@@ -929,6 +931,7 @@ export async function run(opts) {
   let gateResult = null;
   let iter;
   let nativeResult = null;
+  let nativeMutationPolicy = null;
   let approvedExecutionPlan = plan;
   const nativeEvidence = [];
   const nativePhases = [];
@@ -1048,8 +1051,67 @@ export async function run(opts) {
     const checkSelection = () => {
       const required = [...commands, ...buildReviewerTestCommands(commands, [...accumulatedReviewTests]),
         ...(merge === undefined ? [] : [testCountFloorCommand(merge.testCounts.required)])];
-      return { identity: contextDigest({ commands: required, policy: 'required-exit-zero',
+      return { identity: contextDigest({ commands: required, policy: 'required-exit-zero', mutation: mutationPolicy,
         reviewerTests: [...accumulatedReviewTests].sort().map(path => ({ path, digest: reviewDigest(readFileSync(join(iso.dir, path))) })) }), commands: required };
+    };
+    const mutationPolicy = opts.mutation === undefined ? null : opts.mutation === true ? {} : opts.mutation;
+    const mutationTestSupport = new Map();
+    const validateMutationPolicy = () => {
+      if (adapters.runMutation !== undefined) throw new Error('native mutation rejects opaque runMutation adapters');
+      if (!mutationPolicy || typeof mutationPolicy !== 'object' || Array.isArray(mutationPolicy)
+        || Object.keys(mutationPolicy).some(key => !['tests', 'dryRun', 'budget', 'concurrency', 'trialTimeoutMs'].includes(key)))
+        throw new Error('native mutation accepts serializable tests/dryRun/budget/concurrency/trialTimeoutMs policy only');
+      const check = value => {
+        if (typeof value === 'function' || typeof value === 'symbol' || typeof value === 'bigint') throw new Error('native mutation policy must be serializable');
+        if (value && typeof value === 'object') for (const item of Object.values(value)) check(item);
+      };
+      check(mutationPolicy);
+      nativeMutationPolicy = structuredClone(mutationPolicy);
+    };
+    const observeMutationSource = ({ cwd, beforeOverlay = false, expectedTestSupport = [] }) => {
+      const root = realpathSync.native(cwd);
+      const listed = execFileSync('git', ['-C', root, 'ls-files', '--cached', '--others', '--exclude-standard', '-z',
+        '--', '.', ...HARNESS_ARTIFACTS.filter(path => path !== '__uro_review/').map(path => `:(exclude)${path}`)], { encoding: 'utf8', windowsHide: true });
+      const explicitTests = mutationPolicy?.tests?.files ?? [];
+      const listedFiles = listed.split('\0').filter(Boolean);
+      // A new trial may contain a tracked entry but not its ignored helper yet.
+      // This before-write snapshot observes bytes, not an executable test closure;
+      // selection, overlay validation, post-write and command observation stay strict.
+      const support = beforeOverlay ? null : resolveMutationTestSupport({ root,
+        selectedTests: [...new Set([...explicitTests, ...accumulatedReviewTests,
+          ...listedFiles.filter(isTestFile)])],
+        testSupportFiles: [...mutationTestSupport].map(([path, sha256]) => ({ path, sha256 })) });
+      const resolvedSupportPaths = new Set(support?.files.map(file => file.path) ?? expectedTestSupport);
+      const files = [...new Set([...listedFiles, ...mutationTestSupport.keys(), ...resolvedSupportPaths,
+        ...explicitTests, ...accumulatedReviewTests])].filter(path => !path.startsWith('__uro_review/')
+        || isTestFile(path) || explicitTests.includes(path) || accumulatedReviewTests.has(path)
+        || mutationTestSupport.has(path) || resolvedSupportPaths.has(path)).sort().map(path => {
+        const file = resolve(root, path), rel = relative(root, file);
+        if (isAbsolute(rel) || rel === '..' || rel.startsWith('..\\') || rel.startsWith('../')) throw new Error('mutation source escapes observed workspace');
+        if (!existsSync(file)) return { path, missing: true };
+        const canonical = realpathSync.native(file), actual = relative(root, canonical);
+        if (isAbsolute(actual) || actual === '..' || actual.startsWith('..\\') || actual.startsWith('../')
+          || !lstatSync(file).isFile() || lstatSync(file).isSymbolicLink()) throw new Error('mutation source requires contained regular files');
+        const bytes = readFileSync(file);
+        return { path, sha256: reviewDigest(bytes),
+          ...(/\.(?:[cm]?js|jsx|tsx?)$/i.test(path) || explicitTests.includes(path) || mutationTestSupport.has(path)
+            ? { encoding: 'base64', bytes: bytes.toString('base64'), text: bytes.toString('utf8') } : {}) };
+      });
+      return { cwd: root, codeIdentity: contextDigest(files.map(({ bytes, text, encoding, ...identity }) => identity)), files,
+        resolvedTestSupport: support?.files ?? null,
+        supportResolution: beforeOverlay ? 'deferred-before-overlay' : 'resolved' };
+    };
+    const selectMutation = () => {
+      validateMutationPolicy();
+      const source = observeMutationSource({ cwd: iso.dir });
+      const selection = { cwd: source.cwd, base: merge?.mergeBase ?? iso.baseCommit,
+        sourceIdentity: source.codeIdentity, policy: structuredClone(mutationPolicy), requiredChecks: checkSelection(),
+        resolvedTestSupport: source.resolvedTestSupport,
+        testSupportFiles: [...mutationTestSupport].sort(([a], [b]) => a.localeCompare(b)).map(([path, sha256]) => {
+          if (reviewDigest(readFileSync(join(iso.dir, path))) !== sha256) throw new Error('verified reviewer test support bytes changed');
+          return { path, sha256 };
+        }) };
+      return { ...selection, identity: contextDigest(selection) };
     };
     const mergeSelection = ({ state }) => {
       if (merge === undefined || state.mergeProgress?.complete || state.executionCycle?.open
@@ -1155,6 +1217,13 @@ export async function run(opts) {
         const artifact = detectReview({ dir: iso.dir, artifact: response.artifact, round: request.state.proposalCycles, diffDigest: reviewDigest(currentDiff) });
         if (!artifact.reviewed) return { ...response, artifactFailed: true, error: 'native review artifact is missing or stale' };
         for (const file of artifact.testFiles ?? []) accumulatedReviewTests.add(file);
+        for (const path of mutationPolicy === null ? [] : response.artifact.testFiles ?? []) {
+          const key = path.replace(/^__uro_review\//, ''), sha256 = response.artifact.files?.[key];
+          if (!path.startsWith('__uro_review/tests/') || path.split('/').some(part => !part || part === '.' || part === '..')
+            || typeof sha256 !== 'string' || reviewDigest(readFileSync(join(iso.dir, path))) !== sha256)
+            return { ...response, artifactFailed: true, error: 'verified reviewer mutation support identity is invalid' };
+          mutationTestSupport.set(path, sha256);
+        }
         if (iterations.length) iterations.at(-1).reviewer = response;
       }
       let envelope;
@@ -1164,9 +1233,6 @@ export async function run(opts) {
         return { ...response, error: 'current required checks are incomplete or failed' };
       }
       if (envelope?.action === 'approve' && merge !== undefined && !request.state.mergeProgress?.complete) return { ...response, error: 'pending merge cannot be approved' };
-      if (envelope?.action === 'approve' && opts.mutation !== undefined) {
-        return { ...response, error: 'WIP mutation effect integration pending' };
-      }
       return response;
     };
     try {
@@ -1182,6 +1248,42 @@ export async function run(opts) {
         limits: { ...(challengeRounds === undefined ? {} : { challenges: challengeRounds }),
           ...(maxDebateRounds === undefined ? {} : { proposalCycles: maxDebateRounds }) },
         execute, discuss: execute, review, completeReview, capture, selectChecks: checkSelection, reviewInstructions: EXECUTION_REVIEW_PROMPT,
+        ...(mutationPolicy === null ? {} : {
+          selectMutation, observeMutationSource,
+          runMutation: request => realMutation({ ...mutationPolicy, target: iso.dir, base: request.selection.base,
+            runId: phase.runId, reporter: eventReporter, effects: { ...request.effects, testSupportFiles: request.selection.testSupportFiles },
+            judge: createMutationJudge({ cwd: iso.dir, env: runEnvironment, ...(adapters.runMutationSeat ? { runSeat: adapters.runMutationSeat } : {}) }),
+            arbiter: createMutationArbiter({ cwd: iso.dir, env: runEnvironment, ...(adapters.runMutationSeat ? { runSeat: adapters.runMutationSeat } : {}) }),
+            adapters: { ...(adapters.runMutationCommand ? { runCommand: adapters.runMutationCommand } : {}) } }),
+          captureMutationEvidence: async request => {
+            if (request.effect.effect === 'mutation-write') {
+              const records = [];
+              for (const file of request.result.files ?? []) {
+                if (file.missing) continue;
+                const record = await (adapters.captureEvidence ?? captureEvidence)({ projectId: request.state.projectId,
+                  root: request.result.directory, directory: request.evidenceDirectory, evidence: {
+                    id: `${request.operationId}-source-${contextDigest(file.path)}`, kind: 'code', required: true,
+                    projectId: request.state.projectId, claimIds: [], sourceIdentity: request.sources.after.codeIdentity,
+                    locator: { path: file.path, line: 1 }, mutation: { purpose: request.effect.purpose,
+                      analysisIdentity: request.effect.input.analysisIdentity, cwd: request.result.directory,
+                      interpretation: 'historical disposable source captured before cleanup; not current outer code evidence' } } });
+                if (record.sourceDigest !== file.sha256 || record.contextIncomplete) throw new Error('mutation source capture differs from observed write');
+                records.push(record);
+              }
+              return records;
+            }
+            const entry = request.result.evidence;
+            const record = await (adapters.captureEvidence ?? captureEvidence)({ projectId: request.state.projectId,
+              root: entry.cwd, directory: request.evidenceDirectory, evidence: { ...entry, id: request.operationId,
+                kind: 'command', required: true, projectId: request.state.projectId, claimIds: [`${request.operationId}-result`],
+                sourceIdentity: entry.codeIdentity, mutation: { purpose: request.effect.purpose, key: request.effect.key,
+                  analysisIdentity: request.effect.input.analysisIdentity, sourcesBefore: request.sources.before,
+                  sourcesAfter: request.sources.after, interpretation: 'observed command in its actual cwd; trial source is historical, not current outer source' } } });
+            if (record.contextIncomplete) throw new Error('required mutation evidence capture is incomplete');
+            nativeEvidence.push(record);
+            return [record];
+          },
+        }),
         selectMerge: mergeSelection, runMerge: runMergeSequence,
         judgeLiveness,
         selectPreservation: async () => ({ cwd: realpathSync.native(iso.dir), baseCommit: merge?.mergeBase ?? iso.baseCommit,
@@ -1203,7 +1305,8 @@ export async function run(opts) {
           recordGateTimeout(gateResult, request.state.proposalCycles, 1);
           if (captured.length !== request.selection.commands.length) throw new Error('required command evidence is incomplete');
           if (iterations.length) iterations.at(-1).gate = gateResult;
-          return { ...await capture(), evidence: captured };
+          return { ...await capture(), evidence: captured,
+            passed: gateResult.results.every(result => result.code === 0 && !result.timedOut) };
         },
         budget: ({ account }) => tokenBudget !== undefined && (prior.usageUnknown || account.usageUnknown) ? { allowed: false, reason: 'accounting-incomplete: unknown provider usage' }
           : tokenBudget !== undefined && prior.knownUsage.inputTokens + prior.knownUsage.outputTokens + account.knownUsage.inputTokens + account.knownUsage.outputTokens >= tokenBudget
@@ -1218,7 +1321,9 @@ export async function run(opts) {
         nativeResult.approved = false; nativeResult.action = 'paused'; nativeResult.reason = 'current required checks are incomplete, stale or failed';
       }
       if (nativeResult.approved && opts.mutation !== undefined) {
-        nativeResult.approved = false; nativeResult.action = 'paused'; nativeResult.reason = 'WIP mutation effect integration pending';
+        if (nativeResult.mutation?.status !== 'completed' || nativeResult.mutation.selection.identity !== selectMutation().identity) {
+          nativeResult.approved = false; nativeResult.action = 'paused'; nativeResult.reason = 'current mutation analysis is incomplete or stale';
+        }
       }
       const parent = completePhase(nativeResult);
       checkChain();
@@ -2138,7 +2243,7 @@ export async function run(opts) {
     verifier: verifierUsage,
     arbiter: arbiterUsage,
     ...(planningUsage.inputTokens || planningUsage.outputTokens ? { planning: planningUsage } : {}),
-    total: addUsage(addUsage(addUsage(executorUsage, verifierUsage), arbiterUsage), planningUsage),
+    total: nativeExecution ? nativeResult.resources.knownUsage : addUsage(addUsage(addUsage(executorUsage, verifierUsage), arbiterUsage), planningUsage),
   };
   const usageConsistency = summarizeUsageConsistency(usageChecks);
   const blockingOccurrences = new Map();
@@ -2207,7 +2312,9 @@ export async function run(opts) {
         : merge.testCounts.source === 'gate-output' ? null : countTestFiles(iso.dir),
     },
   };
-  let mutation = null;
+  let mutation = nativeExecution && nativeResult.mutation?.result ? { ...nativeResult.mutation.result,
+    analysisIdentity: nativeResult.mutation.selection.identity, phaseRunId: nativeResult.checkpointState.runId,
+    resources: nativeResult.checkpointState.mutation.resources } : null;
   if (!nativeExecution && outcome === 'review-ready' && opts.mutation !== undefined) {
     const mutationOptions = opts.mutation === true ? {} : opts.mutation;
     try {
@@ -2312,7 +2419,8 @@ export async function run(opts) {
         observedWorkspace: observedMergeWorkspace, pendingOperation: nativeResult.state?.pendingOperation,
         next: nativeResult.state?.next, executionChecks: nativeResult.state?.executionChecks } }),
       options: { target, scratchRoot, artifactRoot: opts.artifactRoot, baseRef, executorModel, executorEffort, verifierModel,
-        challengeRounds, debateRounds: maxDebateRounds, tokenBudget, pivotCandidates, superpowers },
+        challengeRounds, debateRounds: maxDebateRounds, tokenBudget, pivotCandidates, superpowers,
+        ...(opts.mutation === undefined ? {} : { mutation: nativeMutationPolicy, mutationPolicyValid: nativeMutationPolicy !== null }) },
     };
   }
   if (!nativeExecution && outcome === 'needs-decision') {
