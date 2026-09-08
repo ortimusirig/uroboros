@@ -109,6 +109,7 @@ async function defaultInspect({ requests, seat, operationId, state }) {
 }
 
 export async function runIssueDialogue({ state: initial, journal, seats, renderInput, inspect = defaultInspect, revise, captureExecution,
+  selectChecks, runChecks,
   persist, budget, reporter }) {
   let state = structuredClone(initial);
   const resources = () => { try { return journal.account(); } catch { return state.resources; } };
@@ -207,6 +208,12 @@ export async function runIssueDialogue({ state: initial, journal, seats, renderI
       state.pendingDecision.artifactDigest = state.artifactDigest;
       state.pendingDecision.contextDigest = state.snapshot.digest;
     }
+    if (operation.effect === 'execution-checks') {
+      state.operations[operation.operationId].effect = 'execution-checks';
+      state.executionChecks = { operationId: operation.operationId, checkSetIdentity: operation.selection.identity,
+        inputArtifactDigest: operation.artifactDigest, artifactDigest: state.artifactDigest,
+        contextDigest: state.snapshot.digest };
+    }
     await save();
   };
   try {
@@ -248,6 +255,31 @@ export async function runIssueDialogue({ state: initial, journal, seats, renderI
       }
       if (state.pendingDecision) { await save(); return result(false, 'needs-decision', state.pendingDecision.reason); }
       if (state.terminalAction) { await save(); return result(false, state.terminalAction, state.stopReason); }
+      // Harness commands are a distinct effect, never part of replayable file capture
+      // or provider delivery. A yielded cycle has not reached its check boundary.
+      if (state.phase === 'execution' && !state.executionCycle?.open && state.executionCycle
+        && (!state.pendingOperation || state.pendingOperation.effect === 'execution-checks')) {
+        const selection = state.pendingOperation?.selection
+          ?? (typeof selectChecks === 'function' ? await selectChecks({ state: structuredClone(state) }) : null);
+        if (selection) {
+          if (typeof selection.identity !== 'string' || !selection.identity || typeof runChecks !== 'function') throw new Error('invalid harness execution check selection');
+          const current = state.executionChecks;
+          if (state.pendingOperation || current?.artifactDigest !== state.artifactDigest || current?.checkSetIdentity !== selection.identity) {
+            const pending = state.pendingOperation ?? await prepare({ seat: 'harness', action: 'verify', effect: 'execution-checks',
+              input: JSON.stringify(selection), selection: structuredClone(selection) });
+            let operation = journal.operation(pending.operationId);
+            if (operation.status !== 'completed') {
+              if (operation.status === 'uncertain' || initial.pendingOperation?.operationId === pending.operationId) throw new Error('unknown or uncertain execution checks; automatic replay refused');
+              const output = await runChecks({ state: structuredClone(state), operationId: pending.operationId,
+                selection: structuredClone(selection) });
+              journal.complete({ operationId: pending.operationId, result: output, usage: null, delivery: null });
+              operation = savedOperation(pending);
+            } else operation = savedOperation(pending);
+            await installArtifact(operation, operation.result);
+            continue;
+          }
+        }
+      }
       if (!state.pendingOperation && !mutations.has(state.next?.action)
         && canApproveDialogue({ state, seat: state.reviewer }).approved) { await save(); return result(true, 'complete', 'Current artifact approved'); }
       let pending = state.pendingOperation, operation;

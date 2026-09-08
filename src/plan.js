@@ -13,7 +13,7 @@ import { runExecutor, DEFAULT_EXECUTOR_MODEL, DEFAULT_EXECUTOR_EFFORT } from './
 import { resolveStageTimeouts } from './timeouts.js';
 import { applySuperpowersRequirement, verifySuperpowersSeats } from './superpowers.js';
 import { saveCheckpoint } from './checkpoint.js';
-import { runPlanningDialogue, openPlanningContext, callPlanningPreparation, assertPlanningSidecars } from './planning-dialogue.js';
+import { runPlanningDialogue, openPlanningContext, callPlanningPreparation, assertPlanningSidecars, createPlanningBudgetGuard, contextLifecycle } from './planning-dialogue.js';
 export { parseSeatReview };
 
 export const DEFAULT_PLAN_CANDIDATES = 1;
@@ -448,7 +448,7 @@ export async function runPlanCandidateSet({
   timeoutMs = resolveStageTimeouts().arbiter, executorTimeout = resolveStageTimeouts().executor,
   runId = `plan-candidates-${randomUUID()}`, env = process.env, reporter,
   draft, select, review, priorMessages = [],
-  directory, out, artifactRoot, searchIndex,
+  directory, out, artifactRoot, searchIndex, budget, resourceBudget,
 } = {}) {
   decisionAuthority({ interactionMode, phase: 'planning' });
   if (count === undefined) count = mode === 'fresh' ? DEFAULT_PIVOT_CANDIDATES : DEFAULT_PLAN_CANDIDATES;
@@ -464,7 +464,7 @@ export async function runPlanCandidateSet({
       adapters: draft ? { author: draft, ...(review ? { reviewer: review } : {}) } : {},
       authorPrompt: request => draftingPrompt({ ...common, ...request, round: request.round }), reviewPrompt: reviewSeatPrompt });
     const result = await runPlanningDialogue({ requirements: goal, target,
-      directory: directory ?? join(target, '.uro-tmp', runId), runId, interactionMode, rounds,
+      directory: directory ?? join(target, '.uro-tmp', runId), runId, interactionMode, rounds, budget, resourceBudget,
       context: { failedPlan, previousPlan, ledger, pivot, feedback, priorMessages }, artifactRoot, env, searchIndex, reporter,
       seats: { author: async r => {
         const response = await (draft ?? production.author)({ ...common, ...r, candidateId: candidate.id,
@@ -488,6 +488,8 @@ export async function runPlanCandidateSet({
   const session = openPlanningContext({ requirements: goal, target, directory: directory ?? join(target, '.uro-tmp', runId),
     runId, context: { failedPlan, previousPlan, ledger, pivot, feedback, priorMessages }, artifactRoot, env, searchIndex });
   try {
+  const budgetGuard = createPlanningBudgetGuard({ session, resourceBudget, budget });
+  let budgetPause = null;
   const perspectives = mode === 'fresh' ? FRESH_PERSPECTIVES : INITIAL_PERSPECTIVES;
   const common = { goal, target, round, mode, interactionMode, ledger, failedPlan,
     claudeModel, codexModel, codexEffort, timeoutMs, executorTimeout, runId, env };
@@ -516,7 +518,7 @@ export async function runPlanCandidateSet({
       candidateId: candidate.id, candidateCount: count, perspective: candidate.perspective, ledger, failedPlan });
     let response;
     try {
-      response = await callPlanningPreparation({ session, requirements: goal, input, call: draftCandidate, seat: 'claude', action: 'propose',
+      response = await callPlanningPreparation({ session, requirements: goal, input, call: draftCandidate, seat: 'claude', action: 'propose', budget: budgetGuard,
         previousPreparationOperationId: repairFeedback ? candidate.response.preparationOperationId : undefined,
         request: { ...common, candidateId: candidate.id,
         candidateIndex: candidate.index + 1, candidateCount: count, perspective: candidate.perspective,
@@ -524,6 +526,7 @@ export async function runPlanCandidateSet({
     } catch (error) {
       response = { unavailable: true, error: error instanceof Error ? error.message : String(error) };
     }
+    if (response?.budgetPaused) { budgetPause = response; candidate.preparationPause = response; return; }
     draftingUsage = addUsage(draftingUsage, response?.usage);
     const message = messageFor(response, 'claude', 'author', { candidateId: candidate.id });
     const attempt = { response, message };
@@ -552,22 +555,24 @@ export async function runPlanCandidateSet({
   const candidates = Array.from({ length: count }, (_, index) => ({
     id: `candidate-${index + 1}`, index, perspective: perspectives[index], author: 'claude', attempts: [],
   }));
-  for (const candidate of candidates) await attemptDraft(candidate);
+  for (const candidate of candidates) { await attemptDraft(candidate); if (budgetPause) break; }
   let irreparable = false;
   for (const candidate of candidates) {
+    if (budgetPause) break;
     while (candidate.repairable) {
       const parseError = candidate.attempts.at(-1).parseError;
       roundHistory.push({ round, candidateId: candidate.id, repair: parseError });
       if (++artifactRepairs > MAX_ARTIFACT_REPAIRS) { irreparable = true; break; }
       await attemptDraft(candidate, [parseError, 'Previous delivered response:', candidate.message.content].join('\n'));
+      if (budgetPause) { artifactRepairs--; break; }
     }
     if (irreparable) break;
   }
-  const surviving = candidates.filter(candidate => candidate.gateResult.passed);
+  const surviving = candidates.filter(candidate => candidate.gateResult?.passed);
   let selected = surviving[0], selectionUsage, selection;
   const failure = reason => {
     const resources = session.journal.account(), usage = resources.knownUsage;
-    return { mode, interactionMode, candidates, surviving, selected: null, messages, roundHistory,
+    const result = { mode, interactionMode, candidates, surviving, selected: null, messages, roundHistory,
       exhausted: surviving.length === 0, approved: false, converged: false, approval: null, reason,
       sharedContext: session.snapshot, directory: session.directory, resources,
       tokens: { total: usage, usageUnknown: resources.usageUnknown }, checkpointState: {
@@ -577,7 +582,23 @@ export async function runPlanCandidateSet({
         artifactRepairs, roundsLimit: rounds ?? null,
         candidateState: { mode, selectedCandidateId: null, candidates, selection },
       } };
+    if (budgetPause) {
+      result.action = 'paused';
+      result.exhausted = true;
+      const tail = session.journal.read().at(-1);
+      Object.assign(result.checkpointState, { directory: session.directory, artifactRoot: session.artifactRoot,
+        resourceBudget: session.resourceBudget, technicalPause: { reason },
+        preparationState: session.journal.read().findLast(event => event.type === 'preparation-paused')?.state ?? null,
+        journalIdentity: tail ? { sequence: tail.sequence, hash: tail.hash } : null });
+      contextLifecycle.checkContext(session);
+      session.journal.close();
+      result.planningArtifacts = contextLifecycle.manifest({ directory: session.directory, runId,
+        contextDigest: session.snapshot.digest, registeredPaths: session.ownedFiles.keys() });
+      result.checkpointState.planningArtifacts = result.planningArtifacts;
+    }
+    return result;
   };
+  if (budgetPause) return failure(budgetPause.reason);
   if (irreparable) return failure('proposal-irreparable');
   if (!surviving.length) return failure('author-unavailable');
   if (surviving.length > 1) {
@@ -585,11 +606,12 @@ export async function runPlanCandidateSet({
     if (!choose) return failure('reviewer-unavailable');
     let answer;
     try {
-      answer = await callPlanningPreparation({ session, requirements: goal, call: choose, seat: 'codex', action: 'verify',
+      answer = await callPlanningPreparation({ session, requirements: goal, call: choose, seat: 'codex', action: 'verify', budget: budgetGuard,
         request: { ...common, candidates: surviving }, input: selectionPrompt({ candidates: surviving, ledger, failedPlan }) });
     } catch (error) {
       answer = { unavailable: true, error: error instanceof Error ? error.message : String(error) };
     }
+    if (answer?.budgetPaused) { budgetPause = answer; return failure(answer.reason); }
     selectionUsage = answer?.usage;
     selection = answer;
     const selectionMessage = messageFor(answer, 'codex', 'reviewer', { kind: 'candidate-selection' });
@@ -607,7 +629,7 @@ export async function runPlanCandidateSet({
   });
   const result = await runPlanningDialogue({
     runId, reporter, tier: 'plan', interactionMode, requirements: goal, rounds,
-    session, target, directory: session.directory,
+    session, target, directory: session.directory, budget, resourceBudget,
     prelude: { proposal: { plan: selected.plan, gate: selected.gate }, artifactRepairs,
       preparationOperationId: selected.response.preparationOperationId, selectionOperationId: selection?.preparationOperationId },
     seats: {

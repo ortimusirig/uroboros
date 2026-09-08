@@ -81,6 +81,55 @@ test('failed retained execution capture pauses without another provider or repea
   assert.equal(result.state.pendingOperation.effect, 'capture-execution');
 });
 
+test('required execution checks run once after completed work and before reviewer evidence', async t => {
+  const { state, journal, root } = setup(t, { phase: 'execution' });
+  state.next = { seat: 'codex', action: 'propose', reason: 'Implement' };
+  const counter = join(root, 'check-count');
+  let segments = 0;
+  const result = await runIssueDialogue({ state, journal, persist: async () => {},
+    captureExecution: ({ state: s }) => ({ artifactDigest: `segment-${segments}`, snapshot: s.snapshot }),
+    selectChecks: () => ({ identity: 'required-check-set-1', commands: ['actual-fixture-command'] }),
+    runChecks: ({ state: s }) => {
+      writeFileSync(counter, String(Number(existsSync(counter) ? readFileSync(counter, 'utf8') : 0) + 1));
+      return { artifactDigest: s.artifactDigest, snapshot: s.snapshot, evidence: [] };
+    },
+    seats: {
+      codex: ({ state: s }) => response(envelope(s, ++segments === 1 ? 'ask' : 'propose', { evidence: ['E1'] })),
+      claude: ({ state: s, action }) => {
+        if (action === 'answer') {
+          assert.equal(existsSync(counter), false, 'yielded partial work must not trigger gate commands');
+          return response(envelope(s, 'answer', { next: { seat: 'codex', action: 'propose', reason: 'Finish remaining work' } }));
+        }
+        assert.equal(readFileSync(counter, 'utf8'), '1');
+        if (!Object.values(s.inspectionReceipts).length) return response(envelope(s, 'inspect', { requests: [{ evidenceId: 'E1' }] }));
+        return response(approve(s));
+      },
+    },
+  });
+  assert.equal(result.approved, true, result.reason);
+  assert.equal(readFileSync(counter, 'utf8'), '1');
+  assert.equal(journal.read().filter(e => e.type === 'prepare' && e.effect === 'execution-checks').length, 1);
+  assert.equal(result.state.proposalCycles, 1);
+});
+
+test('failed required execution check capture pauses before any next seat', async t => {
+  const { state, journal, root } = setup(t, { phase: 'execution' });
+  state.next = { seat: 'codex', action: 'propose', reason: 'Implement' };
+  let reviews = 0;
+  const result = await runIssueDialogue({ state, journal, persist: async () => {},
+    captureExecution: ({ state: s }) => ({ artifactDigest: 'retained', snapshot: s.snapshot }),
+    selectChecks: () => ({ identity: 'check-set', commands: ['check'] }),
+    runChecks: () => { writeFileSync(join(root, 'checked'), '1'); throw new Error('required sink unavailable'); },
+    seats: { codex: ({ state: s }) => response(envelope(s, 'propose')),
+      claude: () => { reviews++; throw new Error('review should not run'); } },
+  });
+  assert.equal(result.action, 'paused');
+  assert.match(result.reason, /required sink unavailable/);
+  assert.equal(reviews, 0);
+  assert.equal(result.state.pendingOperation.effect, 'execution-checks');
+  assert.equal(readFileSync(join(root, 'checked'), 'utf8'), '1');
+});
+
 test('completed retained capture recovery adopts saved output without replaying code or capture', async t => {
   const { state, journal, root } = setup(t, { phase: 'execution', limits: { rounds: 1 } });
   writeFileSync(join(root, 'counter'), '1');
@@ -106,6 +155,64 @@ test('completed retained capture recovery adopts saved output without replaying 
   assert.equal(result.state.executionCycle.open, false);
   assert.equal(result.resources.providerLaunches, 3);
   assert.equal(readFileSync(join(root, 'counter'), 'utf8'), '1');
+});
+
+for (const completed of [true, false]) test(`${completed ? 'completed' : 'uncertain'} execution check recovery never repeats its command`, async t => {
+  const { state, journal, root } = setup(t, { phase: 'execution' });
+  const counter = join(root, 'check-counter');
+  writeFileSync(counter, '1');
+  state.executionCycle = { id: 'cycle-1', cycle: 1, action: 'propose', open: false, completedOperationIds: ['executor-1'] };
+  state.proposalCycles = 1;
+  state.pendingOperation = { operationId: 'check-1', seat: 'harness', action: 'verify', effect: 'execution-checks',
+    selection: { identity: 'required-check-set', commands: ['fixture-command'] } };
+  journal.prepare({ ...state.pendingOperation, artifactDigest: state.artifactDigest, contextDigest: state.snapshot.digest,
+    evidenceIds: ['E1'], unreadMessageIds: [], input: 'Run required checks' });
+  if (completed) journal.complete({ operationId: 'check-1', result: { artifactDigest: 'post-command-bytes', snapshot: state.snapshot } });
+  const result = await runIssueDialogue({ state, journal, persist: async () => {},
+    selectChecks: () => state.pendingOperation.selection,
+    runChecks: () => assert.fail('saved command must not be repeated'),
+    seats: { claude: ({ state: s }) => {
+      assert.equal(s.artifactDigest, 'post-command-bytes');
+      return Object.keys(s.inspectionReceipts).length ? response(approve(s))
+        : response(envelope(s, 'inspect', { requests: [{ evidenceId: 'E1' }] }));
+    } },
+  });
+  assert.equal(readFileSync(counter, 'utf8'), '1');
+  assert.equal(result.approved, completed, result.reason);
+  assert.equal(result.state.proposalCycles, 1);
+  if (completed) {
+    assert.equal(result.state.executionChecks.inputArtifactDigest, state.artifactDigest);
+    assert.equal(result.state.executionChecks.artifactDigest, 'post-command-bytes');
+    assert.equal(result.resources.providerLaunches, 2, 'only the actual reviewer calls count as inference');
+  } else assert.match(result.reason, /uncertain execution checks/);
+});
+
+test('reviewer check-set changes invalidate previous approval before accepting new evidence', async t => {
+  const { state, journal, root } = setup(t, { phase: 'execution' });
+  state.next = { seat: 'codex', action: 'propose', reason: 'Implement' };
+  let checkSet = 'initial-checks', runs = 0, approvals = 0;
+  const result = await runIssueDialogue({ state, journal, persist: async () => {},
+    captureExecution: ({ state: s }) => ({ artifactDigest: 'implemented', snapshot: s.snapshot }),
+    selectChecks: () => ({ identity: checkSet }),
+    runChecks: ({ state: s }) => {
+      runs++;
+      writeFileSync(join(root, 'checks'), String(runs));
+      return { artifactDigest: s.artifactDigest, snapshot: extendSharedContext({ snapshot: s.snapshot,
+        entries: [{ id: `checks-${runs}`, kind: 'check-evidence', content: String(runs), sourceIdentity: s.artifactDigest,
+          provenance: { origin: 'harness' }, status: 'required' }] }) };
+    }, seats: { codex: ({ state: s }) => response(envelope(s, 'propose')),
+      claude: ({ state: s }) => {
+        if (!Object.keys(s.inspectionReceipts).length) return response(envelope(s, 'inspect', { requests: [{ evidenceId: 'E1' }] }));
+        approvals++;
+        if (approvals === 1) checkSet = 'reviewer-required-checks';
+        else assert.equal(s.approval, null, 'old approval cannot be rebound to new evidence');
+        return response(approve(s));
+      } },
+  });
+  assert.equal(result.approved, true, result.reason);
+  assert.equal(approvals, 2);
+  assert.equal(readFileSync(join(root, 'checks'), 'utf8'), '2');
+  assert.equal(result.state.approval.contextDigest, result.state.snapshot.digest);
 });
 
 test('read-only Codex answer never enters the completed-execution capture seam', async t => {

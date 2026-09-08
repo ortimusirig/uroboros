@@ -8,10 +8,124 @@ import { createInspectionReceipt } from '../src/context-evidence.js';
 import { resumeRun } from '../src/resume.js';
 import { openProjectMemory, resolveProjectIdentity } from '../src/project-memory.js';
 import { captureEvidence } from '../src/context-evidence.js';
-import { assertPlanningSidecars } from '../src/planning-dialogue.js';
+import { assertPlanningSidecars, runPlanningDialogue } from '../src/planning-dialogue.js';
 import { contextDigest, renderSharedContext } from '../src/shared-context.js';
 
 const superpowers = { seats: { claude: { verified: true }, codex: { verified: true } } };
+
+for (const scenario of [
+  { name: 'first draft', count: 2, limit: 10, expected: [] },
+  { name: 'single-candidate review', count: 1, limit: 12, expected: ['draft'] },
+  { name: 'selector', count: 2, limit: 14, expected: ['draft', 'draft'] },
+  { name: 'selected review', count: 2, limit: 16, expected: ['draft', 'draft', 'selector'] },
+  { name: 'protocol repair', count: 2, limit: 12, malformed: 'protocol', expected: ['draft'] },
+  { name: 'artifact repair', count: 2, limit: 14, malformed: 'artifact', expected: ['draft', 'draft'] },
+  { name: 'unknown observed usage', count: 2, limit: 100, unknown: true, expected: ['draft'] },
+]) test(`fresh planning budget pauses before ${scenario.name} without trying another effect`, async t => {
+  const opts = fixture(t), launches = [];
+  const resourceBudget = { tokenBudget: scenario.limit,
+    prior: { knownUsage: { inputTokens: 8, outputTokens: 2 }, usageUnknown: false, providerLaunches: 3 } };
+  const result = await runPlanCandidateSet({ ...opts, directory: opts.out, count: scenario.count, mode: 'fresh', resourceBudget,
+    draft: r => {
+      launches.push(r.action === 'repair' ? 'repair' : 'draft');
+      const usage = scenario.unknown ? null : { inputTokens: 1, outputTokens: 1 };
+      if (launches.length === 1 && scenario.malformed === 'protocol') return { content: 'unreadable', usage };
+      if (launches.length === 1 && scenario.malformed === 'artifact') return { answer: '<PLAN_MD>Missing gate</PLAN_MD>', dialogue: reply(r, 'propose'), usage };
+      return { plan: r.candidateId, gate: [], dialogue: reply(r, 'propose'), usage };
+    },
+    select: r => { launches.push('selector'); return { selectedCandidateId: 'candidate-1', dialogue: reply(r, 'verify'), usage: { inputTokens: 1, outputTokens: 1 } }; },
+    review: r => { launches.push('review'); return approve(r); },
+  });
+  assert.equal(result.approved, false);
+  assert.equal(result.action, 'paused', result.reason);
+  assert.match(result.reason, /budget|unknown usage/);
+  assert.deepEqual(launches, scenario.expected);
+  assert.deepEqual(result.checkpointState.resourceBudget, resourceBudget);
+  assert.equal(result.resources.providerLaunches, launches.length);
+  if (scenario.malformed === 'artifact') {
+    assert.equal(result.checkpointState.artifactRepairs, 0, 'a denied repair consumes no repair launch');
+    assert.equal(result.checkpointState.preparationState.proposalCycles, 1, 'the original allocated candidate cycle remains retained');
+  }
+  const events = readFileSync(join(opts.out, '__uro_dialogue', 'journal.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  assert.ok(events.some(e => e.type === 'budget-check' && e.decision.allowed === false));
+  if (scenario.malformed) assert.deepEqual(events.findLast(e => e.type === 'budget-check').nextAction,
+    { seat: 'claude', action: scenario.malformed === 'protocol' ? 'repair' : 'propose' });
+  assert.ok(result.checkpointState.planningArtifacts, 'paused preparation retains exact sidecar provenance');
+});
+
+test('fresh planning budget keeps prior consumption separate from live preparation and review accounting', async t => {
+  const opts = fixture(t), observed = [], launches = [];
+  const resourceBudget = { tokenBudget: 100, prior: { knownUsage: { inputTokens: 8, outputTokens: 2 }, usageUnknown: false, providerLaunches: 3 } };
+  const result = await runPlanCandidateSet({ ...opts, directory: opts.out, count: 2, resourceBudget,
+    budget: ({ account }) => { observed.push(account.providerLaunches); return { allowed: true }; },
+    draft: r => { launches.push('draft'); return { plan: r.candidateId, gate: [], dialogue: reply(r, 'propose'), usage: { inputTokens: 1, outputTokens: 1 } }; },
+    select: r => { launches.push('selector'); return { selectedCandidateId: 'candidate-1', dialogue: reply(r, 'verify'), usage: { inputTokens: 1, outputTokens: 1 } }; },
+    review: r => { launches.push('review'); return approve(r); },
+  });
+  assert.equal(result.approved, true, result.reason);
+  assert.deepEqual(launches, ['draft', 'draft', 'selector', 'review']);
+  assert.deepEqual(observed, [0, 1, 2, 3], 'the live phase account never resets and never includes prior consumption twice');
+  assert.deepEqual(result.resources.knownUsage, { inputTokens: 6, outputTokens: 4 });
+  assert.deepEqual(result.checkpointState.resourceBudget, resourceBudget);
+});
+
+test('a failed planning budget callback pauses without trying another candidate', async t => {
+  const opts = fixture(t); let guards = 0, launches = 0;
+  const result = await runPlanCandidateSet({ ...opts, directory: opts.out, count: 2,
+    budget: () => { if (++guards === 1) throw new Error('budget authority unavailable'); return { allowed: true }; },
+    draft: r => { launches++; return { plan: r.candidateId, gate: [], dialogue: reply(r, 'propose') }; }, review: approve,
+  });
+  assert.equal(result.action, 'paused', result.reason);
+  assert.match(result.reason, /budget authority unavailable/);
+  assert.equal(guards, 1);
+  assert.equal(launches, 0);
+});
+
+for (const change of [
+  { tokenBudget: Infinity }, { tokenBudget: -1 },
+  { prior: { knownUsage: { inputTokens: -1, outputTokens: 0 }, usageUnknown: false, providerLaunches: 0 } },
+  { prior: { knownUsage: { inputTokens: NaN, outputTokens: 0 }, usageUnknown: false, providerLaunches: 0 } },
+  { prior: { knownUsage: { inputTokens: 0, outputTokens: 0 }, usageUnknown: false, providerLaunches: -1 } },
+]) test('invalid planning resource accounting cannot authorize a provider launch', async t => {
+  const opts = fixture(t); let launches = 0;
+  await assert.rejects(runPlanCandidateSet({ ...opts, directory: opts.out, count: 2,
+    resourceBudget: { tokenBudget: 100, prior: { knownUsage: { inputTokens: 0, outputTokens: 0 }, usageUnknown: false, providerLaunches: 0 }, ...change },
+    draft: () => { launches++; },
+  }), /invalid saved planning resource budget/);
+  assert.equal(launches, 0);
+});
+
+test('same-phase planning continuation refuses a raised saved budget before any new provider', async t => {
+  const opts = fixture(t);
+  const resourceBudget = { tokenBudget: 100, prior: { knownUsage: { inputTokens: 8, outputTokens: 2 }, usageUnknown: false, providerLaunches: 3 } };
+  const pending = await runPlanCandidateSet({ ...opts, directory: opts.out, count: 1, resourceBudget,
+    draft: r => ({ plan: 'Preserve local login', gate: [], dialogue: reply(r, 'propose'), usage: { inputTokens: 1, outputTokens: 1 } }),
+    review: r => ({ dialogue: reply(r, 'decide', { issues: [{ id: 'I1', title: 'Unresolved technical issue', status: 'disputed', blocking: true, claimIds: [] }] }), usage: { inputTokens: 1, outputTokens: 1 } }),
+  });
+  assert.equal(pending.action, 'needs-decision');
+  await assert.rejects(runPlanningDialogue({ requirements: opts.goal, target: opts.target, directory: opts.out,
+    runId: pending.runId, continuation: pending.checkpointState, resourceBudget: { ...resourceBudget, tokenBudget: 200 },
+    seats: { author: () => assert.fail('no new launch'), reviewCodex: () => assert.fail('no new launch') }, strategy: {},
+  }), /saved planning resource budget cannot change/);
+});
+
+test('budget pause after malformed preparation retains the current discovered material identity', async t => {
+  const opts = fixture(t);
+  const result = await runPlanCandidateSet({ ...opts, directory: opts.out, count: 2,
+    budget: ({ account }) => ({ allowed: account.providerLaunches === 0, reason: 'budget-exhausted' }),
+    draft: r => {
+      const evidence = captureEvidence({ projectId: r.state.projectId, root: opts.target, directory: join(opts.out, '__uro_evidence'),
+        evidence: { id: 'discovered-before-budget', kind: 'code', projectId: r.state.projectId, claimIds: [],
+          locator: { path: 'source.js', line: 1 }, sourceIdentity: r.state.snapshot.sourceRevision } });
+      return { content: 'malformed preparation with real source observation', observations: { evidence: [evidence],
+        receipts: [createInspectionReceipt({ operationId: r.operationId, seat: 'claude', evidence: [evidence], inspected: true, result: 'read' })] } };
+    },
+  });
+  assert.equal(result.action, 'paused');
+  assert.equal(result.checkpointState.preparationState.snapshot.digest, result.sharedContext.digest);
+  assert.equal(result.resources.providerLaunches, 1);
+  assert.ok(result.sharedContext.evidence.some(e => e.id === 'discovered-before-budget'));
+});
 
 for (const staleRepair of [false, true]) test(`protocol repair prepares current discovered context and preserves original provenance (${staleRepair})`, async t => {
   const opts = fixture(t); let original, repaired, malformed, firstCandidateCalls = 0;

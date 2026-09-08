@@ -155,9 +155,48 @@ function publishPreparationMaterial(session, state) {
   checkContext(session);
 }
 
+/** Frozen prior spend plus this phase's live journal; never roll the same phase into prior. */
+export function createPlanningBudgetGuard({ session, resourceBudget, budget }) {
+  if (resourceBudget !== undefined) {
+    const prior = resourceBudget?.prior;
+    if (!Number.isSafeInteger(resourceBudget?.tokenBudget) || resourceBudget.tokenBudget < 1
+      || !prior || typeof prior.usageUnknown !== 'boolean'
+      || !Number.isSafeInteger(prior.providerLaunches) || prior.providerLaunches < 0
+      || !['inputTokens', 'outputTokens'].every(key => Number.isSafeInteger(prior.knownUsage?.[key]) && prior.knownUsage[key] >= 0)) {
+      throw new Error('invalid saved planning resource budget');
+    }
+    if (session.resourceBudget && JSON.stringify(session.resourceBudget) !== JSON.stringify(resourceBudget)) throw new Error('saved planning resource budget cannot change');
+    session.resourceBudget ??= structuredClone(resourceBudget);
+  }
+  if (!session.resourceBudget && typeof budget !== 'function') return undefined;
+  return async request => {
+    const account = session.journal.account();
+    const saved = session.resourceBudget;
+    const consumed = saved ? {
+      inputTokens: saved.prior.knownUsage.inputTokens + account.knownUsage.inputTokens,
+      outputTokens: saved.prior.knownUsage.outputTokens + account.knownUsage.outputTokens,
+      providerLaunches: saved.prior.providerLaunches + account.providerLaunches,
+      usageUnknown: saved.prior.usageUnknown || account.usageUnknown,
+    } : null;
+    let decision = consumed?.usageUnknown ? { allowed: false, reason: 'accounting-incomplete: unknown usage under enforced budget' }
+      : consumed && consumed.inputTokens + consumed.outputTokens >= saved.tokenBudget
+        ? { allowed: false, reason: 'budget-exhausted: token budget reached' } : { allowed: true };
+    if (decision.allowed && typeof budget === 'function') {
+      try {
+        const additional = await budget({ ...request, account: structuredClone(account) });
+        if (additional?.allowed !== true) decision = { allowed: false, reason: additional?.reason ?? 'budget-exhausted: caller resource guard denied launch' };
+      } catch (error) { decision = { allowed: false, reason: `accounting-incomplete: ${error.message}` }; }
+    }
+    session.journal.append({ type: 'budget-check', nextAction: request.nextAction,
+      resourceBudget: saved ?? null, account, consumed, decision });
+    return decision;
+  };
+}
+
 /** Alternatives are independent proposals, with serialized, accounted preparation calls. */
-export async function callPlanningPreparation({ session, requirements, input, call, seat, action, request = {}, previousPreparationOperationId }) {
+export async function callPlanningPreparation({ session, requirements, input, call, seat, action, request = {}, previousPreparationOperationId, budget }) {
   checkContext(session);
+  let allocatedRepairCycle = null;
   let state = createDialogueState({ runId: session.snapshot.runId, projectId: session.project.projectId,
     phase: 'planning', interactionMode: request.interactionMode, snapshot: session.snapshot,
     artifactDigest: contextDigest({ requirements, proposal: null }),
@@ -169,14 +208,28 @@ export async function callPlanningPreparation({ session, requirements, input, ca
     state.snapshot = session.snapshot;
     state.evidence = structuredClone(session.snapshot.evidence);
     state.pendingArtifact = null; state.pendingOperation = null;
+    allocatedRepairCycle = state.proposalCycles;
     state.proposalCycles--; // Known artifact-format repair reuses the allocated proposal cycle.
   }
   state.messages = structuredClone(session.preparationMessages);
   let failedResponse, repairOf;
   for (let attempt = 0; attempt < 2; attempt++) {
+    // Capture the current published material even if this attempted dispatch is denied.
+    state.snapshot = structuredClone(session.snapshot);
+    if (budget) {
+      const decision = await budget({ state: structuredClone(state), account: session.journal.account(),
+        nextAction: { seat, action: attempt ? 'repair' : action } });
+      if (decision?.allowed !== true) {
+        if (allocatedRepairCycle !== null) state.proposalCycles = allocatedRepairCycle;
+        state.technicalPause = { reason: decision?.reason ?? 'budget-exhausted' };
+        state.resourceBudget = session.resourceBudget;
+        session.journal.append({ type: 'preparation-paused', candidateId: request.candidateId ?? null, state,
+          ...(repairOf ? { repairOf } : {}), ...(previousPreparationOperationId ? { previousPreparationOperationId } : {}) });
+        return { budgetPaused: true, reason: state.technicalPause.reason };
+      }
+    }
     // A completed malformed response may have published authenticated material.
     // The new operation uses that current context; the old input remains history.
-    state.snapshot = structuredClone(session.snapshot);
     const completeInput = [dialoguePromptText(input), renderSharedContext({ snapshot: state.snapshot }),
       'Return one UROBOROS_DIALOGUE JSON envelope beside artifact/selection tags. schemaVersion:1; action:' + action +
         '; replyTo:null; content:explanation; claims:[]; issues:[]; evidence:[]; verifications:[]; next:null.',
@@ -308,7 +361,7 @@ export const contextLifecycle = Object.freeze({ checkContext, registerEvidenceFi
 /** New runs use explicit dialogue; historical runConversation remains a separate reader. */
 export async function runPlanningDialogue({ requirements, target, directory, tier = 'plan', interactionMode = 'manual',
   rounds, runId = `planning-${randomUUID()}`, seats, strategy, reporter, context, artifactRoot, env, searchIndex,
-  session: suppliedSession, continuation, humanRuling, prelude, budget }) {
+  session: suppliedSession, continuation, humanRuling, prelude, budget, resourceBudget }) {
   const session = suppliedSession ?? (continuation ? reopenPlanningContext({ continuation, target, directory })
     : openPlanningContext({ requirements, target, directory, runId, tier, context, artifactRoot, env, searchIndex }));
   let proposal = prelude?.proposal ?? continuation?.proposal ?? null;
@@ -333,6 +386,11 @@ export async function runPlanningDialogue({ requirements, target, directory, tie
     ...(seat === 'claude' ? strategy.draftRequest?.({}) : {}),
   });
   try {
+    if (continuation?.resourceBudget && resourceBudget !== undefined
+      && JSON.stringify(continuation.resourceBudget) !== JSON.stringify(resourceBudget)) throw new Error('saved planning resource budget cannot change');
+    const budgetGuard = createPlanningBudgetGuard({ session,
+      resourceBudget: continuation?.resourceBudget ?? resourceBudget, budget });
+    if (session.resourceBudget) state.resourceBudget = structuredClone(session.resourceBudget);
     let humanAction = null;
     if (humanRuling) {
       if (state.interactionMode !== 'manual' || !state.pendingDecision || !humanRuling.decisionId) throw new Error('human ruling has no current manual decision');
@@ -351,7 +409,7 @@ export async function runPlanningDialogue({ requirements, target, directory, tie
     }
     const result = humanAction ? { state, approved: humanAction === 'approve', action: humanAction === 'approve' ? 'complete' : 'stop',
       reason: state.messages.at(-1).content, messages: state.messages, rounds: state.proposalCycles, resources: session.journal.account() }
-      : await runIssueDialogue({ state, journal: session.journal, budget,
+      : await runIssueDialogue({ state, journal: session.journal, budget: budgetGuard,
       seats: Object.fromEntries([['claude', seats.author], ['codex', seats.reviewCodex]].map(([seat, call]) => [seat, async request => {
         checkContext(session);
         const response = await call(requestFor({ ...request, seat }));
@@ -417,6 +475,7 @@ export async function runPlanningDialogue({ requirements, target, directory, tie
       dialogue: state, directory, roundsLimit: rounds ?? null, pendingDecision,
       messages, artifactRepairs: state.artifactRepairs ?? 0, roundHistory: [], memoryDirectory: session.memory.directory, artifactRoot: session.artifactRoot,
       journalIdentity: { sequence: tail.sequence, hash: tail.hash }, recall: session.recall,
+      ...(session.resourceBudget ? { resourceBudget: structuredClone(session.resourceBudget) } : {}),
       ...(continuation?.candidateState ? { candidateState: continuation.candidateState } : {}) };
     // The live journal owner must never be archived or retained as a stale controller lock.
     const resources = session.journal.account();

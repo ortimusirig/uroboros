@@ -5,8 +5,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { runExecutionDialogue } from '../src/execution-dialogue.js';
-import { createInspectionReceipt } from '../src/context-evidence.js';
+import { captureEvidence, createInspectionReceipt } from '../src/context-evidence.js';
 import { openProjectMemory, resolveProjectIdentity } from '../src/project-memory.js';
+import { runGate } from '../src/gate.js';
 
 function fixture(t) {
   const base = mkdtempSync(join(tmpdir(), 'uro-execution-'));
@@ -57,14 +58,22 @@ test('real execution entry recalls notebook and promotes supported execution mem
 
 test('execution explanation is read-only and does not start another coding step', async t => {
   const opts = fixture(t); let coding = 0, reviews = 0;
+  mkdirSync(join(opts.target, '__uro_review'));
+  const retainedReview = join(opts.target, '__uro_review', 'review-test.js');
+  writeFileSync(retainedReview, 'reviewer-owned evidence');
   const result = await runExecutionDialogue({ ...opts,
     execute: r => { coding++; writeFileSync(join(opts.target, 'counter'), '1'); return { dialogue: reply(r, 'propose') }; },
     review: r => ++reviews === 1 ? { dialogue: reply(r, 'ask', { next: { seat: 'codex', action: 'answer', reason: 'Explain the work' } }) } : approve(r),
-    discuss: r => { writeFileSync(join(opts.target, 'source.js'), 'unauthorized explanation write'); return { dialogue: reply(r, 'answer') }; },
+    discuss: r => {
+      writeFileSync(join(opts.target, 'source.js'), 'unauthorized explanation write');
+      writeFileSync(retainedReview, 'unauthorized reviewer evidence write');
+      return { dialogue: reply(r, 'answer') };
+    },
   });
   assert.equal(result.approved, true, result.reason);
   assert.equal(coding, 1);
   assert.equal(readFileSync(join(opts.target, 'source.js'), 'utf8'), 'export const enabled = true;\n');
+  assert.equal(readFileSync(retainedReview, 'utf8'), 'reviewer-owned evidence');
 });
 
 test('omitted challenge control permits more than two cited execution exchanges', async t => {
@@ -166,4 +175,66 @@ test('required context failure surfaces a technical pause without a later review
   assert.equal(reviews, 0);
   assert.equal(readFileSync(join(opts.target, 'counter'), 'utf8'), '1');
   assert.equal(result.checkpointState.executionArtifacts, undefined, 'no usable integrity manifest may be fabricated');
+});
+
+test('execution entry pauses on required command capture failure before review', async t => {
+  const opts = fixture(t); let reviews = 0;
+  const result = await runExecutionDialogue({ ...opts,
+    execute: r => ({ dialogue: reply(r, 'propose') }),
+    selectChecks: () => ({ identity: 'required-gate-1' }),
+    runChecks: () => { writeFileSync(join(opts.target, 'first-check'), '1'); throw new Error('required command capture failed'); },
+    review: r => { reviews++; return approve(r); },
+  });
+  assert.equal(result.action, 'paused');
+  assert.equal(result.approved, false);
+  assert.match(result.reason, /required command capture failed/);
+  assert.equal(reviews, 0);
+  assert.equal(readFileSync(join(opts.target, 'first-check'), 'utf8'), '1');
+  assert.equal(result.checkpointState.dialogue.pendingOperation.effect, 'execution-checks');
+});
+
+test('execution entry delivers complete actual command evidence and post-command bytes before approval', async t => {
+  const opts = fixture(t); let gates = 0;
+  const script = "require('node:fs').writeFileSync('source.js', 'post-command bytes'); process.stdout.write('x'.repeat(16000));";
+  const result = await runExecutionDialogue({ ...opts,
+    execute: r => ({ dialogue: reply(r, 'propose') }),
+    selectChecks: () => ({ identity: 'required-command-set-1', commands: [{ bin: process.execPath, args: ['-e', script] }] }),
+    runChecks: async r => {
+      gates++;
+      const captured = [];
+      await runGate({ commands: r.selection.commands, cwd: opts.target, requiredEvidence: true,
+        codeIdentity: () => readFileSync(join(opts.target, 'source.js'), 'utf8'),
+        onEvidence: entry => {
+          captured.push(captureEvidence({ projectId: r.state.projectId, root: opts.target, directory: r.evidenceDirectory,
+            evidence: { ...entry, id: `command-${r.operationId}`, kind: 'command', projectId: r.state.projectId,
+              claimIds: ['gate-result'], sourceIdentity: entry.codeIdentity } }));
+        },
+      });
+      return { artifactDigest: readFileSync(join(opts.target, 'source.js'), 'utf8'), diff: 'source.js now contains post-command bytes', evidence: captured };
+    },
+    review: r => {
+      assert.equal(r.state.artifactDigest, 'post-command bytes');
+      const command = r.state.evidence.find(e => e.kind === 'command');
+      assert.equal(command.codeIdentity, 'export const enabled = true;\n');
+      assert.deepEqual(command.argv, [process.execPath, '-e', script]);
+      assert.equal(command.cwd, opts.target);
+      assert.equal(command.exitCode, 0);
+      assert.equal(command.stdout.length, 16000);
+      return approve(r);
+    },
+  });
+  assert.equal(result.approved, true, result.reason);
+  assert.equal(gates, 1);
+  assert.equal(result.state.executionChecks.artifactDigest, 'post-command bytes');
+});
+
+test('execution entry cannot approve an unusable terminal review carrying a valid envelope', async t => {
+  const opts = fixture(t);
+  const result = await runExecutionDialogue({ ...opts,
+    execute: r => ({ dialogue: reply(r, 'propose') }),
+    review: r => ({ ...approve(r), resultSeen: false, resultUsable: false, artifactFailed: true }),
+  });
+  assert.equal(result.action, 'paused');
+  assert.equal(result.approved, false);
+  assert.equal(result.state.approval, null);
 });

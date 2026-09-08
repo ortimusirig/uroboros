@@ -7,7 +7,7 @@ import { runProtectedOperation, captureReviewSnapshot, restoreReviewSnapshot } f
 /** Phase adapter; the native dispatcher is the sole dialogue/effect controller. */
 export async function runExecutionDialogue({ state, journal, snapshot, artifactDigest, directory, target,
   requirements, plan = requirements, runId, artifactRoot, interactionMode = 'manual', context = {}, limits = {},
-  execute, review, discuss, inspect, capture, budget, reporter, env, searchIndex, session: suppliedSession }) {
+  execute, review, discuss, inspect, capture, selectChecks, runChecks, budget, reporter, env, searchIndex, session: suppliedSession }) {
   const session = suppliedSession ?? openPlanningContext({ requirements, target, directory, runId,
     artifactRoot, interactionMode, context: { ...context, approvedPlan: plan }, phase: 'execution', tier: 'execution', env, searchIndex });
   journal ??= session.journal;
@@ -25,16 +25,21 @@ export async function runExecutionDialogue({ state, journal, snapshot, artifactD
     const writing = seat === 'codex' && ['propose', 'revise'].includes(request.action);
     const call = writing ? execute : seat === 'claude' ? review : discuss;
     if (typeof call !== 'function') throw new Error(`missing ${writing ? 'execution' : seat + ' discussion'} transport`);
+    const invoke = () => call({ ...request, seat, dialogueMode: true, plan, cwd: target,
+      remainingWork: Boolean(request.state.executionCycle?.open && request.state.executionCycle.completedOperationIds?.length) });
     const protectedResult = await runProtectedOperation({ cwd: target, scope: writing ? 'inside' : 'outside',
       prefix: '__uro_review', stage: 'execution-dialogue', role: seat, runId, reporter,
       ...(writing ? { captureSnapshot: captureReviewSnapshot, restoreSnapshot: restoreReviewSnapshot } : {}),
-      operation: () => call({ ...request, seat, dialogueMode: true, plan, cwd: target,
-        remainingWork: Boolean(request.state.executionCycle?.open && request.state.executionCycle.completedOperationIds?.length) }),
+      operation: !writing && seat === 'codex' ? async () => (await runProtectedOperation({
+        cwd: target, scope: 'inside', prefix: '__uro_review', stage: 'execution-dialogue', role: seat, runId, reporter,
+        captureSnapshot: captureReviewSnapshot, restoreSnapshot: restoreReviewSnapshot, operation: invoke,
+      })).result : invoke,
     });
     const response = protectedResult.result;
     const normalized = typeof response === 'string' ? { content: response } : { ...response,
       content: response?.content ?? response?.answer ?? response?.lastMessage ?? '' };
-    if (response?.unavailable || response?.launchFailed || response?.timedOut
+    if (response?.unavailable || response?.launchFailed || response?.timedOut || response?.artifactFailed
+      || response?.resultSeen === false || response?.resultUsable === false
       || (Number.isInteger(response?.exitCode) && response.exitCode !== 0)) normalized.error ??= `${seat} transport unavailable`;
     const observed = structuredClone(request.state);
     registerObservations(observed, { operationId: request.operationId, seat, effect: 'provider' }, normalized.observations);
@@ -42,9 +47,26 @@ export async function runExecutionDialogue({ state, journal, snapshot, artifactD
     contextLifecycle.checkContext(session);
     return normalized;
   };
+  const observedSnapshot = (request, observed, kind) => {
+    if (!observed?.artifactDigest || typeof observed.diff !== 'string') throw new Error('actual retained artifact and diff required');
+    const snapshot = extendSharedContext({ snapshot: request.state.snapshot,
+      entries: [{ id: `${kind}-${request.operationId}`, kind,
+        content: JSON.stringify({ diff: observed.diff, providerOperationId: request.providerOperationId,
+          artifactDigest: observed.artifactDigest, ...(request.selection ? { selection: request.selection } : {}) }),
+        sourceIdentity: observed.artifactDigest, provenance: { origin: 'harness', operationId: request.operationId }, status: 'required' }],
+      evidence: observed.evidence ?? [] });
+    contextLifecycle.registerEvidenceFiles(session, snapshot.evidence);
+    return { artifactDigest: observed.artifactDigest, snapshot };
+  };
   try {
     const result = await runIssueDialogue({ state, journal, seats: { codex: callSeat('codex'), claude: callSeat('claude') },
       inspect, budget, reporter, persist,
+      selectChecks,
+      runChecks: typeof runChecks === 'function' ? async request => {
+        contextLifecycle.checkContext(session);
+        const observed = await runChecks({ ...request, evidenceDirectory: session.evidenceDirectory });
+        return observedSnapshot(request, observed, 'execution-checks');
+      } : undefined,
       renderInput: ({ state, seat, action }) => [
         `Approved implementation plan:\n${plan}`, `Requested ${seat} action: ${action}.`,
         'Only an explicitly requested Codex propose/revise operation may change project files. Answers, explanations, challenges, inspections and rebuttals are read-only.',
@@ -56,14 +78,7 @@ export async function runExecutionDialogue({ state, journal, snapshot, artifactD
         contextLifecycle.checkContext(session);
         if (typeof capture !== 'function') throw new Error('actual execution capture required');
         const observed = await capture(request);
-        if (!observed?.artifactDigest || typeof observed.diff !== 'string') throw new Error('actual retained artifact and diff required');
-        const snapshot = extendSharedContext({ snapshot: request.state.snapshot,
-          entries: [{ id: `execution-${request.operationId}`, kind: 'retained-execution',
-            content: JSON.stringify({ diff: observed.diff, providerOperationId: request.providerOperationId, artifactDigest: observed.artifactDigest }),
-            sourceIdentity: observed.artifactDigest, provenance: { origin: 'harness', operationId: request.operationId }, status: 'required' }],
-          evidence: observed.evidence ?? [] });
-        contextLifecycle.registerEvidenceFiles(session, snapshot.evidence);
-        return { artifactDigest: observed.artifactDigest, snapshot };
+        return observedSnapshot(request, observed, 'retained-execution');
       },
     });
     const pause = error => {

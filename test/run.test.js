@@ -27,8 +27,42 @@ import {
 } from '../src/verifier.js';
 import { spawnCapture } from '../src/spawn.js';
 import { exitCodeFor } from '../src/exit.js';
+import { reviewDigest } from '../src/review.js';
 
 const run = (options) => executeRun(withVerifiedSuperpowers(options));
+
+function executionEnvelope(request, action, extra = {}) {
+  return { schemaVersion: 1, action, artifactDigest: request.state.artifactDigest,
+    contextDigest: request.state.snapshot.digest, replyTo: null, content: 'Current execution dialogue',
+    claims: [], issues: [], evidence: [], verifications: [], next: null, ...extra };
+}
+
+test('default run captures partial execution before a human question and launches no gate or reviewer', async t => {
+  const scr = scratch(), target = makeTarget();
+  t.after(() => { rmSync(scr, { recursive: true, force: true }); rmSync(target, { recursive: true, force: true }); });
+  let gates = 0, reviews = 0;
+  const facts = await run({ task: 'Keep the original requirement', target, gate: [], scratchRoot: scr,
+    runId: 'native-human-partial', mode: 'autonomous', adapters: {
+      runExecutor: r => {
+        writeFileSync(join(r.cwd, 'completed.txt'), '1');
+        assert.ok(r.state, 'normal run must deliver the prepared native dialogue request');
+        return { exitCode: 0, changedFiles: ['completed.txt'], dialogue: executionEnvelope(r, 'ask', {
+          evidence: ['requirement-briefing'], issues: [{ id: 'Q1', title: 'Choose the remaining product behavior',
+            kind: 'product', needsHuman: true, blocking: true, status: 'awaiting-answer' }],
+        }) };
+      }, runGate: () => { gates++; }, runReview: () => { reviews++; },
+    },
+  });
+  assert.equal(facts.approved, false);
+  assert.equal(facts.outcome, 'needs-decision');
+  assert.equal(readFileSync(join(facts.dir, 'completed.txt'), 'utf8'), '1');
+  assert.equal(facts.dialogue.pendingDecision.authority, 'human');
+  assert.equal(facts.dialogue.pendingDecision.artifactDigest, reviewDigest(facts.checkpointState.workspace.diff));
+  assert.equal(facts.checkpointState.version, 2);
+  assert.equal(facts.checkpointState.interactionMode, 'autonomous');
+  assert.equal(gates, 0);
+  assert.equal(reviews, 0);
+});
 
 function makeTarget(withFile = true) {
   const d = mkdtempSync(join(tmpdir(), 'tgt-'));
