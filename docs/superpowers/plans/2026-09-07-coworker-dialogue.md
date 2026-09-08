@@ -276,7 +276,7 @@ git commit -m "feat: add durable evidence-led coworker dialogue"
 
 ## Task 3: Shared planning and decomposition conversations
 
-**Files:** Create src/planning-dialogue.js, test/planning-dialogue.test.js. Modify src/plan.js, src/decompose.js, src/conversation.js (compatibility/prompt consistency/rendering), src/args.js (affected defaults/validation), src/run.js (pivot-default import/parameter only), src/executor.js and src/arbiter.js (observed tool receipts), src/review-protection.js and src/isolation.js (context/dialogue sidecar protections/exclusions), src/checkpoint.js and src/resume.js (minimum explicit v2 planning save/load/decision-file bridge only), test/plan.test.js, test/decompose.test.js, test/candidate-campaign.test.js, test/events.test.js and the planning portions of test/checkpoint.test.js and test/resume.test.js, plus affected transport/args/protection/isolation and fresh-pivot default tests. Task5 still owns technical continuation, v1 migration, execution/queue recovery and the remaining resume changes; Task4 owns all other execution dialogue changes.
+**Files:** Create src/planning-dialogue.js, test/planning-dialogue.test.js. Modify src/plan.js, src/decompose.js, src/conversation.js (compatibility/prompt consistency/rendering), src/args.js (affected defaults/validation), src/run.js (pivot-default import/parameter only), src/executor.js and src/arbiter.js (observed tool receipts), src/review-protection.js and src/isolation.js (context/dialogue sidecar protections/exclusions), src/checkpoint.js and src/resume.js as needed (minimum explicit v2 planning save/load/decision-file bridge only), test/plan.test.js, test/decompose.test.js, test/events.test.js and the planning portions of test/resume.test.js, plus affected transport/args/protection/isolation and fresh-pivot default tests. New alternative/v2 behavioral coverage may live in test/planning-dialogue.test.js and test/resume.test.js; preserve and run the existing candidate-campaign/checkpoint/conversation compatibility tests without requiring cosmetic edits. Task5 still owns technical continuation, v1 migration, execution/queue recovery and the remaining resume changes; Task4 owns all other execution dialogue changes.
 
 **Interfaces:** Consumes Tasks 1-2; produces runPlanningDialogue and existing runPlan/runPlanCandidateSet/decompose results plus sharedContext/dialogue/resources. Existing integer rounds, artifact validators/writer, output paths and legacy readers preserved.
 
@@ -342,6 +342,8 @@ Before commit explicitly git add each changed path from this task Files list. Re
 **Files:** Create src/execution-dialogue.js, test/execution-dialogue.test.js. Modify src/run.js, src/executor.js, src/verifier.js, src/review.js, src/evidence.js, src/gate.js, src/decision-resolver.js only at dialogue seams. Extend test/run.test.js, test/review-loop.test.js, test/reviewer-gate.test.js, test/gate.test.js, test/fresh-pivot.test.js, test/claude-review-transport.test.js.
 
 **Interfaces:** Consumes approved planning context/history/resources; produces runExecutionDialogue and serializable execution continuation. Existing landing and human authority remain.
+
+Task4 also owns the existing CLI fake paths fixtures/fake-codex.mjs, fixtures/fake-agent.mjs and test/cli.test.js for explicit/context-aware new-mode responses. Existing version1 review bundles are not dialogue envelopes. Preserve explicit historical-reader fixture modes; no injected-adapter or malformed-response legacy fallback. Reuse task-4-execution-fixture-map.md for actual helper/call-count boundaries.
 
 - [ ] **Step 1: Write RED using real retained files and fake seat transports.**
 ~~~js
@@ -443,6 +445,8 @@ git commit -m "feat: preserve coworker context across queues and safe resume"
 ## Task 6: Reports, instructions and final integrated acceptance
 
 **Files:** Create src/dialogue-report.js, test/dialogue-report.test.js, docs/guides/coworker-dialogue.md. Modify src/report.js, src/dashboard-transcript.js, src/run-journal.js, src/cli-help.js, README.md, commands/resume.md, docs/guides/usage.md and skills/uroboros/SKILL.md. Update affected rendering/packaging/help tests. Do not reorganize runtime paths or regenerate architecture HTML.
+
+Task6 owns the deferred Task3 compatible-transcript stance correction in src/planning-dialogue.js and its focused rendering regression: questions/rebuttals/unreadable replies must not default to agreement. Derive display status from validated explicit action; conversation-only turns remain neutral. This is reporting projection, not new approval authority; retain the legacy reader contract.
 
 **Interfaces:** Consumes stored snapshots, issue/message/disposition history, actual delivery/inspection receipts and resource accounts. Produces existing Markdown/HTML report projections, not a new dashboard.
 
