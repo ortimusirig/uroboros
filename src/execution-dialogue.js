@@ -8,7 +8,7 @@ import { detectReview } from './review.js';
 /** Phase adapter; the native dispatcher is the sole dialogue/effect controller. */
 export async function runExecutionDialogue({ state, journal, snapshot, artifactDigest, directory, target,
   requirements, plan = requirements, runId, artifactRoot, interactionMode = 'manual', context = {}, limits = {},
-  execute, review, discuss, inspect, capture, selectChecks, runChecks, budget, reporter, env, searchIndex, reviewInstructions = '', session: suppliedSession }) {
+  execute, review, completeReview, discuss, inspect, capture, selectChecks, runChecks, budget, reporter, env, searchIndex, reviewInstructions = '', session: suppliedSession }) {
   const session = suppliedSession ?? openPlanningContext({ requirements, target, directory, runId,
     artifactRoot, interactionMode, context: { ...context, approvedPlan: plan }, phase: 'execution', tier: 'execution', env, searchIndex });
   journal ??= session.journal;
@@ -24,7 +24,6 @@ export async function runExecutionDialogue({ state, journal, snapshot, artifactD
   const callSeat = seat => async request => {
     contextLifecycle.checkContext(session);
     const writing = seat === 'codex' && ['propose', 'revise'].includes(request.action);
-    const artifactReview = seat === 'claude' && ['verify', 'approve', 'repair'].includes(request.action);
     const call = writing ? execute : seat === 'claude' ? review : discuss;
     if (typeof call !== 'function') throw new Error(`missing ${writing ? 'execution' : seat + ' discussion'} transport`);
     const invoke = () => call({ ...request, seat, dialogueMode: true, plan, cwd: target,
@@ -32,12 +31,17 @@ export async function runExecutionDialogue({ state, journal, snapshot, artifactD
     const protectedResult = await runProtectedOperation({ cwd: target, scope: writing ? 'inside' : 'outside',
       prefix: '__uro_review', stage: 'execution-dialogue', role: seat, runId, reporter,
       ...(writing ? { captureSnapshot: captureReviewSnapshot, restoreSnapshot: restoreReviewSnapshot } : {}),
-      operation: !writing && !artifactReview ? async () => (await runProtectedOperation({
+      operation: !writing ? async () => (await runProtectedOperation({
         cwd: target, scope: 'inside', prefix: '__uro_review', stage: 'execution-dialogue', role: seat, runId, reporter,
         captureSnapshot: captureReviewSnapshot, restoreSnapshot: restoreReviewSnapshot, operation: invoke,
       })).result : invoke,
     });
-    const response = protectedResult.result;
+    let response = protectedResult.result;
+    contextLifecycle.checkContext(session);
+    if (seat === 'claude' && typeof completeReview === 'function') {
+      try { response = await completeReview({ ...request, response, cwd: target }); }
+      catch (error) { response = { ...response, error: error.message }; }
+    }
     const normalized = typeof response === 'string' ? { content: response } : { ...response,
       content: response?.content ?? response?.answer ?? response?.lastMessage ?? '' };
     if (seat === 'claude' && response?.artifact && !detectReview({ dir: target, artifact: response.artifact,

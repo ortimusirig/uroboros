@@ -504,18 +504,34 @@ export async function runReviewPass(options) {
   if (result.launchFailed || !result.resultSeen || !result.resultUsable || !result.answer.trim()) {
     return { ...result, artifact: null, artifactFailed: true };
   }
+  if (dialogueMode && options.deferMaterialization === true) {
+    // The native caller restores provider writes before adopting this saved raw result.
+    // This is not approval: parsing, input binding and bundle validation still follow.
+    return { ...result, artifact: null, artifactFailed: false, materializationDeferred: true };
+  }
+  return completeReviewPass({ result, cwd, round, diffDigest, dialogueMode });
+}
+
+/** Trusted post-protection adoption of one completed transport; launches no provider. */
+export async function completeReviewPass({ result, cwd, round = 1, diffDigest = '', dialogueMode = false, expectedIdentity }) {
+  if (result?.error || result?.launchFailed || result?.timedOut || !result?.resultSeen || !result?.resultUsable
+    || typeof result?.answer !== 'string' || !result.answer.trim()) {
+    return { ...result, artifact: null, artifactFailed: true, materializationDeferred: false };
+  }
   try {
     const dialogue = dialogueMode ? parseDialogueEnvelope({ response: { content: result.answer } }) : null;
+    if (expectedIdentity && (dialogue?.artifactDigest !== expectedIdentity.artifactDigest
+      || dialogue?.contextDigest !== expectedIdentity.contextDigest)) throw new Error('stale native review input identity');
     const bundle = dialogueMode
       ? result.answer.replace(/<UROBOROS_DIALOGUE>[\s\S]*?<\/UROBOROS_DIALOGUE>/, '').trim() : result.answer;
-    if (!bundle && dialogue?.action !== 'approve') return { ...result, dialogue, artifact: null, artifactFailed: false };
+    if (!bundle && dialogue?.action !== 'approve') return { ...result, dialogue, artifact: null, artifactFailed: false, materializationDeferred: false };
     if (dialogue?.action === 'approve' && JSON.parse(bundle.replace(/^```json\s*|\s*```$/g, '')).conclusion !== 'clean') {
       throw new Error('dialogue approval requires a clean current review bundle');
     }
     const artifact = await materializeReviewBundle({ cwd, bundle, round, diffDigest });
-    return { ...result, ...(dialogue ? { dialogue } : {}), artifact, artifactFailed: false };
+    return { ...result, ...(dialogue ? { dialogue } : {}), artifact, artifactFailed: false, materializationDeferred: false };
   } catch (error) {
-    return { ...result, artifact: null, artifactFailed: true,
+    return { ...result, artifact: null, artifactFailed: true, materializationDeferred: false,
       error: error instanceof Error ? error.message : String(error) };
   }
 }

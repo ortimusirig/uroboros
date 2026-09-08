@@ -39,7 +39,7 @@ import { canApproveDialogue, parseDialogueEnvelope } from './dialogue.js';
 import { captureEvidence } from './context-evidence.js';
 import { contextDigest } from './shared-context.js';
 import { contextLifecycle } from './planning-dialogue.js';
-import { EXECUTION_REVIEW_PROMPT } from './verifier.js';
+import { EXECUTION_REVIEW_PROMPT, completeReviewPass } from './verifier.js';
 import { createRunMarker, releaseRunMarker } from './prune.js';
 import { physicalRunIdFor } from './run-id.js';
 import {
@@ -948,12 +948,20 @@ export async function run(opts) {
     };
     const review = async request => {
       if (typeof runReview !== 'function') throw new Error('missing native Claude reviewer transport');
-      const response = await runReview({ ...request, prompt: request.input,
+      const response = await runReview({ ...request, prompt: request.input, deferMaterialization: true,
         originalRequirements: originalPlan, diff: currentDiff, diffDigest: reviewDigest(currentDiff),
         round: request.state.proposalCycles, messages: request.state.messages, evidence: request.state.evidence,
         model: verifierModel, bin: verifierBin, env: runEnvironment, superpowersDir: claudeSuperpowersDir,
         timeoutMs: stageTimeouts.verifier, reporter: eventReporter, runId });
       providerResults.push({ seat: 'claude', operationId: request.operationId, response });
+      return response;
+    };
+    const completeReview = async ({ response: raw, ...request }) => {
+      const response = raw?.materializationDeferred === true ? await completeReviewPass({ result: raw,
+        cwd: iso.dir, round: request.state.proposalCycles, diffDigest: reviewDigest(currentDiff), dialogueMode: true,
+        expectedIdentity: { artifactDigest: request.state.artifactDigest, contextDigest: request.state.snapshot.digest } }) : raw;
+      const observed = providerResults.find(item => item.operationId === request.operationId);
+      if (observed) observed.response = response;
       if (response?.artifact) {
         const artifact = detectReview({ dir: iso.dir, artifact: response.artifact, round: request.state.proposalCycles, diffDigest: reviewDigest(currentDiff) });
         if (!artifact.reviewed) return { ...response, artifactFailed: true, error: 'native review artifact is missing or stale' };
@@ -979,7 +987,7 @@ export async function run(opts) {
         context: { ...(opts.context ?? {}), workspace: { baseCommit: iso.baseCommit, target: resolve(target) }, requiredCommands: commands },
         limits: { ...(challengeRounds === undefined ? {} : { challenges: challengeRounds }),
           ...(maxDebateRounds === undefined ? {} : { proposalCycles: maxDebateRounds }) },
-        execute, discuss: execute, review, capture, selectChecks: checkSelection, reviewInstructions: EXECUTION_REVIEW_PROMPT,
+        execute, discuss: execute, review, completeReview, capture, selectChecks: checkSelection, reviewInstructions: EXECUTION_REVIEW_PROMPT,
         runChecks: async request => {
           const captured = [];
           gateResult = await runGate({ commands: request.selection.commands, cwd: iso.dir, timeoutMs: stageTimeouts.gate,

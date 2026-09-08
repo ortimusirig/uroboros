@@ -4,7 +4,7 @@ import { EventEmitter } from 'node:events';
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { runReviewPass, runVerifier } from '../src/verifier.js';
+import { runReviewPass, completeReviewPass, runVerifier } from '../src/verifier.js';
 import { runArbiter, parseFindingJudgement } from '../src/arbiter.js';
 
 function captureFixture(events, code = 0, stderr = '') {
@@ -32,6 +32,49 @@ const reviewBundle = JSON.stringify({ version: 1, conclusion: 'clean', report: '
 const nativeEnvelope = action => `<UROBOROS_DIALOGUE>${JSON.stringify({ schemaVersion: 1, action,
   artifactDigest: 'current', contextDigest: 'context', replyTo: null, content: 'Discuss current evidence',
   claims: [], issues: [], evidence: [], verifications: [], next: null })}</UROBOROS_DIALOGUE>`;
+
+test('native Claude raw review defers all bundle writes until protected provider execution finishes', async t => {
+  const cwd = mkdtempSync(join(tmpdir(), 'uro-native-deferred-review-'));
+  t.after(() => rmSync(cwd, { recursive: true, force: true }));
+  const answer = reviewBundle + '\n' + nativeEnvelope('approve');
+  const fixture = captureFixture([success(answer)]);
+  let calls = 0;
+  const result = await runReviewPass({ cwd, dialogueMode: true, deferMaterialization: true, action: 'answer',
+    spawnProcess: (...args) => { calls++; return fixture.spawnProcess(...args); }, round: 1, diffDigest: 'current' });
+  assert.equal(result.answer, answer);
+  assert.equal(result.materializationDeferred, true);
+  assert.equal(result.artifact, null);
+  assert.equal(existsSync(join(cwd, '__uro_review/REVIEW.md')), false);
+  assert.equal(result.usage.inputTokens, 12);
+  const completed = await completeReviewPass({ result, cwd, round: 1, diffDigest: 'current', dialogueMode: true,
+    expectedIdentity: { artifactDigest: 'current', contextDigest: 'context' } });
+  assert.equal(completed.artifactFailed, false);
+  assert.equal(completed.dialogue.action, 'approve');
+  assert.equal(completed.artifact.diffDigest, 'current');
+  assert.equal(readFileSync(join(cwd, '__uro_review/tests/f1.test.js'), 'utf8'), 'console.log("independent test");\n');
+  assert.equal(calls, 1);
+  assert.equal(completed.usage.inputTokens, 12);
+});
+
+for (const [name, bundle, expectedArtifact] of [
+  ['stale input', reviewBundle, 'changed'],
+  ['missing clean bundle', '', 'current'],
+  ['nonclean approval', JSON.stringify({ version: 1, conclusion: 'issues', report: 'Issue remains', tests: [] }), 'current'],
+  ['malformed bundle', '{broken', 'current'],
+]) test(`deferred native adoption rejects ${name} before writing review files`, async t => {
+  const cwd = mkdtempSync(join(tmpdir(), 'uro-native-deferred-negative-'));
+  t.after(() => rmSync(cwd, { recursive: true, force: true }));
+  let calls = 0;
+  const fixture = captureFixture([success(bundle + '\n' + nativeEnvelope('approve'))]);
+  const result = await runReviewPass({ cwd, dialogueMode: true, deferMaterialization: true,
+    spawnProcess: (...args) => { calls++; return fixture.spawnProcess(...args); } });
+  const completed = await completeReviewPass({ result, cwd, round: 1, diffDigest: 'current', dialogueMode: true,
+    expectedIdentity: { artifactDigest: expectedArtifact, contextDigest: 'context' } });
+  assert.equal(completed.artifactFailed, true);
+  assert.equal(completed.artifact, null);
+  assert.equal(existsSync(join(cwd, '__uro_review/REVIEW.md')), false);
+  assert.equal(calls, 1);
+});
 
 test('native Claude review retains its dialogue beside the validated review bundle', async t => {
   const cwd = mkdtempSync(join(tmpdir(), 'uro-native-review-'));

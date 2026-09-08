@@ -199,9 +199,10 @@ test('native ordinary reviewer check addition runs independently and invalidates
       assert.equal(r.state.evidence.some(e => e.kind === 'command' && e.argv.includes('--test')), true);
       return nativeApproval(r);
     }
-    const artifact = await materializeReviewBundle({ cwd: r.cwd, round: r.round, diffDigest: r.diffDigest,
-      bundle: { version: 1, conclusion: 'clean', report: 'Check the existing implementation.', tests: [{ path: 'tests/current.test.js', content: "require('node:assert/strict').equal(require('node:fs').readFileSync('completed.txt','utf8'),'1');" }] } });
-    return { ...nativeApproval(r), artifact };
+    const response = nativeApproval(r);
+    const bundle = { version: 1, conclusion: 'clean', report: 'Check the existing implementation.', tests: [{ path: 'tests/current.test.js', content: "require('node:assert/strict').equal(require('node:fs').readFileSync('completed.txt','utf8'),'1');" }] };
+    return { ...response, resultSeen: true, resultUsable: true, materializationDeferred: true,
+      answer: `${JSON.stringify(bundle)}\n<UROBOROS_DIALOGUE>${JSON.stringify(response.dialogue)}</UROBOROS_DIALOGUE>` };
   } }, [{ bin: process.execPath, args: ['--test'] }]));
   assert.equal(facts.approved, true, facts.reason); assert.equal(reviews, 2);
   assert.equal(facts.dialogue.proposalCycles, 1);
@@ -235,6 +236,45 @@ test('native ordinary discussion bundle restored by isolation cannot support app
   assert.equal(facts.approved, false);
   assert.match(facts.reason, /retained review artifact/);
   assert.equal(facts.resources.providerLaunches, 4);
+});
+
+test('native ordinary requested answer approves current issues in the same call after protected raw transport', async t => {
+  let reviews = 0, answers = 0;
+  const deferred = (r, response, bundle) => ({ ...response, resultSeen: true, resultUsable: true, materializationDeferred: true,
+    answer: `${JSON.stringify(bundle)}\n<UROBOROS_DIALOGUE>${JSON.stringify(response.dialogue)}</UROBOROS_DIALOGUE>` });
+  const retainedReport = 'Explain the existing implementation.';
+  const facts = await run(nativeFixture(t, 'native-answer-approval', {
+    runExecutor: r => {
+      if (r.action === 'answer') return { dialogue: executionEnvelope(r, 'answer', { next: { seat: 'claude', action: 'answer', reason: 'Settle this issue using the briefing' } }) };
+      writeFileSync(join(r.cwd, 'completed.txt'), '1'); return { dialogue: executionEnvelope(r, 'propose') };
+    }, runReview: r => {
+      reviews++;
+      assert.equal(r.deferMaterialization, true);
+      if (reviews === 1) return deferred(r, { dialogue: executionEnvelope(r, 'ask', {
+        issues: [{ id: 'I1', title: 'Clarify intended behavior', status: 'awaiting-answer', blocking: true }],
+        next: { seat: 'codex', action: 'answer', reason: 'Explain the implementation' },
+      }) }, { version: 1, conclusion: 'issues', report: retainedReport, tests: [] });
+      answers++;
+      assert.equal(r.action, 'answer');
+      assert.equal(readFileSync(join(r.cwd, '__uro_review/REVIEW.md'), 'utf8'), retainedReport);
+      assert.equal(r.state.executionChecks.artifactDigest, r.state.artifactDigest);
+      writeFileSync(join(r.cwd, '__uro_review/REVIEW.md'), 'unauthorized raw provider edit');
+      mkdirSync(join(r.cwd, '__uro_review/tests'), { recursive: true });
+      writeFileSync(join(r.cwd, '__uro_review/tests/tamper.test.js'), 'unauthorized new test');
+      writeFileSync(join(r.cwd, 'completed.txt'), 'unauthorized project edit');
+      return deferred(r, nativeApproval(r, { issues: [{ id: 'I1', status: 'resolved', disposition: { kind: 'rejected', reason: 'The briefing supports the implemented behavior.', claimIds: ['briefing-requirement'] } }] }),
+        { version: 1, conclusion: 'clean', report: 'The current issue is resolved by the cited briefing.', tests: [] });
+    },
+  }, [{ bin: process.execPath, args: ['-e', "require('node:assert/strict').equal(require('node:fs').readFileSync('completed.txt','utf8'),'1')"] }]));
+  assert.equal(facts.approved, true, facts.reason);
+  assert.equal(answers, 1, 'the requested answer must approve without a second provider call');
+  assert.equal(reviews, 2); assert.equal(facts.resources.providerLaunches, 4);
+  assert.equal(facts.dialogue.issues.I1.status, 'resolved');
+  assert.equal(facts.approval.messageId, facts.messages.at(-1).id);
+  assert.equal(readFileSync(join(facts.dir, 'completed.txt'), 'utf8'), '1');
+  assert.equal(existsSync(join(facts.dir, '__uro_review/tests/tamper.test.js')), false);
+  assert.equal(facts.iterations.at(-1).reviewer.artifact.revisions.find(item => item.path === 'REVIEW.md').before, reviewDigest(retainedReport));
+  assert.match(readFileSync(join(facts.dir, '__uro_review/REVIEW.md'), 'utf8'), /current issue is resolved/);
 });
 
 test('native ordinary budget stops before the next provider using journal usage once', async t => {
