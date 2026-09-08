@@ -90,6 +90,64 @@ test('removing an active journal cannot silently restart its sequence', (t) => {
   journal.close();
 });
 
+function recordCompletedLaunch(journal) {
+  journal.append({ type: 'state', state: { artifactDigest: 'a1' } });
+  journal.prepare(intent);
+  journal.complete({ operationId: 'op1', result: { content: 'already ran' }, usage: { inputTokens: 10, outputTokens: 5 }, delivery: { status: 'submitted' } });
+  assert.equal(journal.account().providerLaunches, 1);
+  assert.deepEqual(journal.account().knownUsage, { inputTokens: 10, outputTokens: 5 });
+}
+
+test('whole-record journal suffix deletion cannot erase active operations or accounting', (t) => {
+  const options = fixture(t), journal = openDialogueJournal(options);
+  recordCompletedLaunch(journal);
+  const file = join(options.directory, '__uro_dialogue', 'journal.jsonl');
+  writeFileSync(file, `${readFileSync(file, 'utf8').split('\n')[0]}\n`);
+  assert.throws(() => journal.account(), /tail|rollback/);
+  assert.throws(() => journal.operation('op1'), /tail|rollback/);
+  assert.throws(() => journal.prepare({ ...intent, operationId: 'op2' }), /tail|rollback/);
+  journal.close();
+});
+
+test('recovery rejects a shortened complete journal against the durable accepted tail', (t) => {
+  const options = fixture(t), journal = openDialogueJournal(options);
+  recordCompletedLaunch(journal);
+  journal.close();
+  const file = join(options.directory, '__uro_dialogue', 'journal.jsonl');
+  writeFileSync(file, `${readFileSync(file, 'utf8').split('\n')[0]}\n`);
+  assert.throws(() => openDialogueJournal(options), /tail|rollback/);
+});
+
+test('the active accepted tail rejects coordinated rollback of both durable streams', (t) => {
+  const options = fixture(t), journal = openDialogueJournal(options);
+  recordCompletedLaunch(journal);
+  for (const name of ['journal.jsonl', 'journal-tail.jsonl']) {
+    const file = join(options.directory, '__uro_dialogue', name);
+    if (existsSync(file)) writeFileSync(file, `${readFileSync(file, 'utf8').split('\n')[0]}\n`);
+  }
+  assert.throws(() => journal.append({ type: 'state', state: {} }), /tail|rollback/);
+  journal.close();
+});
+
+test('recovery requires the durable tail when a journal already exists', (t) => {
+  const options = fixture(t), journal = openDialogueJournal(options);
+  recordCompletedLaunch(journal);
+  journal.close();
+  const tail = join(options.directory, '__uro_dialogue', 'journal-tail.jsonl');
+  if (existsSync(tail)) rmSync(tail);
+  assert.throws(() => openDialogueJournal(options), /tail|missing/);
+});
+
+test('a durable tail ahead of an interrupted journal append cannot authorize recovery', (t) => {
+  const options = fixture(t), journal = openDialogueJournal(options);
+  journal.append({ type: 'state', state: { artifactDigest: 'a1' } });
+  journal.close();
+  const tail = join(options.directory, '__uro_dialogue', 'journal-tail.jsonl');
+  const original = readFileSync(tail, 'utf8');
+  writeFileSync(tail, `${original}${JSON.stringify({ schemaVersion: 1, runId: 'r1', projectId: 'p1', sequence: 2, hash: 'f'.repeat(64) })}\n`);
+  assert.throws(() => openDialogueJournal(options), /tail|interrupted/);
+});
+
 test('journal refuses a redirected sidecar directory before writing outside its run', (t) => {
   const options = fixture(t), outside = join(options.directory, 'outside'), run = join(options.directory, 'run');
   mkdirSync(outside); mkdirSync(run);
@@ -110,4 +168,6 @@ test('dialogue sidecars are excluded harness artifacts and retained byte for byt
   assert.equal(archived.status, 'ok');
   assert.deepEqual(readFileSync(join(directory, 'records', 'r1', '__uro_dialogue', 'journal.jsonl')),
     readFileSync(join(worktree, '__uro_dialogue', 'journal.jsonl')));
+  assert.deepEqual(readFileSync(join(directory, 'records', 'r1', '__uro_dialogue', 'journal-tail.jsonl')),
+    readFileSync(join(worktree, '__uro_dialogue', 'journal-tail.jsonl')));
 });

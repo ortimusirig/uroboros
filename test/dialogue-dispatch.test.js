@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, rmSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { openDialogueJournal } from '../src/dialogue-journal.js';
 import { runIssueDialogue } from '../src/dialogue-dispatch.js';
@@ -171,6 +171,21 @@ test('persistence failure pauses before any provider or project effect', async (
     seats: { claude: async () => { launches++; } } });
   assert.equal(result.approved, false);
   assert.match(result.reason, /disk full/);
+  assert.equal(launches, 0);
+});
+
+test('unavailable durable tail pauses before launching the next provider effect', async (t) => {
+  const { state, journal, base } = setup(t);
+  let launches = 0, saves = 0;
+  const result = await runIssueDialogue({ state, journal, persist: async () => {
+    if (++saves !== 1) return;
+    const tail = join(base, '__uro_dialogue', 'journal-tail.jsonl');
+    if (existsSync(tail)) rmSync(tail);
+    mkdirSync(tail);
+  }, seats: { codex: async ({ state: s }) => { launches++; return response(envelope(s, 'stop', { content: 'Should not launch.' })); } } });
+  assert.equal(result.action, 'paused');
+  assert.equal(result.approved, false);
+  assert.match(result.reason, /tail/);
   assert.equal(launches, 0);
 });
 
@@ -378,6 +393,33 @@ test('one authoritative approve response settles an autonomous dispute and compl
   assert.equal(result.approved, true, result.reason);
   assert.equal(result.state.issues.I1.disposition.by, 'codex');
   assert.equal(result.resources.providerLaunches, 1);
+});
+
+test('a manual approve response with an evidenced disputed disposition preserves the human checkpoint', async (t) => {
+  const { state: initial, journal } = setup(t, { interactionMode: 'manual' });
+  const state = applyDialogueEnvelope({ state: initial, seat: 'claude', envelope: envelope(initial, 'challenge', {
+    claims: [claim], issues: [{ id: 'I1', title: 'Requirement dispute', status: 'disputed', blocking: true, claimIds: ['C1'] }],
+  }) });
+  observe(state);
+  let launches = 0;
+  const result = await runIssueDialogue({ state, journal, persist: async () => {}, seats: {
+    codex: async ({ state: s }) => {
+      launches++;
+      return response({ ...approve(s), issues: [{ id: 'I1', status: 'resolved',
+        disposition: { kind: 'accepted', reason: 'The briefing controls; human dispute ruling remains required.', claimIds: ['C1'] } }] });
+    },
+  } });
+  assert.equal(result.action, 'needs-decision', result.reason);
+  assert.equal(result.approved, false);
+  assert.equal(result.state.pendingDecision.authority, 'human');
+  assert.equal(result.state.technicalPause, null);
+  assert.equal(result.state.approval, null);
+  assert.equal(result.state.issues.I1.status, 'disputed');
+  assert.equal(result.state.messages.at(-1).action, 'approve');
+  const saved = journal.read().filter(event => event.type === 'state').at(-1).state;
+  assert.deepEqual(saved.pendingDecision, result.state.pendingDecision);
+  assert.equal(saved.messages.at(-1).sender, 'codex');
+  assert.equal(launches, 1);
 });
 
 test('an explicit new revision is not skipped because the input artifact already had approval', async (t) => {

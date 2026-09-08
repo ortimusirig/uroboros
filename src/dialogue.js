@@ -263,9 +263,15 @@ export function applyDialogueEnvelope({ state, envelope, seat, evidence = [], ve
     next.pendingDecision ??= { authority: 'human', messageId, reason: envelope.content, ...identity };
   }
   if (envelope.action === 'approve') {
-    const problem = approvalProblem(next);
-    if (problem) throw new Error(problem);
-    next.approval = { seat, messageId, ...identity };
+    if (next.pendingDecision) {
+      // A valid attempted sign-off can still require a human dispute ruling.
+      // Preserve that checkpoint and message; it is not a technical failure or approval.
+      next.approval = null;
+    } else {
+      const problem = approvalProblem(next);
+      if (problem) throw new Error(problem);
+      next.approval = { seat, messageId, ...identity };
+    }
   }
   if (['stop', 'replan'].includes(envelope.action)) { next.approval = null; next.terminalAction = envelope.action; next.stopReason = envelope.content; }
   next.next = envelope.next ?? { seat: seat === 'claude' ? 'codex' : 'claude', action: envelope.action === 'ask' ? 'answer' : 'verify', reason: 'Assess counterpart response' };

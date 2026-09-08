@@ -16,22 +16,49 @@ export function openDialogueJournal({ directory, runId, projectId }) {
   const root = join(directory, '__uro_dialogue');
   if (lstatSync(root, { throwIfNoEntry: false })?.isSymbolicLink()) throw new Error('journal symbolic-link directory refused');
   mkdirSync(root, { recursive: true });
-  const path = join(root, 'journal.jsonl'), lock = join(root, 'controller.lock'), owner = randomUUID();
-  let closed = false, expectedJournal = existsSync(path);
+  const path = join(root, 'journal.jsonl'), tailPath = join(root, 'journal-tail.jsonl');
+  const lock = join(root, 'controller.lock'), owner = randomUUID();
+  let closed = false, expectedJournal = existsSync(path), acceptedTail = null, persistenceFailure = null;
   const durableWrite = (file, bytes, flags) => {
     const fd = openSync(file, flags, 0o600);
     try { writeFileSync(fd, bytes, 'utf8'); fsyncSync(fd); } finally { closeSync(fd); }
   };
   try { durableWrite(lock, owner, 'wx'); } catch (error) { throw new Error(`journal ownership lock unavailable: ${error.message}`); }
   const assertOwner = () => {
+    if (persistenceFailure) throw persistenceFailure;
     if (lstatSync(root, { throwIfNoEntry: false })?.isSymbolicLink()
-      || lstatSync(path, { throwIfNoEntry: false })?.isSymbolicLink()) throw new Error('journal symbolic-link redirection refused');
+      || lstatSync(path, { throwIfNoEntry: false })?.isSymbolicLink()
+      || lstatSync(tailPath, { throwIfNoEntry: false })?.isSymbolicLink()) throw new Error('journal symbolic-link redirection refused');
     if (closed || !existsSync(lock) || lstatSync(lock).isSymbolicLink() || readFileSync(lock, 'utf8') !== owner) throw new Error('journal controller ownership lost');
+  };
+  const verifyTail = (events) => {
+    const current = { sequence: events.length, hash: events.at(-1)?.hash ?? null };
+    if (acceptedTail && (current.sequence !== acceptedTail.sequence || current.hash !== acceptedTail.hash)) {
+      throw new Error('journal accepted tail changed: rollback or unowned append');
+    }
+    const tailStat = lstatSync(tailPath, { throwIfNoEntry: false });
+    if (!tailStat) {
+      if (events.length || expectedJournal) throw new Error('journal durable tail is missing');
+    } else {
+      if (!tailStat.isFile()) throw new Error('journal durable tail must be a regular file');
+      const bytes = readFileSync(tailPath, 'utf8');
+      if (!bytes || !bytes.endsWith('\n')) throw new Error('journal durable tail truncated or empty');
+      const lines = bytes.slice(0, -1).split('\n');
+      if (lines.length !== events.length) throw new Error('journal durable tail mismatch: rollback or interrupted persistence');
+      for (let index = 0; index < lines.length; index++) {
+        let record;
+        try { record = JSON.parse(lines[index]); } catch { throw new Error('journal durable tail malformed line'); }
+        if (record?.schemaVersion !== 1 || record.runId !== runId || record.projectId !== projectId
+          || record.sequence !== index + 1 || record.hash !== events[index].hash) throw new Error('journal durable tail identity mismatch');
+      }
+    }
+    acceptedTail ??= current;
   };
   const read = () => {
     assertOwner();
     if (!existsSync(path)) {
       if (expectedJournal) throw new Error('active journal was removed');
+      verifyTail([]);
       return [];
     }
     const bytes = readFileSync(path, 'utf8');
@@ -57,6 +84,7 @@ export function openDialogueJournal({ directory, runId, projectId }) {
       previousHash = savedHash;
       events.push(event);
     }
+    verifyTail(events);
     return events;
   };
   const close = () => {
@@ -72,8 +100,18 @@ export function openDialogueJournal({ directory, runId, projectId }) {
     if (!data || typeof data.type !== 'string' || !data.type) throw new Error('journal event type required');
     const body = JSON.parse(JSON.stringify({ ...data, runId, projectId, sequence: events.length + 1, previousHash: events.at(-1)?.hash ?? null }));
     const event = { ...body, hash: hash(body) };
-    durableWrite(path, `${JSON.stringify(event)}\n`, 'a');
+    // Anchor the intended tail before the journal append can authorize an effect.
+    // Either interrupted write leaves a mismatch on recovery; never adopt a shorter chain.
+    const tail = { schemaVersion: 1, runId, projectId, sequence: event.sequence, hash: event.hash };
+    try {
+      durableWrite(tailPath, `${JSON.stringify(tail)}\n`, 'a');
+      durableWrite(path, `${JSON.stringify(event)}\n`, 'a');
+    } catch (error) {
+      persistenceFailure = new Error(`journal/tail persistence failed: ${error.message}`);
+      throw persistenceFailure;
+    }
     expectedJournal = true;
+    acceptedTail = { sequence: event.sequence, hash: event.hash };
     return structuredClone(event);
   };
   const operation = (operationId) => {
