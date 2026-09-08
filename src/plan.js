@@ -517,6 +517,7 @@ export async function runPlanCandidateSet({
     let response;
     try {
       response = await callPlanningPreparation({ session, requirements: goal, input, call: draftCandidate, seat: 'claude', action: 'propose',
+        previousPreparationOperationId: repairFeedback ? candidate.response.preparationOperationId : undefined,
         request: { ...common, candidateId: candidate.id,
         candidateIndex: candidate.index + 1, candidateCount: count, perspective: candidate.perspective,
         feedback: repairFeedback || feedback, messages: [...messages] } });
@@ -534,6 +535,7 @@ export async function runPlanCandidateSet({
       }
       const artifact = parsePlanProposal(response);
       message.artifactDigest = planningArtifactDigest(goal, artifact);
+      session.journal.append({ type: 'candidate-artifact', operationId: response.preparationOperationId, artifactDigest: message.artifactDigest });
       Object.assign(candidate, artifact, { gateResult: { passed: true, failures: [] }, repairable: false });
     } catch (error) {
       attempt.parseError = error.message;
@@ -606,7 +608,8 @@ export async function runPlanCandidateSet({
   const result = await runPlanningDialogue({
     runId, reporter, tier: 'plan', interactionMode, requirements: goal, rounds,
     session, target, directory: session.directory,
-    prelude: { proposal: { plan: selected.plan, gate: selected.gate }, artifactRepairs },
+    prelude: { proposal: { plan: selected.plan, gate: selected.gate }, artifactRepairs,
+      preparationOperationId: selected.response.preparationOperationId, selectionOperationId: selection?.preparationOperationId },
     seats: {
       author: async request => {
         if (draft) return draft({ ...common, ...request, candidateId: selected.id });

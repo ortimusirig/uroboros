@@ -1,14 +1,176 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, existsSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, existsSync, writeFileSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runPlan, runPlanCandidateSet, assertCurrentPlanApproval } from '../src/plan.js';
 import { createInspectionReceipt } from '../src/context-evidence.js';
 import { resumeRun } from '../src/resume.js';
 import { openProjectMemory, resolveProjectIdentity } from '../src/project-memory.js';
+import { captureEvidence } from '../src/context-evidence.js';
+import { assertPlanningSidecars } from '../src/planning-dialogue.js';
+import { contextDigest } from '../src/shared-context.js';
 
 const superpowers = { seats: { claude: { verified: true }, codex: { verified: true } } };
+
+for (const resolveBlocker of [false, true]) test(`selected alternative retains its blocker and requires explicit disposition (${resolveBlocker})`, async t => {
+  const opts = fixture(t); let reviewed = false;
+  const result = await runPlanCandidateSet({ ...opts, directory: opts.out, count: 2,
+    draft: r => ({ plan: r.candidateId, gate: [], dialogue: reply(r, 'propose', {
+      issues: [{ id: `${r.candidateId}-blocker`, title: 'Unresolved source concern', blocking: true, status: 'open', claimIds: [] }],
+      next: { seat: 'codex', action: 'verify', reason: 'Resolve the retained blocker before sign-off' },
+    }) }),
+    select: r => ({ selectedCandidateId: 'candidate-1', dialogue: reply(r, 'verify') }),
+    review: r => {
+      reviewed = true;
+      assert.equal(r.state.issues['candidate-1-blocker']?.status, 'open');
+      assert.equal(r.state.issues['candidate-2-blocker'], undefined, 'rejected concerns are historical, not selected live blockers');
+      assert.match(r.input, /candidate-2-blocker/);
+      const response = approve(r);
+      if (resolveBlocker) response.dialogue.issues = [{ id: 'candidate-1-blocker', status: 'resolved',
+        disposition: { kind: 'accepted', reason: 'The briefing resolves this concern.', claimIds: ['briefing-requirement'] } }];
+      return response;
+    },
+  });
+  assert.equal(reviewed, true);
+  assert.equal(result.approved, resolveBlocker, result.reason);
+  assert.equal(result.dialogue.issues['candidate-1-blocker'].status, resolveBlocker ? 'resolved' : 'open');
+});
+
+test('selected preparation keeps authenticated observations and material evidence before review', async t => {
+  const opts = fixture(t); let captured, preparedId;
+  const result = await runPlanCandidateSet({ ...opts, directory: opts.out, count: 2,
+    draft: r => {
+      if (r.candidateId !== 'candidate-1') return { plan: r.candidateId, gate: [], dialogue: reply(r, 'propose') };
+      captured = captureEvidence({ projectId: r.state.projectId, root: opts.target, directory: join(opts.out, '__uro_evidence'),
+        evidence: { id: 'candidate-source', kind: 'code', projectId: r.state.projectId, claimIds: ['candidate-fact'],
+          locator: { path: 'source.js', line: 1 }, sourceIdentity: r.state.snapshot.sourceRevision } });
+      const receipt = createInspectionReceipt({ operationId: r.operationId, seat: 'claude', evidence: [captured], inspected: true, result: 'read' });
+      preparedId = r.operationId;
+      return { plan: 'Keep login', gate: [], observations: { evidence: [captured], receipts: [receipt] },
+        dialogue: reply(r, 'propose', { claims: [{ id: 'candidate-fact', kind: 'fact', text: 'Local login is enabled.', evidenceIds: [captured.id] }],
+          memoryProposals: [{ id: 'candidate-memory', kind: 'lesson', content: 'Preserve local login', claimIds: ['candidate-fact'], tags: [] }] }) };
+    }, select: r => ({ selectedCandidateId: 'candidate-1', dialogue: reply(r, 'verify') }),
+    review: r => {
+      assert.ok(r.state.snapshot.evidence.some(e => e.id === captured.id));
+      assert.equal(r.state.operations[preparedId].status, 'completed');
+      assert.equal(r.state.claims['candidate-fact'].sender, 'claude');
+      assert.notEqual(r.state.claims['candidate-fact'].contextDigest, r.state.snapshot.digest, 'selection must not relabel an old premise as currently verified');
+      assert.equal(r.state.memoryProposals[0].id, 'candidate-memory');
+      assert.match(r.input, /export const localLogin = true/);
+      return approve(r);
+    },
+  });
+  assert.equal(result.approved, true, result.reason);
+});
+
+for (const timing of ['pre-existing', 'during-provider']) test(`unrelated ${timing} sidecars are rejected before approval`, async t => {
+  const opts = fixture(t); let reviews = 0;
+  const place = () => { mkdirSync(join(opts.out, '__uro_context'), { recursive: true });
+    writeFileSync(join(opts.out, '__uro_context', 'unrelated.js'), 'unrelated user content'); };
+  if (timing === 'pre-existing') place();
+  await assert.rejects(runPlan({ ...opts, adapters: {
+    author: r => { if (timing === 'during-provider') place(); return { plan: 'Keep login', gate: [], dialogue: reply(r, 'propose') }; },
+    reviewer: r => { reviews++; return approve(r); },
+  } }), /unexpected|unregistered|sidecar/);
+  assert.equal(reviews, 0);
+  assert.equal(existsSync(join(opts.out, 'plan.md')), false);
+  assert.equal(readFileSync(join(opts.out, '__uro_context', 'unrelated.js'), 'utf8'), 'unrelated user content');
+});
+
+test('registered captured sidecars remain exactly allowable and intact after normal approval', async t => {
+  const opts = fixture(t);
+  const result = await runPlan({ ...opts, adapters: { author: r => ({ plan: 'Keep login', gate: [], dialogue: reply(r, 'propose') }), reviewer: approve } });
+  const paths = assertPlanningSidecars({ directory: opts.out, runId: result.runId, approval: result.approval, manifest: result.planningArtifacts });
+  assert.equal(paths.length, 4, 'one context, one briefing capture and both journals');
+  assert.ok(paths.some(path => path.endsWith('journal-tail.jsonl')));
+  assert.ok(paths.some(path => path === result.sharedContext.evidence[0].capturedPath));
+  writeFileSync(result.sharedContext.evidence[0].capturedPath, 'tampered');
+  assert.throws(() => assertPlanningSidecars({ directory: opts.out, runId: result.runId, approval: result.approval, manifest: result.planningArtifacts }), /manifest changed/);
+});
+
+test('sidecar provenance rejects symlink roots and escaping registered paths', async t => {
+  const opts = fixture(t), outside = join(opts.artifactRoot, 'outside');
+  mkdirSync(outside, { recursive: true }); mkdirSync(opts.out);
+  symlinkSync(outside, join(opts.out, '__uro_context'), 'junction');
+  await assert.rejects(runPlan({ ...opts, adapters: { author: () => assert.fail('symlink rejected before launch') } }), /symbolic link/);
+  const clean = fixture(t);
+  const result = await runPlan({ ...clean, adapters: { author: r => ({ plan: 'Keep login', gate: [], dialogue: reply(r, 'propose') }), reviewer: approve } });
+  const manifest = structuredClone(result.planningArtifacts);
+  manifest.files.push({ path: '../escape.txt', sha256: 'not-a-generated-file' });
+  const approval = { ...result.approval, sidecarDigest: contextDigest({ manifest }) };
+  assert.throws(() => assertPlanningSidecars({ directory: clean.out, runId: result.runId, approval, manifest }), /invalid registered.*path/);
+});
+
+test('candidate observation cannot impersonate the other seat or another operation', async t => {
+  const opts = fixture(t); let reviewed = false;
+  const result = await runPlanCandidateSet({ ...opts, directory: opts.out, count: 2,
+    draft: r => ({ plan: r.candidateId, gate: [], dialogue: reply(r, 'propose'), observations: { evidence: [],
+      receipts: [createInspectionReceipt({ operationId: 'forged-operation', seat: 'codex', evidence: r.state.evidence, inspected: true, result: 'read' })] } }),
+    review: () => { reviewed = true; },
+  });
+  assert.equal(result.approved, false);
+  assert.equal(result.surviving.length, 0);
+  assert.equal(reviewed, false);
+  assert.ok(result.messages.every(message => /operation or seat mismatch/.test(message.error)));
+});
+
+test('selection cannot change the parsed candidate artifact behind its preparation identity', async t => {
+  const opts = fixture(t);
+  await assert.rejects(runPlanCandidateSet({ ...opts, directory: opts.out, count: 2,
+    draft: r => ({ plan: r.candidateId, gate: [], dialogue: reply(r, 'propose') }),
+    select: r => { r.candidates[0].plan = 'Unattributed replacement'; return { selectedCandidateId: 'candidate-1', dialogue: reply(r, 'verify') }; },
+    review: () => assert.fail('changed candidate must not reach review'),
+  }), /validated saved artifact/);
+});
+
+test('the selected author next action is retained without launching an unrequested revision', async t => {
+  const opts = fixture(t); let reviews = 0;
+  const result = await runPlanCandidateSet({ ...opts, directory: opts.out, count: 2,
+    draft: r => ({ plan: r.candidateId, gate: [], dialogue: reply(r, 'propose', { next: { seat: 'codex', action: 'ask', reason: 'Clarify the source question first' } }) }),
+    select: r => ({ selectedCandidateId: 'candidate-1', dialogue: reply(r, 'verify') }),
+    review: r => { reviews++; assert.equal(r.action, 'ask'); return { dialogue: reply(r, 'stop', { content: 'A human clarification is needed.' }) }; },
+  });
+  assert.equal(result.approved, false);
+  assert.equal(reviews, 1);
+  assert.equal(result.resources.providerLaunches, 4);
+});
+
+test('artifact-format repair of an alternative does not erase its earlier unresolved concern', async t => {
+  const opts = fixture(t); let attempts = 0;
+  const result = await runPlanCandidateSet({ ...opts, directory: opts.out, count: 2,
+    draft: r => {
+      if (r.candidateId === 'candidate-1' && ++attempts === 1) return { answer: '<PLAN_MD>Missing gate</PLAN_MD>',
+        dialogue: reply(r, 'propose', { issues: [{ id: 'earlier-blocker', title: 'An unresolved earlier concern', blocking: true, status: 'open', claimIds: [] }] }) };
+      return { plan: r.candidateId, gate: [], dialogue: reply(r, 'propose') };
+    }, select: r => ({ selectedCandidateId: 'candidate-1', dialogue: reply(r, 'verify') }),
+    review: r => { assert.equal(r.state.issues['earlier-blocker']?.status, 'open'); return approve(r); },
+  });
+  assert.equal(result.approved, false);
+  assert.equal(result.dialogue.issues['earlier-blocker']?.status, 'open');
+  assert.equal(result.dialogue.artifactRepairs, 1);
+});
+
+test('authenticated material from a rejected malformed alternative remains attributed history', async t => {
+  const opts = fixture(t);
+  const result = await runPlanCandidateSet({ ...opts, directory: opts.out, count: 2,
+    draft: r => {
+      if (r.candidateId === 'candidate-2') return { plan: 'Keep login', gate: [], dialogue: reply(r, 'propose') };
+      const evidence = captureEvidence({ projectId: r.state.projectId, root: opts.target, directory: join(opts.out, '__uro_evidence'),
+        evidence: { id: 'rejected-source', kind: 'code', projectId: r.state.projectId, claimIds: [],
+          locator: { path: 'source.js', line: 1 }, sourceIdentity: r.state.snapshot.sourceRevision } });
+      return { content: 'Unparsed rejected alternative with an actual read', observations: { evidence: [evidence],
+        receipts: [createInspectionReceipt({ operationId: r.operationId, seat: 'claude', evidence: [evidence], inspected: true, result: 'read' })] } };
+    }, review: r => {
+      assert.ok(r.state.snapshot.evidence.some(e => e.id === 'rejected-source'));
+      assert.match(r.input, /Unparsed rejected alternative with an actual read/);
+      assert.equal(Object.keys(r.state.claims).length, 0);
+      return approve(r);
+    },
+  });
+  assert.equal(result.approved, true, result.reason);
+  assert.equal(result.selected.id, 'candidate-2');
+});
 function fixture(t) {
   const base = mkdtempSync(join(tmpdir(), 'uro-planning-dialogue-'));
   t.after(() => rmSync(base, { recursive: true, force: true }));
@@ -109,7 +271,7 @@ test('same-artifact question and answer never parse or write artifact text and d
   assert.equal(readdirSync(join(opts.out, '__uro_context')).filter(p => p.endsWith('.json')).length, 1);
 });
 
-test('explicit alternatives and selector are serialized durable calls over the same shared snapshot', async t => {
+test('explicit alternatives share grounding and selected review receives its attributed history extension', async t => {
   const opts = fixture(t), calls = []; let active = 0;
   const result = await runPlanCandidateSet({ ...opts, count: 2,
     draft: async r => {
@@ -126,7 +288,10 @@ test('explicit alternatives and selector are serialized durable calls over the s
   assert.equal(result.selected.id, 'candidate-2');
   assert.equal(result.resources.providerLaunches, 4);
   assert.equal(result.tokens.total.inputTokens, 28);
-  assert.equal(new Set(calls.map(c => c[1])).size, 1);
+  assert.equal(new Set(calls.slice(0, 3).map(c => c[1])).size, 1);
+  assert.equal(result.sharedContext.parentDigest, calls[0][1]);
+  assert.equal(calls[3][1], result.sharedContext.digest);
+  assert.ok(result.sharedContext.entries.some(entry => entry.id === 'candidate-preparation-history' && entry.status === 'historical'));
   assert.ok(calls.every(c => /Preserve local login/.test(c[2])));
 });
 

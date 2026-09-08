@@ -48,7 +48,7 @@ function validateObservedEvidence(state, evidence) {
   const result = validateEvidence({ evidence, projectId: state.projectId, roots: [...state.scope.sourceRoots, ...captures] });
   if (!result.valid) throw new Error(result.reason);
 }
-function registerObservations(state, operation, observations) {
+export function registerObservations(state, operation, observations) {
   const evidence = observations?.evidence ?? [], receipts = observations?.receipts ?? [];
   if (!Array.isArray(evidence) || !Array.isArray(receipts)) throw new Error('invalid observed evidence registry');
   for (const item of evidence) {
@@ -76,7 +76,7 @@ function registerObservations(state, operation, observations) {
     evidenceIds, receiptIds: receipts.map(r => r.id) };
 }
 
-function installMaterialEvidence(state) {
+export function installMaterialEvidence(state) {
   const additions = state.evidence.filter(item => !state.snapshot.evidence.some(old => old.id === item.id));
   if (!additions.length) return;
   const hadApproval = state.approval !== null;
