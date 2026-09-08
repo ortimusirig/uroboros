@@ -1197,8 +1197,7 @@ export async function run(opts) {
       }
       return response;
     };
-    const review = async request => {
-      if (typeof runReview !== 'function') throw new Error('missing native Claude reviewer transport');
+    const review = typeof runReview === 'function' ? async request => {
       const response = await runReview({ ...request, prompt: request.input, deferMaterialization: true,
         originalRequirements: originalPlan, diff: currentDiff, diffDigest: reviewDigest(currentDiff),
         round: request.state.proposalCycles, messages: request.state.messages, evidence: request.state.evidence,
@@ -1206,7 +1205,7 @@ export async function run(opts) {
         timeoutMs: stageTimeouts.verifier, reporter: eventReporter, runId: request.state.runId });
       providerResults.push({ seat: 'claude', operationId: request.operationId, response });
       return response;
-    };
+    } : null;
     const completeReview = async ({ response: raw, ...request }) => {
       const response = raw?.materializationDeferred === true ? await completeReviewPass({ result: raw,
         cwd: iso.dir, round: request.state.proposalCycles, diffDigest: reviewDigest(currentDiff), dialogueMode: true,

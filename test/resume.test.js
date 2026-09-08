@@ -6,7 +6,7 @@ import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runPlan as runNewPlan } from '../src/plan.js';
-import { scriptedPlanningAdapters, scriptedFreshPlanningAdapters } from './fixtures/planning-responses.js';
+import { scriptedPlanningAdapters, scriptedFreshPlanningAdapters, planningEnvelope as envelope } from './fixtures/planning-responses.js';
 const runPlan = options => runNewPlan({ artifactRoot: join(tmpdir(), 'uro-task3-fixture-artifacts'), ...options, adapters: scriptedPlanningAdapters(options.adapters ?? {}) });
 import { planningArtifactDigest } from '../src/conversation.js';
 import { withVerifiedSuperpowers } from '../fixtures/verified-superpowers.mjs';
@@ -15,6 +15,8 @@ const run = options => executeRun({ ...options, env: { ...process.env, ...option
   URO_ARTIFACT_ROOT: options.artifactRoot ?? join(options.scratchRoot, 'artifacts') }, adapters: scriptedFreshPlanningAdapters(options.adapters) });
 import { isolate } from '../src/isolation.js';
 import { materializeReviewBundle } from '../src/review.js';
+import { createInspectionReceipt } from '../src/context-evidence.js';
+import { runGate } from '../src/gate.js';
 import { execFileSync } from 'node:child_process';
 import { parseArgs } from '../src/args.js';
 import { runQueue } from '../src/queue.js';
@@ -230,18 +232,37 @@ for (const twoGoals of [false, true]) test(`queued saved planning inside the tar
   writeFileSync(queueFile, JSON.stringify([...(twoGoals ? [{ name: 'first', goal: 'First change', out: 'target/first-plan' }] : []),
     { name: 'goal', goal: 'Change source', out: 'target/planned' }]));
   let implementations = 0, drafts = 0, facts, planningUnit = 0, interrupted = false;
-  const planningAdapters = { author: async () => { drafts++; return { plan: 'Change source.\n', gate: [], agree: twoGoals && planningUnit === 1, readable: true }; },
+  const command = { bin: process.execPath, args: ['-e', "require('node:assert/strict').match(require('node:fs').readFileSync('source.js','utf8'),/^changed [12]\\n$/);process.stdout.write('queued-child-check')"] };
+  const planningAdapters = { author: async () => { drafts++; return { plan: 'Change source.\n', gate: [command], agree: twoGoals && planningUnit === 1, readable: true }; },
     reviewer: async r => ({ agree: twoGoals && planningUnit === 1, readable: true, artifactDigest: r.artifactDigest, suggestions: [{ id: 'S1', text: 'Prefer another change.' }] }) };
   const dependencies = { assertCleanTarget,
     launchPlan: ({ unit }) => { planningUnit = unit.index; return runPlan(withVerifiedSuperpowers({ goal: unit.goal, target, out: unit.out, candidates: 1, adapters: planningAdapters })); },
     launchRun: async ({ unit }) => {
       implementations++;
       facts = await run(withVerifiedSuperpowers({ task: unit.task, gate: unit.gate, target, scratchRoot: join(root, 'scratch'), runId: `goal-run-${implementations}`,
-        adapters: { runExecutor: async ({ cwd }) => { writeFileSync(join(cwd, 'source.js'), `changed ${implementations}\n`); return { exitCode: 0, changedFiles: ['source.js'], lastMessage: 'Done' }; },
-          runGate: async () => ({ results: [] }), runReview: async options => {
-            const bundle = { version: 1, conclusion: 'clean', report: 'No blockers.', tests: [] };
-            return { artifact: await materializeReviewBundle({ ...options, bundle }), answer: JSON.stringify(bundle) };
+        adapters: { runExecutor: async request => {
+          writeFileSync(join(request.cwd, 'source.js'), `changed ${implementations}\n`);
+          return { exitCode: 0, usage: { inputTokens: 1, outputTokens: 1 }, dialogue: envelope(request, request.action) };
+        }, runGate, runReview: request => {
+            const evidence = request.state.evidence.find(item => item.id === 'requirement-briefing');
+            readFileSync(evidence.capturedPath);
+            const receipt = createInspectionReceipt({ operationId: request.operationId, seat: 'claude',
+              evidence: [evidence], inspected: true, result: 'read' });
+            return { usage: { inputTokens: 1, outputTokens: 1 }, observations: { evidence: [], receipts: [receipt] },
+              dialogue: envelope(request, 'approve', {
+                claims: [{ id: 'briefing-requirement', kind: 'fact', text: evidence.text, evidenceIds: [evidence.id] }],
+                verifications: [{ claimId: 'briefing-requirement', evidenceIds: [evidence.id], inspectionReceiptIds: [receipt.id],
+                  result: 'supports', reason: 'Read the captured approved child requirement.' }],
+              }) };
           } } }));
+      assert.equal(facts.approved, true, facts.reason);
+      assert.equal(facts.resources.providerLaunches, 2);
+      const check = facts.dialogue.evidence.find(item => item.kind === 'command');
+      assert.equal(check.stdout, 'queued-child-check');
+      assert.equal(check.exitCode, 0);
+      assert.deepEqual(check.argv, [process.execPath, ...command.args]);
+      assert.equal(check.cwd, facts.dir);
+      assert.ok(check.codeIdentity);
       return { runDirectory: facts.dir };
     }, readRunFacts: async () => facts, judgeLanding: async () => ({ approved: true }), landDiff: landQueueDiff,
     appendLog: (path, row) => {

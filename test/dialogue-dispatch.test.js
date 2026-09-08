@@ -23,6 +23,19 @@ function approve(state) {
   return envelope(state, 'approve', { claims: [claim], verifications: [support(receipt)] });
 }
 
+test('missing fresh seat pauses before provider preparation or execution cycle allocation', async t => {
+  const { state, journal } = setup(t, { phase: 'execution' });
+  state.next = { seat: 'codex', action: 'propose', reason: 'Implement current work' };
+  const result = await runIssueDialogue({ state, journal, seats: {}, persist: () => {}, captureExecution: () => { throw Error('No writer ran'); } });
+  assert.equal(result.approved, false);
+  assert.match(result.reason, /missing transport for seat codex/);
+  assert.equal(journal.read().some(event => event.type === 'prepare'), false);
+  assert.equal(result.resources.providerLaunches, 0);
+  assert.equal(result.state.proposalCycles, 0);
+  assert.equal(result.state.executionCycle, undefined);
+  assert.equal(result.state.pendingOperation, null);
+});
+
 test('merge effect recovery adopts an actual completed Git result without replay or cycle debit', async t => {
   const { state, journal, root, base } = setup(t, { phase: 'execution' });
   const git = (...args) => execFileSync('git', ['-C', root, ...args], { encoding: 'utf8', windowsHide: true }).trim();
@@ -585,7 +598,7 @@ test('unavailable durable tail pauses before launching the next provider effect'
   assert.equal(launches, 0);
 });
 
-test('completed pending provider operation is consumed on recovery without another launch', async (t) => {
+test('completed pending provider operation is consumed on recovery without another launch or transport', async (t) => {
   const { state, journal } = setup(t);
   observe(state);
   state.next = { seat: 'codex', action: 'verify', reason: 'Review' };
@@ -593,7 +606,7 @@ test('completed pending provider operation is consumed on recovery without anoth
   journal.prepare({ ...state.pendingOperation, input: 'saved complete input', contextDigest: state.snapshot.digest,
     artifactDigest: 'a1', evidenceIds: ['E1'], unreadMessageIds: [] });
   journal.complete({ operationId: 'saved-provider', result: response(approve(state)), usage: null, delivery: { observed: true } });
-  const result = await runIssueDialogue({ state, journal, persist: async () => {}, seats: { codex: async () => { throw new Error('must not relaunch'); } } });
+  const result = await runIssueDialogue({ state, journal, persist: async () => {}, seats: {} });
   assert.equal(result.approved, true);
   assert.equal(result.resources.providerLaunches, 1);
 });

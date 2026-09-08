@@ -377,6 +377,7 @@ export async function runIssueDialogue({ state: initial, journal, seats, renderI
         if (mutations.has(next.action) && next.seat !== state.author) throw new Error('only designated author can apply artifacts');
         const allowed = await launchAllowed(next);
         if (allowed?.allowed !== true) return await pause(allowed?.reason ?? 'dialogue budget exhausted');
+        if (typeof seats?.[next.seat] !== 'function') return await pause(`missing transport for seat ${next.seat}`);
         const execution = state.phase === 'execution' && typeof captureExecution === 'function'
           && next.seat === state.author && mutations.has(next.action);
         if (execution && !state.executionCycle?.open) {
@@ -410,7 +411,6 @@ export async function runIssueDialogue({ state: initial, journal, seats, renderI
         ].join('\n\n');
         pending = await prepare({ seat: next.seat, action: next.action, effect: state.formatRepair ? 'repair' : 'provider', input,
           ...(execution ? { executionCycle: structuredClone(state.executionCycle) } : {}) });
-        if (typeof seats?.[pending.seat] !== 'function') throw new Error(`missing transport for seat ${pending.seat}`);
         let response;
         try { response = await seats[pending.seat]({ input, action: state.formatRepair ? 'repair' : next.action,
           state: structuredClone(state), operationId: pending.operationId }); }

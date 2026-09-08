@@ -7,7 +7,6 @@ import { parseArgs } from '../src/args.js';
 import {
   DEFAULT_EXECUTOR_EFFORT,
   DEFAULT_EXECUTOR_MODEL,
-  EXECUTOR_PREAMBLE,
 } from '../src/executor.js';
 import {
   HARNESS_ARTIFACTS,
@@ -16,13 +15,9 @@ import {
   resolveDebateRounds,
 } from '../src/run.js';
 import { VERIFIED_SUPERPOWERS, withVerifiedSuperpowers } from '../fixtures/verified-superpowers.mjs';
-import { PIVOT_CONCLUDE, PIVOT_FRESH } from '../src/debate.js';
-import { EMPTY_USAGE } from '../src/usage.js';
 import { DEFAULT_ARBITER_MODEL } from '../src/arbiter.js';
 import {
   DEFAULT_VERIFIER_MODEL,
-  parseVerdictDetail,
-  REVIEW_PROMPT,
 } from '../src/verifier.js';
 import { spawnCapture } from '../src/spawn.js';
 import { exitCodeFor } from '../src/exit.js';
@@ -34,7 +29,8 @@ import { deriveMergeContext, MERGE_LEDGER_FILENAME } from '../src/merge.js';
 import { landQueueDiff } from '../src/queue-runtime.js';
 import { isolate } from '../src/isolation.js';
 
-const run = (options) => executeRun(withVerifiedSuperpowers(options));
+import { runNestedGate } from './fixtures/nested-gate.js';
+const run = (options) => executeRun(withVerifiedSuperpowers({ ...options, adapters: { runGate: runNestedGate, ...options.adapters } }));
 
 function executionEnvelope(request, action, extra = {}) {
   return { schemaVersion: 1, action, artifactDigest: request.state.artifactDigest,
@@ -44,6 +40,7 @@ function executionEnvelope(request, action, extra = {}) {
 
 function nativeApproval(r, extra = {}) {
   const item = r.state.evidence.find(e => e.id === 'requirement-briefing');
+  readFileSync(item.capturedPath);
   const receipt = createInspectionReceipt({ operationId: r.operationId, seat: 'claude', evidence: [item], inspected: true, result: 'read' });
   return { usage: { inputTokens: 3, outputTokens: 2 }, observations: { evidence: [], receipts: [receipt] },
     dialogue: executionEnvelope(r, 'approve', { claims: [{ id: 'briefing-requirement', kind: 'fact', text: 'The saved briefing is present.', evidenceIds: [item.id] }],
@@ -922,13 +919,6 @@ const scratch = () => {
   return mkdtempSync(join(SAFE_SCRATCH_BASE, '.ccc-test-'));
 };
 
-// Executor fake that writes a file into the isolated dir, so the diff is non-empty.
-const writingExecutor = async ({ cwd }) => {
-  writeFileSync(join(cwd, 'new.txt'), 'content');
-  return { changedFiles: ['new.txt'], lastMessage: 'wrote new.txt' };
-};
-const noopExecutor = async () => ({ changedFiles: [], lastMessage: 'nothing to do' });
-
 const DECISION_CONTENT = `
 ## Q1
 Kind: technical
@@ -937,441 +927,138 @@ Options: follow the task literally, follow the existing convention
 Recommendation: follow the existing convention
 `;
 
-const AUTHORITY_DECISION_CONTENT = `
-## Q1
-Kind: authority
-Question: May the executor choose on the operator's behalf?
-Options: halt, follow the isolated-worktree recommendation
-Recommendation: follow the isolated-worktree recommendation
-`;
-
-test('one holistic review report carries correctness and intent findings into the record', async () => {
-  const scr = scratch();
-  const reviewCalls = [];
-  const facts = await run({
-    task: 'do the task', target: makeTarget(), gate: [], gateRetries: 2,
-    scratchRoot: scr, runId: 'f1',
-    adapters: {
-      runExecutor: writingExecutor,
-      runGate: async () => ({ passed: true, results: [] }),
-      runReview: reviewerForRounds([
-        `${suggestionReview('F1')}\n## F2\nSeverity: suggestion\nCategory: intent\nDescription: The shared-scope requirement was dropped.\n`,
-      ], reviewCalls),
-    },
-  });
-  assert.equal(facts.outcome, 'review-ready');
-  const round = facts.debate.roundHistory[0];
-  assert.deepEqual(round.findingIds, ['F1', 'F2']);
-  assert.equal(round.findings[1].category, 'intent');
-  assert.equal(round.findings[1].description, 'The shared-scope requirement was dropped.');
-  // The two-seat verdict surface is gone from the facts entirely.
-  for (const gone of ['verdict', 'correctnessVerdict', 'intentVerdict',
-    'verifierFindings', 'intentVerifierFindings']) {
-    assert.equal(Object.hasOwn(facts, gone), false, `${gone} must not exist`);
-  }
-  assert.equal(facts.baseRef, 'HEAD');
-  assert.match(facts.baseCommit, /^[0-9a-f]{40,64}$/);
-  assert.equal(facts.branch, 'uro/f1');
-  assert.equal(reviewCalls.length, 1, 'one seat, one report');
-  assert.equal(reviewCalls[0].request.originalRequirements, 'do the task');
-  assert.match(reviewCalls[0].request.diff, /new.txt/);
-  assert.match(JSON.stringify(reviewCalls[0].request.messages), /wrote new.txt/);
-  rmSync(scr, { recursive: true, force: true });
+test('one holistic review report carries correctness and intent findings into the record', async t => {
+  const calls = [];
+  const report = '## F1\nSeverity: suggestion\nCategory: correctness\nDescription: Simplify the implementation.\n\n## F2\nSeverity: suggestion\nCategory: intent\nDescription: The shared-scope requirement was dropped.\n';
+  const facts = await run({ ...nativeFixture(t, 'f1', { runReview: r => {
+    calls.push(r); const response = nativeApproval(r);
+    return { ...response, resultSeen: true, resultUsable: true, materializationDeferred: true,
+      answer: JSON.stringify({ version: 1, conclusion: 'clean', report, tests: [] }) + '\n<UROBOROS_DIALOGUE>' + JSON.stringify(response.dialogue) + '</UROBOROS_DIALOGUE>' };
+  } }), task: 'do the task' });
+  assert.equal(facts.approved, true, facts.reason);
+  assert.match(readFileSync(join(facts.dir, '__uro_review/REVIEW.md'), 'utf8'), /Category: correctness[\s\S]*Category: intent/);
+  assert.match(JSON.stringify(facts), /shared-scope requirement was dropped/);
+  for (const gone of ['verdict','correctnessVerdict','intentVerdict','verifierFindings','intentVerifierFindings']) assert.equal(Object.hasOwn(facts, gone), false);
+  assert.equal(facts.baseRef, 'HEAD'); assert.match(facts.baseCommit, /^[0-9a-f]{40,64}$/); assert.equal(facts.branch, 'uro/f1');
+  assert.equal(calls.length, 1); assert.match(calls[0].input, /do the task/); assert.match(calls[0].input, /completed.txt/);
 });
 
-test('debate fix rounds accumulate usage and model overrides reach both agents and run facts', async () => {
-  const scr = scratch();
-  const executorCalls = [];
-  const verifierCalls = [];
-  let executorCall = 0;
-  let gateCall = 0;
-  const executorUsages = [
-    { inputTokens: 10, cachedInputTokens: 5, outputTokens: 2,
-      reasoningOutputTokens: 1, cacheWriteTokens: 0 },
-    { inputTokens: 20, cachedInputTokens: 10, outputTokens: 3,
-      reasoningOutputTokens: 2, cacheWriteTokens: 1 },
-  ];
-  const roundOneUsage = { inputTokens: 18, cachedInputTokens: 9, outputTokens: 14,
-    reasoningOutputTokens: 0, cacheWriteTokens: 5 };
-  const roundTwoUsage = { inputTokens: 18, cachedInputTokens: 9, outputTokens: 14,
-    reasoningOutputTokens: 0, cacheWriteTokens: 5 };
-  const cliOpts = parseArgs(['run', '--task', 'do the task', '--target', makeTarget(),
-    '--gate', 'unused-gate.json', '--gate-retries', '1',
-    '--executor-model', 'executor-override', '--executor-effort', 'medium',
-    '--claude-model', 'reviewer-override']);
-  const facts = await run({
-    ...cliOpts, verifierModel: cliOpts.claudeModel, gate: [],
-    scratchRoot: scr, runId: 'usage-models',
-    adapters: {
-      runExecutor: async (opts) => {
-        executorCalls.push(opts);
-        writeFileSync(join(opts.cwd, 'new.txt'), 'content');
-        return { changedFiles: ['new.txt'], lastMessage: `attempt ${executorCall + 1}`,
-          usage: executorUsages[executorCall++] };
-      },
-      runGate: async () => { gateCall++; return { passed: true, results: [] }; },
-      // Round one's report files a blocking finding to force a fix round;
-      // round two's report is clean, so the debate converges.
-      runReview: (() => {
-        const reviewer = reviewerForRounds([blockingReview(), null], verifierCalls);
-        let round = 0;
-        return async (opts) => {
-          const result = await reviewer(opts);
-          round++;
-          return { ...result, usage: round === 1 ? roundOneUsage : roundTwoUsage };
-        };
-      })(),
-    },
+test('debate fix rounds accumulate usage and model overrides reach both agents and run facts', async t => {
+  const writers = [], reviewers = []; let writes = 0;
+  const options = nativeFixture(t, 'usage-models', {
+    runExecutor: r => { writers.push(r); writeFileSync(join(r.cwd, 'completed.txt'), String(++writes));
+      return { usage: { inputTokens: writes === 1 ? 10 : 20, outputTokens: writes === 1 ? 2 : 3 }, dialogue: executionEnvelope(r, r.action) }; },
+    runReview: r => { reviewers.push(r); return reviewers.length === 1
+      ? { usage: { inputTokens: 18, outputTokens: 14 }, dialogue: executionEnvelope(r, 'ask', { next: { seat: 'codex', action: 'revise', reason: 'Correct the implementation' } }) }
+      : { ...nativeApproval(r), usage: { inputTokens: 18, outputTokens: 14 } }; },
   });
-  assert.equal(executorCalls.length, 2, 'initial execution plus one debate fix round');
-  for (const call of executorCalls) {
-    assert.equal(call.model, 'executor-override');
-    assert.equal(call.effort, 'medium');
-  }
-  assert.equal(verifierCalls.length, 2, 'two rounds, one reviewer each');
-  for (const call of verifierCalls) assert.equal(call.model, 'reviewer-override');
-  assert.deepEqual(verifierCalls.map((call) => call.request.round), [1, 2]);
-  assert.deepEqual(facts.model, {
-    executor: 'executor-override', executorEffort: 'medium', verifier: 'reviewer-override',
-    arbiter: 'reviewer-override',
-  });
-  assert.deepEqual(facts.iterations[0].executorUsage, executorUsages[0]);
-  assert.deepEqual(facts.iterations[1].executorUsage, executorUsages[1]);
-  assert.deepEqual(facts.tokens, {
-    participants: [
-      { provider: 'codex', phase: 'execution', role: 'implementation-author',
-        usage: { inputTokens: 30, cachedInputTokens: 15, outputTokens: 5, reasoningOutputTokens: 3, cacheWriteTokens: 1 } },
-      { provider: 'claude', phase: 'execution', role: 'execution-reviewer',
-        usage: { inputTokens: 36, cachedInputTokens: 18, outputTokens: 28, reasoningOutputTokens: 0, cacheWriteTokens: 10 } },
-    ],
-    total: { inputTokens: 66, cachedInputTokens: 33, outputTokens: 33,
-      reasoningOutputTokens: 3, cacheWriteTokens: 11 },
-  });
-  assert.equal(facts.debate.roundsRun, 2);
-  assert.deepEqual(facts.debate.findingsPerRound, [['F1'], []]);
-  assert.equal(Object.hasOwn(facts, 'verdictSource'), false);
-  assert.equal(Object.hasOwn(facts, 'gateFailure'), false);
-  rmSync(scr, { recursive: true, force: true });
+  const cli = parseArgs(['run','--task',options.task,'--target',options.target,'--gate','unused','--executor-model','executor-override','--executor-effort','medium','--claude-model','reviewer-override']);
+  const facts = await run({ ...options, ...cli, gate: [], verifierModel: cli.claudeModel });
+  assert.equal(writers.length, 2); assert.equal(reviewers.length, 2); assert.equal(facts.approved, true, facts.reason);
+  for (const r of writers) { assert.equal(r.model, 'executor-override'); assert.equal(r.effort, 'medium'); }
+  for (const r of reviewers) assert.equal(r.model, 'reviewer-override');
+  assert.deepEqual(facts.model, { executor:'executor-override',executorEffort:'medium',verifier:'reviewer-override',arbiter:'reviewer-override' });
+  assert.equal(facts.resources.providerLaunches, 4); assert.equal(facts.resources.knownUsage.inputTokens, 66); assert.equal(facts.resources.knownUsage.outputTokens, 33);
+  assert.equal(facts.tokens.total.inputTokens, 66); assert.equal(facts.dialogue.correctionCycles, 1);
 });
 
-// The retained-evidence verdict-consistency surface died with the verdict
-// passes; checkVerdictConsistency remains covered in verifier.test.js where
-// the transport lives.
-test('a token invariant violation is reported without failing a completed run', async () => {
-  const scr = scratch();
-  const target = makeTarget();
-  try {
-    const facts = await run({
-      task: 'do the task', target, gate: [], gateRetries: 0,
-      scratchRoot: scr, runId: 'usage-disagreement',
-      adapters: {
-        runExecutor: async (opts) => {
-          await writingExecutor(opts);
-          return {
-            changedFiles: ['new.txt'],
-            lastMessage: 'wrote new.txt',
-            usage: {
-              inputTokens: 10,
-              cachedInputTokens: 30,
-              outputTokens: 2,
-              reasoningOutputTokens: 0,
-              cacheWriteTokens: 0,
-            },
-          };
-        },
-        runGate: async () => ({ passed: true, results: [] }),
-        runVerifier: async () => ({
-          verdict: 'NO_BLOCKERS', launchFailed: false, usage: EMPTY_USAGE,
-        }),
-      },
-    });
-
-    assert.equal(facts.outcome, 'review-ready', 'accounting diagnostics must not fail the run');
-    assert.equal(facts.usageConsistency.status, 'disagreement');
-    const violation = facts.usageConsistency.checks.find((check) => (
-      check.seat === 'executor' && check.status === 'disagreement'
-    ));
-    assert.ok(violation, 'the executor violation must be retained in run facts');
-    assert.equal(violation.invariant, 'cachedInputTokens <= inputTokens');
-    assert.equal(violation.inputTokens, 10);
-    assert.equal(violation.cachedInputTokens, 30);
-
-    const persisted = JSON.parse(readFileSync(join(facts.dir, 'uro-runfacts.json'), 'utf8'));
-    assert.equal(persisted.usageConsistency.status, 'disagreement');
-    const report = readFileSync(join(facts.dir, 'uro-report.md'), 'utf8');
-    assert.match(report, /token accounting bookkeeping disagreement/i);
-    assert.match(report, /input 10, cached input 30/i);
-  } finally {
-    rmSync(scr, { recursive: true, force: true });
-    rmSync(target, { recursive: true, force: true });
-  }
+test('a token invariant violation is reported without failing a completed run', async t => {
+  const options = nativeFixture(t, 'usage-disagreement');
+  const writer = options.adapters.runExecutor;
+  options.adapters.runExecutor = r => ({ ...writer(r), usage: { inputTokens:10,cachedInputTokens:30,outputTokens:2,reasoningOutputTokens:0,cacheWriteTokens:0 } });
+  const facts = await run(options); assert.equal(facts.approved, true, facts.reason);
+  assert.equal(facts.usageConsistency.status, 'disagreement');
+  const violation = facts.usageConsistency.checks.find(c => c.status === 'disagreement');
+  assert.equal(violation.invariant, 'cachedInputTokens <= inputTokens'); assert.equal(violation.inputTokens,10); assert.equal(violation.cachedInputTokens,30);
+  assert.equal(JSON.parse(readFileSync(join(facts.dir,'uro-runfacts.json'))).usageConsistency.status,'disagreement');
+  assert.match(readFileSync(join(facts.dir,'uro-report.md'),'utf8'),/token accounting bookkeeping disagreement/i);
 });
 
-test('omitted model flags travel through the CLI path to both agents and run-fact defaults', async () => {
-  const scr = scratch();
-  const executorCalls = [];
-  const verifierCalls = [];
-  const cliOpts = parseArgs(['run', '--task', 'do the task', '--target', makeTarget(),
-    '--gate', 'unused-gate.json']);
-  const facts = await run({
-    ...cliOpts, verifierModel: cliOpts.claudeModel, gate: [], scratchRoot: scr, runId: 'default-models',
-    adapters: {
-      runExecutor: async (opts) => {
-        executorCalls.push(opts);
-        return writingExecutor(opts);
-      },
-      runGate: async () => ({ passed: true, results: [] }),
-      runReview: reviewerForRounds([null], verifierCalls),
-    },
-  });
-
-  assert.equal(executorCalls[0].model, DEFAULT_EXECUTOR_MODEL);
-  assert.equal(executorCalls[0].effort, DEFAULT_EXECUTOR_EFFORT);
-  assert.equal(Object.hasOwn(executorCalls[0], 'superpowersDir'), false);
-  assert.deepEqual(verifierCalls.map((call) => call.model), [DEFAULT_VERIFIER_MODEL]);
-  assert.deepEqual(verifierCalls.map((call) => call.bin), ['claude']);
-  assert.deepEqual(facts.model, {
-    executor: DEFAULT_EXECUTOR_MODEL,
-    executorEffort: DEFAULT_EXECUTOR_EFFORT,
-    verifier: DEFAULT_VERIFIER_MODEL,
-    arbiter: DEFAULT_ARBITER_MODEL,
-  });
-  assert.equal(facts.skills, VERIFIED_SUPERPOWERS.seats.claude.path);
-  assert.deepEqual(Object.keys(facts.superpowers.seats).sort(), ['claude', 'codex']);
-  rmSync(scr, { recursive: true, force: true });
+test('omitted model flags travel through the CLI path to both agents and run-fact defaults', async t => {
+  const writers=[], reviewers=[], options=nativeFixture(t,'default-models');
+  const writer=options.adapters.runExecutor;
+  options.adapters.runExecutor=r=>{writers.push(r);return writer(r);}; options.adapters.runReview=r=>{reviewers.push(r);return nativeApproval(r);};
+  const cli=parseArgs(['run','--task',options.task,'--target',options.target,'--gate','unused']);
+  const facts=await run({...options,...cli,gate:[],verifierModel:cli.claudeModel});
+  assert.equal(facts.approved,true,facts.reason); assert.equal(writers[0].model,DEFAULT_EXECUTOR_MODEL); assert.equal(writers[0].effort,DEFAULT_EXECUTOR_EFFORT);
+  assert.equal(Object.hasOwn(writers[0],'superpowersDir'),false); assert.equal(reviewers[0].model,DEFAULT_VERIFIER_MODEL); assert.equal(reviewers[0].bin,'claude');
+  assert.deepEqual(facts.model,{executor:DEFAULT_EXECUTOR_MODEL,executorEffort:DEFAULT_EXECUTOR_EFFORT,verifier:DEFAULT_VERIFIER_MODEL,arbiter:DEFAULT_ARBITER_MODEL});
+  assert.equal(facts.skills,VERIFIED_SUPERPOWERS.seats.claude.path); assert.deepEqual(Object.keys(facts.superpowers.seats).sort(),['claude','codex']);
 });
 
-test('TASK.md is written before execution, excluded from the diff, and the reviewer launches', async () => {
-  let launches = 0;
-  const scr = scratch();
-  const plan = 'Implement the exact requested behavior.\nDo not narrow shared scope.\n';
-  const composedPlan = `${EXECUTOR_PREAMBLE}\n\n${plan}`;
-  const target = makeTarget();
-  const facts = await run({
-    task: plan, target, gate: [], gateRetries: 2,
-    scratchRoot: scr, runId: 'g1',
-    adapters: {
-      runExecutor: async ({ cwd, plan: received }) => {
-        assert.ok(received.startsWith(EXECUTOR_PREAMBLE));
-        assert.equal(received.slice(EXECUTOR_PREAMBLE.length + 2), plan,
-          'the operator plan must survive byte-for-byte after the preamble');
-        assert.equal(received, composedPlan);
-        assert.equal(readFileSync(join(cwd, 'TASK.md'), 'utf8'), received,
-          'TASK.md must exactly match the text sent to the executor');
-        return writingExecutor({ cwd });
-      },
-      runGate: async () => ({ passed: true, results: [] }),
-      runReview: (() => {
-        const reviewer = reviewerForRounds([null]);
-        return async (opts) => { launches++; return reviewer(opts); };
-      })(),
-    },
-  });
-  assert.equal(facts.outcome, 'review-ready');
-  assert.equal(launches, 1);
-  assert.ok(existsSync(join(facts.dir, 'CHANGES.diff')), 'CHANGES.diff handed to the reviewer');
-  const diff = readFileSync(join(facts.dir, 'CHANGES.diff'), 'utf8');
-  assert.match(diff, /new[.]txt/);
-  assert.doesNotMatch(diff, /TASK[.]md/);
-  assert.equal(existsSync(join(target, 'TASK.md')), false, 'the target must remain untouched');
-  rmSync(scr, { recursive: true, force: true });
+test('TASK.md is written before execution, excluded from the diff, and the reviewer launches', async t => {
+  const plan='Implement the exact requested behavior.\nDo not narrow shared scope.\n'; let reviews=0;
+  const options=nativeFixture(t,'g1'); const writer=options.adapters.runExecutor;
+  options.task=plan; options.adapters.runExecutor=r=>{ assert.equal(r.approvedPlan,plan); assert.equal(readFileSync(join(r.cwd,'TASK.md'),'utf8'),r.input);
+    assert.ok(r.input.includes(plan)); return writer(r); };
+  options.adapters.runReview=r=>{reviews++;return nativeApproval(r);};
+  const facts=await run(options); assert.equal(facts.approved,true,facts.reason); assert.equal(reviews,1);
+  const diff=readFileSync(join(facts.dir,'CHANGES.diff'),'utf8'); assert.match(diff,/completed.txt/); assert.doesNotMatch(diff,/TASK.md/);
+  assert.equal(existsSync(join(options.target,'TASK.md')),false);
 });
 
-test('run reads an existing .txt task file instead of executing its path string', async () => {
-  const scr = scratch();
-  const taskDir = mkdtempSync(join(tmpdir(), 'run-task-'));
-  const taskPath = join(taskDir, 'plan.txt');
-  const plan = 'Use the contents of the text task file.\n';
-  const composedPlan = `${EXECUTOR_PREAMBLE}\n\n${plan}`;
-  writeFileSync(taskPath, plan);
-  const facts = await run({
-    task: taskPath, target: makeTarget(), gate: [], gateRetries: 0,
-    scratchRoot: scr, runId: 'txt-task',
-    adapters: {
-      runExecutor: async ({ cwd, plan: received }) => {
-        assert.equal(received, composedPlan,
-          'the executor must receive framed file contents, not the .txt path');
-        assert.equal(readFileSync(join(cwd, 'TASK.md'), 'utf8'), received);
-        return noopExecutor();
-      },
-      runGate: async () => ({ passed: true, results: [] }),
-      runReview: async () => { throw new Error('no-op must not launch a reviewer'); },
-    },
-  });
-  assert.equal(facts.outcome, 'no-op');
-  rmSync(taskDir, { recursive: true, force: true });
-  rmSync(scr, { recursive: true, force: true });
+test('run reads an existing .txt task file instead of executing its path string', async t => {
+  const options=nativeFixture(t,'txt-task'), path=join(options.scratchRoot,'plan.txt'), plan='Use the contents of the text task file.\n';
+  writeFileSync(path,plan); const writer=options.adapters.runExecutor; options.task=path;
+  options.adapters.runExecutor=r=>{assert.equal(r.approvedPlan,plan);assert.equal(readFileSync(join(r.cwd,'TASK.md'),'utf8'),r.input);return writer(r);};
+  const facts=await run(options); assert.equal(facts.approved,true,facts.reason);
 });
 
-test('the first call is verbatim and a fix round carries the failing evidence', async () => {
-  const scr = scratch();
-  const plan = 'Implement the requested behavior exactly.\nKeep the original plan unchanged.\n';
-  const composedPlan = `${EXECUTOR_PREAMBLE}\n\n${plan}`;
-  const executorPlans = [];
-  let gateCall = 0;
-  const failure = {
-    bin: 'node', args: ['--test', 'test/repair.test.js'], code: 7,
-    outputTail: '[stdout]\nrepair test failed\n[stderr]\nexpected true but received false',
-  };
-  const facts = await run({
-    task: plan, target: makeTarget(), gate: [], gateRetries: 1,
-    scratchRoot: scr, runId: 'retry-context',
-    adapters: {
-      runExecutor: async (opts) => {
-        executorPlans.push(opts.plan);
-        return writingExecutor(opts);
-      },
-      runGate: async () => gateCall++ <= 1
-        ? { passed: false, results: [failure] }
-        : { passed: true, results: [] },
-      // The fix round is driven by a finding; the failing command travels with it.
-      runReview: reviewerForRounds([blockingReview(), null]),
-    },
-  });
-
-  assert.equal(executorPlans.length, 2);
-  assert.equal(executorPlans[0], composedPlan,
-    'the initial executor prompt must frame the verbatim plan');
-  assert.match(executorPlans[1], /Previous gate attempt failed/);
-  assert.match(executorPlans[1], /"bin":"node"/);
-  assert.match(executorPlans[1], /"--test","test\/repair[.]test[.]js"/);
-  assert.match(executorPlans[1], /Exit code: 7/);
-  assert.ok(executorPlans[1].includes(failure.outputTail));
-  assert.equal(readFileSync(join(facts.dir, 'TASK.md'), 'utf8'), executorPlans[1],
-    'TASK.md must match the final fix text the executor received');
-  rmSync(scr, { recursive: true, force: true });
+test('the first call preserves the plan and a correction receives actual failing evidence', async t => {
+  const requests=[];let reviews=0;
+  const command={bin:process.execPath,args:['-e',"const n=require('node:fs').readFileSync('completed.txt','utf8');if(n==='1'){process.stdout.write('repair test failed');process.stderr.write('expected true but received false');process.exit(7)}"]};
+  const options=nativeFixture(t,'retry-context',{
+    runExecutor:r=>{requests.push(r);writeFileSync(join(r.cwd,'completed.txt'),String(requests.length));return {dialogue:executionEnvelope(r,r.action)};},
+    runReview:r=>++reviews===1?{dialogue:executionEnvelope(r,'ask',{next:{seat:'codex',action:'revise',reason:'Correct failed check'}})}:nativeApproval(r),
+  },[command]);options.task='Implement the requested behavior exactly.\nKeep the original plan unchanged.\n';
+  const facts=await run(options);assert.equal(facts.approved,true,facts.reason);assert.equal(requests.length,2);
+  assert.equal(requests[0].approvedPlan,options.task);assert.ok(requests[0].input.includes(options.task));
+  assert.match(requests[1].input,/repair test failed/);assert.match(requests[1].input,/expected true but received false/);
+  assert.equal(requests[1].state.evidence.find(e=>e.kind==='command').exitCode,7);
+  assert.equal(readFileSync(join(facts.dir,'TASK.md'),'utf8'),requests[1].input);
 });
 
-test('each fix round receives only the immediately preceding failing evidence', async () => {
-  const scr = scratch();
-  const plan = 'Repair the implementation.';
-  const composedPlan = `${EXECUTOR_PREAMBLE}\n\n${plan}`;
-  const executorPlans = [];
-  const firstFailure = {
-    bin: 'node', args: ['--test', 'test/first.test.js'], code: 11,
-    outputTail: '[stdout]\nFIRST_FAILURE_ONLY\n[stderr]\nfirst stack',
-  };
-  const secondFailure = {
-    bin: 'npm', args: ['run', 'second-check'], code: 22,
-    outputTail: '[stdout]\nSECOND_FAILURE_ONLY\n[stderr]\nsecond stack',
-  };
-  const gateResults = [
-    { passed: false, results: [firstFailure] },
-    { passed: false, results: [firstFailure] },
-    { passed: false, results: [secondFailure] },
-    { passed: false, results: [secondFailure] },
-    { passed: true, results: [] },
-  ];
-  const facts = await run({
-    task: plan, target: makeTarget(), gate: [], gateRetries: 2,
-    scratchRoot: scr, runId: 'fresh-retry-context',
-    adapters: {
-      runExecutor: async (opts) => {
-        executorPlans.push(opts.plan);
-        return writingExecutor(opts);
-      },
-      runGate: async () => gateResults.shift(),
-      // Two rounds of findings drive two fix rounds; the third review is clean.
-      runReview: reviewerForRounds([blockingReview('F1'), blockingReview('F2'), null]),
-    },
-  });
-
-  assert.equal(executorPlans.length, 3);
-  assert.equal(executorPlans[0], composedPlan);
-  assert.ok(executorPlans[1].includes('FIRST_FAILURE_ONLY'));
-  assert.ok(!executorPlans[1].includes('SECOND_FAILURE_ONLY'));
-  assert.match(executorPlans[1], /Exit code: 11/);
-  assert.ok(executorPlans[2].includes('SECOND_FAILURE_ONLY'));
-  assert.ok(!executorPlans[2].includes('FIRST_FAILURE_ONLY'),
-    'the second retry must not accumulate the first failure');
-  assert.match(executorPlans[2], /"bin":"npm"/);
-  assert.match(executorPlans[2], /Exit code: 22/);
-  rmSync(scr, { recursive: true, force: true });
+test('each correction distinguishes current failing evidence while retaining earlier evidence as history', async t => {
+  const requests=[];let reviews=0;
+  const command={bin:process.execPath,args:['-e',"const n=+require('node:fs').readFileSync('completed.txt','utf8');if(n<3){process.stdout.write(n===1?'FIRST_FAILURE_ONLY':'SECOND_FAILURE_ONLY');process.exit(n===1?11:22)}"]};
+  const facts=await run(nativeFixture(t,'fresh-retry-context',{
+    runExecutor:r=>{requests.push(r);writeFileSync(join(r.cwd,'completed.txt'),String(requests.length));return {dialogue:executionEnvelope(r,r.action)};},
+    runReview:r=>++reviews<3?{dialogue:executionEnvelope(r,'ask',{next:{seat:'codex',action:'revise',reason:'Correct current command failure'}})}:nativeApproval(r),
+  },[command]));
+  assert.equal(facts.approved,true,facts.reason);assert.equal(requests.length,3);
+  const first=requests[1].state.evidence.filter(e=>e.kind==='command'),second=requests[2].state.evidence.filter(e=>e.kind==='command');
+  assert.equal(first.at(-1).stdout,'FIRST_FAILURE_ONLY');assert.equal(first.at(-1).exitCode,11);
+  assert.equal(second.at(-1).stdout,'SECOND_FAILURE_ONLY');assert.equal(second.at(-1).exitCode,22);
+  assert.notEqual(first.at(-1).codeIdentity,second.at(-1).codeIdentity);assert.ok(second.some(e=>e.stdout==='FIRST_FAILURE_ONLY'));
+  assert.equal(facts.dialogue.correctionCycles,2);
 });
 
-test('a green first gate never augments the executor prompt', async () => {
-  const scr = scratch();
-  const plan = 'Make one focused change.\n';
-  const composedPlan = `${EXECUTOR_PREAMBLE}\n\n${plan}`;
-  const executorPlans = [];
-  const facts = await run({
-    task: plan, target: makeTarget(), gate: [], gateRetries: 2,
-    scratchRoot: scr, runId: 'green-no-retry-context',
-    adapters: {
-      runExecutor: async (opts) => {
-        executorPlans.push(opts.plan);
-        return writingExecutor(opts);
-      },
-      runGate: async () => ({ passed: true, results: [] }),
-      runVerifier: async () => ({ verdict: 'NO_BLOCKERS', launchFailed: false }),
-    },
-  });
-
-  assert.equal(facts.outcome, 'review-ready');
-  assert.deepEqual(executorPlans, [composedPlan]);
-  assert.doesNotMatch(executorPlans[0], /Previous gate attempt failed/);
-  rmSync(scr, { recursive: true, force: true });
+test('a green first gate never augments the executor prompt', async t => {
+  const requests=[],options=nativeFixture(t,'green-no-retry-context',{},[{bin:process.execPath,args:['-e',"process.stdout.write('green')"]}]);
+  const writer=options.adapters.runExecutor; options.adapters.runExecutor=r=>{requests.push(r);return writer(r);};
+  const facts=await run(options); assert.equal(facts.approved,true,facts.reason); assert.equal(requests.length,1);
+  assert.equal(requests[0].approvedPlan,options.task); assert.doesNotMatch(requests[0].input,/Previous gate attempt failed/);
+  assert.equal(facts.dialogue.correctionCycles,0);
 });
 
-test('a reviewer launch failure yields verifier-failed', async () => {
-  const scr = scratch();
-  const facts = await run({
-    task: 'do the task', target: makeTarget(), gate: [], gateRetries: 2,
-    scratchRoot: scr, runId: 'vf1',
-    adapters: {
-      runExecutor: writingExecutor,
-      runGate: async () => ({ passed: true, results: [] }),
-      runReview: async () => { throw new Error('reviewer CLI would not start'); },
-    },
-  });
-  assert.equal(facts.outcome, 'verifier-failed');
-  assert.equal(facts.debate.stopReason, 'review-failed');
-  assert.match(facts.iterations[0].reviewer.error, /reviewer CLI would not start/);
-  rmSync(scr, { recursive: true, force: true });
+test('a reviewer launch failure yields verifier-failed', async t => {
+  const facts=await run(nativeFixture(t,'vf1',{runReview:()=>{throw Error('reviewer CLI would not start');}}));
+  assert.equal(facts.approved,false); assert.equal(facts.nextAction,'paused'); assert.notEqual(exitCodeFor(facts.outcome),0);
+  assert.match(JSON.stringify(facts),/reviewer CLI would not start/);
 });
 
-test('a reviewer that runs but writes no report yields verifier-failed', async () => {
-  // Silence is not consent in execution either: a seat that launched and
-  // produced no REVIEW.md did not review, and the run says so.
-  const scr = scratch();
-  const facts = await run({
-    task: 'do the task', target: makeTarget(), gate: [], gateRetries: 2,
-    scratchRoot: scr, runId: 'vf2',
-    adapters: {
-      runExecutor: writingExecutor,
-      runGate: async () => ({ passed: true, results: [] }),
-      runReview: async () => ({ launchFailed: false, timedOut: false }),
-    },
-  });
-  assert.equal(facts.outcome, 'verifier-failed');
-  assert.equal(facts.debate.stopReason, 'unreviewed');
-  rmSync(scr, { recursive: true, force: true });
+test('a reviewer that runs but writes no report yields verifier-failed', async t => {
+  let reviews=0; const facts=await run(nativeFixture(t,'vf2',{runReview:()=>{reviews++;return {launchFailed:false,timedOut:false};}}));
+  assert.equal(facts.approved,false); assert.equal(facts.nextAction,'paused'); assert.equal(facts.approval,null); assert.equal(reviews,2); assert.equal(facts.resources.repairLaunches,1);
 });
 
-test('empty diff → verifier is NOT launched (no-op)', async () => {
-  let launches = 0;
-  const scr = scratch();
-  const facts = await run({
-    task: 'do the task', target: makeTarget(), gate: [], gateRetries: 2,
-    scratchRoot: scr, runId: 'e1',
-    adapters: {
-      runExecutor: noopExecutor,
-      runGate: async () => ({ passed: true, results: [] }),
-      runReview: async () => { launches++; return { launchFailed: false, timedOut: false }; },
-    },
-  });
-  assert.equal(launches, 0, 'no diff means nothing to review');
-  assert.equal(facts.outcome, 'no-op');
-  assert.equal(readFileSync(join(facts.dir, 'TASK.md'), 'utf8'),
-    `${EXECUTOR_PREAMBLE}\n\ndo the task`);
-  assert.equal(await diffText(facts.dir), '',
-    'TASK.md and generated report artifacts must not turn a no-op into a change');
-  rmSync(scr, { recursive: true, force: true });
+test('empty malformed execution pauses without launching a verifier or inventing no-op success', async t => {
+  let reviews=0;
+  const facts=await run(nativeFixture(t,'e1',{runExecutor:()=>({exitCode:0,changedFiles:[],lastMessage:''}),runReview:()=>{reviews++;throw Error('No review');}}));
+  assert.equal(reviews,0); assert.equal(facts.approved,false); assert.notEqual(facts.outcome,'no-op');
+  assert.equal(readFileSync(join(facts.dir,'CHANGES.diff'),'utf8'),''); assert.equal(await diffText(facts.dir),'');
 });
 
-// The UNVERIFIED marker died with the verdict passes. A seat that cannot
-// review now surfaces as a launch failure, a timeout, or a missing report —
-// all covered above.
 test('a failing verifier preflight probe stops before executor dispatch', async () => {
   let executorCalled = false;
   const target = makeTarget();
@@ -1401,302 +1088,100 @@ test('a failing verifier preflight probe stops before executor dispatch', async 
   }
 });
 
-test('a passing verifier preflight probe leaves executor dispatch unchanged', async () => {
-  const scr = scratch();
-  let executorCalled = false;
-  const facts = await run({
-    task: 'do the task', target: makeTarget(), gate: [], gateRetries: 0,
-    scratchRoot: scr, runId: 'probe-passed',
-    adapters: {
-      probeVerifier: async () => ({ ok: true, reason: null }),
-      runExecutor: async () => {
-        executorCalled = true;
-        return { changedFiles: [], lastMessage: 'nothing to do' };
-      },
-      runGate: async () => ({ passed: true, results: [] }),
-      runReview: async () => { throw new Error('no-op must not verify'); },
-    },
-  });
-
-  assert.equal(executorCalled, true);
-  assert.equal(facts.outcome, 'no-op');
-  rmSync(scr, { recursive: true, force: true });
+test('a passing verifier preflight probe leaves executor dispatch unchanged', async t => {
+  let writes=0; const options=nativeFixture(t,'probe-passed'); const writer=options.adapters.runExecutor;
+  options.adapters.probeVerifier=()=>({ok:true,reason:null}); options.adapters.runExecutor=r=>{writes++;return writer(r);};
+  const facts=await run(options); assert.equal(facts.approved,true,facts.reason); assert.equal(writes,1);
 });
 
-test('a sentinel-only executor challenge needs a decision in manual mode', async () => {
-  const scr = scratch();
-  const events = [];
-  let gateCalls = 0;
-  let verifierCalls = 0;
-  const facts = await run({
-    task: 'do the task', target: makeTarget(), gate: [], gateRetries: 0,
-    scratchRoot: scr, runId: 'manual-decision', mode: 'manual',
-    reporter: (event) => events.push(event),
-    adapters: {
-      runExecutor: async ({ cwd }) => {
-        writeFileSync(join(cwd, 'DECISION.md'), DECISION_CONTENT);
-        return { changedFiles: ['DECISION.md'], lastMessage: 'need a decision', exitCode: 0 };
-      },
-      runGate: async () => {
-        gateCalls++;
-        return { passed: true, results: [] };
-      },
-      runReview: async () => {
-        verifierCalls++;
-        throw new Error('reviewer must not launch for a challenge');
-      },
-    },
-  });
-
-  assert.equal(facts.outcome, 'needs-decision');
-  assert.equal(gateCalls, 0);
-  assert.equal(verifierCalls, 0);
-  assert.equal(facts.decision.questions.length, 1);
-  assert.equal(facts.decision.questions[0].id, 'Q1');
-  assert.equal(facts.decision.mode, 'manual');
-  assert.equal(facts.decision.challengeRound, 1);
-  assert.equal(events.filter((event) => (
-    event.stage === 'decision' && event.type === 'challenged'
-  )).length, 1);
-  rmSync(scr, { recursive: true, force: true });
+test('a native explicit missing product decision pauses in manual mode before gate or reviewer', async t => {
+  let gates=0,reviews=0; const facts=await run({...nativeFixture(t,'manual-decision',{
+    runExecutor:r=>({dialogue:executionEnvelope(r,'ask',{issues:[{id:'Q1',kind:'product',needsHuman:true,title:'Choose product behavior',status:'awaiting-answer',blocking:true}],
+      evidence:['requirement-briefing'],next:{seat:'claude',action:'answer',reason:'Missing user intent'}})}),
+    runGate:()=>{gates++;throw Error('No check');},runReview:()=>{reviews++;throw Error('No reviewer');},
+  }),mode:'manual'});
+  assert.equal(facts.outcome,'needs-decision',facts.reason); assert.equal(gates,0); assert.equal(reviews,0);
+  assert.deepEqual(facts.dialogue.pendingDecision.issueIds,['Q1']); assert.equal(facts.dialogue.pendingDecision.authority,'human');
+  assert.equal(facts.checkpointState.version,2); assert.equal(facts.checkpointState.interactionMode,'manual');
 });
 
-test('a clean executor run is unchanged in every mode', async () => {
-  const scr = scratch();
-  for (const mode of ['manual', 'autonomous']) {
-    const facts = await run({
-      task: 'do the task', target: makeTarget(), gate: [], gateRetries: 0,
-      scratchRoot: scr, runId: `${mode}-noop`, mode,
-      decisionResolver: async () => { throw new Error('no challenge must not resolve'); },
-      adapters: {
-        runExecutor: async () => ({ changedFiles: [], lastMessage: 'nothing', exitCode: 0 }),
-        runGate: async () => ({ passed: true, results: [] }),
-        runReview: async () => { throw new Error('verifier must not launch for no-op'); },
-      },
-    });
-    assert.equal(facts.outcome, 'no-op');
-    assert.equal(facts.decision, undefined);
+test('a clean executor run receives evidenced Claude approval in every mode', async t => {
+  for(const mode of ['manual','autonomous']){
+    const facts=await run({...nativeFixture(t,mode+'-clean'),mode,decisionResolver:()=>{throw Error('No inferred decision');}});
+    assert.equal(facts.approved,true,facts.reason); assert.equal(facts.dialogue.pendingDecision,null); assert.equal(facts.approval.decidedBy,'claude');
+    assert.equal(facts.resources.providerLaunches,2);
   }
-  rmSync(scr, { recursive: true, force: true });
 });
 
-test('a sentinel plus substantive files follows the normal gate and verifier path', async () => {
-  const scr = scratch();
-  let gateCalls = 0;
-  let verifierCalls = 0;
-  const facts = await run({
-    task: 'do the task', target: makeTarget(), gate: [], gateRetries: 0,
-    scratchRoot: scr, runId: 'decision-with-work', mode: 'manual',
-    adapters: {
-      runExecutor: async ({ cwd }) => {
-        writeFileSync(join(cwd, 'DECISION.md'), DECISION_CONTENT);
-        writeFileSync(join(cwd, 'new.txt'), 'substantive work');
-        return {
-          changedFiles: ['DECISION.md', 'new.txt'],
-          lastMessage: 'wrote a sentinel and real work',
-          exitCode: 0,
-        };
-      },
-      runGate: async () => {
-        gateCalls++;
-        return { passed: true, results: [] };
-      },
-      runReview: (() => {
-        const reviewer = reviewerForRounds([null]);
-        return async (opts) => { verifierCalls++; return reviewer(opts); };
-      })(),
-    },
-  });
-
-  assert.equal(facts.outcome, 'review-ready');
-  assert.equal(gateCalls, 1);
-  assert.equal(verifierCalls, 1);
-  assert.equal(facts.decision, undefined);
-  rmSync(scr, { recursive: true, force: true });
+test('a historical sentinel beside substantive native work does not invent a human decision', async t => {
+  let reviews=0; const options=nativeFixture(t,'decision-with-work',{runExecutor:r=>{
+    writeFileSync(join(r.cwd,'DECISION.md'),DECISION_CONTENT); writeFileSync(join(r.cwd,'new.txt'),'substantive work');
+    return {usage:{inputTokens:1,outputTokens:1},dialogue:executionEnvelope(r,'propose')};
+  },runReview:r=>{reviews++;return nativeApproval(r);}},[{bin:process.execPath,args:['-e',"process.stdout.write('gate-ran')"]}]);
+  const facts=await run({...options,mode:'manual'}); assert.equal(facts.approved,true,facts.reason); assert.equal(reviews,1);
+  assert.equal(facts.dialogue.pendingDecision,null); assert.equal(facts.dialogue.evidence.find(e=>e.kind==='command').stdout,'gate-ran');
+  assert.doesNotMatch(readFileSync(join(facts.dir,'CHANGES.diff'),'utf8'),/DECISION.md/);
 });
 
-test('autonomous mode resolves a sentinel challenge and reruns the executor', async () => {
-  const scr = scratch();
-  const events = [];
-  const executorPlans = [];
-  const resolverCalls = [];
-  let executorCalls = 0;
-  const facts = await run({
-    task: 'do the task', target: makeTarget(), gate: [], gateRetries: 0,
-    scratchRoot: scr, runId: 'autonomous-decision', mode: 'autonomous',
-    reporter: (event) => events.push(event),
-    decisionResolver: async (input) => {
-      resolverCalls.push(input);
-      return { answers: [{ id: 'Q1', answer: 'Follow the existing convention.' }] };
-    },
-    adapters: {
-      runExecutor: async ({ cwd, plan }) => {
-        executorCalls++;
-        executorPlans.push(plan);
-        if (executorCalls === 1) {
-          writeFileSync(join(cwd, 'DECISION.md'), DECISION_CONTENT);
-          return { changedFiles: ['DECISION.md'], lastMessage: 'need a decision', exitCode: 0 };
-        }
-        writeFileSync(join(cwd, 'new.txt'), 'resolved work');
-        return { changedFiles: ['new.txt'], lastMessage: 'implemented the answer', exitCode: 0 };
-      },
-      runGate: async () => ({ passed: true, results: [] }),
-      runVerifier: async () => ({ verdict: 'NO_BLOCKERS', launchFailed: false }),
-    },
-  });
-
-  assert.equal(facts.outcome, 'review-ready');
-  assert.equal(executorCalls, 2);
-  assert.equal(resolverCalls.length, 1);
-  assert.equal(resolverCalls[0].plan, 'do the task');
-  assert.equal(resolverCalls[0].task, 'do the task');
-  assert.equal(executorPlans[0], `${EXECUTOR_PREAMBLE}\n\ndo the task`);
-  assert.ok(executorPlans[1].startsWith(`${EXECUTOR_PREAMBLE}\n\ndo the task`),
-    'the challenge rerun must retain the same framed plan');
-  assert.match(executorPlans[1], /## Recorded decision/);
-  assert.match(executorPlans[1], /Answer: Follow the existing convention\./);
-  assert.equal(readFileSync(join(facts.dir, 'TASK.md'), 'utf8'), executorPlans[1]);
-  assert.equal(existsSync(join(facts.dir, 'DECISION.md')), false);
-  const resolved = events.find((event) => (
-    event.stage === 'decision' && event.type === 'resolved'
-  ));
-  assert.equal(resolved.answeredBy, 'claude');
-  assert.equal(facts.decision.answeredBy, 'claude');
-  rmSync(scr, { recursive: true, force: true });
+test('autonomous mode answers a native question then resumes only remaining execution', async t => {
+  let writes=0,reviews=0; const plans=[];
+  const facts=await run(nativeFixture(t,'autonomous-decision',{
+    runExecutor:r=>{plans.push(r); if(++writes===1){writeFileSync(join(r.cwd,'first.txt'),'retained');return {dialogue:executionEnvelope(r,'ask',{
+      issues:[{id:'Q1',title:'Existing convention?',kind:'technical',status:'awaiting-answer',blocking:false}],evidence:['requirement-briefing'],
+      next:{seat:'claude',action:'answer',reason:'Clarify existing convention'}})};}
+      assert.equal(readFileSync(join(r.cwd,'first.txt'),'utf8'),'retained');assert.equal(r.remainingWork,true);
+      writeFileSync(join(r.cwd,'new.txt'),'resolved work');return {dialogue:executionEnvelope(r,'propose')};},
+    runReview:r=>++reviews===1?{dialogue:executionEnvelope(r,'answer',{content:'Follow the existing convention.',next:{seat:'codex',action:'propose',reason:'Complete remaining work'}})}:nativeApproval(r),
+  }));
+  assert.equal(facts.approved,true,facts.reason);assert.equal(writes,2);assert.equal(reviews,2);
+  assert.match(plans[1].input,/Follow the existing convention/);assert.equal(facts.dialogue.proposalCycles,1);assert.equal(facts.dialogue.correctionCycles,0);
+  assert.equal(facts.dialogue.messages.filter(m=>m.action==='answer').length,1);assert.equal(facts.dialogue.pendingDecision,null);
 });
 
-test('autonomous authority does not change when a TTY is present', async () => {
-  const scr = scratch();
-  let executorCalls = 0;
-  const facts = await run({
-    task: 'do the task', target: makeTarget(), gate: [], gateRetries: 0,
-    scratchRoot: scr, runId: 'authority-present', mode: 'autonomous',
-    decisionResolver: async () => ({
-      answers: [{ id: 'Q1', answer: 'follow the recommendation' }],
-      escalation: 'operator-absent',
-      presenceEvidence: { ttyAttached: true, invocation: 'interactive' },
-      reasoning: 'The operator is actually present.',
-    }),
-    adapters: {
-      runExecutor: async ({ cwd }) => {
-        executorCalls++;
-        writeFileSync(join(cwd, 'DECISION.md'), AUTHORITY_DECISION_CONTENT);
-        return { changedFiles: ['DECISION.md'], lastMessage: 'need authority', exitCode: 0 };
-      },
-      runGate: async () => { throw new Error('gate must not run'); },
-      runReview: async () => { throw new Error('verifier must not run'); },
-    },
-  });
-
-  assert.equal(facts.outcome, 'needs-pivot');
-  assert.equal(executorCalls, 3);
-  assert.equal(facts.authority, 'claude');
-  assert.equal(facts.debate.stopReason, 'challenge-limit');
-  rmSync(scr, { recursive: true, force: true });
+test('autonomous authority does not change when a TTY is present', async t => {
+  const ttyDescriptor = Object.getOwnPropertyDescriptor(process.stdin, 'isTTY');
+  Object.defineProperty(process.stdin, 'isTTY', { configurable: true, value: true });
+  t.after(() => { if (ttyDescriptor) Object.defineProperty(process.stdin, 'isTTY', ttyDescriptor); else delete process.stdin.isTTY; });
+  const options=nativeFixture(t,'authority-present');const writer=options.adapters.runExecutor;
+  options.adapters.runExecutor=r=>r.action==='propose'?writer(r):{dialogue:executionEnvelope(r,'challenge',{content:'A TTY is present; reconsider the technical issue.',
+    next:{seat:'claude',action:'answer',reason:'Answer on merits'}})};
+  let reviews=0;options.adapters.runReview=r=>++reviews===1?{dialogue:executionEnvelope(r,'ask',{next:{seat:'codex',action:'challenge',reason:'Explain technical objection'}})}:nativeApproval(r);
+  options.decisionResolver=()=>{throw Error('Presence must not select a legacy resolver');};
+  const facts=await run(options);assert.equal(facts.approved,true,facts.reason);assert.equal(facts.authority,'claude');
+  assert.equal(facts.dialogue.pendingDecision,null);assert.equal(facts.escalation,undefined);
 });
 
-test('autonomous authority uses reviewer merits without inventing an operator-absent assumption', async () => {
-  const scr = scratch();
-  const events = [];
-  let executorCalls = 0;
-  const presenceEvidence = {
-    ttyAttached: false,
-    invocation: 'non-interactive',
-    operatorWait: 'not-acknowledged',
-  };
-  const reasoning = 'No TTY was attached, so there was no operator available to answer.';
-  const facts = await run({
-    task: 'do the task', target: makeTarget(), gate: [], gateRetries: 0,
-    scratchRoot: scr, runId: 'authority-absent', mode: 'autonomous',
-    reporter: (event) => events.push(event),
-    decisionResolver: async () => ({
-      answers: [{ id: 'Q1', answer: 'follow the isolated-worktree recommendation' }],
-      escalation: 'operator-absent',
-      presenceEvidence,
-      reasoning,
-    }),
-    adapters: {
-      runExecutor: async ({ cwd }) => {
-        executorCalls++;
-        if (executorCalls === 1) {
-          writeFileSync(join(cwd, 'DECISION.md'), AUTHORITY_DECISION_CONTENT);
-          return { changedFiles: ['DECISION.md'], lastMessage: 'need authority', exitCode: 0 };
-        }
-        writeFileSync(join(cwd, 'new.txt'), 'resolved authority work');
-        return { changedFiles: ['new.txt'], lastMessage: 'continued safely', exitCode: 0 };
-      },
-      runGate: async () => ({ passed: true, results: [] }),
-      runVerifier: async () => ({ verdict: 'NO_BLOCKERS', launchFailed: false }),
-    },
-  });
-
-  assert.equal(facts.outcome, 'review-ready');
-  assert.equal(executorCalls, 2);
-  assert.equal(facts.decision.answeredBy, 'claude');
-  assert.equal(facts.escalation, undefined);
-  assert.equal(events.some((event) => event.type === 'assumed'), false);
-  rmSync(scr, { recursive: true, force: true });
+test('autonomous authority uses reviewer merits without inventing an operator-absent assumption', async t => {
+  const ttyDescriptor = Object.getOwnPropertyDescriptor(process.stdin, 'isTTY');
+  Object.defineProperty(process.stdin, 'isTTY', { configurable: true, value: false });
+  t.after(() => { if (ttyDescriptor) Object.defineProperty(process.stdin, 'isTTY', ttyDescriptor); else delete process.stdin.isTTY; });
+  let reviews=0;const events=[];const options=nativeFixture(t,'authority-absent');const writer=options.adapters.runExecutor;
+  options.reporter=e=>events.push(e);options.adapters.runExecutor=r=>r.action==='propose'?writer(r):{dialogue:executionEnvelope(r,'rebut',{content:'The captured requirement already permits the existing implementation.',evidence:['requirement-briefing']})};
+  options.adapters.runReview=r=>++reviews===1?{dialogue:executionEnvelope(r,'ask',{next:{seat:'codex',action:'rebut',reason:'Explain requirement'}})}:nativeApproval(r);
+  const facts=await run(options);assert.equal(facts.approved,true,facts.reason);assert.equal(facts.authority,'claude');
+  assert.equal(facts.escalation,undefined);assert.equal(events.some(e=>e.type==='assumed'),false);assert.equal(facts.dialogue.pendingDecision,null);
 });
 
-test('challenge-round exhaustion halts instead of starting another executor', async () => {
-  const scr = scratch();
-  let executorCalls = 0;
-  let resolverCalls = 0;
-  const facts = await run({
-    task: 'do the task', target: makeTarget(), gate: [], gateRetries: 0,
-    scratchRoot: scr, runId: 'challenge-exhaustion', mode: 'autonomous', challengeRounds: 2,
-    decisionResolver: async () => {
-      resolverCalls++;
-      return { answers: [{ id: 'Q1', answer: 'follow the recommendation' }] };
-    },
-    adapters: {
-      runExecutor: async ({ cwd }) => {
-        executorCalls++;
-        writeFileSync(join(cwd, 'DECISION.md'), DECISION_CONTENT);
-        return { changedFiles: ['DECISION.md'], lastMessage: 'challenge again', exitCode: 0 };
-      },
-      runGate: async () => { throw new Error('gate must not run'); },
-      runReview: async () => { throw new Error('verifier must not run'); },
-    },
-  });
-
-  assert.equal(facts.outcome, 'needs-pivot');
-  assert.equal(facts.decision.challengeRound, 3);
-  assert.equal(executorCalls, 3);
-  assert.equal(resolverCalls, 2);
-  rmSync(scr, { recursive: true, force: true });
+test('challenge-round exhaustion halts instead of starting another executor', async t => {
+  let discussions=0,reviews=0,writes=0;
+  const facts=await run({...nativeFixture(t,'challenge-exhaustion',{
+    runExecutor:r=>{if(r.action==='propose'){writes++;writeFileSync(join(r.cwd,'new.txt'),'retained');return {dialogue:executionEnvelope(r,'propose')};}
+      discussions++;return {dialogue:executionEnvelope(r,'challenge',{next:{seat:'claude',action:'answer',reason:'Reconsider technical evidence'}})};},
+    runReview:r=>{reviews++;return {dialogue:executionEnvelope(r,'ask',{next:{seat:'codex',action:'challenge',reason:'Explain remaining objection'}})};},
+  }),challengeRounds:2});
+  assert.equal(facts.approved,false);assert.equal(writes,1);assert.equal(discussions,2);assert.equal(reviews,3);
+  assert.equal(facts.dialogue.challengeCycles,2);assert.match(facts.reason,/challenge/i);
 });
 
-test('a resolver returning no answers halts without rerunning the executor', async () => {
-  const scr = scratch();
-  let executorCalls = 0;
-  const facts = await run({
-    task: 'do the task', target: makeTarget(), gate: [], gateRetries: 0,
-    scratchRoot: scr, runId: 'empty-resolution', mode: 'autonomous',
-    decisionResolver: async () => ({ answers: [] }),
-    adapters: {
-      runExecutor: async ({ cwd }) => {
-        executorCalls++;
-        writeFileSync(join(cwd, 'DECISION.md'), DECISION_CONTENT);
-        return { changedFiles: ['DECISION.md'], lastMessage: 'need a decision', exitCode: 0 };
-      },
-      runGate: async () => { throw new Error('gate must not run'); },
-      runReview: async () => { throw new Error('verifier must not run'); },
-    },
-  });
-
-  assert.equal(facts.outcome, 'needs-pivot');
-  assert.equal(executorCalls, 1);
-  assert.equal(existsSync(join(facts.dir, 'DECISION.md')), true);
-  rmSync(scr, { recursive: true, force: true });
+test('an unusable native answer pauses without rerunning the executor', async t => {
+  let writes=0,reviews=0;const facts=await run(nativeFixture(t,'empty-resolution',{
+    runExecutor:r=>{writes++;writeFileSync(join(r.cwd,'partial.txt'),'retained');return {dialogue:executionEnvelope(r,'ask',{evidence:['requirement-briefing'],
+      next:{seat:'claude',action:'answer',reason:'Clarify before completing'}})};},
+    runReview:()=>{reviews++;return {resultSeen:false,resultUsable:false,answer:''};},
+  }));
+  assert.equal(facts.approved,false);assert.equal(writes,1);assert.equal(reviews,1);
+  assert.equal(readFileSync(join(facts.dir,'partial.txt'),'utf8'),'retained');assert.equal(facts.dialogue.executionCycle.open,true);
 });
-
-// The old "challenge during a gate retry" scenario has no equivalent in the
-// evidence flow: a debate fix round presupposes a substantive diff, and
-// routeChallenges deliberately ignores a sentinel beside one (a challenge
-// presupposes none). Both surviving behaviours are covered by their own tests:
-// "a sentinel-only executor challenge needs a decision in manual mode" and
-// "a sentinel plus substantive files follows the normal gate and verifier path".
 
 test('--mode accepts manual or autonomous and rejects other values', () => {
   const base = ['run', '--task', 'p', '--target', 't', '--gate', 'g'];
@@ -1705,141 +1190,43 @@ test('--mode accepts manual or autonomous and rejects other values', () => {
   assert.throws(() => parseArgs([...base, '--mode', 'interactive']), /invalid --mode/i);
 });
 
-test('non-zero executor exit with an empty diff is executor-failed', async () => {
-  let verifierCalls = 0;
-  const scr = scratch();
-  const facts = await run({
-    task: 'do the task', target: makeTarget(), gate: [], gateRetries: 2,
-    scratchRoot: scr, runId: 'executor-failed-empty-diff',
-    adapters: {
-      runExecutor: async () => ({
-        changedFiles: [], lastMessage: 'executor aborted before making changes', exitCode: 1,
-      }),
-      runGate: async () => ({ passed: true, results: [] }),
-      runReview: async () => {
-        verifierCalls++;
-        throw new Error('an empty diff must not launch a reviewer');
-      },
-    },
-  });
-  assert.equal(facts.outcome, 'executor-failed',
-    'a non-zero executor exit with no diff must be reported as executor-failed');
-  assert.equal(verifierCalls, 0, 'an empty diff must not launch a verifier');
-  assert.notEqual(exitCodeFor(facts.outcome), 0);
-  rmSync(scr, { recursive: true, force: true });
+test('non-zero executor exit with an empty diff is unapproved and launches no reviewer', async t => {
+  let reviews=0;const facts=await run(nativeFixture(t,'executor-failed-empty-diff',{
+    runExecutor:r=>({exitCode:1,changedFiles:[],dialogue:executionEnvelope(r,'propose'),lastMessage:'executor aborted'}),
+    runReview:()=>{reviews++;throw Error('No review');},
+  }));assert.equal(facts.approved,false);assert.equal(reviews,0);assert.notEqual(exitCodeFor(facts),0);
+  assert.equal(readFileSync(join(facts.dir,'CHANGES.diff'),'utf8'),'');
 });
 
-test('zero executor exit with an empty diff remains a successful no-op', async () => {
-  const scr = scratch();
-  const facts = await run({
-    task: 'do the task', target: makeTarget(), gate: [], gateRetries: 2,
-    scratchRoot: scr, runId: 'clean-empty-diff',
-    adapters: {
-      runExecutor: async () => ({ changedFiles: [], lastMessage: 'nothing to do', exitCode: 0 }),
-      runGate: async () => ({ passed: true, results: [] }),
-      runReview: async () => { throw new Error('a no-op must not launch a verifier'); },
-    },
-  });
-  assert.equal(facts.outcome, 'no-op');
-  assert.equal(exitCodeFor(facts.outcome), 0);
-  rmSync(scr, { recursive: true, force: true });
+test('zero executor exit with empty legacy prose cannot imply fresh-run no-op success', async t => {
+  let reviews=0;const facts=await run(nativeFixture(t,'clean-empty-diff',{
+    runExecutor:()=>({exitCode:0,changedFiles:[],lastMessage:'nothing to do'}),runReview:()=>{reviews++;throw Error('No review');},
+  }));assert.equal(facts.approved,false);assert.notEqual(facts.outcome,'no-op');assert.equal(reviews,0);assert.notEqual(exitCodeFor(facts),0);
 });
 
-test('an approval-request message names the advisory no-op reason without changing status', async () => {
-  const scr = scratch();
-  const facts = await run({
-    task: 'Implement the requested behavior.', target: makeTarget(), gate: [], gateRetries: 0,
-    scratchRoot: scr, runId: 'approval-request-no-op',
-    adapters: {
-      runExecutor: async () => ({
-        changedFiles: [],
-        agentMessages: ['I reviewed the design.', "Approve this design and I'll implement it."],
-        lastMessage: "Approve this design and I'll implement it.",
-        exitCode: 0,
-      }),
-      runGate: async () => ({ passed: true, results: [] }),
-      runReview: async () => { throw new Error('a no-op must not launch a verifier'); },
-    },
-  });
-
-  assert.equal(facts.noOpReason, 'approval-requested');
-  assert.equal(facts.outcome, 'no-op');
-  assert.equal(exitCodeFor(facts.outcome), 0);
-  const report = readFileSync(join(facts.dir, 'uro-report.md'), 'utf8');
-  assert.match(report, /approval-requested/);
-  assert.match(report, /DECISION[.]md/);
-  rmSync(scr, { recursive: true, force: true });
+test('approval-request prose cannot replace an explicit native human question or approve empty work', async t => {
+  const raw="Approve this design and I'll implement it.";const facts=await run(nativeFixture(t,'approval-request-no-op',{
+    runExecutor:()=>({exitCode:0,changedFiles:[],agentMessages:[raw],lastMessage:raw}),
+    runReview:()=>{throw Error('No review');},
+  }));assert.equal(facts.approved,false);assert.notEqual(facts.outcome,'needs-decision');assert.notEqual(facts.outcome,'no-op');
+  assert.equal(facts.dialogue.pendingDecision,null);
+  assert.ok(readFileSync(join(facts.checkpointState.directory,'__uro_dialogue/journal.jsonl'),'utf8').includes(raw));
 });
 
-test('unrelated executor prose does not label an empty successful pass as approval-requested',
-  async () => {
-    const scr = scratch();
-    const facts = await run({
-      task: 'Implement the requested behavior.', target: makeTarget(), gate: [], gateRetries: 0,
-      scratchRoot: scr, runId: 'ordinary-no-op',
-      adapters: {
-        runExecutor: async () => ({
-          changedFiles: [],
-          agentMessages: ['The approved design is already implemented; no changes are needed.'],
-          lastMessage: 'The approved design is already implemented; no changes are needed.',
-          exitCode: 0,
-        }),
-        runGate: async () => ({ passed: true, results: [] }),
-        runReview: async () => { throw new Error('a no-op must not launch a verifier'); },
-      },
-    });
+test('unrelated executor prose does not label an empty native pause as approval-requested', async t => {
+  const facts=await run(nativeFixture(t,'ordinary-no-op',{runExecutor:()=>({exitCode:0,changedFiles:[],lastMessage:'The approved design is already implemented; no changes are needed.'})}));
+  assert.equal(facts.approved,false);assert.equal(Object.hasOwn(facts,'noOpReason'),false);
+  assert.doesNotMatch(readFileSync(join(facts.dir,'uro-report.md'),'utf8'),/approval-requested/);
+});
 
-    assert.equal(facts.outcome, 'no-op');
-      assert.equal(exitCodeFor(facts.outcome), 0);
-    assert.equal(Object.hasOwn(facts, 'noOpReason'), false);
-    assert.doesNotMatch(readFileSync(join(facts.dir, 'uro-report.md'), 'utf8'),
-      /approval-requested/);
-    rmSync(scr, { recursive: true, force: true });
-  });
-
-test('a non-zero exit is evidence in front of the seats, never a verdict', async () => {
-  // "No green, no red." The command ran once, its exit code and output are on
-  // the record, and the reviewer is told in one argv-safe line and asked to
-  // judge. With the reviewer satisfied the run converges — nothing anywhere
-  // branches on the exit code, and no gateStatus or gateFailure field exists.
-  let gateCalls = 0;
-  const prompts = [];
-  const scr = scratch();
-  const facts = await run({
-    task: 'do the task', target: makeTarget(), gate: [], gateRetries: 2,
-    scratchRoot: scr, runId: 'r1',
-    adapters: {
-      runExecutor: writingExecutor,
-      runGate: async ({ onEvidence }) => {
-        gateCalls++;
-        onEvidence?.({
-          bin: 'node', args: ['--test'], code: 1,
-          stdout: 'failed assertion', stderr: 'stack trace',
-        });
-        return { passed: false, results: [{
-          bin: 'node', args: ['--test'], code: 1,
-          outputTail: '[stdout]\nfailed assertion\n[stderr]\nstack trace',
-        }] };
-      },
-      runReview: (() => {
-        const reviewer = reviewerForRounds([null]);
-        return async (opts) => { prompts.push(opts.prompt); return reviewer(opts); };
-      })(),
-    },
-  });
-  assert.equal(facts.outcome, 'review-ready',
-    'the reviewer satisfied means converged; an exit code cannot veto it');
-  assert.equal(prompts.length, 1, 'the reviewer reviews, whatever the exit');
-  for (const prompt of prompts) {
-    assert.match(prompt, /"code":1/);
-    assert.match(prompt, /failed assertion/);
-    assert.match(prompt, /__uro_evidence\/round-1-01.out.txt/);
-  }
-  assert.equal(gateCalls, 1, 'commands run once as evidence — the retry loop is gone');
-  assert.equal(Object.hasOwn(facts, 'gateStatus'), false, 'no verdict field survives');
-  assert.equal(Object.hasOwn(facts, 'gateFailure'), false);
-  assert.equal(facts.evidence.filter((entry) => entry.code !== 0).length, 1);
-  rmSync(scr, { recursive: true, force: true });
+test('a non-zero required exit is delivered as evidence and prevents approval', async t => {
+  let reviews=0;const command={bin:process.execPath,args:['-e',"process.stdout.write('failed assertion');process.stderr.write('stack trace');process.exit(7)"]};
+  const facts=await run(nativeFixture(t,'required-nonzero',{runReview:r=>{
+    reviews++;const check=r.state.evidence.find(e=>e.kind==='command');assert.equal(check.exitCode,7);assert.equal(check.stdout,'failed assertion');
+    assert.equal(check.stderr,'stack trace');return nativeApproval(r);
+  }},[command]));
+  assert.equal(facts.approved,false);assert.equal(reviews,1);assert.equal(facts.dialogue.approval,null);
+  const check=facts.dialogue.evidence.find(e=>e.kind==='command');assert.deepEqual(check.argv,[process.execPath,...command.args]);assert.ok(check.codeIdentity);
 });
 
 test('a timed-out executor stops the run, is recorded, and maps to a non-zero process exit', async () => {
@@ -1957,53 +1344,19 @@ test('a failed partial-work commit preserves bytes and reports a required unappr
   rmSync(scr, { recursive: true, force: true });
 });
 
-test('a timed-out reviewer cannot produce a successful outcome', async () => {
-  const scr = scratch();
-  const facts = await run({
-    task: 'Implement the requested timeout behavior.', target: makeTarget(), gate: [],
-    gateRetries: 0, scratchRoot: scr, runId: 'verifier-timeout',
-    adapters: {
-      runExecutor: writingExecutor,
-      runGate: async () => ({ passed: true, results: [] }),
-      runReview: async () => ({ launchFailed: false, timedOut: true,
-        timeoutReason: { timeoutMs: 40 } }),
-    },
-  });
-  assert.equal(facts.outcome, 'timed-out');
-  assert.equal(facts.debate.stopReason, 'review-timed-out');
-  assert.notEqual(exitCodeFor(facts.outcome), 0);
-  assert.deepEqual(facts.timeoutEvents, [
-    { stage: 'verifier', pass: 'review', iteration: 1, timeoutMs: 40 },
-  ]);
-  rmSync(scr, { recursive: true, force: true });
+test('a timed-out reviewer cannot produce a successful outcome', async t => {
+  let reviews=0;const facts=await run(nativeFixture(t,'verifier-timeout',{runReview:()=>{reviews++;return {timedOut:true,timeoutReason:{timeoutMs:40}};}}));
+  assert.equal(facts.approved,false);assert.equal(facts.nextAction,'paused');assert.equal(reviews,1);assert.notEqual(exitCodeFor(facts),0);
+  assert.match(JSON.stringify(facts),/timedOut/);
 });
 
-test('a timed-out gate command is distinguishable in run facts and the report', async () => {
-  const scr = scratch();
-  let verifierCalls = 0;
-  const facts = await run({
-    task: 'Implement the requested timeout behavior.', target: makeTarget(), gate: [],
-    gateRetries: 0, scratchRoot: scr, runId: 'gate-timeout',
-    adapters: {
-      runExecutor: writingExecutor,
-      runGate: async () => ({ passed: false, results: [{
-        bin: 'node', args: ['--test'], code: -1, timedOut: true, timeoutMs: 60,
-        outputTail: '[stdout]\npartial test output\n[stderr]\n',
-      }] }),
-      runReview: async () => { verifierCalls++; return { launchFailed: false, timedOut: false }; },
-    },
-  });
-  assert.equal(facts.outcome, 'timed-out');
-  assert.notEqual(exitCodeFor(facts.outcome), 0);
-  assert.equal(verifierCalls, 0);
-  assert.deepEqual(facts.timeoutEvents, [{
-    stage: 'gate', iteration: 1, attempt: 1, timeoutMs: 60,
-    bin: 'node', args: ['--test'],
-  }]);
-  const report = readFileSync(join(facts.dir, 'uro-report.md'), 'utf8');
-  assert.match(report, /Stage timeouts/);
-  assert.match(report, /60 ms/);
-  rmSync(scr, { recursive: true, force: true });
+test('a timed-out gate command is distinguishable in run facts and the report', async t => {
+  let reviews=0;const command={bin:process.execPath,args:['-e',"process.stdout.write('partial test output');setTimeout(()=>{},10000)"]};
+  const options=nativeFixture(t,'gate-timeout',{runReview:r=>{reviews++;return nativeApproval(r);}},[command]);
+  const facts=await run({...options,gateTimeout:1000});
+  assert.equal(facts.approved,false);assert.notEqual(exitCodeFor(facts),0);assert.equal(reviews,1);
+  const check=facts.dialogue.evidence.find(e=>e.kind==='command');assert.equal(check.timedOut,true);assert.equal(check.status,'timed-out');assert.equal(check.stdout,'partial test output');
+  assert.match(JSON.stringify(facts),/timed-out/);
 });
 
 test('diffText throws when git fails (non-git dir)', async () => {
@@ -2073,176 +1426,49 @@ test('diffText succeeds when gitignore lists every harness artifact', async () =
   rmSync(d, { recursive: true, force: true });
 });
 
-// mergeVerifierVerdicts and reviewOutcomeFor died with the verdict passes:
-// there is one review report now, and seat availability is measured by launch,
-// timeout, and report presence — covered by the reviewer-failure tests above.
-const blockingReview = (id = 'F1') => `
-## ${id}
-Severity: blocking
-Category: correctness
-Description: ${id} demonstrates a reproducible defect.
-Test: __uro_review/tests/test_${id.toLowerCase()}.py
-`;
-
-const suggestionReview = (id = 'F1') => `
-## ${id}
-Severity: suggestion
-Category: maintainability
-Description: ${id} would make the implementation easier to maintain.
-`;
-
-function reviewerForRounds(reports, calls = null) {
-  let round = 0;
-  const observed = new Set();
-  return async (opts) => {
-    calls?.push(opts);
-    const report = reports[round++] ?? null;
-    mkdirSync(join(opts.cwd, '__uro_review/tests'), { recursive: true });
-    const ids = [...String(report ?? '').matchAll(/## (F\d+)/g)].map((match) => match[1]);
-    for (const match of String(report ?? '').matchAll(/Test: (__uro_review\/tests\/[^\n\r]+)/g)) {
-      writeFileSync(join(opts.cwd, match[1].trim()), '# independent proof\n');
-    }
-    const dispositions = [...observed].filter((id) => !ids.includes(id))
-      .map((id) => ({ id, status: 'resolved', reason: 'Reviewed the correction and command evidence; the defect is addressed.' }));
-    for (const id of ids) observed.add(id);
-    writeFileSync(join(opts.cwd, '__uro_review', 'REVIEW.md'),
-      report === null ? 'Reviewed. No findings this round.\n' : report);
-    return { conclusion: /Severity: blocking/.test(report ?? '') ? 'issues' : 'clean', launchFailed: false, timedOut: false, dispositions };
-  };
-}
-
-test('debate regression control converges after one clean review round', async () => {
-  const scr = scratch();
-  const events = [];
-  try {
-    let executorCalls = 0;
-    let gateCalls = 0;
-    const facts = await run({
-      task: 'do the task', target: makeTarget(), gate: [], gateRetries: 0,
-      scratchRoot: scr, runId: 'debate-clean',
-      reporter: (event) => events.push(event),
-      adapters: {
-        runExecutor: async (opts) => { executorCalls++; return writingExecutor(opts); },
-        runGate: async () => { gateCalls++; return { passed: true, results: [] }; },
-        runReview: reviewerForRounds([null]),
-      },
-    });
-
-    assert.equal(facts.outcome, 'review-ready');
-    assert.equal(executorCalls, 1);
-    assert.equal(gateCalls, 1);
-    assert.equal(facts.debate.roundsRun, 1);
-    assert.deepEqual(facts.debate.findingsPerRound, [[]]);
-    assert.equal(facts.debate.stopReason, 'converged');
-    assert.equal(facts.debate.pivotCount, 0);
-    assert.equal(facts.debate.finalPivotDecision, null);
-    assert.equal(events.some((event) => event.stage === 'debate' && event.type === 'pivot'), false);
-  } finally {
-    rmSync(scr, { recursive: true, force: true });
-  }
+test('debate regression control converges after one current native review', async t => {
+  const events=[];const options=nativeFixture(t,'debate-clean',{},[{bin:process.execPath,args:['-e',"process.stdout.write('checked-once')"]}]);
+  options.reporter=e=>events.push(e);const facts=await run(options);
+  assert.equal(facts.approved,true,facts.reason);assert.equal(facts.resources.providerLaunches,2);assert.equal(facts.dialogue.proposalCycles,1);
+  assert.equal(facts.dialogue.evidence.filter(e=>e.kind==='command').length,1);assert.equal(facts.dialogue.messages.filter(m=>m.action==='approve').length,1);
+  assert.equal(events.some(e=>e.type==='pivot'),false);
 });
 
-test('one blocking finding is fixed by the executor and converges in round two', async () => {
-  const scr = scratch();
-  try {
-    let executorCalls = 0;
-    let gateCalls = 0;
-    const plans = [];
-    const facts = await run({
-      task: 'do the task', target: makeTarget(), gate: [], gateRetries: 0,
-      scratchRoot: scr, runId: 'debate-fixed',
-      adapters: {
-        runExecutor: async (opts) => {
-          executorCalls++;
-          plans.push(opts.plan);
-          return writingExecutor(opts);
-        },
-        runGate: async () => { gateCalls++; return { passed: true, results: [] }; },
-        runReview: reviewerForRounds([blockingReview(), null]),
-      },
-    });
-
-    assert.equal(facts.outcome, 'review-ready');
-    assert.equal(executorCalls, 2);
-    assert.equal(gateCalls, 3);
-    assert.equal(facts.debate.roundsRun, 2);
-    assert.deepEqual(facts.debate.findingsPerRound, [['F1'], []]);
-    assert.deepEqual(facts.debate.resolvedFindingIds, ['F1']);
-    assert.match(plans[1], /# Fix Plan/);
-    assert.match(plans[1], /F1 \(blocking\)/);
-  } finally {
-    rmSync(scr, { recursive: true, force: true });
-  }
+test('one blocking native issue is corrected and explicitly resolved by current review', async t => {
+  let writes=0,reviews=0;const requests=[];
+  const facts=await run(nativeFixture(t,'debate-fixed',{
+    runExecutor:r=>{requests.push(r);writeFileSync(join(r.cwd,'completed.txt'),String(++writes));return {dialogue:executionEnvelope(r,r.action)};},
+    runReview:r=>++reviews===1?{dialogue:executionEnvelope(r,'ask',{issues:[{id:'I1',title:'Missing branch',status:'open',blocking:true}],
+      next:{seat:'codex',action:'revise',reason:'Fix I1 missing branch'}})}:nativeApproval(r,{issues:[{id:'I1',status:'resolved',
+        disposition:{kind:'accepted',reason:'Current corrected branch satisfies the briefing.',claimIds:['briefing-requirement']}}]}),
+  },[{bin:process.execPath,args:['-e',"process.stdout.write(require('node:fs').readFileSync('completed.txt','utf8'))"]}]));
+  assert.equal(facts.approved,true,facts.reason);assert.equal(writes,2);assert.equal(reviews,2);assert.match(requests[1].input,/Missing branch/);
+  assert.equal(facts.dialogue.issues.I1.status,'resolved');assert.equal(facts.dialogue.evidence.filter(e=>e.kind==='command').length,2);
 });
 
-test('a finding persistent across three rounds detects circling and retries an amended plan', async () => {
-  const scr = scratch();
-  const events = [];
-  const plans = [];
-  try {
-    const facts = await run({
-      mode: 'autonomous', task: 'do the task', target: makeTarget(), gate: [], gateRetries: 0,
-      scratchRoot: scr, runId: 'debate-circling', debateRounds: 4,
-      reporter: (event) => events.push(event),
-      adapters: {
-        runArbiter: async () => ({ decision: 'amend', reason: 'A corrected implementation approach remains viable.' }),
-        runExecutor: async (opts) => {
-          plans.push(opts.plan);
-          return writingExecutor(opts);
-        },
-        runGate: async () => ({ passed: true, results: [] }),
-        runReview: reviewerForRounds([
-          blockingReview(), blockingReview(), blockingReview(), null,
-        ]),
-      },
-    });
-
-    assert.equal(facts.debate.roundsRun, 4);
-    assert.equal(facts.debate.circlingDetected, true);
-    assert.equal(facts.debate.pivotCount, 1);
-    assert.equal(facts.debate.finalPivotDecision, 'amend');
-    assert.equal(facts.debate.stopReason, 'converged');
-    assert.equal(facts.outcome, 'review-ready');
-    assert.ok(events.some((event) => event.stage === 'debate' && event.type === 'circling'));
-    assert.ok(events.some((event) => event.stage === 'debate'
-      && event.type === 'pivot' && event.decision === 'amend'));
-    assert.equal(plans.length, 4);
-    assert.match(plans[3], /## Pivot amendment/);
-    assert.match(plans[3], /The prior fix approach is circling/);
-    assert.match(plans[3], /Recurring blockers: F1/);
-    assert.match(plans[3], /Round 3: F1/);
-  } finally {
-    rmSync(scr, { recursive: true, force: true });
-  }
+test('a persistent native issue remains visible across three corrections before explicit resolution', async t => {
+  let writes=0,reviews=0;const requests=[];
+  const facts=await run(nativeFixture(t,'debate-circling',{
+    runExecutor:r=>{requests.push(r);writeFileSync(join(r.cwd,'completed.txt'),String(++writes));return {dialogue:executionEnvelope(r,r.action)};},
+    runReview:r=>++reviews<4?{dialogue:executionEnvelope(r,'ask',{issues:[{id:'I1',title:'Recurring missing branch',status:'open',blocking:true}],
+      next:{seat:'codex',action:'revise',reason:'The prior implementation still misses I1; amend this branch'}})}:nativeApproval(r,{issues:[{id:'I1',status:'resolved',
+        disposition:{kind:'accepted',reason:'Fourth implementation addresses I1.',claimIds:['briefing-requirement']}}]}),
+    runArbiter:()=>{throw Error('Claude reviews directly');},
+  }));
+  assert.equal(facts.approved,true,facts.reason);assert.equal(writes,4);assert.equal(reviews,4);assert.equal(facts.dialogue.correctionCycles,3);
+  assert.match(requests[3].input,/amend this branch/);assert.equal(requests[3].state.messages.filter(m=>m.sender==='codex').length,3);
+  assert.equal(facts.dialogue.issues.I1.status,'resolved');
 });
 
-test('circling on the final round suppresses an amend that cannot run', async () => {
-  const scr = scratch();
-  const events = [];
-  try {
-    const facts = await run({
-      mode: 'autonomous', task: 'do the task', target: makeTarget(), gate: [], gateRetries: 0,
-      scratchRoot: scr, runId: 'debate-final-amend', debateRounds: 3,
-      reporter: (event) => events.push(event),
-      adapters: {
-        runArbiter: async () => ({ decision: 'amend', reason: 'A corrected implementation approach remains viable.' }),
-        runExecutor: writingExecutor,
-        runGate: async () => ({ passed: true, results: [] }),
-        runReview: reviewerForRounds([blockingReview(), blockingReview(), blockingReview()]),
-      },
-    });
-
-    assert.equal(facts.outcome, 'needs-pivot');
-    assert.equal(facts.debate.roundsRun, 3);
-    assert.equal(facts.debate.circlingDetected, true);
-    assert.equal(facts.debate.stopReason, 'rounds-exhausted');
-    assert.equal(facts.debate.finalPivotDecision, null);
-    assert.equal(facts.debate.pivotCount, 0);
-    assert.ok(events.some((event) => event.stage === 'debate' && event.type === 'circling'));
-    assert.equal(events.some((event) => event.stage === 'debate' && event.type === 'pivot'), false);
-  } finally {
-    rmSync(scr, { recursive: true, force: true });
-  }
+test('the final allowed execution cycle suppresses a requested correction that cannot run', async t => {
+  let writes=0,reviews=0;
+  const facts=await run({...nativeFixture(t,'debate-final-amend',{
+    runExecutor:r=>{writeFileSync(join(r.cwd,'completed.txt'),String(++writes));return {dialogue:executionEnvelope(r,r.action)};},
+    runReview:r=>{reviews++;return {dialogue:executionEnvelope(r,'ask',{issues:[{id:'I1',title:'Still unresolved',status:'open',blocking:true}],
+      next:{seat:'codex',action:'revise',reason:'Amend the unresolved branch'}})};},
+  }),debateRounds:3});
+  assert.equal(facts.approved,false);assert.equal(writes,3);assert.equal(reviews,3);assert.equal(facts.dialogue.proposalCycles,3);
+  assert.equal(facts.dialogue.issues.I1.status,'open');assert.match(facts.reason,/proposal|cycle|limit/);
 });
 
 test('native retained replan after the last execution cycle plans but cannot buy another cycle', async t => {
@@ -2290,124 +1516,38 @@ test('native retained replan preserves explicit challenge use across remaining e
   assert.equal(readFileSync(join(facts.dir, 'completed.txt'), 'utf8'), '1');
 });
 
-test('the conclude pivot stops without reporting success', async () => {
-  const scr = scratch();
-  const events = [];
-  try {
-    const facts = await run({
-      mode: 'autonomous', task: 'do the task', target: makeTarget(), gate: [], gateRetries: 0,
-      scratchRoot: scr, runId: 'debate-conclude', debateRounds: 3,
-      reporter: (event) => events.push(event),
-      adapters: {
-        runExecutor: writingExecutor,
-        runGate: async () => ({ passed: true, results: [] }),
-        runReview: reviewerForRounds([blockingReview(), blockingReview(), blockingReview()]),
-        runArbiter: async () => ({ decision: 'conclude', reason: 'The approach cannot satisfy requirements.' }),
-      },
-    });
-
-    assert.equal(facts.outcome, 'needs-pivot');
-    assert.equal(facts.debate.roundsRun, 3);
-    assert.equal(facts.debate.stopReason, 'pivot');
-    assert.equal(facts.debate.finalPivotDecision, 'conclude');
-    assert.equal(facts.debate.pivotCount, 1);
-    assert.ok(events.some((event) => event.stage === 'debate'
-      && event.type === 'pivot' && event.decision === 'conclude'));
-    assert.notEqual(exitCodeFor(facts.outcome), 0);
-  } finally {
-    rmSync(scr, { recursive: true, force: true });
-  }
+test('the native reviewer conclude action stops without reporting success', async t => {
+  const facts=await run(nativeFixture(t,'debate-conclude',{runReview:r=>({dialogue:executionEnvelope(r,'stop',{content:'The approach cannot satisfy requirements.'})})}));
+  assert.equal(facts.approved,false);assert.equal(facts.nextAction,'stop');assert.notEqual(exitCodeFor(facts),0);
+  assert.equal(facts.resources.providerLaunches,2);assert.equal(facts.dialogue.messages.at(-1).sender,'claude');assert.match(facts.reason,/cannot satisfy/);
 });
 
-test('URO_DEBATE_ROUNDS exhaustion stops honestly with unresolved findings', async () => {
-  const scr = scratch();
-  try {
-    const facts = await run({
-      task: 'do the task', target: makeTarget(), gate: [], gateRetries: 0,
-      scratchRoot: scr, runId: 'debate-exhausted',
-      env: { URO_DEBATE_ROUNDS: '1' },
-      adapters: {
-        runExecutor: writingExecutor,
-        runGate: async () => ({ passed: true, results: [] }),
-        runReview: reviewerForRounds([blockingReview()]),
-      },
-    });
-
-    assert.equal(facts.outcome, 'needs-pivot');
-    assert.equal(facts.debate.roundsRun, 1);
-    assert.equal(facts.debate.stopReason, 'rounds-exhausted');
-    const report = readFileSync(join(facts.dir, 'uro-report.md'), 'utf8');
-    assert.match(report, /Debate rounds:\*\* 1/);
-    assert.match(report, /Debate stopped:\*\* rounds-exhausted/);
-  } finally {
-    rmSync(scr, { recursive: true, force: true });
-  }
+test('URO_DEBATE_ROUNDS exhaustion stops honestly with unresolved findings', async t => {
+  let writes=0;const facts=await run({...nativeFixture(t,'debate-exhausted',{
+    runExecutor:r=>{writeFileSync(join(r.cwd,'completed.txt'),String(++writes));return {dialogue:executionEnvelope(r,r.action)};},
+    runReview:r=>({dialogue:executionEnvelope(r,'ask',{issues:[{id:'I1',title:'Unresolved requirement',status:'open',blocking:true}],
+      next:{seat:'codex',action:'revise',reason:'Correct I1'}})}),
+  }),env:{...process.env,URO_DEBATE_ROUNDS:'1'}});
+  assert.equal(facts.approved,false);assert.equal(writes,1);assert.equal(facts.dialogue.proposalCycles,1);assert.equal(facts.dialogue.issues.I1.status,'open');
+  assert.match(facts.reason,/proposal|cycle|limit/);assert.match(JSON.stringify(facts.checkpointState),/Unresolved requirement/);
 });
 
-test('a non-zero fix-round exit keeps the debate alive, and the seats decide', async () => {
-  // A red fix-round exit is evidence in front of round 2's reviewer; nothing
-  // ends the run for it.
-  const scr = scratch();
-  try {
-    let gateCall = 0;
-    let verifierCalls = 0;
-    const facts = await run({
-      task: 'do the task', target: makeTarget(), gate: [], gateRetries: 0,
-      scratchRoot: scr, runId: 'debate-fix-gate-failed',
-      adapters: {
-        runExecutor: writingExecutor,
-        runGate: async () => ++gateCall === 1
-          ? { passed: true, results: [] }
-          : { passed: false, results: [{ bin: 'node', args: ['--test'], code: 7,
-              outputTail: 'review regression failed' }] },
-        runReview: (() => {
-          const reviewer = reviewerForRounds([blockingReview(), null]);
-          return async (options) => {
-            verifierCalls++;
-            return reviewer(options);
-          };
-        })(),
-      },
-    });
-
-    // The exit-7 command is evidence in front of round 2's seats; they judged
-    // it not worth blocking on, so the run converges. Nothing branched on it.
-    assert.equal(facts.outcome, 'review-ready');
-    assert.equal(verifierCalls, 2,
-      'a non-zero fix-round exit must NOT prevent the next review round');
-    assert.equal(facts.debate.roundsRun, 2);
-    assert.equal(Object.hasOwn(facts, 'gateFailure'), false);
-  } finally {
-    rmSync(scr, { recursive: true, force: true });
-  }
+test('a non-zero correction check remains visible and blocks an attempted approval', async t => {
+  let writes=0,reviews=0;
+  const command={bin:process.execPath,args:['-e',"if(require('node:fs').readFileSync('completed.txt','utf8')==='2'){process.stdout.write('review regression failed');process.exit(7)}"]};
+  const facts=await run(nativeFixture(t,'debate-fix-gate-failed',{
+    runExecutor:r=>{writeFileSync(join(r.cwd,'completed.txt'),String(++writes));return {dialogue:executionEnvelope(r,r.action)};},
+    runReview:r=>++reviews===1?{dialogue:executionEnvelope(r,'ask',{next:{seat:'codex',action:'revise',reason:'Fix branch'}})}:(assert.equal(r.state.evidence.filter(e=>e.kind==='command').at(-1).exitCode,7),nativeApproval(r)),
+  },[command]));
+  assert.equal(facts.approved,false);assert.equal(writes,2);assert.equal(reviews,2);assert.equal(facts.dialogue.approval,null);
+  assert.equal(facts.dialogue.evidence.filter(e=>e.kind==='command').at(-1).stdout,'review regression failed');
 });
 
-// The UNVERIFIED round died with the verdict marker: a reviewer that
-// cannot produce a report now stops the run as unreviewed, proved above.
-test('suggestions alone converge without another executor or gate round', async () => {
-  const scr = scratch();
-  try {
-    let executorCalls = 0;
-    let gateCalls = 0;
-    const facts = await run({
-      task: 'do the task', target: makeTarget(), gate: [], gateRetries: 0,
-      scratchRoot: scr, runId: 'debate-suggestion',
-      adapters: {
-        runExecutor: async (opts) => { executorCalls++; return writingExecutor(opts); },
-        runGate: async () => { gateCalls++; return { passed: true, results: [] }; },
-        runReview: reviewerForRounds([suggestionReview()]),
-      },
-    });
-
-    assert.equal(facts.outcome, 'review-ready');
-    assert.equal(executorCalls, 1);
-    assert.equal(gateCalls, 1);
-    assert.equal(facts.debate.roundsRun, 1);
-    assert.deepEqual(facts.debate.roundHistory[0].suggestionFindingIds, ['F1']);
-    assert.deepEqual(facts.debate.ledger.rounds[0].findingIds, []);
-  } finally {
-    rmSync(scr, { recursive: true, force: true });
-  }
+test('suggestions alone converge without another executor or gate round', async t => {
+  const facts=await run(nativeFixture(t,'debate-suggestion',{runReview:r=>nativeApproval(r,{issues:[{id:'I1',title:'Optional naming suggestion',status:'open',blocking:false}]})},
+    [{bin:process.execPath,args:['-e',"process.stdout.write('checked')"]}]));
+  assert.equal(facts.approved,true,facts.reason);assert.equal(facts.resources.providerLaunches,2);assert.equal(facts.dialogue.correctionCycles,0);
+  assert.equal(facts.dialogue.evidence.filter(e=>e.kind==='command').length,1);assert.equal(facts.dialogue.issues.I1.blocking,false);
 });
 
 test('debate rounds are unbounded by default and accept any positive operator bound', () => {
@@ -2417,92 +1557,25 @@ test('debate rounds are unbounded by default and accept any positive operator bo
   assert.throws(() => resolveDebateRounds({ URO_DEBATE_ROUNDS: '2.5' }), /positive integer/);
 });
 
-test('circling keeps Claude in its reviewer role and supplies the actual debate to its pivot judgment', async () => {
-  // The owner's rule: once the debate has gone on for some time — the measured
-  // circling signal, never a round count — Claude stops refereeing the other
-  // seats' claims and reviews the diff first-hand. Its stance and findings are
-  // recorded, handed to the pivot judgement, and put in front of Codex.
-  const scr = scratch();
-  try {
-    const arbiterRequests = [];
-    const executorPlans = [];
-    const facts = await run({
-      mode: 'autonomous', task: 'do the task', target: makeTarget(), gate: [], gateRetries: 0,
-      scratchRoot: scr, runId: 'debate-independent-review',
-      adapters: {
-        runExecutor: async (options) => {
-          executorPlans.push(options.plan);
-          return writingExecutor(options);
-        },
-        runGate: async () => ({ passed: true, results: [] }),
-        runReview: reviewerForRounds([
-          blockingReview(), blockingReview(), blockingReview(), null,
-        ]),
-        runArbiter: async ({ request }) => {
-          arbiterRequests.push(request);
-          if (request.type === 'finding') return { verdict: 'valid' };
-          if (request.type === 'review') {
-            return {
-              stance: 'mixed',
-              findings: [{ id: 'C1', severity: 'P0', text: 'the recurring objection is real at line 4' }],
-              reasoning: 'read the diff first-hand',
-            };
-          }
-          if (request.type === 'pivot') return { decision: 'amend', reason: 'the review shows it is fixable' };
-          return { verdict: 'valid' };
-        },
-      },
-    });
-
-    assert.equal(facts.outcome, 'review-ready', 'the amended round converges');
-    assert.equal(arbiterRequests.some((request) => request.type === 'review'), false);
-    const pivotRequest = arbiterRequests.find((request) => request.type === 'pivot');
-    assert.match(pivotRequest.diff, /diff --git/);
-    assert.equal(pivotRequest.messages.filter((message) => message.speaker === 'codex').length, 3);
-    assert.equal(facts.debate.independentReviews.length, 0);
-    assert.match(executorPlans[3], /the review shows it is fixable/);
-  } finally {
-    rmSync(scr, { recursive: true, force: true });
-  }
+test('Claude retains reviewer authority and sees current diff and history when amending recurring work', async t => {
+  const requests=[],writers=[];let writes=0;
+  const facts=await run(nativeFixture(t,'debate-independent-review',{
+    runExecutor:r=>{writers.push(r);writeFileSync(join(r.cwd,'completed.txt'),String(++writes));return {dialogue:executionEnvelope(r,r.action)};},
+    runReview:r=>{requests.push(r);if(requests.length<4)return {dialogue:executionEnvelope(r,'ask',{content:'Current branch remains fixable.',
+      next:{seat:'codex',action:'revise',reason:'The review shows it is fixable'}})};return nativeApproval(r);},
+    runArbiter:()=>{throw Error('No separate pivot oracle');},
+  }));
+  assert.equal(facts.approved,true,facts.reason);assert.equal(requests.length,4);assert.equal(facts.authority,'claude');
+  assert.match(requests[2].input,/diff --git/);assert.equal(requests[2].state.messages.filter(m=>m.sender==='codex').length,3);
+  assert.match(writers[3].input,/The review shows it is fixable/);assert.equal(facts.dialogue.messages.filter(m=>m.sender==='claude').length,4);
 });
 
-test('every command run in the worktree leaves whole evidence on disk', async () => {
-  // "No green, no red" starts here: the harness executes as a stenographer.
-  // Full stdout/stderr per command goes to __uro_evidence/ files the seats can
-  // read; the facts carry a tail excerpt plus the paths. Nothing may branch on
-  // these records — they are transcript, not verdict.
-  const scr = scratch();
-  try {
-    const facts = await run({
-      task: 'do the task', target: makeTarget(), gate: [], gateRetries: 0,
-      scratchRoot: scr, runId: 'evidence-run',
-      adapters: {
-        runExecutor: writingExecutor,
-        runGate: async ({ onEvidence }) => {
-          onEvidence?.({
-            bin: 'node', args: ['--test'], code: 0, timedOut: false, attempt: 1,
-            stdout: `${'noise line\n'.repeat(200)}tests 823 pass 823 fail 0\n`,
-            stderr: '',
-          });
-          return { passed: true, results: [] };
-        },
-        runVerifier: async () => ({ verdict: 'NO_BLOCKERS' }),
-      },
-    });
-
-    assert.equal(facts.evidence.length, 1);
-    const record = facts.evidence[0];
-    assert.equal(record.code, 0);
-    // The excerpt keeps the TAIL — the end of a run is where it says why it
-    // stopped — and the full text lives on disk, untruncated.
-    assert.match(record.excerpt, /tests 823 pass 823 fail 0/);
-    assert.ok(record.excerpt.length <= 500);
-    const full = readFileSync(join(facts.dir, record.outFile), 'utf8');
-    assert.match(full, /^noise line/, 'the file must hold the WHOLE output, head included');
-    assert.equal((full.match(/noise line/g) ?? []).length, 200);
-    assert.equal(Object.hasOwn(record, 'passed'), false,
-      'an evidence record must never carry a verdict field');
-  } finally {
-    rmSync(scr, { recursive: true, force: true });
-  }
+test('every command run in the worktree leaves whole evidence on disk', async t => {
+  const stdout='noise line\n'.repeat(200)+'tests 823 pass 823 fail 0\n',stderr='whole stderr';
+  const command={bin:process.execPath,args:['-e',"process.stdout.write("+JSON.stringify(stdout)+");process.stderr.write("+JSON.stringify(stderr)+")"]};
+  const facts=await run(nativeFixture(t,'evidence-run',{},[command]));assert.equal(facts.approved,true,facts.reason);
+  const record=facts.dialogue.evidence.find(e=>e.kind==='command');assert.equal(record.exitCode,0);assert.equal(record.stdout,stdout);assert.equal(record.stderr,stderr);
+  assert.deepEqual(record.argv,[process.execPath,...command.args]);assert.equal(record.cwd,facts.dir);assert.ok(record.codeIdentity);
+  const full=JSON.parse(readFileSync(record.capturedPath,'utf8'));assert.equal(full.stdout,stdout);assert.equal(full.stderr,stderr);
+  assert.equal(Object.hasOwn(record,'passed'),false);
 });

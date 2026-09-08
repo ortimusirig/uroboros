@@ -17,6 +17,9 @@ import { parsePartialEventStream } from '../src/event-stream.js';
 import { formatEventSummary, reportEvent } from '../src/events.js';
 import { exitCodeFor } from '../src/exit.js';
 import { spawnCapture } from '../src/spawn.js';
+import { runGate } from '../src/gate.js';
+import { createInspectionReceipt } from '../src/context-evidence.js';
+import { planningEnvelope as envelope } from './fixtures/planning-responses.js';
 import {
   addUsage,
   normalizeCodexUsage,
@@ -39,6 +42,19 @@ const runCampaign = (options) => executeCampaign({
   verifySuperpowers: async () => VERIFIED_SUPERPOWERS,
   ...options,
 });
+
+function nativeCampaignReview(request) {
+  const evidence = request.state.evidence.find(item => item.id === 'requirement-briefing');
+  readFileSync(evidence.capturedPath);
+  const receipt = createInspectionReceipt({ operationId: request.operationId, seat: 'claude',
+    evidence: [evidence], inspected: true, result: 'read' });
+  return { usage: { inputTokens: 1, outputTokens: 1 }, observations: { evidence: [], receipts: [receipt] },
+    dialogue: envelope(request, 'approve', {
+      claims: [{ id: 'briefing-requirement', kind: 'fact', text: evidence.text, evidenceIds: [evidence.id] }],
+      verifications: [{ claimId: 'briefing-requirement', evidenceIds: [evidence.id],
+        inspectionReceiptIds: [receipt.id], result: 'supports', reason: 'Read the captured unit requirement.' }],
+    }) };
+}
 
 test('campaign mode and provider options reach child execution and synthesis', async () => {
   const children = [], synthesis = [];
@@ -243,37 +259,42 @@ test('a dependent isolates from its predecessor result branch and sees its exact
         },
       ],
       target,
-      gate: [],
+      gate: [{ bin: process.execPath, args: ['-e', "require('node:assert/strict').equal(require('node:fs').readFileSync('predecessor.txt','utf8'),'specific predecessor content: alpha-42');process.stdout.write('inherited-marker-checked')"] }],
       concurrency: 2,
       tokenBudget: 1000,
       scratchRoot,
       runOptions: {
         gateRetries: 0,
         adapters: {
-          runExecutor: async ({ cwd, runId }) => {
+          runExecutor: async request => {
+            const { cwd, runId } = request;
             if (runId === 'tree-parent') {
               writeFileSync(join(cwd, 'predecessor.txt'), 'specific predecessor content: alpha-42');
-              return { changedFiles: ['predecessor.txt'], lastMessage: 'wrote predecessor', usage: {} };
+              return { changedFiles: ['predecessor.txt'], lastMessage: 'wrote predecessor', usage: { inputTokens: 1, outputTokens: 1 }, dialogue: envelope(request, request.action) };
             }
             const inherited = readFileSync(join(cwd, 'predecessor.txt'), 'utf8');
             writeFileSync(join(cwd, 'dependent-observation.txt'), `observed: ${inherited}`);
             return {
               changedFiles: ['dependent-observation.txt'],
               lastMessage: 'observed predecessor',
-              usage: {},
+              usage: { inputTokens: 1, outputTokens: 1 },
+              dialogue: envelope(request, request.action),
             };
           },
-          runGate: async () => ({ passed: true, results: [] }),
-          runVerifier: async () => ({
-            verdict: 'NO_BLOCKERS', verdictSource: 'result', launchFailed: false, usage: {},
-          }),
+          runGate,
+          runReview: nativeCampaignReview,
         },
       },
     });
 
     const [parent, child] = result.units;
-    assert.equal(parent.facts.outcome, 'review-ready');
-    assert.equal(child.facts.outcome, 'review-ready');
+    assert.equal(parent.facts.outcome, 'review-ready', JSON.stringify(parent.facts.dialogue));
+    assert.equal(child.facts.outcome, 'review-ready', JSON.stringify(child.facts.dialogue));
+    for (const entry of result.units) {
+      assert.equal(entry.facts.approved, true, entry.facts.reason);
+      assert.equal(entry.facts.resources.providerLaunches, 2);
+      assert.equal(entry.facts.dialogue.evidence.find(item => item.kind === 'command').stdout, 'inherited-marker-checked');
+    }
     assert.equal(child.facts.baseRef, parent.facts.branch,
       'the child must name the predecessor result branch, not the campaign base');
     assert.equal(child.facts.baseCommit, parent.resultCommit,
@@ -805,6 +826,48 @@ test('a missing required review is explicit planner input rather than silent abs
   assert.equal(event.complete, false);
 });
 
+test('native review projection requires a current substantive reviewer message, not approval', async () => {
+  // Projection-only inputs: the candidate integration separately produces real
+  // accepted envelopes and approvals through the full provider/evidence path.
+  const current = { sender: 'claude', phase: 'execution', artifactDigest: 'current-artifact',
+    contextDigest: 'current-context', action: 'verify', issues: [], verifications: [{ claimId: 'C1' }] };
+  const cases = [
+    { name: 'approved', message: { ...current, action: 'approve' }, outcome: 'review-ready', reported: true },
+    { name: 'issueful', message: { ...current, issues: [{ id: 'F1' }] }, reported: true },
+    { name: 'answer-assessment', message: { ...current, action: 'answer', verifications: [{ claimId: 'C1' }] }, reported: true },
+    { name: 'ask', message: { ...current, action: 'ask', verifications: [] }, reported: false },
+    { name: 'issueful-ask', message: { ...current, action: 'ask', issues: [{ id: 'F1' }], verifications: [] }, reported: true },
+    { name: 'acknowledgment', message: { ...current, action: 'answer', verifications: [] }, reported: false },
+    { name: 'empty-verify', message: { ...current, verifications: [] }, reported: false },
+    { name: 'old-artifact', message: { ...current, artifactDigest: 'old' }, reported: false },
+    { name: 'old-context', message: { ...current, contextDigest: 'old' }, reported: false },
+    { name: 'planning', message: { ...current, phase: 'planning' }, reported: false },
+    { name: 'author', message: { ...current, sender: 'codex' }, reported: false },
+    { name: 'missing', message: null, reported: false },
+    { name: 'native-no-op-missing', message: null, outcome: 'no-op', reported: false },
+  ];
+  for (const scenario of cases) {
+    let reviews;
+    await runCampaign({ campaignId: `native-review-${scenario.name}`, tasks: ['Inspect current implementation'],
+      target: 'projection-only', gate: [], concurrency: 1, tokenBudget: 1000,
+      runUnit: async ({ runId }) => ({ ...successFacts(runId), outcome: scenario.outcome ?? 'needs-pivot', approved: scenario.name === 'approved',
+        // A legacy round must not mask absent native review.
+        debate: { roundHistory: [{ findings: [], blockingFindingIds: [] }] },
+        dialogue: { schemaVersion: 2, phase: 'execution', reviewer: 'claude',
+          artifactDigest: current.artifactDigest, snapshot: { digest: current.contextDigest },
+          messages: scenario.message ? [scenario.message] : [],
+          issues: { F1: { id: 'F1', blocking: true, status: scenario.name === 'approved' ? 'resolved' : 'open' },
+            F2: { id: 'F2', blocking: true, status: 'resolved' } } } }),
+      plannerSynthesis: input => { reviews = input.reviews; return { decision: 'inspect', reasoning: 'Keep reported review separate from current approval.' }; },
+    });
+    assert.deepEqual(reviews[0].review, { reported: scenario.reported, findings: 2,
+      blocking: scenario.name === 'approved' ? 0 : 1 }, scenario.name);
+    assert.equal(reviews[0].expected, true, scenario.name);
+    assert.equal(reviews[0].complete, scenario.reported, scenario.name);
+    assert.deepEqual(reviews[0].missing, scenario.reported ? [] : ['review'], scenario.name);
+  }
+});
+
 test('broken campaign and unit event sinks cannot change campaign outcomes', async () => {
   const result = await runCampaign({
     campaignId: 'broken-sinks',
@@ -855,7 +918,7 @@ test('the single-writer campaign stream is valid NDJSON and stays outside every 
       campaignId: 'stream-campaign',
       tasks: ['change one', 'change two'],
       target,
-      gate: [],
+      gate: [{ bin: process.execPath, args: ['-e', "const fs=require('node:fs');const file=fs.readdirSync('.').find(name=>name.endsWith('.txt')&&name!=='seed.txt');require('node:assert/strict').equal(fs.readFileSync(file,'utf8'),'real unit change\\n');process.stdout.write('unit-check-ran')"] }],
       concurrency: 2,
       tokenBudget: 1000,
       scratchRoot,
@@ -870,15 +933,14 @@ test('the single-writer campaign stream is valid NDJSON and stays outside every 
       runOptions: {
         gateRetries: 0,
         adapters: {
-          runExecutor: async ({ cwd, runId }) => {
+          runExecutor: async request => {
+            const { cwd, runId } = request;
             const file = `${runId}.txt`;
             writeFileSync(join(cwd, file), 'real unit change\n');
-            return { changedFiles: [file], lastMessage: 'changed', usage: {} };
+            return { changedFiles: [file], lastMessage: 'changed', usage: { inputTokens: 1, outputTokens: 1 }, dialogue: envelope(request, request.action) };
           },
-          runGate: async () => ({ passed: true, results: [] }),
-          runVerifier: async () => ({
-            verdict: 'NO_BLOCKERS', verdictSource: 'result', launchFailed: false, usage: {},
-          }),
+          runGate,
+          runReview: nativeCampaignReview,
         },
       },
     });
@@ -902,6 +964,12 @@ test('the single-writer campaign stream is valid NDJSON and stays outside every 
     assert.deepEqual(parsePartialEventStream(readFileSync(campaignEventsPath, 'utf8')),
       parsed, 'a partial final append must not hide or corrupt any completed campaign record');
     for (const entry of result.units) {
+      assert.equal(entry.facts.approved, true, entry.facts.reason);
+      const check = entry.facts.dialogue.evidence.find(item => item.kind === 'command');
+      assert.equal(check.stdout, 'unit-check-ran');
+      assert.equal(check.exitCode, 0);
+      assert.equal(check.cwd, entry.facts.dir);
+      assert.ok(check.codeIdentity);
       const diff = readFileSync(join(entry.facts.dir, 'CHANGES.diff'), 'utf8');
       assert.match(diff, new RegExp(`${entry.unitId}[.]txt`),
         'positive control: the unit must have a real diff');
@@ -925,21 +993,23 @@ test('a non-repo campaign gives every unit exactly one shared root commit', asyn
       campaignId: 'shared-nonrepo-base',
       tasks: ['unit one', 'unit two', 'unit three'],
       target,
-      gate: [],
+      gate: [{ bin: process.execPath, args: ['-e', "require('node:assert/strict').equal(require('node:fs').readFileSync('seed.txt','utf8').replaceAll('\\r',''),'one campaign baseline\\n');process.stdout.write('shared-root-check')"] }],
       concurrency: 3,
       tokenBudget: 1000,
       scratchRoot,
       runOptions: {
         gateRetries: 0,
         adapters: {
-          runExecutor: async () => ({ changedFiles: [], lastMessage: 'no changes', usage: {} }),
-          runGate: async () => ({ passed: true, results: [] }),
-          runVerifier: async () => { throw new Error('no-op units must not verify'); },
+          runExecutor: async request => ({ usage: { inputTokens: 1, outputTokens: 1 }, dialogue: envelope(request, request.action) }),
+          runGate,
+          runReview: nativeCampaignReview,
         },
       },
     });
 
-    assert.equal(result.rollup.counts.succeeded, 3);
+    assert.equal(result.rollup.counts.succeeded, 3, JSON.stringify(result.units.map(entry => entry.facts.dialogue)));
+    assert.ok(result.units.every(entry => entry.facts.approved === true));
+    assert.ok(result.units.every(entry => entry.facts.dialogue.evidence.find(item => item.kind === 'command').stdout === 'shared-root-check'));
     const roots = await Promise.all(result.units.map((entry) => (
       gitOk(entry.facts.dir, 'rev-list', '--max-parents=0', 'HEAD')
     )));
@@ -1034,16 +1104,16 @@ test('one campaign isolation failure does not prevent another unit from running'
         { task: 'This unit succeeds.', unitId: 'good-unit', branch: 'planner/good-unit' },
       ],
       target,
-      gate: [],
+      gate: [{ bin: process.execPath, args: ['-e', "require('node:assert/strict').equal(require('node:fs').readFileSync('seed.txt','utf8').replaceAll('\\r',''),'seed\\n')"] }],
       concurrency: 2,
       tokenBudget: 1000,
       scratchRoot,
       runOptions: {
         gateRetries: 0,
         adapters: {
-          runExecutor: async () => ({ changedFiles: [], lastMessage: 'ran', usage: {} }),
-          runGate: async () => ({ passed: true, results: [] }),
-          runVerifier: async () => { throw new Error('no-op unit must not verify'); },
+          runExecutor: async request => ({ usage: { inputTokens: 1, outputTokens: 1 }, dialogue: envelope(request, request.action) }),
+          runGate,
+          runReview: nativeCampaignReview,
         },
       },
     });
@@ -1051,7 +1121,9 @@ test('one campaign isolation failure does not prevent another unit from running'
     assert.equal(result.units[0].status, 'failed');
     assert.match(result.units[0].error.message, /already exists/i);
     assert.equal(result.units[1].status, 'completed');
-    assert.equal(result.units[1].facts.outcome, 'no-op');
+    assert.equal(result.units[1].facts.outcome, 'review-ready', JSON.stringify(result.units[1].facts.dialogue));
+    assert.equal(result.units[1].facts.approved, true);
+    assert.equal(result.units[1].facts.resources.providerLaunches, 2);
     assert.equal(result.rollup.counts.failed, 1);
     assert.equal(result.rollup.counts.succeeded, 1);
   } finally {

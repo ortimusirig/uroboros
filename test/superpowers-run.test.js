@@ -1,11 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { run } from '../src/run.js';
 import { EMPTY_USAGE } from '../src/usage.js';
 import { verifyCodexSuperpowers } from '../src/superpowers.js';
+import { isolate } from '../src/isolation.js';
+import { planningEnvelope as envelope } from './fixtures/planning-responses.js';
 
 const VERIFIED = Object.freeze({
   ok: true,
@@ -29,12 +31,13 @@ const VERIFIED = Object.freeze({
 });
 
 async function runWithVerification(verification, { env = {}, expectExecution = true } = {}) {
-  const root = mkdtempSync(join(tmpdir(), 'uro-skills-run-'));
+  const base = process.platform === 'win32' ? 'C:/ccc-test' : tmpdir();
+  mkdirSync(base, { recursive: true });
+  const root = mkdtempSync(join(base, 'uro-skills-run-'));
   const target = join(root, 'target');
-  const worktree = join(root, 'worktree');
   const scratchRoot = join(root, 'scratch');
   mkdirSync(target);
-  mkdirSync(worktree);
+  writeFileSync(join(target, 'seed.txt'), 'unchanged prerequisite fixture\n');
   mkdirSync(scratchRoot);
   const executorCalls = [];
   const isolateCalls = [];
@@ -42,29 +45,21 @@ async function runWithVerification(verification, { env = {}, expectExecution = t
     const facts = await run({
       task: 'Do nothing.', target, gate: [], gateRetries: 0,
       scratchRoot, artifactRoot: join(root, 'artifacts'), runId: 'skills-facts',
-      env,
+      env: { ...process.env, ...env },
       adapters: {
         verifySuperpowers: async () => verification,
-        isolate: async () => {
+        isolate: async options => {
           isolateCalls.push(true);
-          return {
-            dir: worktree,
-            isRepo: false,
-            baseRef: 'HEAD',
-            baseCommit: '0'.repeat(40),
-            branch: 'uro/skills-facts',
-          };
+          return isolate(options);
         },
-        diffText: async () => '',
         runExecutor: async (options) => {
           executorCalls.push(options);
           return {
             changedFiles: [], lastMessage: '', agentMessages: [], usage: EMPTY_USAGE,
-            exitCode: 0, timedOut: false,
+            exitCode: 0, timedOut: false, dialogue: envelope(options, options.action),
           };
         },
-        runGate: async () => ({ passed: true, results: [] }),
-        runVerifier: async () => { throw new Error('no-op must not verify'); },
+        runReview: null,
       },
     });
     assert.equal(executorCalls.length > 0, expectExecution);
@@ -72,7 +67,7 @@ async function runWithVerification(verification, { env = {}, expectExecution = t
       facts,
       executorCalls,
       isolateCalls,
-      report: readFileSync(join(worktree, 'uro-report.md'), 'utf8'),
+      report: readFileSync(join(facts.dir, 'uro-report.md'), 'utf8'),
     };
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -87,6 +82,9 @@ test('run facts record per-seat verification evidence and distinct versions', as
   assert.equal(facts.superpowers.bypassed, false);
   assert.deepEqual(facts.superpowers.seats, { codex: VERIFIED.seats.codex, claude: VERIFIED.seats.claude });
   assert.equal(Object.hasOwn(facts.participation, 'claude'), false, 'configuration is not observed review participation');
+  assert.equal(facts.approved, false, 'configuration and a proposal do not imply reviewer approval');
+  assert.equal(facts.resources.providerLaunches, 1);
+  assert.equal(facts.dialogue.messages.some(message => message.sender === 'claude'), false);
   assert.deepEqual(
     Object.fromEntries(Object.entries(facts.superpowers.seats)
       .map(([seat, value]) => [seat, value.version])),

@@ -283,7 +283,7 @@ export async function runExecutionDialogue({ state, journal, snapshot, artifactD
     };
     let protectedResult;
     try { protectedResult = await runProtectedOperation({ cwd: target, scope: writing ? 'inside' : 'outside',
-      prefix: '__uro_review', stage: 'execution-dialogue', role: seat, runId, reporter,
+      prefix: '__uro_review', stage: seat === 'claude' ? 'verify' : 'executor', role: seat, runId, reporter,
       ...(writing ? { captureSnapshot: captureReviewSnapshot, restoreSnapshot: restoreReviewSnapshot } : {}),
       ...(writing ? { validateCritical: ({ changedPaths }) => {
         const allowed = resolve(directory) === resolve(target) ? ['__uro_dialogue/journal.jsonl', '__uro_dialogue/journal-tail.jsonl'] : [];
@@ -293,7 +293,7 @@ export async function runExecutionDialogue({ state, journal, snapshot, artifactD
         return true;
       } } : {}),
       operation: !writing ? async () => (await runProtectedOperation({
-        cwd: target, scope: 'inside', prefix: '__uro_review', stage: 'execution-dialogue', role: seat, runId, reporter,
+        cwd: target, scope: 'inside', prefix: '__uro_review', stage: seat === 'claude' ? 'verify' : 'executor', role: seat, runId, reporter,
         captureSnapshot: captureReviewSnapshot, restoreSnapshot: restoreReviewSnapshot, operation: invoke,
       })).result : invoke,
     }); } catch (error) {
@@ -365,7 +365,7 @@ export async function runExecutionDialogue({ state, journal, snapshot, artifactD
     const result = uncertain ? { state: { ...state, approval: null,
       technicalPause: { reason: `uncertain ${uncertain.purpose}; replay refused`, operationId: uncertain.operationId } },
       approved: false, action: 'paused', reason: `uncertain ${uncertain.purpose}; replay refused`, resources: journal.account(), messages: state.messages }
-      : await runIssueDialogue({ state, journal, seats: { codex: callSeat('codex'), claude: callSeat('claude') },
+      : await runIssueDialogue({ state, journal, seats: { codex: callSeat('codex'), claude: typeof review === 'function' ? callSeat('claude') : null },
       inspect, budget, reporter, persist,
       selectChecks,
       selectMerge,

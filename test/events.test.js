@@ -40,7 +40,8 @@ import { runExecutor as realExecutor } from '../src/executor.js';
 import { runGate as realGate } from '../src/gate.js';
 import { run as executeRun } from '../src/run.js';
 import { runPlan as executePlan } from '../src/plan.js';
-import { scriptedPlanningAdapters } from './fixtures/planning-responses.js';
+import { planningEnvelope as envelope, scriptedPlanningAdapters } from './fixtures/planning-responses.js';
+import { createInspectionReceipt } from '../src/context-evidence.js';
 import { generateRunJournal } from '../src/run-journal.js';
 import { runReviewPass as realReviewPass } from '../src/verifier.js';
 import { VERIFIED_SUPERPOWERS, withVerifiedSuperpowers } from '../fixtures/verified-superpowers.mjs';
@@ -57,7 +58,7 @@ const runPlan = (options) => executePlan({
   adapters: scriptedPlanningAdapters(options.adapters ?? {}),
 });
 
-const fakeWriter = fileURLToPath(new URL('../fixtures/fake-codex-writer.mjs', import.meta.url));
+const fakeWriter = fileURLToPath(new URL('../fixtures/fake-codex.mjs', import.meta.url));
 const fakeAgent = fileURLToPath(new URL('../fixtures/fake-agent.mjs', import.meta.url));
 const SAFE_SCRATCH_BASE = process.env.URO_TEST_SCRATCH_ROOT ?? (process.platform === 'win32'
   ? 'C:/ccc-test'
@@ -66,6 +67,17 @@ const SAFE_SCRATCH_BASE = process.env.URO_TEST_SCRATCH_ROOT ?? (process.platform
 function scratch() {
   mkdirSync(SAFE_SCRATCH_BASE, { recursive: true });
   return mkdtempSync(join(SAFE_SCRATCH_BASE, '.run-'));
+}
+
+function nativeEventReview(request) {
+  const evidence = request.state.evidence.find(item => item.id === 'requirement-briefing');
+  readFileSync(evidence.capturedPath);
+  const receipt = createInspectionReceipt({ operationId: request.operationId, seat: 'claude', evidence: [evidence], inspected: true, result: 'read' });
+  return { usage: { inputTokens: 1, outputTokens: 1 }, observations: { evidence: [], receipts: [receipt] },
+    dialogue: envelope(request, 'approve', {
+      claims: [{ id: 'briefing-requirement', kind: 'fact', text: evidence.text, evidenceIds: [evidence.id] }],
+      verifications: [{ claimId: 'briefing-requirement', evidenceIds: [evidence.id], inspectionReceiptIds: [receipt.id], result: 'supports', reason: 'Read the captured requirement.' }],
+    }) };
 }
 
 function target() {
@@ -425,7 +437,7 @@ test('stage transitions and executor file changes reach the reporter in order', 
   const events = [];
   try {
     const facts = await run({
-      task: 'Write observed.txt.', target: tgt, gate: [], gateRetries: 0,
+      task: 'Write a.py.', target: tgt, gate: [], gateRetries: 0,
       scratchRoot: scr, runId: 'ordered-events', reporter: (event) => events.push(event),
       adapters: {
         runExecutor: (opts) => realExecutor({
@@ -438,7 +450,7 @@ test('stage transitions and executor file changes reach the reporter in order', 
         }),
       },
     });
-    assert.equal(facts.outcome, 'review-ready');
+    assert.equal(facts.outcome, 'review-ready', JSON.stringify(facts.dialogue?.technicalPause));
     assert.deepEqual(events.map((event) => `${event.stage}/${event.type}${event.pass ? `:${event.pass}` : ''}`), [
       'isolate/start',
       'isolate/finish',
@@ -448,18 +460,19 @@ test('stage transitions and executor file changes reach the reporter in order', 
       'executor/finish',
       'gate/start',
       'gate/finish',
-      'diff/start',
-      'diff/finish',
       'verify/start',
       'verify/finish',
-      'debate/round',
-      'debate/converged',
+      'verify/start',
+      'verify/finish',
       'report/start',
       'report/finish',
     ]);
     const fileChange = events.find((event) => event.type === 'file_change');
-    assert.equal(fileChange.file, 'observed.txt');
+    assert.equal(fileChange.file, 'a.py');
     assert.equal(fileChange.runId, 'ordered-events');
+    assert.equal(readFileSync(join(facts.dir, 'a.py'), 'utf8'), '# actual native fixture write\n');
+    assert.equal(facts.approved, true);
+    assert.deepEqual(facts.dialogue.messages.filter(message => message.sender === 'claude').map(message => message.action), ['inspect', 'approve']);
     const isolateFinish = events.find((event) => (
       event.stage === 'isolate' && event.type === 'finish'
     ));
@@ -487,7 +500,7 @@ test('each gate command reports its exit code without its output tail', async ()
   assert.ok(commands.every((event) => !Object.hasOwn(event, 'outputTail')));
 });
 
-test('a retry event says which stall started the next attempt', async () => {
+test('a native stalled writer reports silence and preserves partial work without a restart', async () => {
   const scr = scratch();
   const tgt = target();
   const events = [];
@@ -501,30 +514,24 @@ test('a retry event says which stall started the next attempt', async () => {
         runExecutor: async (opts) => {
           executorCalls++;
           reportEvent(opts.reporter, opts.runId, 'executor', 'start', { attempt: opts.attempt });
-          if (executorCalls === 1) {
-            // Go silent past the watchdog threshold; the restart abort releases us.
-            await new Promise((resolve) => opts.signal.addEventListener('abort', resolve,
-              { once: true }));
-            return { changedFiles: [], lastMessage: 'stopped', aborted: true };
-          }
-          writeFileSync(join(opts.cwd, 'repair.txt'), 'repaired\n');
-          return { changedFiles: ['repair.txt'], lastMessage: 'repaired' };
+          writeFileSync(join(opts.cwd, 'partial.txt'), 'preserved before silence\n');
+          await new Promise(resolve => opts.signal.addEventListener('abort', resolve, { once: true }));
+          return { changedFiles: ['partial.txt'], lastMessage: 'stopped', aborted: true, usage: { inputTokens: 1, outputTokens: 1 } };
         },
-        runGate: async () => ({ passed: true, results: [] }),
-        runVerifier: async () => ({ verdict: 'NO_BLOCKERS', launchFailed: false }),
+        runGate: realGate,
+        runReview: nativeEventReview,
       },
     });
-    assert.equal(facts.outcome, 'review-ready');
-    const retry = events.find((event) => event.type === 'retry');
-    assert.equal(retry.stage, 'executor');
-    assert.equal(retry.attempt, 2);
-    assert.equal(retry.source, 'stall');
-    assert.match(retry.reason, /^no event for \d+ ms$/);
-    assert.ok(Number.isSafeInteger(retry.gapMs) && retry.gapMs >= 25,
-      'the event carries the measured silence, not a command payload');
-    // The event names the trigger; command output stays in the evidence files.
-    assert.equal(Object.hasOwn(retry, 'bin'), false);
-    assert.equal(Object.hasOwn(retry, 'outputTail'), false);
+    assert.equal(facts.outcome, 'needs-pivot');
+    assert.equal(executorCalls, 1);
+    assert.equal(facts.resources.providerLaunches, 1);
+    assert.equal(readFileSync(join(facts.dir, 'partial.txt'), 'utf8'), 'preserved before silence\n');
+    assert.equal(events.some(event => event.type === 'retry'), false);
+    const stalled = events.find(event => event.stage === 'executor' && event.type === 'stalled');
+    assert.ok(stalled, JSON.stringify(events));
+    assert.ok(Number.isSafeInteger(stalled.gapMs) && stalled.gapMs >= 25);
+    assert.equal(Object.hasOwn(stalled, 'bin'), false);
+    assert.equal(Object.hasOwn(stalled, 'outputTail'), false);
   } finally {
     rmSync(tgt, { recursive: true, force: true });
     rmSync(scr, { recursive: true, force: true });
@@ -539,12 +546,13 @@ test('omitting reporter emits nothing and creates no events artifact', async () 
       task: 'Do nothing.', target: tgt, gate: [], gateRetries: 0,
       scratchRoot: scr, runId: 'no-reporter',
       adapters: {
-        runExecutor: async () => ({ changedFiles: [], lastMessage: 'no changes' }),
-        runGate: async () => ({ passed: true, results: [] }),
-        runVerifier: async () => { throw new Error('no-op must not verify'); },
+        runExecutor: async request => ({ usage: { inputTokens: 1, outputTokens: 1 }, dialogue: envelope(request, request.action) }),
+        runGate: realGate,
+        runReview: nativeEventReview,
       },
     });
-    assert.equal(facts.outcome, 'no-op');
+    assert.equal(facts.outcome, 'review-ready', JSON.stringify(facts.dialogue?.technicalPause));
+    assert.equal(facts.approved, true);
     assert.equal(existsSync(join(facts.dir, 'events.jsonl')), false);
   } finally {
     rmSync(tgt, { recursive: true, force: true });
@@ -561,12 +569,13 @@ test('a throwing reporter cannot change a run outcome', async () => {
       scratchRoot: scr, runId: 'throwing-reporter',
       reporter: () => { throw new Error('logging is broken'); },
       adapters: {
-        runExecutor: async () => ({ changedFiles: [], lastMessage: 'no changes' }),
-        runGate: async () => ({ passed: true, results: [] }),
-        runVerifier: async () => { throw new Error('no-op must not verify'); },
+        runExecutor: async request => ({ usage: { inputTokens: 1, outputTokens: 1 }, dialogue: envelope(request, request.action) }),
+        runGate: realGate,
+        runReview: nativeEventReview,
       },
     });
-    assert.equal(facts.outcome, 'no-op');
+    assert.equal(facts.outcome, 'review-ready', JSON.stringify(facts.dialogue?.technicalPause));
+    assert.equal(facts.approved, true);
   } finally {
     rmSync(tgt, { recursive: true, force: true });
     rmSync(scr, { recursive: true, force: true });
@@ -586,15 +595,16 @@ test('events.jsonl is excluded from CHANGES.diff while a real changed file remai
       task: 'Add new.txt.', target: tgt, gate: [], gateRetries: 0,
       scratchRoot: scr, runId: 'artifact-exclusion', reporter,
       adapters: {
-        runExecutor: async ({ cwd }) => {
-          writeFileSync(join(cwd, 'new.txt'), 'real change\n');
-          return { changedFiles: ['new.txt'], lastMessage: 'added new.txt' };
+        runExecutor: async request => {
+          writeFileSync(join(request.cwd, 'new.txt'), 'real change\n');
+          return { usage: { inputTokens: 1, outputTokens: 1 }, dialogue: envelope(request, request.action) };
         },
-        runGate: async () => ({ passed: true, results: [] }),
-        runVerifier: async () => ({ verdict: 'NO_BLOCKERS', launchFailed: false }),
+        runGate: realGate,
+        runReview: nativeEventReview,
       },
     });
     const diff = readFileSync(join(facts.dir, 'CHANGES.diff'), 'utf8');
+    assert.equal(facts.approved, true, JSON.stringify(facts.dialogue?.technicalPause));
     assert.match(diff, /new[.]txt/, 'positive control: a real change must remain in the diff');
     assert.doesNotMatch(diff, /events[.]jsonl/);
     assert.ok(readFileSync(eventPath, 'utf8').trim().split('\n').length > 1,
@@ -611,7 +621,7 @@ test('reportEvent also swallows an asynchronous reporter rejection', async () =>
   await new Promise((resolve) => setImmediate(resolve));
 });
 
-test('fully exercised runs have exact pair equality with both event vocabularies', async () => {
+test('observed native runs and explicit schema constructors cover the exact event vocabularies', async () => {
   const scr = scratch();
   const tgt = target();
   const campaignEvents = [];
@@ -638,7 +648,7 @@ test('fully exercised runs have exact pair equality with both event vocabularies
       campaignId: 'event-conformance',
       tasks: [
         {
-          task: 'Write observed.txt.',
+          task: 'Write a.py.',
           unitKind: 'candidate',
           unitId: '2026-08-15T12-00-00-000Z-conformance-parent',
           perspective: 'test-first',
@@ -655,9 +665,8 @@ test('fully exercised runs have exact pair equality with both event vocabularies
         bin: process.execPath,
         args: ['-e', [
           "const fs = require('node:fs');",
-          "if (fs.existsSync('.conformance-gate')) process.exit(0);",
-          "fs.writeFileSync('.conformance-gate', 'retry\\n');",
-          'process.exit(1);',
+          "require('node:assert/strict').match(fs.readFileSync('a.py','utf8'),/corrected native implementation/);",
+          "process.stdout.write('conformance-source-check');",
         ].join('')],
       }],
       concurrency: 1,
@@ -668,18 +677,31 @@ test('fully exercised runs have exact pair equality with both event vocabularies
       runOptions: {
         gateRetries: 1,
         adapters: {
-          runExecutor: (opts) => realExecutor({
-            ...opts, bin: process.execPath, extraArgv: [fakeWriter],
-          }),
+          runExecutor: async opts => {
+            const response = await realExecutor({ ...opts, bin: process.execPath, extraArgv: [fakeWriter] });
+            if (opts.action === 'revise') writeFileSync(join(opts.cwd, 'a.py'), '# corrected native implementation\n');
+            return response;
+          },
           runGate: realGate,
-          runReview: (opts) => realReviewPass({
-            ...opts, bin: process.execPath,
-          spawnProcess: (_bin, args, options) => spawn(process.execPath, [fakeAgent, 'clean', ...args], options),
-          }),
+          runReview: request => request.state.evidence.filter(item => item.kind === 'command').at(-1)?.exitCode !== 0
+            ? { usage: { inputTokens: 1, outputTokens: 1 }, dialogue: envelope(request, 'ask', {
+              content: 'The actual source check failed. Correct a.py.',
+              next: { seat: 'codex', action: 'revise', reason: 'Correct the failed implementation check' } }) }
+            : realReviewPass({ ...request, bin: process.execPath,
+              spawnProcess: (_bin, args, options) => spawn(process.execPath, [fakeAgent, 'clean', ...args], options) }),
         },
       },
     });
-    assert.equal(result.rollup.outcome, 'review-ready');
+    assert.equal(result.rollup.outcome, 'review-ready', JSON.stringify(result.units.map(entry => ({ reason: entry.facts?.dialogue?.technicalPause, error: entry.error, messages: entry.facts?.dialogue?.messages }))));
+    for (const entry of result.units) {
+      const commands = entry.facts.dialogue.evidence.filter(item => item.kind === 'command');
+      assert.deepEqual(commands.map(item => item.exitCode), [1, 0]);
+      assert.equal(commands[1].stdout, 'conformance-source-check');
+      assert.equal(commands[1].cwd, entry.facts.dir);
+      assert.notEqual(commands[0].codeIdentity, commands[1].codeIdentity);
+      assert.equal(entry.facts.approved, true);
+      assert.equal(entry.facts.resources.providerLaunches, 5);
+    }
 
     await runCampaign({
       campaignId: 'conformance-merge',
@@ -719,45 +741,31 @@ test('fully exercised runs have exact pair equality with both event vocabularies
 
     let decisionExecutorCalls = 0;
     const decisionFacts = await run({
-      task: 'Resolve the authority challenge in isolation.',
-      target: tgt,
-      gate: [],
-      gateRetries: 0,
-      scratchRoot: scr,
-      runId: 'conformance-decision-assumed',
-      mode: 'autonomous',
-      reporter: (event) => unitEvents.push(event),
-      decisionResolver: async () => ({
-        answers: [{ id: 'Q1', answer: 'Proceed only in the isolated worktree.' }],
-        escalation: 'operator-absent',
-        presenceEvidence: {
-          ttyAttached: false,
-          invocation: 'non-interactive',
-          operatorWait: 'not-acknowledged',
-        },
-        reasoning: 'No TTY was attached, so no operator was available to answer.',
-      }),
+      task: 'Resolve the technical clarification in isolation.', target: tgt, gate: [],
+      scratchRoot: scr, runId: 'conformance-native-clarification', mode: 'autonomous',
+      reporter: event => unitEvents.push(event),
+      decisionResolver: () => { throw new Error('Native technical clarification must not impersonate operator authority'); },
       adapters: {
-        runExecutor: async ({ cwd }) => {
+        runExecutor: request => {
           decisionExecutorCalls++;
-          if (decisionExecutorCalls === 1) {
-            writeFileSync(join(cwd, 'DECISION.md'), [
-              '## Q1',
-              'Kind: authority',
-              'Question: May this proceed in the isolated worktree?',
-              'Recommendation: Proceed only in the isolated worktree.',
-              '',
-            ].join('\n'));
-            return { changedFiles: ['DECISION.md'], lastMessage: 'authority needed' };
-          }
-          writeFileSync(join(cwd, 'assumed.txt'), 'isolated decision\n');
-          return { changedFiles: ['assumed.txt'], lastMessage: 'continued in isolation' };
+          if (request.action === 'propose') writeFileSync(join(request.cwd, 'assumed.txt'), 'isolated implementation\n');
+          return { usage: { inputTokens: 1, outputTokens: 1 }, dialogue: envelope(request, request.action,
+            request.action === 'answer' ? { content: 'The task confines implementation to the isolated worktree.',
+              next: { seat: 'claude', action: 'verify', reason: 'Assess the clarification' } } : {}) };
         },
-        runGate: async () => ({ passed: true, results: [] }),
-        runVerifier: async () => ({ verdict: 'NO_BLOCKERS', launchFailed: false }),
+        runGate: realGate,
+        runReview: request => request.state.messages.some(message => message.action === 'answer')
+          ? nativeEventReview(request)
+          : { usage: { inputTokens: 1, outputTokens: 1 }, dialogue: envelope(request, 'ask', {
+            content: 'Is this confined to the isolated worktree?',
+            next: { seat: 'codex', action: 'answer', reason: 'Clarify isolation scope' } }) },
       },
     });
     assert.equal(decisionFacts.outcome, 'review-ready');
+    assert.equal(decisionExecutorCalls, 2);
+    assert.equal(decisionFacts.resources.providerLaunches, 4);
+    assert.equal(unitEvents.some(event => event.stage === 'decision'), false);
+    assert.equal(readFileSync(join(decisionFacts.dir, 'assumed.txt'), 'utf8'), 'isolated implementation\n');
 
     const journalFacts = result.units[0].facts;
     generatedNote = generateRunJournal(join(journalFacts.dir, 'uro-runfacts.json'), {
@@ -795,18 +803,11 @@ test('fully exercised runs have exact pair equality with both event vocabularies
       'verify/scope_violation': 'Requires a reviewer to write outside its dedicated artifact directory.',
       // The healthy executor follows the review-file restriction in this conformance run.
       'executor/scope_violation': 'Requires an executor to modify or delete a protected reviewer file.',
-      // The clean verifier presents no blocking finding for the executor to resist.
-      'debate/resist': 'Requires at least one structured blocking review finding.',
-      // Claude's first-hand review fires only when the debate circles; the
-      // healthy conformance run converges on its first round.
-      'debate/independent_review': 'Requires a circling debate; covered by the circling suite in run.test.js.',
-      // Healthy conformance converges on its first review and therefore cannot circle.
-      'debate/circling': 'Requires unresolved blockers across three consecutive review rounds.',
-      // A pivot is only selected after the debate has been detected as circling.
-      'debate/pivot': 'Requires a circling debate before a pivot strategy can be selected.',
-      // Retries now start only from a stall restart, which needs deliberate
-      // executor silence; the payload is proved in the stall retry test above.
-      'executor/retry': 'Requires a stalled executor restart; payload proved by the stall retry test.',
+      'debate/resist': 'Historical blocking-finding rebuttal event; native responses remain in the shared issue dialogue.',
+      'debate/independent_review': 'Historical circling review event; current Claude participates directly in the shared dialogue.',
+      'debate/circling': 'Historical three-round circling summary; current repeated corrections have no inferred cap.',
+      'debate/pivot': 'Historical circling-selected pivot event; current replan follows an explicit dialogue action.',
+      'executor/retry': 'Historical saved-run restart event; native uncertain mutating operations retain partial work without replay.',
     });
     assert.equal(Object.keys(stalledFamily).length, EVENT_STAGES.length,
       'every stage must carry a silence pair — the watchdog arms for any of them');
@@ -853,7 +854,16 @@ test('fully exercised runs have exact pair equality with both event vocabularies
       runId: 'conformance-plan-pivot', stage: 'plan', type: 'pivot',
       fields: { tier: 'goal', planRound: 3, decision: 'conclude', unjudged: false, reason: 'conformance fixture' },
     })];
+    // Exact historical wire vocabulary, not claimed as native runtime emission.
+    // These producers remain in run.js's historical execution branch. This
+    // group proves constructor/schema compatibility, not stored-reader execution.
+    const historicalExecutionEvents = [
+      ['diff', 'start'], ['diff', 'finish'], ['debate', 'round'], ['debate', 'converged'],
+      ['decision', 'challenged'], ['decision', 'resolved'],
+    ].map(([stage, type]) => createEvent({ runId: 'historical-execution-vocabulary', stage, type,
+      fields: { reason: 'Historical event-constructor schema control.' } }));
     const allEvents = [
+      ...historicalExecutionEvents,
       ...campaignEvents,
       ...unitEvents,
       ...auxiliaryCampaignEvents,

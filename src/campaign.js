@@ -102,6 +102,22 @@ function candidateFailureReason(entry) {
 }
 
 function candidateReview(facts) {
+  const dialogue = facts?.dialogue;
+  if (dialogue?.schemaVersion === 2) {
+    // Reporting an assessment is distinct from signing off the artifact. Only
+    // the current execution reviewer can supply it; old phases stay history.
+    const reported = dialogue.phase === 'execution' && dialogue.reviewer === 'claude'
+      && typeof dialogue.artifactDigest === 'string' && typeof dialogue.snapshot?.digest === 'string'
+      && (dialogue.messages ?? []).some(message => message.sender === dialogue.reviewer
+        && message.phase === dialogue.phase && message.artifactDigest === dialogue.artifactDigest
+        && message.contextDigest === dialogue.snapshot.digest
+        && (message.action === 'approve'
+          || (message.issues ?? []).length > 0 || (message.verifications ?? []).length > 0));
+    const issues = Object.values(dialogue.issues ?? {});
+    return { reported, findings: issues.length,
+      blocking: issues.filter(issue => issue.blocking
+        && ['open', 'awaiting-answer', 'awaiting-verification', 'disputed'].includes(issue.status)).length };
+  }
   const lastRound = facts?.debate?.roundHistory?.at(-1) ?? null;
   return {
     reported: lastRound !== null,
@@ -119,7 +135,7 @@ function observedCandidateTestCount(facts) {
 function plannerReview(entry) {
   const facts = entry.facts;
   const review = facts === null ? null : candidateReview(facts);
-  const reviewExpected = facts?.outcome !== 'no-op';
+  const reviewExpected = facts?.dialogue?.schemaVersion === 2 || facts?.outcome !== 'no-op';
   const missing = reviewExpected && review?.reported !== true ? ['review'] : [];
   return {
     unitId: entry.unitId,
