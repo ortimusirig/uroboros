@@ -17,6 +17,7 @@ import { runGate } from '../src/gate.js';
 import { MERGE_LEDGER_FILENAME, stageMergeChanges, TEST_COUNT_FLOOR_BIN } from '../src/merge.js';
 import { spawnCapture } from '../src/spawn.js';
 import { VERIFIED_SUPERPOWERS } from '../fixtures/verified-superpowers.mjs';
+import { createInspectionReceipt } from '../src/context-evidence.js';
 
 const runCampaign = (options) => executeCampaign({
   superpowers: VERIFIED_SUPERPOWERS,
@@ -27,9 +28,15 @@ const SAFE_SCRATCH_BASE = process.env.URO_TEST_SCRATCH_ROOT ?? (process.platform
   ? 'C:/ccc-test'
   : join(homedir(), '.ccc-test'));
 
-const cleanVerifier = async () => ({
-  verdict: 'NO_BLOCKERS', verdictSource: 'result', launchFailed: false, usage: {},
-});
+const nativeEnvelope = (r, action) => ({ schemaVersion: 1, action, artifactDigest: r.state.artifactDigest,
+  contextDigest: r.state.snapshot.digest, replyTo: null, content: 'Observed fixture work', claims: [], issues: [], evidence: [], verifications: [], next: null });
+const cleanVerifier = async r => {
+  const evidence = r.state.evidence.find(e => e.id === 'requirement-briefing');
+  const receipt = createInspectionReceipt({ operationId: r.operationId, seat: 'claude', evidence: [evidence], inspected: true, result: 'read' });
+  return { usage: { inputTokens: 1, outputTokens: 1 }, observations: { evidence: [], receipts: [receipt] },
+    dialogue: { ...nativeEnvelope(r, 'approve'), claims: [{ id: 'briefing-requirement', kind: 'fact', text: 'The retained briefing specifies this work.', evidenceIds: [evidence.id] }],
+      verifications: [{ claimId: 'briefing-requirement', evidenceIds: [evidence.id], inspectionReceiptIds: [receipt.id], result: 'supports', reason: 'Read retained briefing' }] } };
+};
 
 const successFacts = (runId) => ({
   runId,
@@ -149,7 +156,8 @@ test('a clean fan-in merge contains both distinctive parent changes and is revie
       runOptions: {
         gateRetries: 0,
         adapters: {
-          runExecutor: async ({ cwd, runId, plan }) => {
+          runExecutor: async r => {
+            const { cwd, runId, plan } = r;
             if (runId === 'clean-left') {
               writeFileSync(join(cwd, 'left-only.txt'), 'left parent: lunar-17\n');
               writeFileSync(join(cwd, 'left.test.js'),
@@ -171,14 +179,15 @@ test('a clean fan-in merge contains both distinctive parent changes and is revie
                 'right parent: solar-29');
               writeFileSync(join(cwd, 'seam.test.js'), 'test("left and right seam", () => {});\n');
             }
-            return { changedFiles: [], lastMessage: `completed ${runId}`, usage: {}, exitCode: 0 };
+            return { changedFiles: [], lastMessage: `completed ${runId}`, usage: { inputTokens: 1, outputTokens: 1 }, exitCode: 0, dialogue: nativeEnvelope(r, r.action) };
           },
           runGate,
-          runReview: async ({ cwd, pass }) => {
-            verifierPasses.push(pass);
+          runReview: async r => {
+            const { cwd, action } = r;
+            verifierPasses.push(action);
             mkdirSync(join(cwd, '__uro_review'), { recursive: true });
             writeFileSync(join(cwd, '__uro_review', 'REVIEW.md'), 'Reviewed. No findings.\n');
-            return { conclusion: 'clean', launchFailed: false, timedOut: false };
+            return cleanVerifier(r);
           },
         },
       },
@@ -201,7 +210,7 @@ test('a clean fan-in merge contains both distinctive parent changes and is revie
       'the target folder must remain untouched');
     assert.equal(existsSync(join(dirs.target, 'right-only.txt')), false,
       'the target folder must remain untouched');
-    assert.deepEqual(verifierPasses.slice(-1), ['review'],
+    assert.deepEqual(verifierPasses.slice(-1), ['verify'],
       'the merged worktree gets one holistic review');
     assert.deepEqual(merge.facts.merge.parentOrder, ['clean-left', 'clean-right'],
       'graph declaration order, not dependsOn array order, selects the merge parent order');
@@ -264,7 +273,8 @@ test('a text conflict reaches the executor with named paths and ledgers the reso
       runOptions: {
         gateRetries: 0,
         adapters: {
-          runExecutor: async ({ cwd, runId, plan }) => {
+          runExecutor: async r => {
+            const { cwd, runId, plan } = r;
             if (runId === 'conflict-left') {
               writeFileSync(join(cwd, 'shared.txt'), 'left contract\n');
               writeFileSync(join(cwd, 'left.test.js'), 'left test\n');
@@ -287,10 +297,10 @@ test('a text conflict reaches the executor with named paths and ledgers the reso
                 }],
               }));
             }
-            return { changedFiles: ['shared.txt'], lastMessage: `completed ${runId}`, usage: {} };
+            return { changedFiles: ['shared.txt'], lastMessage: `completed ${runId}`, usage: { inputTokens: 1, outputTokens: 1 }, dialogue: nativeEnvelope(r, r.action) };
           },
           runGate,
-          runVerifier: cleanVerifier,
+          runReview: cleanVerifier,
         },
       },
     });
@@ -330,7 +340,8 @@ test('the merge gate test-count floor fails when conflict repair drops one paren
       runOptions: {
         gateRetries: 0,
         adapters: {
-          runExecutor: async ({ cwd, runId }) => {
+          runExecutor: async r => {
+            const { cwd, runId } = r;
             if (runId === 'floor-left') {
               writeFileSync(join(cwd, 'left.test.js'), 'left behavior test\n');
             } else if (runId === 'floor-right') {
@@ -340,16 +351,10 @@ test('the merge gate test-count floor fails when conflict repair drops one paren
               writeFileSync(join(cwd, 'left.test.js'),
                 'left behavior test plus a nominal seam in the same file\n');
             }
-            return { changedFiles: [], lastMessage: `completed ${runId}`, usage: {} };
+            return { changedFiles: [], lastMessage: `completed ${runId}`, usage: { inputTokens: 1, outputTokens: 1 }, dialogue: nativeEnvelope(r, r.action) };
           },
           runGate,
-          runVerifier: async ({ runId }) => {
-            if (runId === 'floor-join') {
-              // The red floor no longer stops review — the seats look and judge.
-              return { verdict: 'NO_BLOCKERS', launchFailed: false };
-            }
-            return cleanVerifier();
-          },
+          runReview: cleanVerifier,
         },
       },
     });
@@ -358,14 +363,12 @@ test('the merge gate test-count floor fails when conflict repair drops one paren
     const facts = result.units[2].facts;
     assert.equal(facts.merge.testCounts.required, 2);
     assert.equal(facts.merge.testCounts.actual, 1);
-    // The dropped-test floor exits non-zero. That exit is evidence in front
-    // of the seats, never a verdict: the run still converges review-ready and
-    // the record names the floor harness with its measurement.
-    assert.equal(facts.outcome, 'review-ready');
+    assert.equal(facts.approved, false, 'an actual required test floor failure prevents approval');
+    assert.match(facts.reason, /checks.*failed/);
     const floorEvidence = (facts.evidence ?? []).find(
-      (entry) => entry.harness === TEST_COUNT_FLOOR_BIN && entry.code !== 0);
+      (entry) => entry.argv?.some(arg => arg.endsWith('merge-test-count.js')) && entry.exitCode !== 0);
     assert.ok(floorEvidence, 'the dropped-test floor exit must be on the record');
-    assert.match(floorEvidence.excerpt, /actual=1 required=2/);
+    assert.match(floorEvidence.stdout, /actual=1 required=2/);
     assert.equal(readFileSync(join(facts.dir, 'left.test.js'), 'utf8'),
       'left behavior test plus a nominal seam in the same file\n');
     assert.throws(() => readFileSync(join(facts.dir, 'right.test.js'), 'utf8'), /ENOENT/);
@@ -391,7 +394,8 @@ test('genuinely conflicting intent stops with a distinct terminal outcome before
       runOptions: {
         gateRetries: 0,
         adapters: {
-          runExecutor: async ({ cwd, runId }) => {
+          runExecutor: async r => {
+            const { cwd, runId } = r;
             if (runId === 'intent-left') {
               writeFileSync(join(cwd, 'policy.txt'), 'policy must allow anonymous access\n');
             } else if (runId === 'intent-right') {
@@ -406,7 +410,7 @@ test('genuinely conflicting intent stops with a distinct terminal outcome before
                 }],
               }));
             }
-            return { changedFiles: [], lastMessage: `completed ${runId}`, usage: {} };
+            return { changedFiles: [], lastMessage: `completed ${runId}`, usage: { inputTokens: 1, outputTokens: 1 }, dialogue: nativeEnvelope(r, r.action) };
           },
           runGate: async (options) => {
             if (options.commands.some((command) => command.harness === TEST_COUNT_FLOOR_BIN)) {
@@ -414,9 +418,9 @@ test('genuinely conflicting intent stops with a distinct terminal outcome before
             }
             return { passed: true, results: [] };
           },
-          runVerifier: async ({ runId }) => {
-            if (runId === 'intent-join') verifierCalls++;
-            return cleanVerifier();
+          runReview: async r => {
+            if (r.runId === 'intent-join') verifierCalls++;
+            return cleanVerifier(r);
           },
         },
       },
@@ -547,17 +551,18 @@ test('the same graph twice selects the same merge base and canonical parent orde
       runOptions: {
         gateRetries: 0,
         adapters: {
-          runExecutor: async ({ cwd, runId }) => {
+          runExecutor: async r => {
+            const { cwd, runId } = r;
             if ((runId === 'order-right') === reverseDelay) {
               await new Promise((resolve) => setTimeout(resolve, 15));
             }
             if (runId === 'order-right') writeFileSync(join(cwd, 'right.test.js'), 'right\n');
             else if (runId === 'order-left') writeFileSync(join(cwd, 'left.test.js'), 'left\n');
             else writeFileSync(join(cwd, 'seam.test.js'), 'seam\n');
-            return { changedFiles: [], lastMessage: runId, usage: {} };
+            return { changedFiles: [], lastMessage: runId, usage: { inputTokens: 1, outputTokens: 1 }, dialogue: nativeEnvelope(r, r.action) };
           },
           runGate,
-          runVerifier: cleanVerifier,
+          runReview: cleanVerifier,
         },
       },
     });

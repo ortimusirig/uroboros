@@ -109,7 +109,7 @@ async function defaultInspect({ requests, seat, operationId, state }) {
 }
 
 export async function runIssueDialogue({ state: initial, journal, seats, renderInput, inspect = defaultInspect, revise, captureExecution,
-  selectChecks, runChecks,
+  selectChecks, runChecks, selectMerge, runMerge,
   persist, budget, reporter }) {
   let state = structuredClone(initial);
   const resources = () => { try { return journal.account(); } catch { return state.resources; } };
@@ -214,6 +214,23 @@ export async function runIssueDialogue({ state: initial, journal, seats, renderI
         inputArtifactDigest: operation.artifactDigest, artifactDigest: state.artifactDigest,
         contextDigest: state.snapshot.digest };
     }
+    if (operation.effect === 'merge-sequence') {
+      const progress = output.mergeProgress;
+      if (!progress || typeof progress.complete !== 'boolean' || !Number.isSafeInteger(progress.nextParentIndex)
+        || typeof progress.task !== 'string') throw new Error('invalid completed merge progress');
+      state.mergeProgress = { ...structuredClone(progress), operationId: operation.operationId,
+        artifactDigest: state.artifactDigest, contextDigest: state.snapshot.digest };
+      state.executionTask = progress.task;
+      state.operations[operation.operationId].effect = 'merge-sequence';
+      state.operations[operation.operationId].selection = structuredClone(operation.selection);
+      state.executionChecks = null;
+      if (progress.reason) state.technicalPause = { reason: progress.reason, operationId: operation.operationId };
+      else if (progress.conflict || !state.executionCycle) {
+        // Ordered parent work continues the allocated cycle; it is not reviewer correction.
+        if (state.executionCycle) state.executionCycle.open = true;
+        state.next = { seat: state.author, action: state.executionCycle?.action ?? 'propose', reason: 'Complete the current ordered merge task' };
+      }
+    }
     await save();
   };
   try {
@@ -255,6 +272,24 @@ export async function runIssueDialogue({ state: initial, journal, seats, renderI
       }
       if (state.pendingDecision) { await save(); return result(false, 'needs-decision', state.pendingDecision.reason); }
       if (state.terminalAction) { await save(); return result(false, state.terminalAction, state.stopReason); }
+      if (state.phase === 'execution' && (!state.pendingOperation || state.pendingOperation.effect === 'merge-sequence')) {
+        const selection = state.pendingOperation?.selection
+          ?? (typeof selectMerge === 'function' ? await selectMerge({ state: structuredClone(state) }) : null);
+        if (selection) {
+          if (!selection.identity || typeof runMerge !== 'function') throw new Error('invalid harness merge selection');
+          const pending = state.pendingOperation ?? await prepare({ seat: 'harness', action: 'merge', effect: 'merge-sequence',
+            input: JSON.stringify(selection), selection: structuredClone(selection) });
+          let operation = journal.operation(pending.operationId);
+          if (operation?.status !== 'completed') {
+            if (!operation || operation.status === 'uncertain' || initial.pendingOperation?.operationId === pending.operationId) throw new Error('unknown or uncertain merge sequence; automatic replay refused');
+            const output = await runMerge({ state: structuredClone(state), operationId: pending.operationId, selection: structuredClone(selection) });
+            journal.complete({ operationId: pending.operationId, result: output, usage: null, delivery: null });
+          }
+          operation = savedOperation(pending);
+          await installArtifact(operation, operation.result);
+          continue;
+        }
+      }
       // Harness commands are a distinct effect, never part of replayable file capture
       // or provider delivery. A yielded cycle has not reached its check boundary.
       if (state.phase === 'execution' && !state.executionCycle?.open && state.executionCycle
@@ -280,7 +315,7 @@ export async function runIssueDialogue({ state: initial, journal, seats, renderI
           }
         }
       }
-      if (!state.pendingOperation && !mutations.has(state.next?.action)
+      if (!state.pendingOperation && (!state.mergeProgress || state.mergeProgress.complete) && !mutations.has(state.next?.action)
         && canApproveDialogue({ state, seat: state.reviewer }).approved) { await save(); return result(true, 'complete', 'Current artifact approved'); }
       let pending = state.pendingOperation, operation;
       if (pending?.effect === 'apply') {
@@ -398,6 +433,7 @@ export async function runIssueDialogue({ state: initial, journal, seats, renderI
       }
       if (mutations.has(envelope.action) && envelope.action !== operation.action) throw new Error('unsolicited artifact application outside explicit proposal/revision operation');
       if (state.phase === 'execution' && state.executionCycle?.open && envelope.action === 'approve') throw new Error('unfinished execution cycle cannot be approved');
+      if (state.mergeProgress && !state.mergeProgress.complete && envelope.action === 'approve') throw new Error('pending merge cannot be approved');
       // Reducer checks the saved INPUT identities, before the local artifact callback can change them.
       let reductionState = state;
       const execution = state.phase === 'execution' && captureExecution && operation.seat === state.author

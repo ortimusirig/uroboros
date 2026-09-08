@@ -50,6 +50,7 @@ import {
   clearMergeLedger,
   concludeConflict,
   readMergeLedger,
+  MERGE_LEDGER_FILENAME,
   testCountFloorCommand,
 } from './merge.js';
 import { countTestFiles } from './merge-test-count.js';
@@ -627,6 +628,7 @@ export async function run(opts) {
   const mergeResolutions = continuation?.mergeState?.mergeResolutions ?? [];
   let mergeProgress = continuation?.mergeState?.mergeProgress ?? null;
   let activeConflict = continuation?.mergeState?.activeConflict ?? null;
+  let observedMergeWorkspace = null;
   let observedAdvanceMerge;
   if (merge !== undefined) observedAdvanceMerge = async (options) => {
     reportEvent(eventReporter, runId, 'merge', 'start', {
@@ -915,6 +917,7 @@ export async function run(opts) {
   let gateResult = null;
   let iter;
   let nativeResult = null;
+  let approvedExecutionPlan = plan;
   const nativeEvidence = [];
   const nativePhases = [];
   const nativeLinks = [];
@@ -984,7 +987,7 @@ export async function run(opts) {
           journalIdentity: parent.checkpointState.journalIdentity, manifest: parentManifest,
           stateDigest: contextDigest({ state: parent.checkpointState.dialogue ?? parent.checkpointState.preparationState }),
           contextDigest: parentManifest.contextDigest }, child: phase, originalRequirements: originalPlan, currentPlan: plan,
-        originalContext: opts.context ?? {}, sourceScope: execution.scope,
+        originalContext: opts.context ?? {}, sourceScope: execution.scope, approvedExecutionPlan,
         parentEntries: (parent.checkpointState.dialogue?.snapshot.entries ?? []).filter(entry => entry.kind !== 'retained-phase'),
         interactionMode: mode, limits: { challengeRounds, debateRounds: maxDebateRounds, tokenBudget, pivotCandidates },
         workspace: { target: resolve(target), directory: iso.dir, baseCommit: iso.baseCommit,
@@ -993,6 +996,7 @@ export async function run(opts) {
         history: nativePhases.map(item => ({ runId: item.runId, phase: item.phase, messages: item.messages })),
         execution: { proposalCycles: execution.proposalCycles, correctionCycles: execution.correctionCycles,
           challengeCycles: execution.challengeCycles, executionCycle: execution.executionCycle, operations: execution.operations,
+          mergeProgress: execution.mergeProgress,
           previous: execution.priorExecution ?? null }, resources: totalResources() };
       const path = join(directory, 'phase-link.json');
       const fd = openSync(path, 'wx');
@@ -1002,15 +1006,86 @@ export async function run(opts) {
       return { context, validate: checkChain, evidence: parent.checkpointState.dialogue?.evidence ?? [],
         evidenceRoots: parent.checkpointState.dialogue?.scope.evidenceRoots ?? [] };
     };
-    const capture = async () => {
-      currentDiff = await createDiff(iso.dir, iso.baseCommit);
+    const readMergeHead = () => {
+      try { return execFileSync('git', ['-C', iso.dir, 'rev-parse', '--verify', '--quiet', 'MERGE_HEAD'], { encoding: 'utf8', windowsHide: true }).trim(); }
+      catch (error) { if (error.status === 1) return null; throw error; }
+    };
+    const capture = async ({ readOnly = false } = {}) => {
+      if (readOnly) {
+        // At merge entry only parent-tracked files exist; after a merge sequence
+        // all writer files were already captured. Observe without restaging an
+        // uncertain Git effect or mutating before the first durable intent.
+        const observed = await spawnCapture('git', ['-C', iso.dir, 'diff', merge?.mergeBase ?? iso.baseCommit,
+          '--', '.', ...HARNESS_ARTIFACTS.map(path => `:(exclude)${path}`)]);
+        if (observed.code !== 0) throw new Error(`cannot observe retained merge diff: ${observed.stderr.trim()}`);
+        currentDiff = observed.stdout;
+        const paths = await spawnCapture('git', ['-C', iso.dir, 'ls-files', '--others', '--exclude-standard', '-z',
+          '--', '.', ...HARNESS_ARTIFACTS.map(path => `:(exclude)${path}`)]);
+        if (paths.code !== 0) throw new Error(`cannot observe retained merge files: ${paths.stderr.trim()}`);
+        const untrackedFiles = paths.stdout.split('\0').filter(Boolean).map(path => {
+          const file = join(iso.dir, path), stat = lstatSync(file);
+          return stat.isFile() && !stat.isSymbolicLink() ? { path, sha256: reviewDigest(readFileSync(file)) } : { path, kind: 'non-regular' };
+        });
+        observedMergeWorkspace = { head: execFileSync('git', ['-C', iso.dir, 'rev-parse', 'HEAD'], { encoding: 'utf8', windowsHide: true }).trim(),
+          mergeHead: readMergeHead(), trackedDiffDigest: reviewDigest(currentDiff), untrackedFiles, diffComplete: untrackedFiles.length === 0 };
+        observedMergeWorkspace.codeIdentity = contextDigest(observedMergeWorkspace);
+      } else currentDiff = await createDiff(iso.dir, merge?.mergeBase ?? iso.baseCommit);
       writeFileSync(join(iso.dir, 'CHANGES.diff'), currentDiff);
       return { artifactDigest: reviewDigest(currentDiff), diff: currentDiff };
     };
     const checkSelection = () => {
-      const required = [...commands, ...buildReviewerTestCommands(commands, [...accumulatedReviewTests])];
+      const required = [...commands, ...buildReviewerTestCommands(commands, [...accumulatedReviewTests]),
+        ...(merge === undefined ? [] : [testCountFloorCommand(merge.testCounts.required)])];
       return { identity: contextDigest({ commands: required, policy: 'required-exit-zero',
         reviewerTests: [...accumulatedReviewTests].sort().map(path => ({ path, digest: reviewDigest(readFileSync(join(iso.dir, path))) })) }), commands: required };
+    };
+    const mergeSelection = ({ state }) => {
+      if (merge === undefined || state.mergeProgress?.complete || state.executionCycle?.open
+        || state.mergeProgress && !state.executionCycle) return null;
+      const progress = state.mergeProgress;
+      const mergeHead = readMergeHead();
+      if (progress?.conflict && mergeHead && mergeHead !== progress.conflict.parentCommit) throw new Error('actual merge parent differs from saved conflict');
+      const gitRead = (...args) => execFileSync('git', ['-C', iso.dir, ...args], { encoding: 'utf8', windowsHide: true }).trim();
+      const ledgerPath = join(iso.dir, MERGE_LEDGER_FILENAME);
+      if (existsSync(ledgerPath) && (!lstatSync(ledgerPath).isFile() || lstatSync(ledgerPath).isSymbolicLink())) throw new Error('merge ledger must be a retained regular file');
+      for (const parent of merge.parents) if (gitRead('rev-parse', `${parent.commit}^{commit}`) !== parent.commit) throw new Error('merge parent requires exact commit identity');
+      const selection = { cwd: realpathSync.native(iso.dir), baseCommit: iso.baseCommit, mergeBase: merge.mergeBase,
+        head: gitRead('rev-parse', 'HEAD'), mergeHead, parents: structuredClone(merge.parents),
+        nextParentIndex: progress?.nextParentIndex ?? 1, conflict: progress?.conflict ?? null,
+        ledger: { path: MERGE_LEDGER_FILENAME, sha256: existsSync(ledgerPath) ? reviewDigest(readFileSync(ledgerPath)) : null },
+        index: gitRead('ls-files', '--stage'), worktreeDiff: reviewDigest(gitRead('diff')),
+        action: progress?.conflict ? 'conclude-clear-advance' : 'initial-advance' };
+      return { ...selection, identity: contextDigest(selection) };
+    };
+    const runMergeSequence = async request => {
+      // Validate the actual inputs again after durable preparation, before any Git mutation.
+      if (mergeSelection(request)?.identity !== request.selection.identity) throw new Error('prepared merge inputs changed');
+      const before = request.state.mergeProgress;
+      let progress = before, reason = null;
+      if (request.selection.conflict) {
+        const ledger = readMergeLedger({ cwd: iso.dir, conflict: request.selection.conflict });
+        if (!ledger.ok) reason = mergePreparationFailure = ledger.reason;
+        else {
+          mergeResolutions.push(...ledger.resolutions);
+          if (ledger.status === 'conflicting-intent') {
+            conflictingIntent = true; reason = 'conflicting-intent: merge requires human direction';
+          } else {
+            const concluded = await concludeConflict({ cwd: iso.dir, conflict: request.selection.conflict, unitId: runId });
+            if (!concluded.ok) reason = mergePreparationFailure = concluded.reason;
+            else clearMergeLedger(iso.dir);
+          }
+        }
+      }
+      if (!reason) progress = await observedAdvanceMerge({ cwd: iso.dir, parents: merge.parents, unitId: runId,
+        nextParentIndex: request.selection.nextParentIndex + (request.selection.conflict ? 1 : 0) });
+      mergeProgress = progress; activeConflict = progress?.conflict ?? null;
+      if (activeConflict && !mergeConflicts.some(c => c.parentCommit === activeConflict.parentCommit)) mergeConflicts.push(activeConflict);
+      plan = buildMergeTask(approvedExecutionPlan, merge, activeConflict);
+      const observed = await capture();
+      const head = execFileSync('git', ['-C', iso.dir, 'rev-parse', 'HEAD'], { encoding: 'utf8', windowsHide: true }).trim();
+      return { ...observed, mergeProgress: { ...progress, task: plan, head, mergeHead: readMergeHead(), reason,
+        conflicts: structuredClone(mergeConflicts), resolutions: structuredClone(mergeResolutions),
+        ledger: { path: MERGE_LEDGER_FILENAME, sha256: existsSync(join(iso.dir, MERGE_LEDGER_FILENAME)) ? reviewDigest(readFileSync(join(iso.dir, MERGE_LEDGER_FILENAME))) : null } } };
     };
     const providerResults = [];
     const execute = async request => {
@@ -1061,6 +1136,7 @@ export async function run(opts) {
         || gateResult.results.some(result => result.code !== 0 || result.timedOut))) {
         return { ...response, error: 'current required checks are incomplete or failed' };
       }
+      if (envelope?.action === 'approve' && merge !== undefined && !request.state.mergeProgress?.complete) return { ...response, error: 'pending merge cannot be approved' };
       if (envelope?.action === 'approve' && opts.mutation !== undefined) {
         return { ...response, error: 'WIP mutation effect integration pending' };
       }
@@ -1068,15 +1144,18 @@ export async function run(opts) {
     };
     try {
       while (true) {
-      const initial = await capture();
+      const initial = await capture({ readOnly: merge !== undefined });
       const prior = totalResources();
       nativeResult = await runExecutionDialogue({ target: iso.dir, directory: phase.directory, runId: phase.runId, retained,
         artifactRoot: resolveArtifactRoot({ scratchRoot, artifactRoot: opts.artifactRoot, env: runEnvironment }),
-        requirements: originalPlan, plan, artifactDigest: initial.artifactDigest, interactionMode: mode,
+        requirements: originalPlan, plan: approvedExecutionPlan,
+        task: merge !== undefined ? buildMergeTask(approvedExecutionPlan, merge, activeConflict) : approvedExecutionPlan,
+        artifactDigest: initial.artifactDigest, interactionMode: mode,
         context: { ...(opts.context ?? {}), workspace: { baseCommit: iso.baseCommit, target: resolve(target) }, requiredCommands: commands },
         limits: { ...(challengeRounds === undefined ? {} : { challenges: challengeRounds }),
           ...(maxDebateRounds === undefined ? {} : { proposalCycles: maxDebateRounds }) },
         execute, discuss: execute, review, completeReview, capture, selectChecks: checkSelection, reviewInstructions: EXECUTION_REVIEW_PROMPT,
+        selectMerge: mergeSelection, runMerge: runMergeSequence,
         runChecks: async request => {
           const captured = [];
           gateResult = await runGate({ commands: request.selection.commands, cwd: iso.dir, timeoutMs: stageTimeouts.gate,
@@ -1093,13 +1172,12 @@ export async function run(opts) {
           if (iterations.length) iterations.at(-1).gate = gateResult;
           return { ...await capture(), evidence: captured };
         },
-        budget: ({ account }) => merge !== undefined ? { allowed: false, reason: 'WIP merge effect integration pending; paused before initial advance' }
-          : tokenBudget !== undefined && (prior.usageUnknown || account.usageUnknown) ? { allowed: false, reason: 'accounting-incomplete: unknown provider usage' }
+        budget: ({ account }) => tokenBudget !== undefined && (prior.usageUnknown || account.usageUnknown) ? { allowed: false, reason: 'accounting-incomplete: unknown provider usage' }
           : tokenBudget !== undefined && prior.knownUsage.inputTokens + prior.knownUsage.outputTokens + account.knownUsage.inputTokens + account.knownUsage.outputTokens >= tokenBudget
             ? { allowed: false, reason: 'budget-exhausted: token budget reached' } : { allowed: true },
         reporter: eventReporter, env: runEnvironment });
-      const finalCapture = await capture();
-      if (nativeResult.approved && (finalCapture.artifactDigest !== nativeResult.state.artifactDigest
+      const finalCapture = await capture({ readOnly: merge !== undefined });
+      if (nativeResult.approved && (observedMergeWorkspace?.diffComplete === false || finalCapture.artifactDigest !== nativeResult.state.artifactDigest
         || nativeResult.state.executionChecks?.artifactDigest !== finalCapture.artifactDigest
         || nativeResult.state.executionChecks?.checkSetIdentity !== checkSelection().identity
         || !gateResult || gateResult.results?.length !== checkSelection().commands.length
@@ -1185,7 +1263,8 @@ export async function run(opts) {
       if ((await capture()).artifactDigest !== held.context.workspace.diffDigest
         || execFileSync('git', ['-C', iso.dir, 'rev-parse', 'HEAD'], { encoding: 'utf8', windowsHide: true }).trim()
           !== held.context.workspace.head) throw new Error('retained project changed before planning adoption');
-      plan = selected.plan; commands.splice(0, commands.length, ...selected.gate); gateResult = null;
+      plan = selected.plan; approvedExecutionPlan = selected.plan;
+      commands.splice(0, commands.length, ...selected.gate); gateResult = null;
       retained = allocatePhase('execution', planningPhase, execution, { ...trigger, message });
       }
     } catch (error) {
@@ -1201,7 +1280,7 @@ export async function run(opts) {
         nativeResult.resources = nativePhases.at(-1).resources;
         planningUsage = addUsage(planningUsage, nativeResult.resources.knownUsage);
       }
-      await capture(); // Retain uncertain writes without replaying a provider or check.
+      await capture({ readOnly: merge !== undefined }); // Observe uncertain merge effects without restaging them.
     }
     if (!nativeResult.approved && nativeResult.state) nativeResult.state.approval = null;
     nativeResult.phaseResources = nativeResult.resources;
@@ -1213,7 +1292,8 @@ export async function run(opts) {
       }),
       ...nativeLinks.map(link => ({ path: relative(iso.dir, link.path).replaceAll('\\', '/'), sha256: link.digest })),
     ];
-    outcome = nativeResult.approved ? 'review-ready' : nativeResult.action === 'needs-decision' ? 'needs-decision' : 'needs-pivot';
+    outcome = nativeResult.approved ? 'review-ready' : conflictingIntent ? 'conflicting-intent'
+      : nativeResult.action === 'needs-decision' ? 'needs-decision' : 'needs-pivot';
     debateStopReason = nativeResult.reason;
     for (const message of nativePhases.flatMap(item => item.phase === 'execution' ? item.messages : [])) {
       const observed = providerResults.find(item => item.operationId === message.operationId);
@@ -2190,8 +2270,12 @@ export async function run(opts) {
       phase: nativeResult.checkpointState?.phase ?? 'execution', runId: nativeResult.checkpointState?.runId ?? runId, rootRunId: runId,
       interactionMode: mode, action: nativeResult.action, reason: nativeResult.reason, approved,
       workspace: { ...iso, targetPath: resolve(target), diff: currentDiff, diffDigest: reviewDigest(currentDiff) },
-      originalPlan, plan, commands, resources: nativeResult.resources,
+      originalPlan, plan, approvedExecutionPlan, commands, resources: nativeResult.resources,
       phaseResources: nativeResult.phaseResources, phaseChain: nativePhases, phaseLinks: nativeLinks,
+      ...(merge === undefined ? {} : { mergeState: { merge, mergeProgress: nativeResult.state?.mergeProgress ?? null,
+        activeConflict, mergeConflicts, mergeResolutions, conflictingIntent, mergePreparationFailure,
+        observedWorkspace: observedMergeWorkspace, pendingOperation: nativeResult.state?.pendingOperation,
+        next: nativeResult.state?.next, executionChecks: nativeResult.state?.executionChecks } }),
       options: { target, scratchRoot, artifactRoot: opts.artifactRoot, baseRef, executorModel, executorEffort, verifierModel,
         challengeRounds, debateRounds: maxDebateRounds, tokenBudget, pivotCandidates, superpowers },
     };

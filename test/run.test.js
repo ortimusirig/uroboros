@@ -29,6 +29,9 @@ import { exitCodeFor } from '../src/exit.js';
 import { reviewDigest, materializeReviewBundle } from '../src/review.js';
 import { createInspectionReceipt } from '../src/context-evidence.js';
 import { planningEnvelope, planningApproval } from './fixtures/planning-responses.js';
+import { execFileSync } from 'node:child_process';
+import { deriveMergeContext, MERGE_LEDGER_FILENAME } from '../src/merge.js';
+import { landQueueDiff } from '../src/queue-runtime.js';
 
 const run = (options) => executeRun(withVerifiedSuperpowers(options));
 
@@ -53,6 +56,236 @@ function nativeFixture(t, name, adapters = {}, gate = []) {
     adapters: { runExecutor: r => { writeFileSync(join(r.cwd, 'completed.txt'), '1'); return { exitCode: 0, changedFiles: ['completed.txt'], usage: { inputTokens: 5, outputTokens: 1 }, dialogue: executionEnvelope(r, r.action) }; },
       runReview: nativeApproval, ...adapters } };
 }
+
+async function nativeMergeFixture(t, name, conflict = false) {
+  const options = nativeFixture(t, name);
+  const git = (...args) => execFileSync('git', ['-C', options.target, ...args], { encoding: 'utf8', windowsHide: true }).trim();
+  git('init', '-b', 'main'); git('config', 'core.autocrlf', 'false');
+  git('config', 'user.name', 'test'); git('config', 'user.email', 'test@local');
+  const commit = message => { git('add', '-A'); git('-c', 'user.name=test', '-c', 'user.email=test@local', 'commit', '-m', message); return git('rev-parse', 'HEAD'); };
+  writeFileSync(join(options.target, 'shared.txt'), 'base\n');
+  const base = commit('base'), parents = [];
+  for (const id of ['left', 'middle', 'right']) {
+    git('checkout', '-b', id, base);
+    writeFileSync(join(options.target, conflict ? 'shared.txt' : `${id}.txt`), `${id}\n`);
+    parents.push({ unitId: id, branch: id, commit: commit(id) });
+  }
+  git('checkout', 'main');
+  options.baseRef = parents[0].commit;
+  options.unitKind = 'merge';
+  options.merge = await deriveMergeContext({ repository: options.target, parents });
+  return { options, git };
+}
+
+test('native merge clean ordered parents have durable initial intent before Git and current merged approval', async t => {
+  const { options } = await nativeMergeFixture(t, 'native-merge-clean');
+  let beforeAdvance;
+  options.reporter = event => {
+    if (event.stage === 'merge' && event.type === 'start') {
+      const cwd = join(options.scratchRoot, options.runId, 'w');
+      const events = readFileSync(join(cwd, '__uro_dialogue/journal.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+      beforeAdvance = { intent: events.findLast(e => e.type === 'prepare'),
+        head: execFileSync('git', ['-C', cwd, 'rev-parse', 'HEAD'], { encoding: 'utf8', windowsHide: true }).trim(),
+        middleExists: existsSync(join(cwd, 'middle.txt')) };
+    }
+  };
+  options.adapters.runExecutor = r => {
+    const events = readFileSync(join(r.cwd, '__uro_dialogue/journal.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+    const intent = events.find(e => e.type === 'prepare' && e.effect === 'merge-sequence');
+    assert.ok(intent, 'initial Git sequence must already have a durable intent');
+    assert.equal(intent.selection.head, options.merge.parents[0].commit);
+    assert.deepEqual(intent.selection.parents, options.merge.parents);
+    assert.ok(events.some(e => e.type === 'complete' && e.operationId === intent.operationId));
+    for (const id of ['left', 'middle', 'right']) assert.equal(readFileSync(join(r.cwd, `${id}.txt`), 'utf8'), `${id}\n`);
+    writeFileSync(join(r.cwd, 'seam.test.js'), '');
+    return { dialogue: executionEnvelope(r, r.action), usage: { inputTokens: 5, outputTokens: 1 } };
+  };
+  const facts = await run(options);
+  assert.equal(facts.approved, true, facts.reason);
+  assert.equal(beforeAdvance.intent.effect, 'merge-sequence');
+  assert.equal(beforeAdvance.head, options.merge.parents[0].commit);
+  assert.equal(beforeAdvance.middleExists, false, 'intent is observable before the first real parent merge');
+  assert.equal(facts.dialogue.mergeProgress.complete, true);
+  assert.equal(facts.dialogue.mergeProgress.nextParentIndex, 3);
+  assert.equal(facts.dialogue.proposalCycles, 1);
+  assert.equal(facts.resources.providerLaunches, 2);
+  assert.match(readFileSync(join(facts.dir, 'CHANGES.diff'), 'utf8'), /left|middle|right/);
+  assert.equal(facts.approval.artifactDigest, reviewDigest(readFileSync(join(facts.dir, 'CHANGES.diff'))));
+  assert.ok(facts.evidence.some(e => e.kind === 'command' && e.argv.some(arg => arg.endsWith('merge-test-count.js'))));
+  const landing = await landQueueDiff({ target: options.target, diffPath: join(facts.dir, 'CHANGES.diff'), unit: { name: 'merge' }, runId: facts.runId });
+  assert.ok(landing.commit);
+  for (const id of ['left', 'middle', 'right']) assert.equal(readFileSync(join(options.target, `${id}.txt`), 'utf8'), `${id}\n`);
+});
+
+test('native merge successive conflicts retain first resolution and separately prepare next parent without correction', async t => {
+  const { options } = await nativeMergeFixture(t, 'native-merge-conflicts', true);
+  let segments = 0;
+  options.debateRounds = 1;
+  options.adapters.runExecutor = r => {
+    const parent = ++segments === 1 ? 'middle' : 'right';
+    assert.equal(r.state.mergeProgress.conflict.parentUnitId, parent);
+    assert.match(r.input, new RegExp(`merge of parent ${parent}`));
+    if (segments === 2) assert.match(readFileSync(join(r.cwd, 'first-resolution.txt'), 'utf8'), /retained/);
+    writeFileSync(join(r.cwd, 'shared.txt'), segments === 1 ? 'left and middle\n' : 'left and middle and right\n');
+    writeFileSync(join(r.cwd, 'first-resolution.txt'), 'retained');
+    writeFileSync(join(r.cwd, MERGE_LEDGER_FILENAME), JSON.stringify({ status: 'resolved', resolutions: [{ path: 'shared.txt', chosen: parent, reason: 'Preserve all parent behavior' }] }));
+    return { dialogue: executionEnvelope(r, r.action), usage: { inputTokens: 5, outputTokens: 1 } };
+  };
+  const facts = await run(options);
+  assert.equal(facts.approved, true, facts.reason);
+  assert.equal(segments, 2);
+  assert.equal(facts.dialogue.proposalCycles, 1);
+  assert.equal(facts.dialogue.correctionCycles, 0);
+  assert.equal(facts.resources.providerLaunches, 3);
+  assert.deepEqual(facts.merge.resolutions.map(r => r.parentUnitId), ['middle', 'right']);
+  assert.equal(existsSync(join(facts.dir, MERGE_LEDGER_FILENAME)), false);
+});
+
+test('native merge malformed missing and conflicting-intent ledgers retain work without another effect or reviewer', async t => {
+  for (const kind of ['missing', 'malformed', 'conflicting-intent']) {
+    const { options } = await nativeMergeFixture(t, `native-merge-ledger-${kind}`, true);
+    let writes = 0, reviews = 0;
+    options.adapters.runExecutor = r => {
+      writes++;
+      writeFileSync(join(r.cwd, 'retained.txt'), 'useful work');
+      if (kind !== 'missing') writeFileSync(join(r.cwd, MERGE_LEDGER_FILENAME), kind === 'malformed' ? '{' : JSON.stringify({
+        status: 'conflicting-intent', resolutions: [{ path: 'shared.txt', chosen: 'Unresolved for human', reason: 'Parent intents conflict' }] }));
+      return { dialogue: executionEnvelope(r, r.action), usage: { inputTokens: 1, outputTokens: 1 } };
+    };
+    options.adapters.runReview = () => { reviews++; };
+    const facts = await run(options);
+    assert.equal(facts.approved, false);
+    assert.match(facts.reason, kind === 'conflicting-intent' ? /conflicting-intent/ : kind === 'missing' ? /missing.*resolutions/ : /invalid.*resolutions/);
+    assert.equal(readFileSync(join(facts.dir, 'retained.txt'), 'utf8'), 'useful work');
+    assert.equal(writes, 1); assert.equal(reviews, 0);
+    assert.equal(facts.dialogue.mergeProgress.nextParentIndex, 1);
+    assert.equal(facts.dialogue.mergeProgress.complete, false);
+    assert.equal(facts.evidence.length, 0);
+  }
+});
+
+test('native merge actual derived test floor failure blocks current approval', async t => {
+  const { options } = await nativeMergeFixture(t, 'native-merge-floor');
+  options.merge.testCounts.required = 2;
+  const facts = await run(options);
+  assert.equal(facts.approved, false);
+  assert.match(facts.reason, /checks.*failed/);
+  const floor = facts.evidence.find(e => e.kind === 'command');
+  assert.equal(floor.exitCode, 1);
+  assert.match(floor.stdout, /actual=0 required=2/);
+  assert.equal(facts.dialogue.approval, null);
+});
+
+test('native merge uncertain effect finalization observes partial bytes without staging or another provider', async t => {
+  const { options } = await nativeMergeFixture(t, 'native-merge-uncertain');
+  let captures = 0, providers = 0, heldIndex, heldHead;
+  options.adapters.diffText = async cwd => {
+    captures++;
+    const git = (...args) => execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8', windowsHide: true }).trim();
+    heldIndex = git('ls-files', '--stage'); heldHead = git('rev-parse', 'HEAD');
+    writeFileSync(join(cwd, 'left.txt'), 'useful partial bytes after merge\n');
+    writeFileSync(join(cwd, 'uncaptured.txt'), 'uncertain new work');
+    throw new Error('interrupted merge outcome capture');
+  };
+  options.adapters.runExecutor = () => { providers++; };
+  const facts = await run(options);
+  assert.equal(facts.approved, false);
+  assert.match(facts.reason, /interrupted merge outcome capture/);
+  assert.equal(captures, 1, 'initial capture and post-uncertainty finalization must never call the staging adapter');
+  assert.equal(providers, 0);
+  const git = (...args) => execFileSync('git', ['-C', facts.dir, ...args], { encoding: 'utf8', windowsHide: true }).trim();
+  assert.equal(git('ls-files', '--stage'), heldIndex);
+  assert.equal(git('rev-parse', 'HEAD'), heldHead);
+  assert.match(readFileSync(join(facts.dir, 'CHANGES.diff'), 'utf8'), /useful partial bytes after merge/);
+  assert.equal(facts.dialogue.pendingOperation.effect, 'merge-sequence');
+  assert.equal(facts.checkpointState.mergeState.mergeProgress, null, 'callback-only progress is not a durably completed effect');
+  assert.equal(facts.resources.providerLaunches, 0);
+  assert.equal(facts.checkpointState.mergeState.observedWorkspace.diffComplete, false);
+  assert.deepEqual(facts.checkpointState.mergeState.observedWorkspace.untrackedFiles, [{ path: 'uncaptured.txt', sha256: reviewDigest('uncertain new work') }]);
+});
+
+test('native merge retained replan carries completed progress and current remaining plan without repeating parents', async t => {
+  const { options } = await nativeMergeFixture(t, 'native-merge-replan');
+  let writes = 0, reviews = 0, advances = 0;
+  options.pivotCandidates = 1;
+  options.reporter = event => { if (event.stage === 'merge' && event.type === 'start') advances++; };
+  options.adapters.runExecutor = r => {
+    if (++writes === 2) {
+      assert.match(r.input.split('Requested codex action:')[0], /Only add remaining.txt/);
+      assert.equal(r.state.mergeProgress.complete, true);
+      assert.equal(r.state.priorExecution.mergeProgress.operationId, r.state.mergeProgress.operationId);
+    }
+    writeFileSync(join(r.cwd, writes === 1 ? 'first.txt' : 'remaining.txt'), 'retained');
+    return { dialogue: executionEnvelope(r, 'propose'), usage: { inputTokens: 1, outputTokens: 1 } };
+  };
+  options.adapters.runReview = r => ++reviews === 1 ? { dialogue: executionEnvelope(r, 'replan', {
+    issues: [{ id: 'R1', title: 'Remaining seam work', status: 'open', blocking: true }],
+    replan: { issueId: 'R1', evidenceIds: ['requirement-briefing'], novelty: 'The complete parent merge narrows remaining implementation to one additional file.' },
+  }), usage: { inputTokens: 1, outputTokens: 1 } } : nativeApproval(r);
+  options.adapters.draftPlanCandidate = r => ({ plan: 'Only add remaining.txt', gate: [], dialogue: planningEnvelope(r, 'propose'), usage: { inputTokens: 1, outputTokens: 1 } });
+  options.adapters.reviewPlanCandidate = planningApproval;
+  const facts = await run(options);
+  assert.equal(facts.approved, true, facts.reason);
+  assert.equal(advances, 1); assert.equal(writes, 2);
+  assert.equal(facts.checkpointState.phaseChain.length, 3);
+  assert.equal(facts.dialogue.proposalCycles, 2);
+  assert.equal(facts.dialogue.correctionCycles, 0);
+});
+
+test('native merge rejects a replaced actual MERGE_HEAD before concluding the saved parent conflict', async t => {
+  const { options } = await nativeMergeFixture(t, 'native-merge-head-mismatch', true);
+  let writes = 0;
+  options.adapters.runExecutor = r => {
+    writes++;
+    writeFileSync(join(r.cwd, 'shared.txt'), 'retained resolution');
+    writeFileSync(join(r.cwd, MERGE_LEDGER_FILENAME), JSON.stringify({ status: 'resolved', resolutions: [{ path: 'shared.txt', chosen: 'both', reason: 'Retain both' }] }));
+    const mergeHeadPath = execFileSync('git', ['-C', r.cwd, 'rev-parse', '--path-format=absolute', '--git-path', 'MERGE_HEAD'], { encoding: 'utf8', windowsHide: true }).trim();
+    writeFileSync(mergeHeadPath, `${options.merge.parents[2].commit}\n`);
+    return { dialogue: executionEnvelope(r, 'propose'), usage: { inputTokens: 1, outputTokens: 1 } };
+  };
+  const facts = await run(options);
+  assert.equal(facts.approved, false);
+  assert.match(facts.reason, /actual merge parent.*saved conflict/);
+  assert.equal(writes, 1);
+  assert.equal(execFileSync('git', ['-C', facts.dir, 'rev-parse', 'HEAD'], { encoding: 'utf8', windowsHide: true }).trim(), options.merge.parents[0].commit);
+  assert.equal(existsSync(join(facts.dir, MERGE_LEDGER_FILENAME)), true);
+});
+
+test('native merge partial replan composes each later conflict from the current approved remaining plan in one cycle', async t => {
+  const { options } = await nativeMergeFixture(t, 'native-merge-partial-replan', true);
+  let writes = 0, reviews = 0;
+  options.pivotCandidates = 1; options.debateRounds = 1;
+  const remainingPlan = 'Preserve partial.txt and complete only the remaining parent conflicts.';
+  options.adapters.runExecutor = r => {
+    writes++;
+    if (writes === 1) {
+      writeFileSync(join(r.cwd, 'partial.txt'), 'retained before planning');
+      return { dialogue: executionEnvelope(r, 'ask'), usage: { inputTokens: 1, outputTokens: 1 } };
+    }
+    const parent = writes === 2 ? 'middle' : 'right';
+    const taskPreamble = r.input.split('Requested codex action:')[0];
+    assert.match(taskPreamble, /Preserve partial.txt and complete only the remaining parent conflicts/);
+    assert.match(taskPreamble, new RegExp(`merge of parent ${parent}`));
+    assert.equal(r.state.proposalCycles, 1); assert.equal(r.state.correctionCycles, 0);
+    assert.equal(readFileSync(join(r.cwd, 'partial.txt'), 'utf8'), 'retained before planning');
+    writeFileSync(join(r.cwd, 'shared.txt'), writes === 2 ? 'left and middle' : 'all three parents');
+    writeFileSync(join(r.cwd, MERGE_LEDGER_FILENAME), JSON.stringify({ status: 'resolved', resolutions: [{ path: 'shared.txt', chosen: 'composed', reason: 'Preserve all parent behavior' }] }));
+    return { dialogue: executionEnvelope(r, 'propose'), usage: { inputTokens: 1, outputTokens: 1 } };
+  };
+  options.adapters.runReview = r => ++reviews === 1 ? { dialogue: executionEnvelope(r, 'replan', {
+    issues: [{ id: 'R1', title: 'Clarify remaining merge strategy', status: 'open', blocking: true }],
+    replan: { issueId: 'R1', evidenceIds: ['requirement-briefing'], novelty: 'The retained partial implementation leaves only ordered parent conflict resolution.' },
+  }), usage: { inputTokens: 1, outputTokens: 1 } } : nativeApproval(r);
+  options.adapters.draftPlanCandidate = r => ({ plan: remainingPlan, gate: [], dialogue: planningEnvelope(r, 'propose'), usage: { inputTokens: 1, outputTokens: 1 } });
+  options.adapters.reviewPlanCandidate = planningApproval;
+  const facts = await run(options);
+  assert.equal(facts.approved, true, facts.reason);
+  assert.equal(writes, 3); assert.equal(reviews, 2);
+  assert.equal(facts.dialogue.proposalCycles, 1); assert.equal(facts.dialogue.correctionCycles, 0);
+  assert.equal(facts.dialogue.executionCycle.completedOperationIds.length, 3);
+  assert.equal(facts.checkpointState.phaseChain.length, 3);
+  assert.equal(facts.checkpointState.approvedExecutionPlan, `${remainingPlan}\n`);
+});
 
 test('native ordinary run binds actual writes and required command evidence to current approval and facts', async t => {
   const command = { bin: process.execPath, args: ['-e', "if(require('node:fs').readFileSync('completed.txt','utf8')!=='1')process.exit(4);process.stdout.write('x'.repeat(16000))"] };
@@ -194,13 +427,13 @@ test('native ordinary retained manifest corruption is unapproved before another 
   assert.match(readFileSync(join(facts.dir, 'CHANGES.diff'), 'utf8'), /completed.txt/);
 });
 
-test('native ordinary merge guard precedes initial Git advance and every provider', async t => {
+test('native ordinary invalid merge identities stop before initial Git advance and every provider', async t => {
   let calls = 0;
-  const options = nativeFixture(t, 'native-merge-pause', { runExecutor: () => { calls++; } });
-  options.unitKind = 'merge'; options.merge = { parents: [{ unitId: 'a', commit: 'does-not-exist' }, { unitId: 'b', commit: 'also-absent' }],
-    parentOrder: ['a', 'b'], mergeBase: 'missing', testCounts: { required: 0, parents: [] } };
+  const { options } = await nativeMergeFixture(t, 'native-merge-pause');
+  options.adapters.runExecutor = () => { calls++; };
+  options.merge.parents[1].commit = 'does-not-exist';
   const facts = await run(options);
-  assert.equal(facts.approved, false); assert.match(facts.reason, /merge.*initial advance/);
+  assert.equal(facts.approved, false); assert.match(facts.reason, /bad revision|unknown revision|Command failed|ambiguous argument/);
   assert.equal(calls, 0); assert.equal(facts.resources.providerLaunches, 0);
 });
 

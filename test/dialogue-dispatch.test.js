@@ -2,6 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, writeFileSync, mkdirSync, rmSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
+import { execFileSync } from 'node:child_process';
+import { advanceMerge, concludeConflict } from '../src/merge.js';
 import { openDialogueJournal } from '../src/dialogue-journal.js';
 import { runIssueDialogue } from '../src/dialogue-dispatch.js';
 import { applyDialogueEnvelope, canApproveDialogue } from '../src/dialogue.js';
@@ -20,6 +22,99 @@ function approve(state) {
   const receipt = Object.values(state.inspectionReceipts).find(r => r.seat === state.reviewer);
   return envelope(state, 'approve', { claims: [claim], verifications: [support(receipt)] });
 }
+
+test('merge effect recovery adopts an actual completed Git result without replay or cycle debit', async t => {
+  const { state, journal, root, base } = setup(t, { phase: 'execution' });
+  const git = (...args) => execFileSync('git', ['-C', root, ...args], { encoding: 'utf8', windowsHide: true }).trim();
+  git('init', '-b', 'main'); git('config', 'core.autocrlf', 'false'); git('add', '-A');
+  git('-c', 'user.name=test', '-c', 'user.email=test@local', 'commit', '-m', 'base');
+  const initialHead = git('rev-parse', 'HEAD');
+  git('checkout', '-b', 'parent'); writeFileSync(join(root, 'parent.txt'), 'retained parent'); git('add', '-A');
+  git('-c', 'user.name=test', '-c', 'user.email=test@local', 'commit', '-m', 'parent'); const parent = git('rev-parse', 'HEAD'); git('checkout', 'main');
+  const pending = { operationId: 'completed-merge', seat: 'harness', action: 'merge', effect: 'merge-sequence', selection: { identity: 'bound-parent', head: initialHead, parents: [parent] } };
+  state.pendingOperation = pending;
+  state.executionCycle = { id: 'allocated-cycle', cycle: 1, action: 'propose', open: false, completedOperationIds: ['completed-writer'] };
+  state.proposalCycles = 1;
+  journal.append({ type: 'state', state });
+  journal.prepare({ ...pending, input: JSON.stringify(pending.selection), artifactDigest: state.artifactDigest, contextDigest: state.snapshot.digest, evidenceIds: [], unreadMessageIds: [] });
+  git('merge', '--ff-only', parent);
+  journal.complete({ operationId: pending.operationId, result: { artifactDigest: 'actual-merged', snapshot: state.snapshot,
+    mergeProgress: { complete: true, nextParentIndex: 2, conflict: null, task: 'Merged parent', head: git('rev-parse', 'HEAD') } } });
+  journal.close();
+  const reopened = openDialogueJournal({ directory: base, runId: 'r1', projectId: 'p1' }); t.after(() => reopened.close());
+  let mutations = 0;
+  const result = await runIssueDialogue({ state: reopened.read().findLast(e => e.type === 'state').state, journal: reopened,
+    persist: async () => {}, runMerge: () => { mutations++; git('commit', '--allow-empty', '-m', 'duplicate'); },
+    budget: () => ({ allowed: false, reason: 'stop after adoption' }) });
+  assert.equal(mutations, 0);
+  assert.equal(git('rev-parse', 'HEAD'), parent);
+  assert.equal(readFileSync(join(root, 'parent.txt'), 'utf8'), 'retained parent');
+  assert.equal(result.state.mergeProgress.operationId, 'completed-merge');
+  assert.equal(result.state.artifactDigest, 'actual-merged');
+  assert.equal(result.state.proposalCycles, 1); assert.equal(result.state.correctionCycles, 0);
+  assert.equal(result.resources.providerLaunches, 0);
+});
+
+test('uncertain prepared merge recovery never clears retained ledger advances or calls another provider', async t => {
+  const { state, journal, root, base } = setup(t, { phase: 'execution' });
+  const git = (...args) => execFileSync('git', ['-C', root, ...args], { encoding: 'utf8', windowsHide: true }).trim();
+  const commit = message => { git('add', '-A'); git('-c', 'user.name=test', '-c', 'user.email=test@local', 'commit', '-m', message); return git('rev-parse', 'HEAD'); };
+  git('init', '-b', 'main'); git('config', 'core.autocrlf', 'false');
+  const initialHead = commit('base');
+  git('checkout', '-b', 'parent'); writeFileSync(join(root, 'source.js'), 'parent behavior'); const parent = commit('parent');
+  git('checkout', 'main'); writeFileSync(join(root, 'source.js'), 'main behavior'); const left = commit('left');
+  const progress = await advanceMerge({ cwd: root, parents: [{ unitId: 'left', commit: left }, { unitId: 'parent', commit: parent }], unitId: 'r1' });
+  assert.equal(progress.complete, false);
+  const pending = { operationId: 'uncertain-conclude', seat: 'harness', action: 'merge', effect: 'merge-sequence', selection: { identity: 'conclude-clear-advance' } };
+  state.pendingOperation = pending;
+  writeFileSync(join(root, 'uro-merge-resolutions.json'), '{"status":"resolved"}');
+  journal.append({ type: 'state', state });
+  journal.prepare({ ...pending, input: JSON.stringify(pending.selection), artifactDigest: state.artifactDigest, contextDigest: state.snapshot.digest, evidenceIds: [], unreadMessageIds: [] });
+  writeFileSync(join(root, 'source.js'), 'both parent behaviors');
+  assert.equal((await concludeConflict({ cwd: root, conflict: progress.conflict, unitId: 'r1' })).ok, true);
+  const concludedHead = git('rev-parse', 'HEAD');
+  assert.notEqual(concludedHead, initialHead);
+  // Process interruption after actual conclude, before ledger clear/advance/completion.
+  journal.close();
+  const reopened = openDialogueJournal({ directory: base, runId: 'r1', projectId: 'p1' }); t.after(() => reopened.close());
+  let calls = 0;
+  const result = await runIssueDialogue({ state: reopened.read().findLast(e => e.type === 'state').state, journal: reopened,
+    persist: async () => {}, runMerge: () => { calls++; rmSync(join(root, 'uro-merge-resolutions.json')); }, seats: { codex: () => { calls++; } } });
+  assert.equal(calls, 0); assert.equal(result.approved, false);
+  assert.match(result.reason, /uncertain merge.*replay refused/);
+  assert.equal(result.state.pendingOperation.operationId, 'uncertain-conclude');
+  assert.equal(existsSync(join(root, 'uro-merge-resolutions.json')), true);
+  assert.equal(git('rev-parse', 'HEAD'), concludedHead);
+  assert.equal(readFileSync(join(root, 'source.js'), 'utf8'), 'both parent behaviors');
+  assert.equal(result.resources.providerLaunches, 0);
+});
+
+test('merge preparation persistence failure launches neither Git callback nor provider', async t => {
+  const { state, journal, root } = setup(t, { phase: 'execution' });
+  const git = (...args) => execFileSync('git', ['-C', root, ...args], { encoding: 'utf8', windowsHide: true }).trim();
+  git('init', '-b', 'main'); git('config', 'core.autocrlf', 'false'); git('add', '-A');
+  const indexBefore = readFileSync(join(root, '.git/index'));
+  writeFileSync(join(root, 'not-staged.txt'), 'retained unstaged work');
+  let calls = 0;
+  const result = await runIssueDialogue({ state, journal,
+    persist: () => { throw new Error('required manifest unavailable'); },
+    selectMerge: () => ({ identity: 'actual-parent-intent' }), runMerge: () => { calls++; git('add', '-A'); }, seats: { codex: () => { calls++; } } });
+  assert.equal(calls, 0); assert.equal(result.approved, false);
+  assert.match(result.reason, /required manifest unavailable/);
+  assert.equal(journal.read().some(e => e.type === 'prepare'), false);
+  assert.deepEqual(readFileSync(join(root, '.git/index')), indexBefore);
+  assert.equal(git('ls-files', '--others', '--exclude-standard'), 'not-staged.txt');
+});
+
+test('pending merge prevents a current evidenced reviewer approval', async t => {
+  const { state, journal } = setup(t, { phase: 'execution' });
+  state.mergeProgress = { complete: false, conflict: { paths: ['source.js'] }, nextParentIndex: 1 };
+  observe(state, 'claude');
+  const result = await runIssueDialogue({ state, journal, persist: () => {}, seats: { claude: ({ state: s }) => response(approve(s)) } });
+  assert.equal(result.approved, false);
+  assert.match(result.reason, /pending merge cannot be approved/);
+  assert.equal(result.state.approval, null);
+});
 
 test('completed execution question adopts retained writes before answering and resumes the same cycle', async t => {
   const { state, journal, root } = setup(t, { phase: 'execution', limits: { rounds: 1, corrections: 0 } });
