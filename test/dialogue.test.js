@@ -148,6 +148,31 @@ test('blocking issues require explicit authorized dispositions and manual disput
   }
 });
 
+test('human dispute resolution stays scoped to current dispute class identity and evidenced issues', t => {
+  for (const [decisionKind, changed, resolved] of [
+    ['manual-dispute', null, true], ['disputed-replan', null, true],
+    ['manual-dispute', 'artifactDigest', false], ['manual-dispute', 'contextDigest', false],
+    ['manual-dispute', 'unrelated', false], ['product', null, false], ['permission', null, false],
+  ]) {
+    const { state } = fixture(t, { interactionMode: 'manual' });
+    const raised = applyDialogueEnvelope({ state, seat: 'codex', envelope: envelope(state, 'challenge', {
+      claims: [claim], issues: [{ id: 'I1', title: 'Compatibility disputed', status: 'disputed', blocking: true }],
+    }) });
+    raised.humanRuling = { decisionId: 'validated-answer', artifactDigest: raised.artifactDigest,
+      contextDigest: raised.snapshot.digest, question: { decisionKind, disputedIssueIds: changed === 'unrelated' ? ['I2'] : ['I1'] } };
+    if (changed === 'artifactDigest' || changed === 'contextDigest') raised.humanRuling[changed] = 'stale';
+    const receipt = observe(raised);
+    const value = envelope(raised, 'verify', { claims: [claim], verifications: [support(receipt)],
+      issues: [{ id: 'I1', status: 'resolved', disposition: {
+        kind: 'accepted', reason: 'The current requirement supports the human ruling', claimIds: ['C1'] } }] });
+    const result = applyDialogueEnvelope({ state: raised, seat: 'codex', envelope: value });
+    assert.equal(result.issues.I1.status, resolved ? 'resolved' : 'disputed', `${decisionKind}/${changed}`);
+    assert.equal(Boolean(result.pendingDecision), !resolved, `${decisionKind}/${changed}`);
+    const unsupported = structuredClone(value); unsupported.verifications = [];
+    assert.throws(() => applyDialogueEnvelope({ state: raised, seat: 'codex', envelope: unsupported }), /unsupported.*disposition/);
+  }
+});
+
 test('an unapplied proposal invalidates approval and Q&A preserves identity and cycle counts', (t) => {
   const { state } = fixture(t), receipt = observe(state);
   const approved = applyDialogueEnvelope({ state, seat: 'codex', envelope: envelope(state, 'approve', { claims: [claim], verifications: [support(receipt)] }) });

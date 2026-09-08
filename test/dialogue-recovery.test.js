@@ -11,7 +11,7 @@ import { runQueue } from '../src/queue.js';
 import { assertCleanTarget, landQueueDiff } from '../src/queue-runtime.js';
 import { resumeRun } from '../src/resume.js';
 import { parseArgs } from '../src/args.js';
-import { readCheckpoint, saveCheckpoint } from '../src/checkpoint.js';
+import { nativeHumanQuestion, readCheckpoint, saveCheckpoint } from '../src/checkpoint.js';
 import { openDialogueJournal } from '../src/dialogue-journal.js';
 import { contextLifecycle } from '../src/planning-dialogue.js';
 import { spawnCapture } from '../src/spawn.js';
@@ -404,6 +404,73 @@ test('native preparation continuation selects saved alternatives without replayi
   assert.equal(result.resources.providerLaunches, 9);
   assert.equal(result.resources.knownUsage.inputTokens, 9);
   assert.equal(result.dir, pending.dir);
+});
+
+for (const unrelated of [false, true]) test(`public native manual dispute answer ${unrelated ? 'does not authorize a pre-existing dispute outside the recorded question' : 'settles the current issue without another question or edit replay'}`, async () => {
+  const base = mkdtempSync(join(process.platform === 'win32' ? 'C:/ccc-test' : tmpdir(), 'uro-manual-dispute-'));
+  const target = join(base, 'target'); mkdirSync(target); writeFileSync(join(target, 'source.js'), 'before\n');
+  let writes = 0, reviews = 0;
+  const pending = await run(withVerifiedSuperpowers({ target, task: 'Preserve compatibility', gate: [], mode: 'manual',
+    runId: 'manual-dispute', scratchRoot: join(base, 'scratch'), artifactRoot: join(base, 'artifacts'), adapters: {
+      runExecutor: request => { writes++; writeFileSync(join(request.cwd, 'source.js'), 'retained\n'); return {
+        dialogue: envelope(request, request.action, { issues: unrelated ? ['D1', 'D2'].map(id => ({
+          id, title: `${id} compatibility dispute`, status: 'disputed', blocking: true })) : [] }),
+        usage: { inputTokens: 1, outputTokens: 1 } }; },
+      runReview: request => {
+        if (!unrelated) return { dialogue: envelope(request, 'decide', {
+          content: 'Compatibility dispute', issues: [{ id: 'D1', title: 'Compatibility dispute', status: 'disputed', blocking: true }],
+        }), usage: { inputTokens: 1, outputTokens: 1 } };
+        const response = executionApproval(request); response.dialogue.action = 'decide';
+        response.dialogue.content = 'Settle D1 compatibility only';
+        response.dialogue.issues = [{ id: 'D1', status: 'resolved', disposition: {
+          kind: 'accepted', reason: 'D1 is supported by the requirement', claimIds: ['briefing-requirement'] } }];
+        return response;
+      },
+  } }));
+  assert.equal(pending.outcome, 'needs-decision');
+  const saved = readCheckpoint(pending.dir), decisionFile = join(base, 'answer.json');
+  writeFileSync(decisionFile, JSON.stringify({ schemaVersion: 1, runId: saved.runId, artifactDigest: saved.artifactDigest,
+    answers: [{ id: saved.pending.questions[0].id, answer: 'Accept the retained compatibility behavior and resolve D1' }] }));
+  const result = await resumeRun({ runDirectory: pending.dir, decisionFile, adapters: {
+    runExecutor: () => assert.fail('completed implementation replayed'),
+    runReview: request => {
+      reviews++;
+      assert.equal(request.state.humanRuling.question.decisionKind, 'manual-dispute');
+      assert.equal(request.state.humanRuling.question.id, saved.pending.questions[0].id);
+      assert.deepEqual(request.state.humanRuling.question.disputedIssueIds, ['D1']);
+      assert.equal(request.state.snapshot.parentDigest, saved.continuation.dialogue.snapshot.digest);
+      assert.equal(request.state.approval, null, 'human direction alone is not artifact approval');
+      const response = executionApproval(request);
+      response.dialogue.issues = [{ id: 'D1', status: 'resolved', disposition: {
+        kind: 'accepted', reason: 'Current requirement and the human compatibility ruling agree', claimIds: ['briefing-requirement'] } }];
+      if (unrelated) response.dialogue.issues.push({ id: 'D2', status: 'resolved', disposition: {
+        kind: 'accepted', reason: 'Attempt to resolve an issue outside this answer', claimIds: ['briefing-requirement'] } });
+      return response;
+    },
+  } });
+  assert.equal(result.approved, !unrelated, result.reason);
+  if (unrelated) {
+    assert.equal(result.dialogue.issues.D2.status, 'disputed');
+    assert.equal(result.outcome, 'needs-decision');
+    assert.deepEqual(result.dialogue.pendingDecision.issues.map(issue => issue.id), ['D1', 'D2']);
+  } else assert.equal(result.dialogue.pendingDecision, null);
+  assert.equal(result.dialogue.issues.D1.status, 'resolved');
+  assert.equal(result.dialogue.issues.D1.disposition.by, 'claude');
+  assert.deepEqual(result.dialogue.humanRuling.question.disputedIssueIds, ['D1']);
+  assert.equal(result.dir, pending.dir);
+  assert.equal(readFileSync(join(result.dir, 'source.js'), 'utf8'), 'retained\n');
+  const applied = readCheckpoint(pending.dir);
+  assert.equal(applied.status, unrelated ? 'needs-decision' : 'terminal');
+  if (unrelated) assert.deepEqual(nativeHumanQuestion(applied.continuation).disputedIssueIds, ['D2']);
+  else assert.equal(applied.pending.questions[0].id, saved.pending.questions[0].id, 'only the historical answered question remains');
+  assert.equal(applied.receipts.length, 1);
+  assert.equal(applied.receipts[0].status, 'applied');
+  const replay = await resumeRun({ runDirectory: pending.dir, decisionFile, adapters: {
+    runExecutor: () => assert.fail('receipt replay launched writer'), runReview: () => assert.fail('receipt replay launched reviewer') } });
+  assert.deepEqual(replay, applied.receipts[0].result);
+  assert.deepEqual(replay.dialogue.issues, result.dialogue.issues);
+  assert.equal(replay.approved, result.approved); assert.equal(writes, 1); assert.equal(reviews, 1);
+  assert.equal(readCheckpoint(pending.dir).receipts.length, 1);
 });
 
 test('native disputed replan answer is reassessed before any old replan or implementation is replayed', async () => {

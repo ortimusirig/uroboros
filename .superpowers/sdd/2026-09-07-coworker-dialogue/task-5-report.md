@@ -261,3 +261,47 @@ Final read-only hash comparison checked all 30 owned source/test files: no misma
 The provider-denial log was absent after the last gate (no denied live-provider launch was recorded). The frozen full raw output retains one actual `source.js` LF-to-CRLF warning at line 704; the final affected raw output has no `warning:`, `LF will`, or `CRLF` matches after the two disposable-only checkpoint Git settings. No global Git configuration was changed. No source/evidence cleanup, push, merge, release, install, authentication, live inference or operational/main/PR5 mutation was performed.
 
 Remaining verification limitation: the full historical result is still a failed 1494/1498 receipt, not a green final tree. Only the approved fixture-only deltas followed it and their complete affected gate is green; Ruling53 assigns the next whole-suite gate to Task6. This local commit is ready for root's original-BASE independent review, not publication or final Task6 acceptance.
+
+## Fix round 1 — Important I1 ordinary manual execution dispute
+
+FIX_BASE `ef8f67e0ba73342d0a1ef0ee0154eba3cc4336ba`. The independent original-range review found I1: an ordinary execution `manual-dispute` answer reached current Claude review, but the reducer only recognized `disputed-replan` and re-created the same human question. This section supersedes the initial no-open-finding self-review assessment, not its historical evidence. Root explicitly deferred Minor M1 to Task6 public-boundary acceptance; no CLI/args/docs expansion is included here.
+
+The fix changes only `src/checkpoint.js` and `src/dialogue.js`, with direct regressions in `test/dialogue-recovery.test.js` and `test/dialogue.test.js`, plus this report. The authenticated `nativeHumanQuestion` producer now captures disputed IDs for ordinary manual disputes as well as disputed replans. When the pending question records a specific `issues` array, capture intersects that array with currently disputed state issues; the existing general decide/replan fallback without an array still concerns all unresolved disputes. No duplicate classifier was added to the answer bridge. The reducer accepts either dispute class only for those recorded IDs and the exact current artifact/context identity; existing reviewer authority and evidenced-disposition checks still execute first. Product/permission prose is not granted dispute or artifact authority.
+
+Real public regression starts a native manual run, retains one actual source edit, gets an ordinary dispute checkpoint, answers through `resumeRun`, then supplies current inspected requirement evidence and a Claude accepted disposition. D1 resolves, no new question is produced, the terminal checkpoint preserves the historical answer/question identity and one applied receipt, and replay returns the persisted receipt without another writer or reviewer. The second public variant begins with D1 and D2 both disputed, but the saved attempted disposition concerns D1 only. Its actual captured human question contains D1 only; a resumed reviewer attempt to resolve both settles D1 but keeps D2 disputed and creates a new question scoped only to D2. This tests the real producer/application/reducer chain, not only a handcrafted ruling.
+
+Reducer controls independently check both accepted dispute classes, stale artifact, stale context, unrelated issue IDs, product and permission classes, and absent current verification. Existing full dialogue/recovery/checkpoint coverage additionally exercises pending-human refusal, scoped product/permission answers, disputed replans, retained planning-manual authority, current identity, corruption, receipt/replay, no-effect replay and historical v1 validation. Selected unchanged resume controls cover both native planning breadths and atomic further-question replacement.
+
+All following commands use the same persistent provider-deny PATH and `outputs/coworker-task-5-provider-denials.log` prefix. Raw files remain in persistent outputs; nothing is deleted or overwritten from earlier Task5 runs. Source was frozen after the corrected focused gate for the final affected/planning gates.
+
+| Receipt | Exact command after `node --test --test-reporter=tap` | Exit; pass/tests; elapsed ms |
+| --- | --- | --- |
+| task-5-fix1-red.tap | --test-name-pattern='public native manual dispute\|human dispute resolution stays scoped' test/dialogue-recovery.test.js test/dialogue.test.js | 1; 0/2; 10318.9687. Actual public I1 reproduced and reducer rejected current ordinary ruling. |
+| task-5-fix1-scope-red.tap | same pattern/files, after adding actual D1/D2 capture variant | 1; 0/3; 17952.1052. Ordinary captured disputedIssueIds absent; the fake reviewer assertion exposes that missing production field, not a provider failure. |
+| task-5-fix1-focused.tap | same pattern/files after the two-source fix | 1; 1/3; 18257.4845. Production resolution and D2 exclusion succeeded; two new fixture assertions were incorrect: terminal checkpoints intentionally preserve their historical question, and serialized receipt results omit undefined properties. No production relaxation followed. |
+| task-5-fix1-focused-second.tap | same pattern/files after correcting only those assertions | 0; 3/3; 18001.5999 |
+| task-5-fix1-planning-controls.tap | --test-name-pattern='manual planning resumes\|further planning dispute atomically' test/resume.test.js | 0; 3/3; 5027.3371 |
+
+All completed receipts above have zero skipped/cancelled/todo. The final affected result and receipt hashes are recorded below after process completion.
+
+| Changed source/test path | Frozen fix-round SHA256 |
+| --- | --- |
+| src/checkpoint.js | E6C42A87BABB5F73F9515979B57A783AE68165D11AAC13FFC34318F07BEB17AD |
+| src/dialogue.js | 8D5940A07FBAE1FB03866562EA9CD66C716D0FFE3585646F9E7D879E57E0E350 |
+| test/dialogue-recovery.test.js | 3F7E4E86B4C11DDF9DAE1FE0FBC4ACDB8476A8EC36AB0F1ADDA753829B37989C |
+| test/dialogue.test.js | 018BEA9FA26F356D9A1973C2AF3CE81C32005173327FD04EEBFE016B0F107A15 |
+
+Final direct affected command: `node --test --test-reporter=tap test/dialogue.test.js test/dialogue-recovery.test.js test/checkpoint.test.js` returned **exit 0, 57/57**, zero skipped/cancelled/todo, 249305.9694 ms (`task-5-fix1-affected.tap`). The full three files include all new regressions and required existing scoped human, planning authority, current identity and receipt controls; no whole-suite repetition was performed.
+
+| Fix-round preserved receipt | SHA256 |
+| --- | --- |
+| task-5-fix1-red.tap | 4ED992E01D1AC8567388066F7ECFA38EE83CDE3AAE90B497A83ADEC7FDB835E5 |
+| task-5-fix1-scope-red.tap | BFB9E527CC817D38F9F2AA738381066EB531E56F8B77AD9DEC8CA628522D360D |
+| task-5-fix1-focused.tap | 0ED80721231E11D01CF958948B31DEB981BFC404F2A6FFB0E05BAE84A9887848 |
+| task-5-fix1-focused-second.tap | B8A6F42EAAE896E7AF874E83B6BE3D4465CF09470335F91160C12F46D849410A |
+| task-5-fix1-planning-controls.tap | 58F32E4DDDFFDFA6AF91BD6D2C558A2010922C7F60E4481D9DA42915FE298D7C |
+| task-5-fix1-affected.tap | D89CE8A87769B5A0A763860DC5D643B871A50EBD3022D6911F94A34CE118ACA8 |
+
+Final fix-round self-review checked the complete four-file diff and confirmed the question producer uses the existing authenticated pending artifact/context/message/manual authority. Specific pending issue scope cannot leak to another pre-existing disputed issue, while general fallback remains unchanged. Current disposition evidence and reviewer authority are not bypassed; stale identities, other human classes and unrelated IDs retain their stopping behavior. Neither run/answer transport nor v1 receipt validation was changed. Final four source/test hashes match the frozen values above, and `git diff --check` passed. The final affected and planning raw outputs have no `not ok`, `warning:`, `LF will` or `CRLF` matches. The configured provider-denial log remains absent (no recorded denied launch).
+
+Fix I1 is ready for scoped root re-review from FIX_BASE through the containing fix commit (`fix: honor scoped human execution dispute resolutions`). Stage scope is exactly the four paths above plus this report. M1 remains explicitly deferred to Task6 under root Ruling54; final whole-suite acceptance and all prior full-result limitations remain unchanged. No remaining I1 implementation concern was identified, and no helpers/reviewers, live providers, installs, auth/global changes, evidence deletion or publication was performed.

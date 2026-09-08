@@ -128,7 +128,9 @@ export function nativeHumanQuestion(state) {
     kind = message.action === 'replan' ? 'disputed-replan' : 'manual-dispute';
   }
   return { ...pending, id: `${pending.messageId}:decision`, question: pending.reason, decisionKind: kind,
-    ...(kind === 'disputed-replan' ? { disputedIssueIds: Object.values(dialogue.issues).filter(issue => issue.status === 'disputed').map(issue => issue.id) } : {}) };
+    ...(['manual-dispute', 'disputed-replan'].includes(kind) ? { disputedIssueIds: Object.values(dialogue.issues)
+      .filter(issue => issue.status === 'disputed' && (!Array.isArray(pending.issues) || pending.issues.some(update => update.id === issue.id)))
+      .map(issue => issue.id) } : {}) };
 }
 function questionsFor(state) {
   if (state.version === 2 && state.preparationSnapshot && state.technicalPause && !state.dialogue) return [];
