@@ -276,9 +276,11 @@ git commit -m "feat: add durable evidence-led coworker dialogue"
 
 ## Task 3: Shared planning and decomposition conversations
 
-**Files:** Create src/planning-dialogue.js, test/planning-dialogue.test.js. Modify src/plan.js, src/decompose.js, src/conversation.js (compatibility/prompt consistency/rendering), src/args.js (affected defaults/validation), src/run.js (pivot-default import/parameter only), src/executor.js and src/arbiter.js (observed tool receipts), src/review-protection.js and src/isolation.js (context/dialogue sidecar protections/exclusions), test/plan.test.js, test/decompose.test.js, test/candidate-campaign.test.js, test/events.test.js and the fresh-planning fixture portions of test/resume.test.js, plus affected transport/args/protection/isolation and fresh-pivot default tests. Task5 still owns recovery semantics and the remaining resume test changes; Task4 owns all other execution dialogue changes.
+**Files:** Create src/planning-dialogue.js, test/planning-dialogue.test.js. Modify src/plan.js, src/decompose.js, src/conversation.js (compatibility/prompt consistency/rendering), src/args.js (affected defaults/validation), src/run.js (pivot-default import/parameter only), src/executor.js and src/arbiter.js (observed tool receipts), src/review-protection.js and src/isolation.js (context/dialogue sidecar protections/exclusions), src/checkpoint.js and src/resume.js (minimum explicit v2 planning save/load/decision-file bridge only), test/plan.test.js, test/decompose.test.js, test/candidate-campaign.test.js, test/events.test.js and the planning portions of test/checkpoint.test.js and test/resume.test.js, plus affected transport/args/protection/isolation and fresh-pivot default tests. Task5 still owns technical continuation, v1 migration, execution/queue recovery and the remaining resume changes; Task4 owns all other execution dialogue changes.
 
 **Interfaces:** Consumes Tasks 1-2; produces runPlanningDialogue and existing runPlan/runPlanCandidateSet/decompose results plus sharedContext/dialogue/resources. Existing integer rounds, artifact validators/writer, output paths and legacy readers preserved.
+
+**Narrow dependency ownership:** Task3 also owns src/dialogue-dispatch.js/test/dialogue-dispatch.test.js for material-evidence context extension and known no-application artifact repair; src/dialogue.js/test/dialogue.test.js only where trusted repair-cycle bookkeeping requires it; and src/spawn.js/test/spawn.test.js for optional observed stdin submission metadata. Preserve the reviewed foundation outside these seams.
 
 - [ ] **Step 1: Add failing real-entry-point fake-provider cases.**
 ~~~js
@@ -309,6 +311,13 @@ Wire the Task1 notebook into these actual entry points, not only unit-test its s
 
 Author answer/rebut uses read-only seat without parsePlanProposal or writeArtifacts. Explicit propose/revise creates a new cycle. Only current plan/gate/context approval writes once through existing rollback-safe writer. Retain legacy runConversation/historical readers explicitly; do not infer legacy mode from invalid new response or injected adapters. Update stale test fixtures intentionally, not by weakening authority assertions. Transport parsers retain actual tool/source observations; narration is not a tool observation.
 
+Newly registered material source/evidence records extend the shared snapshot and clear stale approval before the next provider launch or terminal transition. Receipt-only rereads/audit growth do not change context. A provider's returned envelope still validates against its durably prepared INPUT identity before installing the resulting delta; apply the same rule when recovering completed inspections. A new digest is not proof of semantic novelty. Record optional onInputSubmitted metadata at the actual spawnCapture stdin.end boundary, preserving default behavior without the hook and handling submission/observer errors without false acknowledgment or leaked child processes. Submitted bytes/hash are not proof of child consumption.
+
+Preserve separate artifact-format repair: a trusted planning parser may return artifactRepair:{reason} from the local application callback only for a positively known pre-application RepairableArtifactError. Durably record the no-application outcome, then schedule the next author attempt outside that callback. Repair stays inside the same allocated proposal/review cycle, so rounds1 permits repair of its malformed first proposal. Preserve the existing cumulative MAX_ARTIFACT_REPAIRS5 count across candidates and continuation; do not reset it per candidate or revision. Bind repair markers to harness-owned operation/cycle state, budget/account every launch and retain identity on replay. Model envelopes cannot request a cycle-limit bypass. Writer/execution or uncertain failures still pause; exhausted repair never restores stale approval. Test rounds1 successful repair, exhaustion, writer-failure distinction and budget/recovery accounting.
+
+Fresh manual planning must remain resumable through the existing decision-file entry point. Add the minimum explicitly versioned v2 planning checkpoint save/load and trusted human-ruling phase bridge now: preserve pending questions, current artifact/context/scope identity, answer identity/replay checks and no-repeat initial drafting. Keep the existing v1 checksum/answer validation and historical fields unchanged; a new run is never disguised as v1. Preserve the validated human message and explicit authority without model impersonation or converting unsupported claims to facts. Technical --continue, execution/queue recovery and v1-to-v2 reconstruction remain Task5; report the exact serialized planning bridge for that worker.
+Queued planning must recognize only the exact new planning sidecar files derived from the validated current run/output identity and retained manifest. Task3 owns the minimum src/queue.js generated-sidecar provenance/allowance seam plus planning-focused queue/resume tests. Revalidate integrity and containment before use; reject escaping paths, symlinks and unrelated files. Never exempt a whole output directory or arbitrary __uro_* content. Queue migration, execution/landing replay and resource propagation remain Task5.
+
 Preserve explicit candidates and pivot-candidates 1..5. Split DEFAULT_PIVOT_CANDIDATES from the initial default: initial becomes one, existing omitted fresh-pivot breadth remains three. This avoids changing an unspecified default merely because the old code shared one constant.
 
 The existing run.js import and omitted pivotCandidates parameter also use DEFAULT_PLAN_CANDIDATES. Change only that import/default seam in this task so direct execution preserves the separate pivot default before Task4 integrates execution dialogue.
@@ -317,7 +326,7 @@ Reconcile the existing exactly-two-artifact-tags prompt with the extra dialogue 
 
 - [ ] **Step 4: GREEN focused and whole suite.**
 ~~~powershell
-node --test test/planning-dialogue.test.js test/plan.test.js test/decompose.test.js test/conversation.test.js test/candidate-campaign.test.js test/args.test.js test/executor.test.js test/arbiter.test.js
+node --test test/planning-dialogue.test.js test/plan.test.js test/decompose.test.js test/conversation.test.js test/candidate-campaign.test.js test/args.test.js test/executor.test.js test/arbiter.test.js test/spawn.test.js test/dialogue-dispatch.test.js test/dialogue.test.js test/checkpoint.test.js test/resume.test.js
 node --test
 ~~~
 - [ ] **Step 5: Report, self-review, stage only changed task files and commit.**
@@ -361,7 +370,11 @@ Update snapshot with actual diff and command evidence before Claude review. Reta
 
 For harness-run commands, capture actual argv, cwd, exit/status, full outputs and code identity at execution time. Existing evidence.js writes and gate.js onEvidence are best-effort legacy sinks: new-mode required evidence must surface capture failure and pause before a subsequent effect, not proceed using only an excerpt or invented output. Preserve legacy behavior explicitly outside the new mode. Test a failed required sink with a second command whose real counter must remain untouched, alongside the legacy sink behavior. Partial nested provider observations remain observations; never substitute outer CLI argv/cwd for a nested command.
 
+Task4 also owns the narrow src/spawn.js/test/spawn.test.js actual launch-metadata seam: Windows command wrappers change the argv passed to the child, so preserve requested bin/args separately from observed actual argv/cwd. Preserve Task3's stdin observation contract. Await the required evidence sink and propagate synchronous or asynchronous failure before the next command. Capture project code identity at the relevant command boundary; neither requested argv nor a nested provider narrative is proof of actual execution.
+
 Fresh planning retains parent issue, novelty evidence, original scope, completed work and consumed budgets; Claude revises, Codex approves, then Codex executes. Reuse amend/fresh/conclude and existing decision-resolver semantics. Legacy readers remain unchanged.
+
+Task3's planning directory/journal is durable for one run identity. Allocate distinct explicit planning phase directory/run identities for subsequent fresh/replan phases; never reuse a completed journal as a new run or reset its resource history. Reuse an existing identity only through its validated continuation path. Task5 owns technical recovery of partially prepared alternatives, using Task3's retained operation records without replaying uncertain provider effects.
 
 Reuse Task3 notebook lifecycle for execution work items and execution-derived memory proposals: either seat may propose; the harness validates provenance/evidence/disposition before writing. Retain selected history in execution/replan snapshots. Do not leave notebook recall or promotion disconnected from the real run path.
 
@@ -382,6 +395,8 @@ git commit -m "feat: converse during execution and replan from retained evidence
 **Files:** Modify src/checkpoint.js, src/resume.js, src/queue.js, src/queue-runtime.js, src/queue-cli.js, src/campaign.js, src/args.js, bin/loop.js, src/artifacts.js and phase continuation seams from Tasks 3-4. Add test/dialogue-recovery.test.js; extend test/checkpoint.test.js, test/resume.test.js, test/queue-runtime.test.js, test/queue.test.js, test/queue-cli.test.js, test/campaign.test.js, test/artifact-retention.test.js and CLI/args tests.
 
 **Interfaces:** Consumes stored snapshot/state/journal receipts; produces checkpoint schemaVersion:2 and mutually exclusive technical resume --continue, preserving v1 reader/answer identities.
+
+Extend the minimum v2 planning/decision-file bridge implemented in Task3. Do not replace its fresh-run state with legacy records or discard its answer/operation receipts; this task completes the migration, technical continuation, execution, queue and resource contracts.
 
 Preserve the actual resumeRun({runDirectory,decisionFile,...}) signature and add technicalContinue:false; map public --continue to technicalContinue:true. Keep validated scope roots in the saved state and do not infer permission from resumed model references.
 
