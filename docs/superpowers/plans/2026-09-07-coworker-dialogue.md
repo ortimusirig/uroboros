@@ -432,6 +432,8 @@ git commit -m "feat: converse during execution and replan from retained evidence
 
 **Interfaces:** Consumes stored snapshot/state/journal receipts; produces checkpoint schemaVersion:2 and mutually exclusive technical resume --continue, preserving v1 reader/answer identities.
 
+Task5 also owns the narrow optional per-unit tokenBudget validation/pass-through in src/campaign-validation.js and src/campaign-file.js plus test/campaign-file.test.js. Preserve positive safe-integer validation, omitted behavior, existing strict unknown-key/round/topology rules and actual min(parent remaining,item remaining) child enforcement; no new CLI flag/default, scheduler/reservation mechanism or resumed allowance increase.
+
 Extend the minimum v2 planning/decision-file bridge implemented in Task3. Do not replace its fresh-run state with legacy records or discard its answer/operation receipts; this task completes the migration, technical continuation, execution, queue and resource contracts.
 
 For Task4's explicit missing-user-decision product/permission checkpoints, retain the saved autonomous/manual mode. Distinguish these questions from legacy manual dispute approval using the validated native pending record, not answer prose. A scoped human answer is not whole-artifact approval; material clarification enters parent-linked current context and returns to the phase reviewer with stale approval invalidated. Preserve original question/answer identities, and keep --continue blocked by any human pending. Reuse task-5-human-checkpoint-map.md for exact save/validate/answer-routing seams; preserve its source-observed versus required-behavior distinction.
