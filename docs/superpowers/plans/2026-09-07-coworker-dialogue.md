@@ -472,6 +472,8 @@ git commit -m "feat: preserve coworker context across queues and safe resume"
 
 **Files:** Create src/dialogue-report.js, test/dialogue-report.test.js, docs/guides/coworker-dialogue.md. Modify src/report.js, src/dashboard-transcript.js, src/run-journal.js, src/cli-help.js, README.md, commands/resume.md, docs/guides/usage.md and skills/uroboros/SKILL.md. Update affected rendering/packaging/help tests. Do not reorganize runtime paths or regenerate architecture HTML.
 
+Task6 also owns the minimal src/dashboard-view.js normalized-dialogue pass-through and actual buildDashboardSnapshot-to-render regression in existing dashboard tests. Its current curated decision drops native context/issues/resources/next-action fields before rendering. Carry only allowlisted display data using the final producer contract; preserve the separate curated client snapshot and existing dashboard, not a raw checkpoint export. Reuse task-6-report-projection-map.md for verified current sinks, escaping/privacy boundaries and dependent producer fields.
+
 Task6 owns the deferred Task3 compatible-transcript stance correction in src/planning-dialogue.js and its focused rendering regression: questions/rebuttals/unreadable replies must not default to agreement. Derive display status from validated explicit action; conversation-only turns remain neutral. This is reporting projection, not new approval authority; retain the legacy reader contract.
 
 **Interfaces:** Consumes stored snapshots, issue/message/disposition history, actual delivery/inspection receipts and resource accounts. Produces existing Markdown/HTML report projections, not a new dashboard.
