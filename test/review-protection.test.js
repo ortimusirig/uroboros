@@ -25,6 +25,17 @@ import {
   restoreWorktreeSnapshot,
 } from '../src/worktree-snapshot.js';
 
+test('correctness-critical context and dialogue edits fail even when normal harness paths are excluded', async t => {
+  const cwd = mkdtempSync(join(tmpdir(), 'uro-critical-protection-'));
+  t.after(() => rmSync(cwd, { recursive: true, force: true }));
+  mkdirSync(join(cwd, '__uro_context'));
+  writeFileSync(join(cwd, '__uro_context', 'snapshot.json'), '{"required":"keep login"}');
+  await assert.rejects(runProtectedOperation({ cwd, scope: 'outside', prefix: '__uro_review', role: 'reviewer',
+    captureSnapshot: async () => ({}), restoreSnapshot: async () => ({ restoredPaths: [] }),
+    operation: async () => { writeFileSync(join(cwd, '__uro_context', 'snapshot.json'), '{"required":"remove login"}'); return { approved: true }; },
+  }), /correctness-critical/);
+});
+
 function filesIn(root) {
   const files = new Map();
   const visit = (directory) => {

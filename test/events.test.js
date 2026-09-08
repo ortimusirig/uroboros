@@ -40,6 +40,7 @@ import { runExecutor as realExecutor } from '../src/executor.js';
 import { runGate as realGate } from '../src/gate.js';
 import { run as executeRun } from '../src/run.js';
 import { runPlan as executePlan } from '../src/plan.js';
+import { scriptedPlanningAdapters } from './fixtures/planning-responses.js';
 import { generateRunJournal } from '../src/run-journal.js';
 import { runReviewPass as realReviewPass } from '../src/verifier.js';
 import { VERIFIED_SUPERPOWERS, withVerifiedSuperpowers } from '../fixtures/verified-superpowers.mjs';
@@ -50,8 +51,10 @@ const runCampaign = (options) => executeCampaign({
   ...options,
 });
 const runPlan = (options) => executePlan({
+  artifactRoot: join(tmpdir(), 'uro-task3-fixture-artifacts'),
   superpowers: VERIFIED_SUPERPOWERS,
   ...options,
+  adapters: scriptedPlanningAdapters(options.adapters ?? {}),
 });
 
 const fakeWriter = fileURLToPath(new URL('../fixtures/fake-codex-writer.mjs', import.meta.url));
@@ -761,7 +764,7 @@ test('fully exercised runs have exact pair equality with both event vocabularies
       reporter: (event) => journalEvents.push(event),
     }).notePath;
 
-    planTarget = mkdtempSync(join(process.cwd(), '.ccc-test-event-plan-'));
+    planTarget = mkdtempSync(join(tmpdir(), '.ccc-test-event-plan-'));
     await runPlan({
       goal: 'Exercise plan event conformance', candidates: 1,
       target: planTarget,

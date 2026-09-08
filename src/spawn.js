@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { createHash } from 'node:crypto';
 
 const WINDOWS_TREE_SCRIPT = fileURLToPath(new URL('./windows-process-tree.ps1', import.meta.url));
 
@@ -489,6 +490,7 @@ export async function spawnCapture(bin, args, opts = {}) {
     let childClosed = false;
     let timeoutReason = null;
     let killPromise = null;
+    let inputFailure = null;
     const requestKill = (reason, isTimeout) => {
       if (settled || killPromise) return killPromise;
       if (isTimeout) timedOut = true;
@@ -580,6 +582,7 @@ export async function spawnCapture(bin, args, opts = {}) {
       const finishClose = () => {
         if (settled) return;
         settled = true;
+        if (inputFailure) { reject(inputFailure); return; }
         resolve({
           code: code ?? -1,
           signal: closeSignal ?? null,
@@ -595,8 +598,22 @@ export async function spawnCapture(bin, args, opts = {}) {
       if (killPromise) killPromise.then(finishClose, finishClose);
       else finishClose();
     });
-    if (opts.input !== undefined) child.stdin.end(opts.input);
-    else child.stdin.end();
+    try {
+      if (opts.input !== undefined) child.stdin.end(opts.input);
+      else child.stdin.end();
+    } catch (error) {
+      inputFailure = error;
+      requestKill({ kind: 'stdin-failed', reason: error.message }, false);
+      return;
+    }
+    if (opts.input !== undefined && typeof opts.onInputSubmitted === 'function') {
+      const bytes = Buffer.from(opts.input);
+      try {
+        const observed = opts.onInputSubmitted({ kind: 'stdin-submitted', bytes: bytes.length,
+          sha256: createHash('sha256').update(bytes).digest('hex'), consumption: 'unknown' });
+        if (observed?.catch) observed.catch(() => {});
+      } catch { /* Submission happened; an optional observer cannot change capture behavior. */ }
+    }
   });
 }
 

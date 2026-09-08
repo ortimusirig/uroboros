@@ -8,9 +8,13 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import test from 'node:test';
 import { PIVOT_CONCLUDE, PIVOT_FRESH } from '../src/debate.js';
-import { createFreshPivotBranch, run } from '../src/run.js';
+import { createFreshPivotBranch, run as executeRun } from '../src/run.js';
+import { scriptedFreshPlanningAdapters } from './fixtures/planning-responses.js';
+const run = options => executeRun({ ...options, env: { ...process.env, ...options.env,
+  URO_ARTIFACT_ROOT: options.artifactRoot ?? join(options.scratchRoot, 'artifacts') }, adapters: scriptedFreshPlanningAdapters(options.adapters) });
 import { execFileSync } from 'node:child_process';
 import { assertSafeScratchRoot } from '../src/isolation.js';
 import { materializeReviewBundle } from '../src/review.js';
@@ -67,7 +71,7 @@ test('autonomous actual-Git fresh pivot retains complete command evidence throug
       reviewPlanCandidate: async request => ({ agree: true, readable: true, content: 'AGREE: yes', artifactDigest: request.artifactDigest }),
       createFreshPivotBranch: async options => { const result = await createFreshPivotBranch(options); pivoted = true; return result; },
     } });
-  assert.equal(pivoted, true);
+  assert.equal(pivoted, true, facts.debate?.stopReason);
   assert.equal(facts.approved, true);
   assert.equal(facts.artifacts.status, 'ok');
   assert.equal(new Set(facts.evidence.map(entry => entry.outFile)).size, facts.evidence.length);
@@ -88,7 +92,7 @@ const TEST_SUPERPOWERS = {
 };
 
 function fixture(name) {
-  const root = mkdtempSync(join(process.cwd(), `.ccc-test-${name}-`));
+  const root = mkdtempSync(join(tmpdir(), `.ccc-test-${name}-`));
   const target = join(root, 'target');
   const scratchRoot = join(root, 'scratch');
   const worktree = join(scratchRoot, name, 'w');
@@ -300,7 +304,7 @@ test('FRESH replans with ledger-informed candidates, discards failed drafts, and
     assert.deepEqual(branchCalls, [{
       baseCommit: 'pre-debate-commit',
       branch: 'uro/original-fresh-1',
-    }]);
+    }], facts.debate?.stopReason);
     assert.deepEqual(reviewBytesAtPivot, executableProof);
     assert.deepEqual(readFileSync(join(facts.dir, '__uro_review', 'tests', 'f1.test.js')), executableProof);
     assert.equal(candidateRequests.length, 3);

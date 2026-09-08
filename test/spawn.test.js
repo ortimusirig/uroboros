@@ -72,6 +72,35 @@ function fakeChild() {
   return child;
 }
 
+test('stdin submission observation follows end and never asserts child consumption', async () => {
+  const child = fakeChild(), seen = [];
+  child.stdin.end = value => { assert.equal(value, 'hello'); seen.push('end'); queueMicrotask(() => child.emit('close', 0)); };
+  const result = await spawnCapture('fixture', [], { input: 'hello', spawnProcess: () => child,
+    onInputSubmitted: receipt => seen.push(receipt) });
+  assert.equal(result.code, 0);
+  assert.equal(seen[0], 'end');
+  assert.deepEqual(seen[1], { kind: 'stdin-submitted', bytes: 5,
+    sha256: '2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824', consumption: 'unknown' });
+});
+
+test('stdin submission failure kills the child and emits no successful receipt', async () => {
+  const child = fakeChild(); let killed = false;
+  child.stdin.end = () => { throw new Error('write failed'); };
+  await assert.rejects(spawnCapture('fixture', [], { input: 'hello', spawnProcess: () => child,
+    onInputSubmitted: () => assert.fail('failed write is not submission'),
+    killProcessTree: async () => { killed = true; queueMicrotask(() => child.emit('close', 1)); },
+  }), /write failed/);
+  assert.equal(killed, true);
+});
+
+test('an optional submission observer failure does not leak the child or lose captured completion', async () => {
+  const child = fakeChild();
+  child.stdin.end = () => queueMicrotask(() => child.emit('close', 0));
+  const result = await spawnCapture('fixture', [], { input: 'hello', spawnProcess: () => child,
+    onInputSubmitted: () => { throw new Error('observer unavailable'); } });
+  assert.equal(result.code, 0);
+});
+
 function livenessSupervision(clock) {
   return {
     thresholdMs: 50,

@@ -5,17 +5,24 @@ import fs from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { runPlan } from '../src/plan.js';
+import { runPlan as runNewPlan } from '../src/plan.js';
+import { scriptedPlanningAdapters, scriptedFreshPlanningAdapters } from './fixtures/planning-responses.js';
+const runPlan = options => runNewPlan({ artifactRoot: join(tmpdir(), 'uro-task3-fixture-artifacts'), ...options, adapters: scriptedPlanningAdapters(options.adapters ?? {}) });
 import { planningArtifactDigest } from '../src/conversation.js';
 import { withVerifiedSuperpowers } from '../fixtures/verified-superpowers.mjs';
-import { run } from '../src/run.js';
+import { run as executeRun } from '../src/run.js';
+const run = options => executeRun({ ...options, env: { ...process.env, ...options.env,
+  URO_ARTIFACT_ROOT: options.artifactRoot ?? join(options.scratchRoot, 'artifacts') }, adapters: scriptedFreshPlanningAdapters(options.adapters) });
 import { isolate } from '../src/isolation.js';
 import { materializeReviewBundle } from '../src/review.js';
 import { execFileSync } from 'node:child_process';
 import { parseArgs } from '../src/args.js';
 import { runQueue } from '../src/queue.js';
 import { assertCleanTarget, landQueueDiff } from '../src/queue-runtime.js';
-const resume = await import('../src/resume.js').catch(() => ({}));
+const resumeModule = await import('../src/resume.js').catch(() => ({}));
+const resume = { ...resumeModule, resumeRun: options => resumeModule.resumeRun({ ...options,
+  env: { ...process.env, ...options.env, URO_ARTIFACT_ROOT: join(tmpdir(), 'uro-task3-fixture-artifacts') },
+  adapters: scriptedFreshPlanningAdapters(options.adapters) }) };
 
 test('resume CLI accepts only the saved run and answer file, never a mode override', () => {
   assert.deepEqual(parseArgs(['resume', '--run', 'saved', '--decision-file', 'answers.json']),
@@ -72,9 +79,9 @@ test('a further planning dispute atomically replaces pending state without a fal
   const root = mkdtempSync(join(tmpdir(), 'uro-resume-next-'));
   const target = join(root, 'target'), out = join(root, 'plan');
   mkdirSync(target);
-  const adapters = { author: async () => ({ plan: 'Existing proposal.', gate: [], readable: true, agree: false, content: 'Keep it.' }),
+  const adapters = scriptedPlanningAdapters({ author: async () => ({ plan: 'Existing proposal.', gate: [], readable: true, agree: false, content: 'Keep it.' }),
     reviewer: async r => ({ readable: true, agree: false, artifactDigest: r.artifactDigest,
-      suggestions: [{ id: 'S1', text: 'Change it.' }], content: 'Change it.' }) };
+      suggestions: [{ id: 'S1', text: 'Change it.' }], content: 'Change it.' }) });
   const pending = await runPlan(withVerifiedSuperpowers({ goal: 'A goal.', target, out, candidates: 1, adapters }));
   const decisionFile = join(root, 'answers.json');
   writeFileSync(decisionFile, JSON.stringify({ schemaVersion: 1, runId: pending.runId,
@@ -278,7 +285,8 @@ for (const twoGoals of [false, true]) test(`queued saved planning inside the tar
   const result = await resume.resumeRun({ runDirectory: out, decisionFile, adapters: planningAdapters, queueDependencies: dependencies });
   assert.equal(result.queueResult.landedCount, twoGoals ? 2 : 1, result.queueResult.stop?.reason);
   assert.equal(implementations, twoGoals ? 2 : 1);
-  assert.equal(drafts, twoGoals ? 4 : 3);
+  // The explicit human approval applies the saved proposal without another author call.
+  assert.equal(drafts, twoGoals ? 3 : 2);
   assert.equal(readFileSync(join(target, 'source.js'), 'utf8'), twoGoals ? 'changed 2\n' : 'changed 1\n');
   assert.equal(git('rev-list', '--count', 'HEAD').trim(), twoGoals ? '3' : '2');
   await resume.resumeRun({ runDirectory: out, decisionFile, adapters: planningAdapters, queueDependencies: dependencies });

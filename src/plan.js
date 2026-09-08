@@ -5,7 +5,7 @@ import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { buildArbiterPrompt, DEFAULT_ARBITER_MODEL, runArbiter } from './arbiter.js';
 import { CONVERSATION_DNA, conversationText, parseSeatReview, RepairableArtifactError,
   runConversation, seatLaunchFailure, stanceRepairLines, MAX_ARTIFACT_REPAIRS,
-  planningArtifactDigest } from './conversation.js';
+  planningArtifactDigest, dialoguePromptText } from './conversation.js';
 import { decisionAuthority } from './decision-policy.js';
 import { reportEvent } from './events.js';
 import { addUsage, EMPTY_USAGE } from './usage.js';
@@ -13,9 +13,11 @@ import { runExecutor, DEFAULT_EXECUTOR_MODEL, DEFAULT_EXECUTOR_EFFORT } from './
 import { resolveStageTimeouts } from './timeouts.js';
 import { applySuperpowersRequirement, verifySuperpowersSeats } from './superpowers.js';
 import { saveCheckpoint } from './checkpoint.js';
+import { runPlanningDialogue, openPlanningContext, callPlanningPreparation, assertPlanningSidecars } from './planning-dialogue.js';
 export { parseSeatReview };
 
-export const DEFAULT_PLAN_CANDIDATES = 3;
+export const DEFAULT_PLAN_CANDIDATES = 1;
+export const DEFAULT_PIVOT_CANDIDATES = 3;
 export const MAX_PLAN_CANDIDATES = 5;
 
 const INITIAL_PERSPECTIVES = Object.freeze([
@@ -86,6 +88,7 @@ export function assertCurrentPlanApproval({ unit, result, mode = 'manual' }) {
     plan: readFileSync(planPath, 'utf8'), gate: JSON.parse(readFileSync(gatePath, 'utf8')),
   });
   if (approval.artifactDigest !== digest) throw new Error('plan approval digest is stale for the current goal, plan or gate');
+  if (approval.contextDigest) assertPlanningSidecars({ directory: unit.out, runId: result.runId, approval, manifest: result.planningArtifacts });
   return { ...approval };
 }
 
@@ -277,6 +280,9 @@ export async function planningPreflight({ adapters = {}, superpowers, env, home 
 }
 
 export function planningAuthorPrompt(prompt, request) {
+  if (request.dialogueMode) return [dialoguePromptText(prompt), dialoguePromptText(request.input),
+    'You are Claude, the planning author. Follow the requested dialogue action. Only propose/revise includes complete required artifact tags alongside the dialogue envelope.',
+    'Independently inspect relevant repository sources. Conversation-only turns are read-only.'].join('\n\n');
   return [
     prompt,
     ...(request.candidateCount ? [`Author candidate ${request.candidateId} of ${request.candidateCount}. Its perspective is: ${request.perspective}. Make this approach materially distinct and describe that perspective in the plan.`] : []),
@@ -290,6 +296,8 @@ export function planningAuthorPrompt(prompt, request) {
 }
 
 export function planningReviewPrompt(prompt, request) {
+  if (request.dialogueMode) return [dialoguePromptText(prompt), dialoguePromptText(request.input),
+    'You are Codex, the independent planning reviewer. Inspect evidence and explicitly assess it. A clean approve may finish this call; decide alone is not approval. Manual unresolved disputes go to the human.'].join('\n\n');
   return [
     prompt,
     `ARTIFACT_DIGEST: ${request.artifactDigest}`,
@@ -340,7 +348,10 @@ export function createPlanningSeats({
     author: adapters.author ?? (async request => {
       if (typeof authorTransport !== 'function') return { unavailable: true, error: 'Claude author transport unavailable' };
       return authorTransport({
-        cwd: target, request, prompt: planningAuthorPrompt(authorPrompt(request), request),
+        cwd: target, request, prompt: planningAuthorPrompt(request.dialogueMode
+          ? (['propose', 'revise', 'repair'].includes(request.action)
+            ? authorPrompt({ ...request, type: request.type === 'draft' ? 'draft' : 'propose' })
+            : '# Read-only planning discussion') : authorPrompt(request), request),
         model: claudeModel, timeoutMs: arbiterTimeout, runId, env, reporter,
       });
     }),
@@ -350,12 +361,13 @@ export function createPlanningSeats({
         cwd: target, plan: planningReviewPrompt(reviewPrompt(request), request),
         model: codexModel, effort: codexEffort, sandbox: 'read-only',
         timeoutMs: executorTimeout, runId, env,
+        ...(request.dialogueMode ? { dialogueState: request.state, operationId: request.operationId } : {}),
       });
       if (result.exitCode !== 0 || result.timedOut || result.launchFailed) {
-        return { unavailable: true, error: seatLaunchFailure('codex review', result), usage: result.usage,
+        return { ...result, unavailable: true, error: seatLaunchFailure('codex review', result), usage: result.usage,
           ...planningReviewEvidence(result) };
       }
-      return parsePlanningReview(result);
+      return request.dialogueMode ? { ...result, content: result.lastMessage ?? result.content ?? '' } : parsePlanningReview(result);
     }),
   };
 }
@@ -373,6 +385,7 @@ async function productionDraft(request) {
     prompt: planningAuthorPrompt(request.input, request),
     cwd: request.target, model: request.claudeModel, timeoutMs: request.timeoutMs,
     runId: request.runId, env: request.env,
+    ...(request.dialogueMode ? { dialogueState: request.state, operationId: request.operationId } : {}),
   });
   if (result?.verdict === 'UNVERIFIED' || result?.launchFailed || result?.timedOut) {
     return { ...result, unavailable: true, error: seatLaunchFailure('claude author', result) };
@@ -398,7 +411,7 @@ function selectionPrompt({ candidates, ledger, failedPlan }) {
       `Gate: ${JSON.stringify(candidate.gate)}`,
       '',
     ]),
-    'Return exactly <SELECTED_CANDIDATE>candidate-N</SELECTED_CANDIDATE>.',
+    'Return <SELECTED_CANDIDATE>candidate-N</SELECTED_CANDIDATE> alongside the required dialogue envelope.',
   ].join('\n');
 }
 
@@ -419,6 +432,7 @@ async function productionSelect(request, execute = runExecutor) {
     plan: request.input, cwd: request.target, model: request.codexModel,
     effort: request.codexEffort, sandbox: 'read-only', timeoutMs: request.executorTimeout,
     runId: request.runId, env: request.env,
+    ...(request.dialogueMode ? { dialogueState: request.state, operationId: request.operationId } : {}),
   });
   if (result.exitCode !== 0 || result.timedOut || result.launchFailed) {
     return { ...result, unavailable: true, error: seatLaunchFailure('codex selector', result) };
@@ -427,21 +441,53 @@ async function productionSelect(request, execute = runExecutor) {
 }
 
 export async function runPlanCandidateSet({
-  goal, target, count = DEFAULT_PLAN_CANDIDATES, mode = 'initial',
+  goal, target, count, mode = 'initial',
   interactionMode = 'manual', round = 1, rounds, ledger = null,
   failedPlan = '', previousPlan = '', feedback = '', pivot = '',
   claudeModel, codexModel, codexEffort, plannerModel,
   timeoutMs = resolveStageTimeouts().arbiter, executorTimeout = resolveStageTimeouts().executor,
   runId = `plan-candidates-${randomUUID()}`, env = process.env, reporter,
   draft, select, review, priorMessages = [],
+  directory, out, artifactRoot, searchIndex,
 } = {}) {
   decisionAuthority({ interactionMode, phase: 'planning' });
+  if (count === undefined) count = mode === 'fresh' ? DEFAULT_PIVOT_CANDIDATES : DEFAULT_PLAN_CANDIDATES;
   validatePlanCandidateCount(count, mode === 'fresh' ? 'pivotCandidates' : 'candidates');
   if (!['initial', 'fresh'].includes(mode)) throw new TypeError(`unknown candidate mode: ${mode}`);
   if (typeof goal !== 'string' || !goal.trim()) throw new TypeError('candidate goal must be a non-empty string');
   if (typeof target !== 'string' || !target) throw new TypeError('candidate target must be a non-empty string');
   if (plannerModel !== undefined) throw new TypeError('plannerModel is ambiguous; use claudeModel or codexModel');
+  if (count === 1) {
+    const candidate = { id: 'candidate-1', index: 0, perspective: (mode === 'fresh' ? FRESH_PERSPECTIVES : INITIAL_PERSPECTIVES)[0], author: 'claude', attempts: [] };
+    const common = { goal, target, mode, interactionMode, claudeModel, codexModel, codexEffort, timeoutMs, executorTimeout, runId, env };
+    const production = createPlanningSeats({ ...common, arbiterTimeout: timeoutMs,
+      adapters: draft ? { author: draft, ...(review ? { reviewer: review } : {}) } : {},
+      authorPrompt: request => draftingPrompt({ ...common, ...request, round: request.round }), reviewPrompt: reviewSeatPrompt });
+    const result = await runPlanningDialogue({ requirements: goal, target,
+      directory: directory ?? join(target, '.uro-tmp', runId), runId, interactionMode, rounds,
+      context: { failedPlan, previousPlan, ledger, pivot, feedback, priorMessages }, artifactRoot, env, searchIndex, reporter,
+      seats: { author: async r => {
+        const response = await (draft ?? production.author)({ ...common, ...r, candidateId: candidate.id,
+          candidateIndex: r.type === 'draft' ? 1 : undefined, candidateCount: 1, perspective: candidate.perspective,
+          messages: [...priorMessages, ...r.messages] });
+        candidate.attempts.push({ response }); candidate.response = response;
+        return response;
+      }, reviewCodex: r => (review ?? production.reviewCodex)({ ...r, messages: [...priorMessages, ...r.messages] }) },
+      strategy: { parseProposal: response => {
+        const proposal = parsePlanProposal(response);
+        Object.assign(candidate, proposal, { gateResult: { passed: true, failures: [] } }); return proposal;
+      }, reviewRequests: ({ proposal, round }) => ({ codex: { goal, ...proposal, round } }),
+      renderInput: r => draftingPrompt({ ...common, ...r, failedPlan, previousPlan, ledger, pivot, feedback }),
+      writeConverged: proposal => ({ selected: { ...candidate, ...proposal } }) },
+    });
+    result.checkpointState.candidateState = { mode, selectedCandidateId: candidate.id, candidates: [candidate] };
+    return { mode, interactionMode, candidates: [candidate], surviving: candidate.plan ? [candidate] : [],
+      selected: null, exhausted: !candidate.plan, ...result };
+  }
   const draftCandidate = draft ?? productionDraft;
+  const session = openPlanningContext({ requirements: goal, target, directory: directory ?? join(target, '.uro-tmp', runId),
+    runId, context: { failedPlan, previousPlan, ledger, pivot, feedback, priorMessages }, artifactRoot, env, searchIndex });
+  try {
   const perspectives = mode === 'fresh' ? FRESH_PERSPECTIVES : INITIAL_PERSPECTIVES;
   const common = { goal, target, round, mode, interactionMode, ledger, failedPlan,
     claudeModel, codexModel, codexEffort, timeoutMs, executorTimeout, runId, env };
@@ -470,9 +516,10 @@ export async function runPlanCandidateSet({
       candidateId: candidate.id, candidateCount: count, perspective: candidate.perspective, ledger, failedPlan });
     let response;
     try {
-      response = await draftCandidate({ ...common, input, candidateId: candidate.id,
+      response = await callPlanningPreparation({ session, requirements: goal, input, call: draftCandidate, seat: 'claude', action: 'propose',
+        request: { ...common, candidateId: candidate.id,
         candidateIndex: candidate.index + 1, candidateCount: count, perspective: candidate.perspective,
-        feedback: repairFeedback || feedback, messages: [...messages] });
+        feedback: repairFeedback || feedback, messages: [...messages] } });
     } catch (error) {
       response = { unavailable: true, error: error instanceof Error ? error.message : String(error) };
     }
@@ -503,7 +550,7 @@ export async function runPlanCandidateSet({
   const candidates = Array.from({ length: count }, (_, index) => ({
     id: `candidate-${index + 1}`, index, perspective: perspectives[index], author: 'claude', attempts: [],
   }));
-  await Promise.all(candidates.map(candidate => attemptDraft(candidate)));
+  for (const candidate of candidates) await attemptDraft(candidate);
   let irreparable = false;
   for (const candidate of candidates) {
     while (candidate.repairable) {
@@ -517,11 +564,12 @@ export async function runPlanCandidateSet({
   const surviving = candidates.filter(candidate => candidate.gateResult.passed);
   let selected = surviving[0], selectionUsage, selection;
   const failure = reason => {
-    const usage = addUsage(draftingUsage, selectionUsage);
+    const resources = session.journal.account(), usage = resources.knownUsage;
     return { mode, interactionMode, candidates, surviving, selected: null, messages, roundHistory,
       exhausted: surviving.length === 0, approved: false, converged: false, approval: null, reason,
-      tokens: { total: usage }, checkpointState: {
-        version: 1, phase: 'planning', tier: 'plan', runId, interactionMode,
+      sharedContext: session.snapshot, directory: session.directory, resources,
+      tokens: { total: usage, usageUnknown: resources.usageUnknown }, checkpointState: {
+        version: 2, phase: 'planning', tier: 'plan', runId, interactionMode,
         authority: decisionAuthority({ interactionMode, phase: 'planning' }), requirements: goal,
         proposal: null, artifactDigest: null, approval: null, messages, roundHistory, openIssues: [], usage,
         artifactRepairs, roundsLimit: rounds ?? null,
@@ -535,8 +583,8 @@ export async function runPlanCandidateSet({
     if (!choose) return failure('reviewer-unavailable');
     let answer;
     try {
-      answer = await choose({ ...common, candidates: surviving,
-        input: selectionPrompt({ candidates: surviving, ledger, failedPlan }) });
+      answer = await callPlanningPreparation({ session, requirements: goal, call: choose, seat: 'codex', action: 'verify',
+        request: { ...common, candidates: surviving }, input: selectionPrompt({ candidates: surviving, ledger, failedPlan }) });
     } catch (error) {
       answer = { unavailable: true, error: error instanceof Error ? error.message : String(error) };
     }
@@ -555,15 +603,13 @@ export async function runPlanCandidateSet({
     authorPrompt: request => draftingPrompt({ goal, round: request.round, feedback: request.feedback }),
     reviewPrompt: request => reviewSeatPrompt(request),
   });
-  const result = await runConversation({
+  const result = await runPlanningDialogue({
     runId, reporter, tier: 'plan', interactionMode, requirements: goal, rounds,
-    prelude: { messages, roundHistory, usage: addUsage(draftingUsage, selectionUsage), artifactRepairs,
-      author: { response: selected.response, message: selected.message } },
+    session, target, directory: session.directory,
+    prelude: { proposal: { plan: selected.plan, gate: selected.gate }, artifactRepairs },
     seats: {
       author: async request => {
-        if (draft) return draft({ ...common, ...request,
-          input: draftingPrompt({ goal, round: request.round, feedback: request.feedback,
-            previousPlan: request.previousProposal }), candidateId: selected.id });
+        if (draft) return draft({ ...common, ...request, candidateId: selected.id });
         return productionSeats.author(request);
       },
       reviewCodex: review ?? productionSeats.reviewCodex,
@@ -577,6 +623,7 @@ export async function runPlanCandidateSet({
   result.checkpointState.candidateState = { mode, selectedCandidateId: selected.id, candidates, selection };
   return { mode, interactionMode, candidates, surviving, selected: null, exhausted: false,
     ...result, ...(selectionUsage === undefined ? {} : { selectionUsage }) };
+  } finally { session.journal.close(); }
 }
 
 /** Resume the selected in-memory candidate debate; no new candidates or disk writer. */
@@ -587,12 +634,13 @@ export async function continuePlanCandidateSet({ checkpointState: state, humanRu
   const seats = createPlanningSeats({ target, claudeModel, codexModel, codexEffort, executorTimeout,
     arbiterTimeout: timeoutMs, runId: state.runId, env, reporter,
     adapters: { ...(draft ? { author: request => draft({ ...request, target, candidateId: selected.id,
-      input: draftingPrompt({ goal: state.requirements, round: request.round,
+      input: state.version === 2 ? request.input : draftingPrompt({ goal: state.requirements, round: request.round,
         previousPlan: request.previousProposal, feedback: request.feedback }) }) } : {}),
       ...(review ? { reviewer: review } : {}) },
     authorPrompt: request => draftingPrompt({ goal: state.requirements, round: request.round,
       previousPlan: request.previousProposal, feedback: request.feedback }), reviewPrompt: reviewSeatPrompt });
-  const result = await runConversation({ runId: state.runId, tier: 'plan', interactionMode: state.interactionMode,
+  const result = await (state.version === 2 ? runPlanningDialogue : runConversation)({ runId: state.runId, tier: 'plan', interactionMode: state.interactionMode,
+    ...(state.version === 2 ? { target, directory: state.directory } : {}),
     requirements: state.requirements, rounds: state.roundsLimit ?? undefined, continuation: state, humanRuling, seats, reporter,
     strategy: { parseProposal: parsePlanProposal,
       reviewRequests: ({ proposal, round }) => ({ codex: { goal: state.requirements, ...proposal, round } }),
@@ -617,12 +665,13 @@ function writeArtifacts(out, plan, gate) {
 
 export async function runPlan({
   goal, target, out, rounds, interactionMode = 'manual',
-  candidates = DEFAULT_PLAN_CANDIDATES, pivotCandidates = DEFAULT_PLAN_CANDIDATES,
+  candidates = DEFAULT_PLAN_CANDIDATES, pivotCandidates = DEFAULT_PIVOT_CANDIDATES,
   claudeModel, codexModel, codexEffort, plannerModel, verifierModel, arbiterModel,
   executorTimeout = resolveStageTimeouts().executor,
   arbiterTimeout = resolveStageTimeouts().arbiter,
   dryRun = false, runId = `plan-${randomUUID()}`, reporter,
   baseDirectory = process.cwd(), env = process.env, home = homedir(), superpowers, adapters = {},
+  artifactRoot, searchIndex,
 } = {}) {
   decisionAuthority({ interactionMode, phase: 'planning' });
   if (plannerModel !== undefined || verifierModel !== undefined) {
@@ -651,6 +700,7 @@ export async function runPlan({
       goal: request.goal, target: request.target, count: candidates, interactionMode, rounds,
       claudeModel: claudeModel ?? arbiterModel, codexModel, codexEffort,
       timeoutMs: arbiterTimeout, executorTimeout, runId, env, reporter,
+      directory: request.out, artifactRoot, searchIndex,
       draft: r => seats.author({ ...r, type: r.previousProposal ? 'propose' : 'draft' }),
       review: seats.reviewCodex,
       select: execute ? r => productionSelect(r, execute)
@@ -658,8 +708,9 @@ export async function runPlan({
     });
     if (result.approved) Object.assign(result, writeArtifacts(request.out, result.selected.plan, result.selected.gate));
   } else {
-    result = await runConversation({
+    result = await runPlanningDialogue({
       runId, reporter, rounds, tier: 'plan', interactionMode, requirements: request.goal, seats,
+      target: request.target, directory: request.out, artifactRoot, env, searchIndex,
       strategy: {
         draftRequest: () => ({ claudeRequest: { type: 'draft', goal: request.goal } }),
         proposeRequest: context => ({ type: 'propose', goal: request.goal, ...context }),
@@ -683,8 +734,9 @@ export async function runPlan({
 export async function continuePlanning({ checkpointState, humanRuling, adapters = {}, reporter, env }) {
   const state = structuredClone(checkpointState);
   const { request, options } = state.planningContext;
-  const result = await runConversation({ runId: state.runId, reporter, rounds: state.roundsLimit ?? undefined,
+  const result = await (state.version === 2 ? runPlanningDialogue : runConversation)({ runId: state.runId, reporter, rounds: state.roundsLimit ?? undefined,
     tier: 'plan', interactionMode: state.interactionMode, requirements: state.requirements,
+    ...(state.version === 2 ? { target: request.target, directory: state.directory } : {}),
     continuation: state, humanRuling,
     seats: createPlanningSeats({ target: request.target, ...options, runId: state.runId, env, reporter, adapters,
       authorPrompt: r => `${CONVERSATION_DNA}\n\n${buildArbiterPrompt({ ...r, goal: request.goal })}`,

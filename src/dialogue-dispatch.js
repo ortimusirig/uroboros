@@ -2,7 +2,7 @@ import { randomUUID, createHash } from 'node:crypto';
 import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
 import { applyDialogueEnvelope, canApproveDialogue, parseDialogueEnvelope, createDialogueState } from './dialogue.js';
-import { renderSharedContext, validateSharedContext } from './shared-context.js';
+import { renderSharedContext, validateSharedContext, extendSharedContext } from './shared-context.js';
 import { captureEvidence, createInspectionReceipt, validateEvidence } from './context-evidence.js';
 
 const mutations = new Set(['propose', 'revise']);
@@ -76,6 +76,15 @@ function registerObservations(state, operation, observations) {
     evidenceIds, receiptIds: receipts.map(r => r.id) };
 }
 
+function installMaterialEvidence(state) {
+  const additions = state.evidence.filter(item => !state.snapshot.evidence.some(old => old.id === item.id));
+  if (!additions.length) return;
+  const hadApproval = state.approval !== null;
+  state.snapshot = extendSharedContext({ snapshot: state.snapshot, evidence: additions });
+  state.approval = null;
+  if (hadApproval) state.next = { seat: state.reviewer, action: 'verify', reason: 'Assess the extended material context before approval' };
+}
+
 async function defaultInspect({ requests, seat, operationId, state }) {
   const evidence = [];
   for (const request of requests) {
@@ -118,9 +127,10 @@ export async function runIssueDialogue({ state: initial, journal, seats, renderI
   };
   const launchAllowed = async (nextAction) => {
     if (mutations.has(nextAction.action)) {
+      const repairing = state.artifactRepair?.cycle === state.proposalCycles && state.artifactRepair?.action === nextAction.action;
       const rounds = state.limits.rounds ?? state.limits.proposalCycles;
-      if (rounds !== undefined && state.proposalCycles >= rounds) return { allowed: false, reason: 'explicit proposal-cycle limit reached' };
-      if (nextAction.action === 'revise' && state.limits.corrections !== undefined && state.correctionCycles >= state.limits.corrections) return { allowed: false, reason: 'explicit correction-cycle limit reached' };
+      if (!repairing && rounds !== undefined && state.proposalCycles >= rounds) return { allowed: false, reason: 'explicit proposal-cycle limit reached' };
+      if (!repairing && nextAction.action === 'revise' && state.limits.corrections !== undefined && state.correctionCycles >= state.limits.corrections) return { allowed: false, reason: 'explicit correction-cycle limit reached' };
     }
     if (nextAction.action === 'challenge' && state.limits.challenges !== undefined && state.challengeCycles >= state.limits.challenges) return { allowed: false, reason: 'explicit challenge limit reached' };
     return budget ? await budget({ state: structuredClone(state), account: journal.account(), nextAction }) : { allowed: true };
@@ -145,6 +155,20 @@ export async function runIssueDialogue({ state: initial, journal, seats, renderI
     validateSharedContext({ snapshot: output.snapshot, projectId: state.projectId });
     if (output.snapshot.runId !== state.runId || output.snapshot.phase !== state.phase
       || (output.snapshot.digest !== state.snapshot.digest && output.snapshot.parentDigest !== state.snapshot.digest)) throw new Error('artifact application context identity mismatch');
+    if (output.artifactRepair) {
+      if (output.artifactDigest !== state.artifactDigest || output.snapshot.digest !== state.snapshot.digest
+        || typeof output.artifactRepair.reason !== 'string' || !output.artifactRepair.reason.trim()
+        || !Number.isSafeInteger(state.limits.artifactRepairs)) throw new Error('invalid known no-application repair outcome');
+      state.artifactRepairs = (state.artifactRepairs ?? 0) + 1;
+      state.artifactRepair = { reason: output.artifactRepair.reason, operationId: operation.operationId,
+        providerOperationId: state.pendingArtifact.providerOperationId, cycle: state.proposalCycles, action: operation.action };
+      state.pendingArtifact = null; state.pendingOperation = null; state.approval = null;
+      state.operations[operation.operationId] = { status: 'completed', seat: operation.seat, effect: 'apply', evidenceIds: [], receiptIds: [], applied: false };
+      state.next = { seat: state.author, action: operation.action, reason: output.artifactRepair.reason };
+      if (state.artifactRepairs > state.limits.artifactRepairs) state.technicalPause = { reason: 'proposal-irreparable' };
+      await save();
+      return;
+    }
     if (output.artifactDigest !== state.artifactDigest || output.snapshot.digest !== state.snapshot.digest) {
       state.historicalEvidenceIds = [...new Set([...state.historicalEvidenceIds, ...state.evidence.filter(e => e.kind === 'code' || e.kind === 'command').map(e => e.id)])];
     }
@@ -158,8 +182,10 @@ export async function runIssueDialogue({ state: initial, journal, seats, renderI
     state.approval = null;
     state.pendingArtifact = null;
     state.pendingOperation = null;
+    state.artifactRepair = null;
     state.operations[operation.operationId] = { status: 'completed', seat: operation.seat, effect: 'apply', evidenceIds: [], receiptIds: [] };
     state.next = { seat: state.reviewer, action: 'verify', reason: 'Review applied artifact' };
+    installMaterialEvidence(state);
     await save();
   };
   try {
@@ -172,6 +198,7 @@ export async function runIssueDialogue({ state: initial, journal, seats, renderI
     }
     if (state.technicalPause) return result(false, 'paused', state.technicalPause.reason);
     while (true) {
+      if (state.technicalPause) return result(false, 'paused', state.technicalPause.reason);
       if (state.pendingDecision) { await save(); return result(false, 'needs-decision', state.pendingDecision.reason); }
       if (state.terminalAction) { await save(); return result(false, state.terminalAction, state.stopReason); }
       if (!state.pendingOperation && !mutations.has(state.next?.action)
@@ -185,6 +212,7 @@ export async function runIssueDialogue({ state: initial, journal, seats, renderI
       if (pending?.effect === 'inspect') {
         operation = savedOperation(pending);
         registerObservations(state, operation, operation.result);
+        installMaterialEvidence(state);
         state.pendingOperation = null;
         state.pendingInspection = null;
         state.next = { seat: operation.seat, action: 'verify', reason: 'Assess inspected evidence' };
@@ -221,6 +249,7 @@ export async function runIssueDialogue({ state: initial, journal, seats, renderI
         const observed = await inspect({ requests: structuredClone(requests), seat, operationId: inspection.operationId, state: structuredClone(state) });
         journal.complete({ operationId: inspection.operationId, result: observed, usage: null, delivery: null });
         registerObservations(state, inspection, observed);
+        installMaterialEvidence(state);
         state.pendingOperation = null;
         state.pendingInspection = null;
         state.next = { seat, action: 'verify', reason: 'Assess inspected evidence' };
@@ -254,6 +283,7 @@ export async function runIssueDialogue({ state: initial, journal, seats, renderI
             next, issues: state.issues, messages: state.messages,
             claims: state.claims, evidence: state.evidence, capturedEvidence, inspectionReceipts: state.inspectionReceipts, memoryProposals: state.memoryProposals }, null, 2),
           state.formatRepair ? `FORMAT REPAIR ONLY. Preserve the prior substance and return the required envelope. Previous response:\n${JSON.stringify(state.formatRepair.response)}` : '',
+          state.artifactRepair ? `ARTIFACT FORMAT REPAIR in the same proposal cycle: ${state.artifactRepair.reason}\nPrevious saved response:\n${JSON.stringify(journal.operation(state.artifactRepair.providerOperationId)?.result)}` : '',
         ].join('\n\n');
         pending = await prepare({ seat: next.seat, action: next.action, effect: state.formatRepair ? 'repair' : 'provider', input });
         if (typeof seats?.[pending.seat] !== 'function') throw new Error(`missing transport for seat ${pending.seat}`);
@@ -277,7 +307,16 @@ export async function runIssueDialogue({ state: initial, journal, seats, renderI
       }
       if (mutations.has(envelope.action) && envelope.action !== operation.action) throw new Error('unsolicited artifact application outside explicit proposal/revision operation');
       // Reducer checks the saved INPUT identities, before the local artifact callback can change them.
-      state = applyDialogueEnvelope({ state, envelope, seat: operation.seat });
+      let reductionState = state;
+      if (state.artifactRepair && mutations.has(envelope.action)) {
+        if (state.artifactRepair.action !== envelope.action || state.artifactRepair.cycle !== state.proposalCycles
+          || operation.seat !== state.author) throw new Error('artifact repair cycle binding mismatch');
+        reductionState = structuredClone(state);
+        reductionState.proposalCycles--;
+        if (envelope.action === 'revise') reductionState.correctionCycles--;
+      }
+      state = applyDialogueEnvelope({ state: reductionState, envelope, seat: operation.seat });
+      if (!state.pendingArtifact) installMaterialEvidence(state);
       state.formatRepair = null;
       state.pendingOperation = null;
       await save();

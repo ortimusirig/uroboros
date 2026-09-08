@@ -21,6 +21,72 @@ function approve(state) {
   return envelope(state, 'approve', { claims: [claim], verifications: [support(receipt)] });
 }
 
+test('artifact repair respects budget and recovers a completed no-application without a second application', async t => {
+  const { state, journal } = setup(t, { limits: { rounds: 1, artifactRepairs: 5 } });
+  state.proposalCycles = 1;
+  state.artifactRepairs = 3;
+  const pending = { operationId: 'repair-application', seat: 'claude', action: 'propose', effect: 'apply' };
+  state.pendingOperation = pending;
+  state.pendingArtifact = { action: 'propose', seat: 'claude', providerOperationId: 'saved-author' };
+  journal.prepare({ ...pending, input: 'saved response', artifactDigest: state.artifactDigest,
+    contextDigest: state.snapshot.digest, evidenceIds: ['E1'], unreadMessageIds: [] });
+  journal.complete({ operationId: pending.operationId, result: { artifactDigest: state.artifactDigest,
+    snapshot: state.snapshot, artifactRepair: { reason: 'Missing required artifact tag' } } });
+  let applications = 0, launches = 0, budgetChecks = 0;
+  const result = await runIssueDialogue({ state, journal, persist: async () => {},
+    revise: async () => { applications++; }, seats: { claude: async () => { launches++; } },
+    budget: ({ state: current, account, nextAction }) => {
+      budgetChecks++;
+      assert.equal(current.artifactRepairs, 4);
+      assert.equal(current.artifactRepair.cycle, 1);
+      assert.equal(current.artifactRepair.operationId, pending.operationId);
+      assert.equal(nextAction.action, 'propose');
+      assert.equal(account.providerLaunches, 0);
+      return { allowed: false, reason: 'repair launch budget exhausted' };
+    } });
+  assert.equal(result.approved, false);
+  assert.match(result.reason, /budget exhausted/);
+  assert.equal(result.state.operations[pending.operationId].applied, false);
+  assert.equal(result.state.artifactRepairs, 4);
+  assert.equal(applications, 0);
+  assert.equal(launches, 0);
+  assert.equal(budgetChecks, 1);
+});
+
+test('uncertain artifact writer failure never becomes a format repair or retries application', async t => {
+  const { state, journal } = setup(t, { limits: { rounds: 1, artifactRepairs: 5 } });
+  state.next = { seat: 'claude', action: 'propose', reason: 'Draft' };
+  let calls = 0, writes = 0;
+  const result = await runIssueDialogue({ state, journal, persist: async () => {},
+    seats: { claude: async ({ state: s }) => { calls++; return response(envelope(s, 'propose'), { inputTokens: 7, outputTokens: 2 }); } },
+    revise: async () => { writes++; throw new Error('disk write may have partially applied'); } });
+  assert.equal(result.action, 'paused');
+  assert.equal(result.state.pendingOperation.effect, 'apply');
+  assert.equal(result.state.artifactRepair, undefined);
+  const again = await runIssueDialogue({ state: result.state, journal, persist: async () => {},
+    seats: { claude: () => assert.fail('no repeated provider') }, revise: () => assert.fail('no repeated write') });
+  assert.equal(again.action, 'paused');
+  assert.equal(calls, 1);
+  assert.equal(writes, 1);
+  assert.equal(again.resources.providerLaunches, 1);
+  assert.equal(again.resources.knownUsage.inputTokens, 7);
+});
+
+test('rereading registered evidence adds a receipt without changing material context', async t => {
+  const { state, journal } = setup(t);
+  let launches = 0;
+  const result = await runIssueDialogue({ state, journal, persist: async () => {}, seats: {
+    codex: async ({ state: current }) => {
+      if (++launches === 1) return response(envelope(current, 'inspect', { requests: [{ evidenceId: 'E1' }] }));
+      assert.equal(current.snapshot.digest, state.snapshot.digest);
+      assert.equal(Object.keys(current.inspectionReceipts).length, 1);
+      return response(approve(current));
+    },
+  } });
+  assert.equal(result.approved, true, result.reason);
+  assert.equal(launches, 2);
+});
+
 test('first clean review completes after exactly one launch with full common input', async (t) => {
   const { state, journal } = setup(t, { interactionMode: 'manual' });
   observe(state);

@@ -31,6 +31,7 @@ export class WorktreeRestorationError extends Error {
 export const HARNESS_ARTIFACT_PATTERNS = Object.freeze([
   /^events\.jsonl$/, /^TASK\.md$/, /^CHANGES\.diff$/, /^__uro_review(\/|\\|$)/,
   /^\.uro-tmp(\/|\\|$)/,
+  /^__uro_context(\/|\\|$)/, /^__uro_dialogue(\/|\\|$)/,
 ]);
 export function isHarnessArtifact(relativePath) {
   const normalized = String(relativePath).replace(/\\/g, '/');
@@ -136,12 +137,18 @@ export async function runProtectedOperation({
   captureSnapshot = captureWorktreeSnapshot,
   restoreSnapshot = restoreWorktreeSnapshot,
 }) {
+  const critical = ['__uro_context', '__uro_dialogue'].map(prefix => reviewFiles(cwd, prefix));
   const snapshot = await captureSnapshot({ cwd, scope, prefix });
   let result;
   let restoredPaths = [];
   try {
     result = await operation();
   } finally {
+    const changedCritical = critical.some(before => {
+      const after = reviewFiles(cwd, relative(cwd, before.root));
+      return [...new Set([...before.entries.keys(), ...after.entries.keys()])]
+        .some(path => !entriesEqual(before.entries.get(path), after.entries.get(path)));
+    });
     let restoration;
     try {
       restoration = await restoreSnapshot({ snapshot, scope, prefix });
@@ -160,6 +167,7 @@ export async function runProtectedOperation({
         action: 'restored',
       });
     }
+    if (changedCritical) throw new WorktreeRestorationError('correctness-critical shared context or dialogue records changed during provider access');
   }
   return { result, restoredPaths };
 }

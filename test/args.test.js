@@ -427,7 +427,7 @@ test('plan parses its goal, target, output, rounds, model, and dry-run', () => {
     target: 'repo',
     out: 'generated',
     rounds: 5,
-    candidates: 3,
+    candidates: 1,
     pivotCandidates: 3,
     codexModel: 'gpt-plan',
     interactionMode: 'manual',
@@ -442,7 +442,7 @@ test('plan parses its goal, target, output, rounds, model, and dry-run', () => {
   ]);
   assert.equal(Object.hasOwn(unbounded, 'rounds'), false,
     'omitting --rounds must not invent a planning bound');
-  assert.equal(unbounded.candidates, 3);
+  assert.equal(unbounded.candidates, 1);
   assert.equal(unbounded.pivotCandidates, 3);
   const configured = parseArgs([
     'plan', '--goal', 'x', '--target', 'repo', '--out', 'generated',

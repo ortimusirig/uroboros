@@ -84,7 +84,7 @@ import {
   runMutate as realMutation,
 } from './mutate.js';
 import {
-  DEFAULT_PLAN_CANDIDATES,
+  DEFAULT_PIVOT_CANDIDATES,
   planCandidateFacts,
   runPlanCandidateSet,
   continuePlanCandidateSet,
@@ -437,7 +437,7 @@ export async function run(opts) {
     arbiterModel = DEFAULT_ARBITER_MODEL,
     arbiterBin = 'claude',
     mode = 'manual', decisionResolver, challengeRounds = 2,
-    debateRounds, tokenBudget, pivotCandidates = DEFAULT_PLAN_CANDIDATES,
+    debateRounds, tokenBudget, pivotCandidates = DEFAULT_PIVOT_CANDIDATES,
     adapters = {}, reporter,
   } = opts;
   const physicalRunId = physicalRunIdFor(runId);

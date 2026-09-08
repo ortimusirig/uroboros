@@ -9,6 +9,7 @@ import { assertCurrentPlanApproval, assertPlanOutputAvailable, resolveGoal } fro
 import { detectReview, reviewDigest } from './review.js';
 import { attachQueueCheckpoint, checkpointDigest, readCheckpoint } from './checkpoint.js';
 import { recoverQueueLanding } from './queue-runtime.js';
+import { assertPlanningSidecars } from './planning-dialogue.js';
 
 const QUEUE_UNIT_KEYS = new Set(['name', 'task', 'gate', 'goal', 'out']);
 const QUEUE_MODES = new Set(['manual', 'autonomous']);
@@ -338,6 +339,8 @@ export function queueContinuationPaths(context) {
       ?? context.approvedPlans?.[unit.index];
     if (!result?.approved) continue;
     assertCurrentPlanApproval({ unit, result, mode: context.options?.mode ?? 'manual' });
+    if (result.approval.contextDigest) paths.push(...assertPlanningSidecars({ directory: unit.out,
+      runId: result.runId, approval: result.approval, manifest: result.planningArtifacts }));
     paths.push(join(unit.out, 'plan.md'), join(unit.out, 'gate.json'));
     if (existsSync(join(unit.out, 'uro-checkpoint.json')) && readCheckpoint(unit.out).runId === result.runId) {
       paths.push(join(unit.out, 'uro-checkpoint.json'), join(unit.out, 'uro-resume.lock'));
@@ -417,8 +420,8 @@ async function executeQueue({
     const persist = () => continuation?.persistJournal(journal);
     if (unitJournal.logged) {
       if (unitJournal.planResult?.approved) {
-        const { runId, planPath, gatePath, approval } = unitJournal.planResult;
-        approvedPlans[unit.index] = { approved: true, runId, planPath, gatePath, approval };
+        const { runId, planPath, gatePath, approval, planningArtifacts } = unitJournal.planResult;
+        approvedPlans[unit.index] = { approved: true, runId, planPath, gatePath, approval, ...(planningArtifacts ? { planningArtifacts } : {}) };
       }
       ({ attemptedCount, landedCount, totalTokens } = unitJournal.afterUnit);
       continue;
@@ -509,7 +512,8 @@ async function executeQueue({
         }
         assertCurrentPlanApproval({ unit, result: planResult, mode });
         approvedPlans[unit.index] = { approved: true, runId: planResult.runId,
-          planPath: planResult.planPath, gatePath: planResult.gatePath, approval: planResult.approval };
+          planPath: planResult.planPath, gatePath: planResult.gatePath, approval: planResult.approval,
+          ...(planResult.planningArtifacts ? { planningArtifacts: planResult.planningArtifacts } : {}) };
         implementationUnit = {
           ...unit,
           approval: planResult.approval,
@@ -517,6 +521,8 @@ async function executeQueue({
           gate: planResult.gatePath ?? join(unit.out, 'gate.json'),
         };
         allowedQueuePaths.push(implementationUnit.task, implementationUnit.gate);
+        if (planResult.approval.contextDigest) allowedQueuePaths.push(...assertPlanningSidecars({ directory: unit.out,
+          runId: planResult.runId, approval: planResult.approval, manifest: planResult.planningArtifacts }));
       }
       if (unitJournal.result) {
         launch = unitJournal.launch;

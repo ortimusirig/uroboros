@@ -629,6 +629,7 @@ async function runDecomposition(kind, {
   arbiterTimeout = resolveStageTimeouts().arbiter,
   runId = `decompose-${kind}-${randomUUID()}`, reporter,
   env = process.env, home = homedir(), superpowers, adapters = {},
+  artifactRoot, searchIndex,
 } = {}) {
   decisionAuthority({ interactionMode, phase: 'planning' });
   if (plannerModel !== undefined || verifierModel !== undefined) {
@@ -647,8 +648,10 @@ async function runDecomposition(kind, {
     ? { goalSpec: request.goalSpec, constitution: request.constitution }
     : { project: request.project, constitution: request.constitution };
   const context = { ...requirements, repoMap };
-  const result = await runConversation({
+  const { runPlanningDialogue } = await import('./planning-dialogue.js');
+  const result = await runPlanningDialogue({
     runId, reporter, rounds, tier: kind, requirements, interactionMode,
+    target: request.target, directory: request.out ?? request.tasksDir, context, env, artifactRoot, searchIndex,
     seats: createPlanningSeats({
       target: request.target, claudeModel: claudeModel ?? arbiterModel, codexModel, codexEffort,
       executorTimeout, arbiterTimeout, runId, env, reporter, adapters,
@@ -660,7 +663,13 @@ async function runDecomposition(kind, {
       }),
     }),
     strategy: {
-      parseProposal: isGoal ? parseTaskProposal : parseGoalProposal,
+      parseProposal: response => {
+        const proposal = (isGoal ? parseTaskProposal : parseGoalProposal)(response);
+        const items = (isGoal ? assertWritableTasks : assertWritableGoals)(proposal.items);
+        topologicalOrder(items);
+        if (!isGoal) assertNoGoalDependsOnLaterGoal(items);
+        return proposal;
+      },
       proposalText: proposal => proposal.text,
       reviewRequests: ({ proposal, round }) => ({ codex: {
         ...context, [isGoal ? 'tasks' : 'goals']: proposal.text, round,
@@ -693,14 +702,24 @@ export async function continueDecomposition({ checkpointState, humanRuling, adap
   const state = structuredClone(checkpointState);
   const { kind, request, context, options } = state.planningContext;
   const isGoal = kind === 'goal';
-  const result = await runConversation({ runId: state.runId, reporter, rounds: state.roundsLimit ?? undefined,
+  const { runPlanningDialogue } = await import('./planning-dialogue.js');
+  const result = await (state.version === 2 ? runPlanningDialogue : runConversation)({ runId: state.runId, reporter, rounds: state.roundsLimit ?? undefined,
     tier: kind, requirements: state.requirements, interactionMode: state.interactionMode,
+    ...(state.version === 2 ? { target: request.target, directory: state.directory } : {}),
     continuation: state, humanRuling,
     seats: createPlanningSeats({ target: request.target, ...options, runId: state.runId, reporter, env, adapters,
       authorPrompt: r => (isGoal ? goalDraftingPrompt : projectDraftingPrompt)({ ...context, ...r, seat: 'Claude' }),
       reviewPrompt: r => (isGoal ? goalReviewPrompt : projectReviewPrompt)({ ...context, ...r, seat: 'Codex' }) }),
     strategy: {
-      parseProposal: isGoal ? parseTaskProposal : parseGoalProposal,
+      parseProposal: response => {
+        const proposal = (isGoal ? parseTaskProposal : parseGoalProposal)(response);
+        if (state.version === 2) {
+          const items = (isGoal ? assertWritableTasks : assertWritableGoals)(proposal.items);
+          topologicalOrder(items);
+          if (!isGoal) assertNoGoalDependsOnLaterGoal(items);
+        }
+        return proposal;
+      },
       proposalText: proposal => proposal.text,
       reviewRequests: ({ proposal, round }) => ({ codex: { ...context, [isGoal ? 'tasks' : 'goals']: proposal.text, round } }),
       writeConverged: proposal => {

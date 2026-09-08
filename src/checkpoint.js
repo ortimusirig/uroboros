@@ -102,7 +102,9 @@ function questionsFor(state) {
 }
 export function validateCheckpoint(value) {
   if (value?.checksum !== integrityDigest(value ?? {})) throw new Error('checkpoint checksum is corrupt');
-  if (value?.schemaVersion !== 1 || value?.continuation?.version !== 1) throw new Error('unsupported checkpoint schema version');
+  const version2Planning = value?.schemaVersion === 2 && value?.continuation?.version === 2
+    && value?.phase === 'planning' && value?.continuation?.dialogue?.schemaVersion === 2;
+  if (!version2Planning && (value?.schemaVersion !== 1 || value?.continuation?.version !== 1)) throw new Error('unsupported checkpoint schema version');
   if (!['planning', 'execution'].includes(value.phase) || value.phase !== value.continuation.phase) throw new Error('invalid checkpoint phase');
   if (value.interactionMode !== 'manual' || value.continuation.interactionMode !== 'manual') throw new Error('saved mode is not manual; mode cannot change on resume');
   if (!value.runId || value.runId !== value.continuation.runId || !Number.isSafeInteger(value.revision) || value.revision < 1) throw new Error('invalid checkpoint identity');
@@ -133,7 +135,7 @@ export async function saveCheckpoint({ directory, checkpointState, references = 
   const execution = state.phase === 'execution' ? state : state.executionContinuation;
   const target = execution ? execution.workspace.targetPath : state.planningContext.request.target;
   const workspace = execution ? identity(execution.workspace.dir, true) : null;
-  const checkpoint = { schemaVersion: 1, revision: (previous?.revision ?? (existsSync(join(directory, CHECKPOINT_FILE))
+  const checkpoint = { schemaVersion: state.version === 2 && state.phase === 'planning' ? 2 : 1, revision: (previous?.revision ?? (existsSync(join(directory, CHECKPOINT_FILE))
     ? readCheckpoint(directory).revision : 0)) + 1, runId: state.runId, phase: state.phase,
     interactionMode: 'manual', status: 'needs-decision', directory: canonical(directory),
     continuation: state, stateDigest: checkpointDigest(state), workspace, target: identity(target, false,

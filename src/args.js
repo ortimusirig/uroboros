@@ -320,7 +320,7 @@ export function parseArgs(argv) {
       ...(values.rounds === undefined ? {} : {
         rounds: strictInt(values.rounds, undefined, 1, Number.MAX_SAFE_INTEGER),
       }),
-      candidates: strictInt(values.candidates, 3, 1, MAX_PLAN_CANDIDATES),
+      candidates: strictInt(values.candidates, 1, 1, MAX_PLAN_CANDIDATES),
       pivotCandidates: strictInt(
         values['pivot-candidates'], 3, 1, MAX_PLAN_CANDIDATES,
       ),

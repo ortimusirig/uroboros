@@ -1,0 +1,299 @@
+import { execFileSync } from 'node:child_process';
+import { createHash, randomUUID } from 'node:crypto';
+import { existsSync, mkdirSync, readFileSync, lstatSync, readdirSync, realpathSync } from 'node:fs';
+import { join, resolve, relative, isAbsolute } from 'node:path';
+import { homedir } from 'node:os';
+import { createSharedContext, persistSharedContext, validateSharedContext, contextDigest, renderSharedContext } from './shared-context.js';
+import { captureEvidence } from './context-evidence.js';
+import { resolveProjectIdentity, openProjectMemory } from './project-memory.js';
+import { resolveArtifactRoot } from './artifacts.js';
+import { readEnv } from './env-compat.js';
+import { openDialogueJournal } from './dialogue-journal.js';
+import { createDialogueState, parseDialogueEnvelope, applyDialogueEnvelope } from './dialogue.js';
+import { runIssueDialogue } from './dialogue-dispatch.js';
+import { canonicalPlanningArtifact, planningArtifactDigest, RepairableArtifactError, MAX_ARTIFACT_REPAIRS, dialoguePromptText } from './conversation.js';
+import { reportEvent } from './events.js';
+
+const digestBytes = path => createHash('sha256').update(readFileSync(path)).digest('hex');
+
+function planningSidecarManifest({ directory, runId, contextDigest: snapshotDigest }) {
+  if (lstatSync(directory).isSymbolicLink()) throw new Error('planning sidecar root must not be a symbolic link');
+  const root = realpathSync.native(directory), files = [];
+  const visit = path => {
+    const stats = lstatSync(path), rel = relative(root, path).replaceAll('\\', '/');
+    if (stats.isSymbolicLink() || rel.startsWith('../') || isAbsolute(rel)) throw new Error('planning sidecar escape or symbolic link');
+    if (stats.isDirectory()) for (const child of readdirSync(path).sort()) visit(join(path, child));
+    else if (stats.isFile()) files.push({ path: rel, sha256: digestBytes(path) });
+    else throw new Error('nonregular planning sidecar');
+  };
+  for (const name of ['__uro_context', '__uro_dialogue', '__uro_evidence']) visit(join(root, name));
+  return { schemaVersion: 1, directory: resolve(directory), runId, contextDigest: snapshotDigest, files };
+}
+
+/** Only this validated exact file set can be exempted from queue cleanliness. */
+export function assertPlanningSidecars({ directory, runId, approval, manifest }) {
+  if (!manifest || manifest.runId !== runId || resolve(manifest.directory) !== resolve(directory)
+    || manifest.contextDigest !== approval.contextDigest
+    || contextDigest({ manifest }) !== approval.sidecarDigest) throw new Error('planning sidecar manifest identity mismatch');
+  const actual = planningSidecarManifest({ directory, runId, contextDigest: approval.contextDigest });
+  if (contextDigest({ manifest: actual }) !== approval.sidecarDigest) throw new Error('planning sidecar manifest changed');
+  return manifest.files.map(file => join(directory, file.path));
+}
+
+/** Create required common grounding before any author, selector or reviewer launch. */
+export function openPlanningContext({ requirements, target, directory, runId, tier = 'plan', context = {},
+  artifactRoot, env = process.env, searchIndex }) {
+  mkdirSync(directory, { recursive: true });
+  const project = resolveProjectIdentity({ target });
+  let sourceRevision;
+  try { sourceRevision = execFileSync('git', ['-C', target, 'rev-parse', 'HEAD'], { encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] }).trim(); }
+  catch { sourceRevision = `unversioned:${project.projectId}`; }
+  const root = resolveArtifactRoot({ artifactRoot, env, scratchRoot: readEnv(env, 'SCRATCH_ROOT')
+    ?? (process.platform === 'win32' ? 'C:/uro/w' : join(homedir(), '.uro', 'w')) });
+  const memory = openProjectMemory({ artifactRoot: root, project, searchIndex });
+  const text = typeof requirements === 'string' ? requirements : JSON.stringify(requirements);
+  const recalled = memory.search({ text });
+  const sourceIdentity = contextDigest({ requirements, sourceRevision });
+  const entries = Object.entries({ requirements, target: project, ...context })
+    .filter(([, value]) => value !== undefined && value !== null && value !== '')
+    .map(([id, value]) => ({ id, kind: id, content: typeof value === 'string' ? value : JSON.stringify(value),
+      sourceIdentity, provenance: { origin: 'phase-controller', runId }, status: 'required' }));
+  entries.push({ id: 'memory-selection', kind: 'memory-selection', content: JSON.stringify({
+    query: { text, tags: [] }, selectedVersionIds: recalled.map(record => record.versionId),
+    status: recalled.searchStatus, error: recalled.searchError,
+  }), sourceIdentity, provenance: { origin: 'harness-recall', projectId: project.projectId }, status: 'historical' });
+  const evidenceDirectory = join(directory, '__uro_evidence');
+  mkdirSync(evidenceDirectory, { recursive: true });
+  const evidence = captureEvidence({ projectId: project.projectId, root: target, directory: evidenceDirectory,
+    evidence: { id: 'requirement-briefing', kind: 'requirement', projectId: project.projectId, claimIds: ['briefing-requirement'],
+      text, locator: { briefingId: `${runId}:${tier}` }, sourceIdentity } });
+  const snapshot = createSharedContext({ projectId: project.projectId, runId, unitId: `${runId}:${tier}`,
+    phase: 'planning', sourceRevision, entries, evidence: [evidence], recalled: recalled.map(record => ({
+      ...record, id: record.versionId, notebookEntryId: record.id, status: 'historical', notebookStatus: record.status,
+    })) });
+  const path = persistSharedContext({ directory, snapshot });
+  const journal = openDialogueJournal({ directory, runId, projectId: project.projectId });
+  return { snapshot, journal, memory, project, directory, artifactRoot: root, evidenceDirectory, contextPaths: new Map([[path, digestBytes(path)]]),
+    recall: { status: recalled.searchStatus, error: recalled.searchError } };
+}
+
+function reopenPlanningContext({ continuation, target, directory }) {
+  const snapshot = continuation.dialogue.snapshot;
+  const project = resolveProjectIdentity({ target });
+  if (project.projectId !== snapshot.projectId) throw new Error('saved planning project identity changed');
+  const path = join(directory, '__uro_context', `${snapshot.id}.json`);
+  const stored = JSON.parse(readFileSync(path, 'utf8'));
+  validateSharedContext({ snapshot: stored, projectId: project.projectId });
+  if (stored.digest !== snapshot.digest) throw new Error('saved shared context identity changed');
+  const journal = openDialogueJournal({ directory, runId: snapshot.runId, projectId: project.projectId });
+  try {
+    const events = journal.read();
+    if (events.at(-1)?.hash !== continuation.journalIdentity.hash || events.at(-1)?.sequence !== continuation.journalIdentity.sequence) throw new Error('saved planning journal identity changed');
+    const latest = events.filter(e => e.type === 'state').at(-1)?.state;
+    if (contextDigest({ state: latest }) !== contextDigest({ state: continuation.dialogue })) throw new Error('saved planning dialogue differs from journal');
+    return { snapshot, journal, project, directory, dialogue: latest, artifactRoot: continuation.artifactRoot,
+      memory: openProjectMemory({ artifactRoot: continuation.artifactRoot, project }),
+      evidenceDirectory: join(directory, '__uro_evidence'), contextPaths: new Map([[path, digestBytes(path)]]), recall: continuation.recall };
+  } catch (error) { journal.close(); throw error; }
+}
+
+function checkContext(session) {
+  session.journal.read();
+  for (const [path, digest] of session.contextPaths) {
+    if (!existsSync(path) || digestBytes(path) !== digest) throw new Error('persisted shared context changed during provider access');
+    validateSharedContext({ snapshot: JSON.parse(readFileSync(path, 'utf8')), projectId: session.project.projectId });
+  }
+}
+
+/** Alternatives are independent proposals, with serialized, accounted preparation calls. */
+export async function callPlanningPreparation({ session, requirements, input, call, seat, action, request = {} }) {
+  checkContext(session);
+  const state = createDialogueState({ runId: session.snapshot.runId, projectId: session.project.projectId,
+    phase: 'planning', interactionMode: request.interactionMode, snapshot: session.snapshot,
+    artifactDigest: contextDigest({ requirements, proposal: null }),
+    scope: { sourceRoots: [session.project.root], evidenceRoots: [session.evidenceDirectory] } });
+  const completeInput = [dialoguePromptText(input), renderSharedContext({ snapshot: session.snapshot }),
+    'Return one UROBOROS_DIALOGUE JSON envelope beside artifact/selection tags. schemaVersion:1; action:' + action +
+      '; replyTo:null; content:explanation; claims:[]; issues:[]; evidence:[]; verifications:[]; next:null.',
+    JSON.stringify({ artifactDigest: state.artifactDigest, contextDigest: state.snapshot.digest })].join('\n\n');
+  let failedResponse;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const operationId = `${state.runId}:candidate:${randomUUID()}`;
+    const submitted = completeInput + (attempt ? `\nFORMAT REPAIR ONLY. Preserve the saved substance and return the required envelope. Previous response:\n${JSON.stringify(failedResponse)}` : '');
+    session.journal.prepare({ operationId, seat, effect: attempt ? 'repair' : 'provider', action, input: submitted,
+      contextDigest: state.snapshot.digest, artifactDigest: state.artifactDigest,
+      evidenceIds: state.evidence.map(e => e.id), unreadMessageIds: [] });
+    let response;
+    try { response = await call({ ...request, input: submitted, dialogueMode: true, state, operationId, action: attempt ? 'repair' : action }); }
+    catch (error) { response = { error: error.message, unavailable: true }; }
+    checkContext(session);
+    response = typeof response === 'string' ? { content: response, answer: response } : {
+      ...response, content: response?.content ?? response?.answer ?? response?.lastMessage ?? '',
+    };
+    session.journal.complete({ operationId, result: response, usage: response.usage ?? null, delivery: response.delivery ?? null });
+    if (response.error || response.unavailable || response.launchFailed || response.timedOut) return response;
+    let envelope;
+    try { envelope = parseDialogueEnvelope({ response }); }
+    catch (error) { if (attempt) throw error; failedResponse = response; continue; }
+    if (envelope.action !== action) throw new Error(`candidate preparation requires explicit ${action}`);
+    applyDialogueEnvelope({ state, envelope, seat });
+    return response;
+  }
+}
+
+function promoteMemory(session, state) {
+  for (const proposal of state.memoryProposals) {
+    const issue = proposal.issueId && state.issues[proposal.issueId];
+    if (!state.approval && !issue?.disposition) continue;
+    const claims = proposal.claimIds.map(id => state.claims[id]);
+    const verified = claims.every(claim => claim && claim.status === 'active'
+      && claim.artifactDigest === state.artifactDigest && claim.contextDigest === state.snapshot.digest
+      && state.verifications.some(v => v.claimId === claim.id && v.seat === state.reviewer && v.result === 'supports'
+        && v.artifactDigest === state.artifactDigest && v.contextDigest === state.snapshot.digest)
+      && !state.verifications.some(v => v.claimId === claim.id && v.result !== 'supports'
+        && v.artifactDigest === state.artifactDigest && v.contextDigest === state.snapshot.digest));
+    const operationId = `${state.runId}:memory:${proposal.id}`;
+    if (session.journal.operation(operationId)) continue;
+    const entry = { id: proposal.id, kind: proposal.kind, content: proposal.content, tags: proposal.tags,
+      sourceIdentity: state.snapshot.digest, provenance: { ...proposal.provenance, promotionOperationId: operationId },
+      status: verified ? 'verified' : issue?.status === 'disputed' ? 'disputed' : 'unsupported',
+      claims, evidence: state.evidence.filter(e => claims.some(c => c?.evidenceIds.includes(e.id))),
+      disposition: issue?.disposition ?? { kind: 'approved', messageId: state.approval?.messageId } };
+    session.journal.prepare({ operationId, seat: 'harness', effect: 'memory', input: JSON.stringify(entry),
+      contextDigest: state.snapshot.digest, artifactDigest: state.artifactDigest, evidenceIds: entry.evidence.map(e => e.id), unreadMessageIds: [] });
+    const result = session.memory.append({ entry });
+    session.journal.complete({ operationId, result, usage: null, delivery: null });
+  }
+}
+
+/** New runs use explicit dialogue; historical runConversation remains a separate reader. */
+export async function runPlanningDialogue({ requirements, target, directory, tier = 'plan', interactionMode = 'manual',
+  rounds, runId = `planning-${randomUUID()}`, seats, strategy, reporter, context, artifactRoot, env, searchIndex,
+  session: suppliedSession, continuation, humanRuling, prelude, budget }) {
+  const session = suppliedSession ?? (continuation ? reopenPlanningContext({ continuation, target, directory })
+    : openPlanningContext({ requirements, target, directory, runId, tier, context, artifactRoot, env, searchIndex }));
+  let proposal = prelude?.proposal ?? continuation?.proposal ?? null;
+  let state = session.dialogue ?? continuation?.dialogue ?? createDialogueState({ runId, projectId: session.project.projectId,
+    phase: 'planning', interactionMode, snapshot: session.snapshot,
+    artifactDigest: proposal ? planningArtifactDigest(requirements, proposal) : contextDigest({ requirements, proposal: null }),
+    limits: { ...(rounds === undefined ? {} : { rounds }), artifactRepairs: MAX_ARTIFACT_REPAIRS }, scope: { sourceRoots: [target], evidenceRoots: [session.evidenceDirectory] } });
+  if (!continuation) {
+    state.next = proposal ? { seat: 'codex', action: 'verify', reason: 'Review selected proposal' }
+      : { seat: 'claude', action: 'propose', reason: 'Draft the initial proposal' };
+    state.proposalCycles = proposal ? 1 : 0;
+    state.artifactRepairs = prelude?.artifactRepairs ?? 0;
+  }
+  const requestFor = ({ state, seat, action, input, operationId }) => ({ state, input, operationId, action,
+    dialogueMode: true, type: action === 'propose' && !proposal && !state.artifactRepair ? 'draft' : action,
+    round: state.proposalCycles + (['propose', 'revise'].includes(action) ? 1 : 0),
+    interactionMode, artifactDigest: state.artifactDigest, contextDigest: state.snapshot.digest,
+    previousProposal: proposal ? (strategy.proposalText?.(proposal) ?? proposal.plan ?? JSON.stringify(proposal)) : '',
+    feedback: state.artifactRepair?.reason ?? state.messages.at(-1)?.content ?? '', messages: state.messages,
+    ...(seat === 'codex' && proposal ? strategy.reviewRequests?.({ proposal, round: state.proposalCycles })?.codex : {}),
+    ...(seat === 'claude' ? strategy.draftRequest?.({}) : {}),
+  });
+  try {
+    let humanAction = null;
+    if (humanRuling) {
+      if (state.interactionMode !== 'manual' || !state.pendingDecision || !humanRuling.decisionId) throw new Error('human ruling has no current manual decision');
+      if (planningArtifactDigest(requirements, proposal) !== state.artifactDigest) throw new Error('saved planning artifact identity changed');
+      const content = humanRuling.answers.map(answer => answer.answer).join('\n');
+      humanAction = /^approve(?:\s*:|\s*$)/i.test(content) ? 'approve' : /^stop(?:\s*:|\s*$)/i.test(content) ? 'stop' : null;
+      state = structuredClone(state);
+      state.messages.push({ id: `${runId}:human:${humanRuling.decisionId}`, sender: 'human', speaker: 'human',
+        phase: 'planning', action: 'decide', content, artifactDigest: state.artifactDigest, contextDigest: state.snapshot.digest,
+        decisionId: humanRuling.decisionId, sequence: state.messages.length + 1 });
+      state.humanRuling = { ...humanRuling, action: humanAction, artifactDigest: state.artifactDigest, contextDigest: state.snapshot.digest };
+      state.pendingDecision = null;
+      state.next = { seat: 'codex', action: 'verify', reason: 'Assess the human clarification' };
+      session.journal.append({ type: 'human-ruling', ruling: state.humanRuling });
+      session.journal.append({ type: 'state', state });
+    }
+    const result = humanAction ? { state, approved: humanAction === 'approve', action: humanAction === 'approve' ? 'complete' : 'stop',
+      reason: state.messages.at(-1).content, messages: state.messages, rounds: state.proposalCycles, resources: session.journal.account() }
+      : await runIssueDialogue({ state, journal: session.journal, budget,
+      seats: Object.fromEntries([['claude', seats.author], ['codex', seats.reviewCodex]].map(([seat, call]) => [seat, async request => {
+        checkContext(session);
+        const response = await call(requestFor({ ...request, seat }));
+        checkContext(session);
+        const normalized = typeof response === 'string' ? { content: response } : { ...response,
+          content: response?.content ?? response?.answer ?? response?.lastMessage ?? '' };
+        if (response?.unavailable || response?.launchFailed || response?.timedOut) normalized.error ??= `${seat} transport unavailable`;
+        reportEvent(reporter, runId, 'plan', seat === 'claude' ? 'proposal' : 'review', {
+          tier, speaker: seat, role: seat === 'claude' ? 'author' : 'reviewer', round: request.state.proposalCycles,
+          content: normalized.content, artifactDigest: request.state.artifactDigest,
+        });
+        return normalized;
+      }])),
+      renderInput: request => {
+        const r = requestFor(request);
+        return [dialoguePromptText(strategy.renderInput?.(r) ?? ''), `Requested action: ${request.action}.`,
+          proposal ? `CURRENT ARTIFACT\n${strategy.proposalText?.(proposal) ?? JSON.stringify(proposal)}` : '',
+          'Conversation-only answers, rebuttals and questions must not emit or apply revised artifacts. Only propose/revise returns complete artifact tags.'].join('\n\n');
+      },
+      revise: ({ state, response }) => {
+        checkContext(session);
+        try { proposal = strategy.parseProposal(response); }
+        catch (error) {
+          if (!(error instanceof RepairableArtifactError)) throw error;
+          return { artifactDigest: state.artifactDigest, snapshot: state.snapshot, response,
+            artifactRepair: { reason: error.message } };
+        }
+        return { artifactDigest: planningArtifactDigest(requirements, proposal), snapshot: state.snapshot,
+          response: canonicalPlanningArtifact(proposal) };
+      },
+      persist: ({ state }) => {
+        checkContext(session);
+        const path = join(directory, '__uro_context', `${state.snapshot.id}.json`);
+        if (!session.contextPaths.has(path)) {
+          persistSharedContext({ directory, snapshot: state.snapshot });
+          session.contextPaths.set(path, digestBytes(path));
+        }
+      },
+    });
+    state = result.state;
+    checkContext(session);
+    promoteMemory(session, state);
+    const approval = result.approved ? { artifactDigest: state.artifactDigest, contextDigest: state.snapshot.digest,
+      basis: humanAction === 'approve' ? 'human' : interactionMode === 'manual' ? 'consensus' : 'reviewer',
+      decidedBy: humanAction === 'approve' ? 'human' : 'codex',
+      reason: state.messages.find(m => m.id === state.approval?.messageId)?.content ?? result.reason } : null;
+    const pendingDecision = state.pendingDecision ? { ...state.pendingDecision,
+      id: `${state.pendingDecision.messageId}:decision`, question: state.pendingDecision.reason } : null;
+    const messages = session.journal.read().filter(e => e.type === 'prepare' && ['provider', 'repair'].includes(e.effect)).map(operation => {
+      const transport = session.journal.operation(operation.operationId)?.result ?? {};
+      const message = state.messages.find(m => m.operationId === operation.operationId);
+      const content = transport.agentMessages?.length ? transport.agentMessages.join('\n\n')
+        : message?.content ?? transport.content ?? transport.answer ?? transport.lastMessage ?? '';
+      return { ...message, speaker: operation.seat, role: operation.seat === 'claude' ? 'author' : 'reviewer',
+        content, transport, ...(transport.error ? { error: transport.error } : {}),
+        stance: transport.error ? 'unavailable' : /AGREE:\s*no/i.test(content) ? 'disagree' : 'agree',
+        ...(message?.action === 'stop' ? { decision: 'stop' } : {}) };
+    });
+    messages.push(...state.messages.filter(m => m.sender === 'human'));
+    const tail = session.journal.read().at(-1);
+    const checkpointState = { version: 2, phase: 'planning', tier, runId, interactionMode, requirements,
+      proposal: canonicalPlanningArtifact(proposal), artifactDigest: state.artifactDigest, approval,
+      dialogue: state, directory, roundsLimit: rounds ?? null, pendingDecision,
+      messages, artifactRepairs: state.artifactRepairs ?? 0, roundHistory: [], memoryDirectory: session.memory.directory, artifactRoot: session.artifactRoot,
+      journalIdentity: { sequence: tail.sequence, hash: tail.hash }, recall: session.recall,
+      ...(continuation?.candidateState ? { candidateState: continuation.candidateState } : {}) };
+    // The live journal owner must never be archived or retained as a stale controller lock.
+    const resources = session.journal.account();
+    session.journal.close();
+    const planningArtifacts = planningSidecarManifest({ directory, runId, contextDigest: state.snapshot.digest });
+    if (approval) approval.sidecarDigest = contextDigest({ manifest: planningArtifacts });
+    const written = result.approved ? await strategy.writeConverged(proposal) : {};
+    if (approval) reportEvent(reporter, runId, 'plan', 'agreement', {
+      tier, artifactDigest: state.artifactDigest, approval, approved: true, converged: approval.basis === 'consensus',
+    });
+    reportEvent(reporter, runId, 'plan', 'finish', { tier, approved: result.approved, rounds: result.rounds });
+    return { ...result, ...written, messages, pendingDecision, runId, directory, artifactDigest: state.artifactDigest,
+      approved: result.approved, converged: approval?.basis === 'consensus',
+      reason: result.action === 'needs-decision' ? 'needs-decision' : result.action === 'stop' ? 'reviewer-stopped'
+        : result.reason.startsWith('provider failed:') ? `${state.pendingOperation?.seat === 'claude' ? 'author' : 'reviewer'}-unavailable` : result.reason, approval,
+      checkpointState, sharedContext: state.snapshot, dialogue: state, resources, planningArtifacts,
+      tokens: { total: result.resources.knownUsage, usageUnknown: result.resources.usageUnknown },
+      roundHistory: [], recall: session.recall };
+  } finally { session.journal.close(); }
+}

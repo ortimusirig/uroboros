@@ -79,6 +79,7 @@ export function parseCodexStream(streamText) {
   const seen = new Set();
   const changedFiles = [];
   const agentMessages = [];
+  const toolObservations = [];
   let lastMessage = '';
   // Null until a turn.completed line actually carries a usage field: nothing
   // was accounted yet, and that must never be reported as a fake zero.
@@ -94,6 +95,7 @@ export function parseCodexStream(streamText) {
     }
     if (o.type !== 'item.completed' || !o.item) continue;
     const it = o.item;
+    if (it.type === 'command_execution') toolObservations.push({ provider: 'codex', eventType: o.type, item: structuredClone(it) });
     if (it.type === 'file_change' && Array.isArray(it.changes)) {
       for (const c of it.changes) {
         if (c && typeof c.path === 'string' && !seen.has(c.path)) { seen.add(c.path); changedFiles.push(c.path); }
@@ -103,7 +105,7 @@ export function parseCodexStream(streamText) {
       lastMessage = it.text;
     }
   }
-  return { changedFiles, lastMessage, agentMessages, usage };
+  return { changedFiles, lastMessage, agentMessages, usage, ...(toolObservations.length ? { toolObservations } : {}) };
 }
 
 function createIncrementalReporter({
@@ -285,11 +287,13 @@ export async function runExecutor({
     onAgentMessage: (message) => { lastAgentMessage = message; },
   });
   let r;
+  let delivery = null;
   try {
     r = await spawnCapture(bin, args, {
       cwd,
       env: launchEnv,
       input: plan,
+      onInputSubmitted: receipt => { delivery = receipt; },
       timeoutMs: resolvedTimeoutMs,
       signal,
       beforeKill,
@@ -348,6 +352,7 @@ export async function runExecutor({
   const parsed = parseCodexStream(r.stdout);
   const result = annotateUsageConsistency({
     ...parsed,
+    stdout: r.stdout, delivery,
     exitCode: r.code,
     timedOut: r.timedOut,
     // When the executor dies, its stderr is usually the only account of why.
