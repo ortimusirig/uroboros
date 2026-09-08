@@ -380,6 +380,8 @@ Task3's planning directory/journal is durable for one run identity. Allocate dis
 
 Reuse Task3 notebook lifecycle for execution work items and execution-derived memory proposals: either seat may propose; the harness validates provenance/evidence/disposition before writing. Retain selected history in execution/replan snapshots. Do not leave notebook recall or promotion disconnected from the real run path.
 
+Task4 may make the narrow shared-lifecycle export/integration change in src/planning-dialogue.js needed to reuse its existing openPlanningContext and private promoteMemory helper from execution. Preserve existing planning behavior and shared validation; do not duplicate weaker notebook promotion logic or invoke planning providers merely to obtain a memory write. Cover execution recall/promotion through the real execution entry point and retain the existing planning tests.
+
 - [ ] **Step 4: GREEN focused and whole suite.**
 ~~~powershell
 node --test test/execution-dialogue.test.js test/run.test.js test/review-loop.test.js test/reviewer-gate.test.js test/gate.test.js test/fresh-pivot.test.js test/claude-review-transport.test.js test/review-protection.test.js test/verifier-evidence.test.js test/executor.test.js test/decision-resolver.test.js
