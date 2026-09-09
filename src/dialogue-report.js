@@ -20,10 +20,21 @@ function messageContent(message) {
 }
 
 function locatorText(locator) {
-  if (typeof locator === 'string') return screenText(locator);
-  if (!locator || typeof locator !== 'object') return 'not recorded';
-  const path = typeof locator.path === 'string' ? locator.path : locator.url;
-  return `${scalar(path)}${Number.isSafeInteger(locator.line) ? `:${locator.line}` : ''}`;
+  const raw = typeof locator === 'string' ? locator
+    : locator && typeof locator === 'object' ? (typeof locator.path === 'string' ? locator.path : locator.url) : null;
+  let displayed = raw;
+  if (typeof raw === 'string') {
+    try {
+      const parsed = new URL(raw);
+      if (['https:', 'http:'].includes(parsed.protocol)) {
+        parsed.username = '';
+        parsed.password = '';
+        displayed = parsed.href;
+      }
+    } catch { /* local paths and opaque references remain plain screened text */ }
+  }
+  const line = locator && typeof locator === 'object' && Number.isSafeInteger(locator.line) ? `:${locator.line}` : '';
+  return `${scalar(displayed)}${line}`;
 }
 
 function evidenceState(evidence) {
@@ -35,6 +46,129 @@ function evidenceState(evidence) {
 function valuesOf(value) {
   if (Array.isArray(value)) return value;
   return value && typeof value === 'object' ? Object.values(value) : [];
+}
+
+function textFields(value, fields) {
+  if (!value || typeof value !== 'object') return null;
+  const result = {};
+  for (const field of fields) {
+    if (value[field] !== undefined && value[field] !== null) result[field] = screenText(value[field]);
+  }
+  return result;
+}
+
+function booleanField(result, value, field) {
+  if (typeof value?.[field] === 'boolean') result[field] = value[field];
+}
+
+function numberField(result, value, field) {
+  if (Number.isFinite(value?.[field])) result[field] = value[field];
+}
+
+function normalizeLocator(locator) {
+  if (typeof locator === 'string') return locatorText(locator);
+  if (!locator || typeof locator !== 'object') return null;
+  const result = {};
+  if (typeof locator.path === 'string') result.path = screenText(locator.path);
+  if (typeof locator.url === 'string') result.url = locatorText(locator.url);
+  if (Number.isSafeInteger(locator.line)) result.line = locator.line;
+  return result;
+}
+
+function normalizeClaim(claim) {
+  const result = textFields(claim, ['id', 'kind', 'status', 'text']) ?? {};
+  if (Array.isArray(claim?.evidenceIds)) result.evidenceIds = claim.evidenceIds.map(screenText);
+  return result;
+}
+
+function normalizeVerification(verification) {
+  const result = textFields(verification, ['result', 'claimId', 'seat', 'reason']) ?? {};
+  if (Array.isArray(verification?.evidenceIds)) result.evidenceIds = verification.evidenceIds.map(screenText);
+  if (Array.isArray(verification?.inspectionReceiptIds)) {
+    result.inspectionReceiptIds = verification.inspectionReceiptIds.map(screenText);
+  }
+  return result;
+}
+
+function normalizeDisposition(disposition, issueId) {
+  const result = textFields(disposition, ['issueId', 'kind', 'disposition', 'status', 'by', 'decidedBy', 'reason']) ?? {};
+  if (result.issueId === undefined && issueId !== undefined) result.issueId = screenText(issueId);
+  if (Array.isArray(disposition?.claimIds)) result.claimIds = disposition.claimIds.map(screenText);
+  return result;
+}
+
+function normalizeIssue(issue) {
+  const result = textFields(issue, ['id', 'status', 'title']) ?? {};
+  booleanField(result, issue, 'blocking');
+  return result;
+}
+
+function normalizeMessage(message) {
+  const result = textFields(message, ['sender', 'speaker', 'provider', 'action', 'role', 'phase']) ?? {};
+  if (message?.recordedContent || message?.content !== undefined) result.content = messageContent(message);
+  booleanField(result, message, 'historical');
+  if (message?.delivery && typeof message.delivery === 'object') {
+    result.delivery = textFields(message.delivery, ['status']);
+  } else if (message?.delivery !== undefined && message.delivery !== null) {
+    result.delivery = screenText(message.delivery);
+  }
+  const references = Array.isArray(message?.evidenceIds) ? message.evidenceIds
+    : Array.isArray(message?.evidence) ? message.evidence : null;
+  if (references) result.evidenceIds = references.map(reference => screenText(
+    typeof reference === 'string' ? reference : reference?.id,
+  ));
+  if (Array.isArray(message?.claims)) result.claims = message.claims.map(normalizeClaim);
+  if (Array.isArray(message?.verifications)) result.verifications = message.verifications.map(normalizeVerification);
+  return result;
+}
+
+function normalizeEvidence(evidence) {
+  const result = textFields(evidence, ['id', 'kind', 'status', 'sourceDigest']) ?? {};
+  booleanField(result, evidence, 'missing');
+  booleanField(result, evidence, 'observed');
+  if (evidence?.locator !== undefined) result.locator = normalizeLocator(evidence.locator);
+  return result;
+}
+
+function normalizeReceipt(receipt) {
+  const result = textFields(receipt, ['id', 'seat', 'evidenceId', 'result']) ?? {};
+  booleanField(result, receipt, 'observed');
+  if (Array.isArray(receipt?.evidenceIds)) result.evidenceIds = receipt.evidenceIds.map(screenText);
+  return result;
+}
+
+function normalizeResources(resources) {
+  if (!resources || typeof resources !== 'object') return null;
+  const result = {};
+  for (const field of ['providerLaunches', 'repairLaunches', 'failedLaunches']) numberField(result, resources, field);
+  for (const field of ['usageUnknown', 'launchesUnknown']) booleanField(result, resources, field);
+  if (resources.knownUsage && typeof resources.knownUsage === 'object') {
+    result.knownUsage = {};
+    for (const field of ['inputTokens', 'outputTokens']) numberField(result.knownUsage, resources.knownUsage, field);
+  }
+  return result;
+}
+
+function normalizeSnapshot(snapshot) {
+  if (!snapshot || typeof snapshot !== 'object') return null;
+  const result = textFields(snapshot, ['digest']) ?? {};
+  if (snapshot.completeness && typeof snapshot.completeness === 'object') {
+    result.completeness = {};
+    booleanField(result.completeness, snapshot.completeness, 'complete');
+    if (Array.isArray(snapshot.completeness.reasons)) {
+      result.completeness.reasons = snapshot.completeness.reasons.map(screenText);
+    }
+  }
+  result.entries = Array.isArray(snapshot.entries)
+    ? snapshot.entries.map(entry => textFields(entry, ['id', 'kind', 'status', 'content', 'reference']) ?? {}) : [];
+  result.recalled = Array.isArray(snapshot.recalled) ? snapshot.recalled.map(item => {
+    const recalled = textFields(item, ['versionId', 'id', 'logicalId', 'entryId', 'status', 'attribution']) ?? {};
+    if (item?.provenance && typeof item.provenance === 'object') {
+      recalled.provenance = textFields(item.provenance, ['seat']);
+    }
+    return recalled;
+  }) : [];
+  return result;
 }
 
 function resourceLine(label, resources) {
@@ -55,37 +189,43 @@ function resourceLine(label, resources) {
 export function normalizeDialogueProjection(input = {}) {
   const dialogue = input.dialogue && typeof input.dialogue === 'object' ? input.dialogue : input;
   const checkpoint = input.checkpointState && typeof input.checkpointState === 'object' ? input.checkpointState : {};
-  const snapshot = dialogue.snapshot ?? input.snapshot ?? null;
-  const approval = input.approval ?? dialogue.approval ?? null;
-  const next = input.next ?? dialogue.next ?? null;
-  const issues = valuesOf(dialogue.issues);
+  const rawSnapshot = dialogue.snapshot ?? input.snapshot ?? null;
+  const rawApproval = Object.hasOwn(input, 'approval') ? input.approval : dialogue.approval ?? null;
+  const rawNext = input.next ?? dialogue.next ?? null;
+  const rawIssues = valuesOf(dialogue.issues);
+  const issues = rawIssues.map(normalizeIssue);
+  const rawReceipts = valuesOf(dialogue.inspectionReceipts).length
+    ? valuesOf(dialogue.inspectionReceipts) : valuesOf(dialogue.receipts);
   return {
-    phase: input.phase ?? dialogue.phase ?? checkpoint.phase ?? null,
-    authority: input.authority ?? dialogue.authority ?? null,
-    interactionMode: input.interactionMode ?? dialogue.interactionMode ?? null,
-    approved: input.approved ?? dialogue.approved ?? (approval ? true : null),
-    approval,
-    reason: input.reason ?? dialogue.reason ?? checkpoint.reason ?? null,
-    next: next && typeof next === 'object' ? next : null,
-    nextAction: input.nextAction ?? dialogue.nextAction ?? next?.action ?? checkpoint.action ?? null,
-    snapshot,
-    messages: Array.isArray(dialogue.messages) ? dialogue.messages : Array.isArray(input.messages) ? input.messages : [],
-    evidence: Array.isArray(dialogue.evidence) ? dialogue.evidence : Array.isArray(input.evidence) ? input.evidence : [],
-    claims: valuesOf(dialogue.claims),
-    verifications: valuesOf(dialogue.verifications),
+    phase: scalar(input.phase ?? dialogue.phase ?? checkpoint.phase ?? null, null),
+    authority: scalar(input.authority ?? dialogue.authority ?? null, null),
+    interactionMode: scalar(input.interactionMode ?? dialogue.interactionMode ?? null, null),
+    approved: input.approved ?? dialogue.approved ?? (rawApproval ? true : null),
+    approval: textFields(rawApproval, ['seat', 'decidedBy', 'messageId', 'artifactDigest', 'contextDigest', 'basis', 'reason']),
+    reason: scalar(input.reason ?? dialogue.reason ?? checkpoint.reason ?? null, null),
+    next: textFields(rawNext, ['seat', 'action', 'reason']),
+    nextAction: scalar(input.nextAction ?? dialogue.nextAction ?? rawNext?.action ?? checkpoint.action ?? null, null),
+    snapshot: normalizeSnapshot(rawSnapshot),
+    messages: (Array.isArray(dialogue.messages) ? dialogue.messages
+      : Array.isArray(input.messages) ? input.messages : []).map(normalizeMessage),
+    evidence: (Array.isArray(dialogue.evidence) ? dialogue.evidence
+      : Array.isArray(input.evidence) ? input.evidence : []).map(normalizeEvidence),
+    claims: valuesOf(dialogue.claims).map(normalizeClaim),
+    verifications: valuesOf(dialogue.verifications).map(normalizeVerification),
     issues,
-    dispositions: [...valuesOf(dialogue.dispositions), ...issues.filter(issue => issue?.disposition)
-      .map(issue => ({ issueId: issue.id, ...issue.disposition }))],
-    inspectionReceipts: valuesOf(dialogue.inspectionReceipts).length
-      ? valuesOf(dialogue.inspectionReceipts) : valuesOf(dialogue.receipts),
-    resources: input.resources ?? checkpoint.resources ?? dialogue.resources ?? null,
-    phaseResources: checkpoint.phaseResources ?? input.phaseResources ?? null,
+    dispositions: [...valuesOf(dialogue.dispositions).map(item => normalizeDisposition(item)),
+      ...rawIssues.filter(issue => issue?.disposition).map(issue => normalizeDisposition(issue.disposition, issue.id))],
+    inspectionReceipts: rawReceipts.map(normalizeReceipt),
+    resources: normalizeResources(input.resources ?? checkpoint.resources ?? dialogue.resources ?? null),
+    phaseResources: normalizeResources(checkpoint.phaseResources ?? input.phaseResources ?? null),
     phaseChain: Array.isArray(checkpoint.phaseChain) ? checkpoint.phaseChain
-      : Array.isArray(input.phaseChain) ? input.phaseChain : [],
-    queueResources: input.queueResult?.resources ?? input.queueResources ?? null,
-    pendingDecision: dialogue.pendingDecision ?? null,
-    technicalPause: dialogue.technicalPause ?? checkpoint.technicalPause ?? null,
-    recall: input.recall ?? checkpoint.recall ?? null,
+      .map(phase => ({ ...(textFields(phase, ['phase', 'runId', 'action']) ?? {}), resources: normalizeResources(phase.resources) }))
+      : Array.isArray(input.phaseChain) ? input.phaseChain
+        .map(phase => ({ ...(textFields(phase, ['phase', 'runId', 'action']) ?? {}), resources: normalizeResources(phase.resources) })) : [],
+    queueResources: normalizeResources(input.queueResult?.resources ?? input.queueResources ?? null),
+    pendingDecision: textFields(dialogue.pendingDecision, ['reason', 'question']),
+    technicalPause: textFields(dialogue.technicalPause ?? checkpoint.technicalPause, ['reason']),
+    recall: textFields(input.recall ?? checkpoint.recall, ['status', 'detail', 'reason']),
   };
 }
 
@@ -181,10 +321,13 @@ function escapeHtml(value) {
 
 function safeExternalHref(locator) {
   const raw = typeof locator === 'string' ? locator : locator?.url;
-  if (typeof raw !== 'string' || screenText(raw) !== raw) return null;
+  if (typeof raw !== 'string') return null;
   try {
     const parsed = new URL(raw);
-    return ['https:', 'http:'].includes(parsed.protocol) ? parsed.href : null;
+    if (!['https:', 'http:'].includes(parsed.protocol)) return null;
+    parsed.username = '';
+    parsed.password = '';
+    return screenText(parsed.href) === parsed.href ? parsed.href : null;
   } catch { return null; }
 }
 

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { renderDialogueHtml, renderDialogueReport } from '../src/dialogue-report.js';
+import { normalizeDialogueProjection, renderDialogueHtml, renderDialogueReport } from '../src/dialogue-report.js';
 
 function fixture() {
   return {
@@ -82,4 +82,58 @@ test('dialogue HTML escapes model text, permits only safe source hrefs, and sepa
   const unsafe = renderDialogueHtml({ ...fixture(), evidence: [{ id: 'bad', kind: 'external', locator: { url: 'javascript:alert(1)' } }] });
   assert.doesNotMatch(unsafe, /href="javascript:/);
   assert.match(unsafe, /javascript:alert\(1\)/);
+});
+
+test('normalized dialogue is a fresh deep allowlist and stays stable when normalized again', () => {
+  const source = fixture();
+  source.approval.privateCredential = 'approval-secret';
+  source.next.privateOptions = { token: 'next-secret' };
+  source.snapshot.privateOptions = { token: 'snapshot-secret' };
+  source.snapshot.entries[0].privateCredential = 'entry-secret';
+  source.snapshot.recalled[0].provenance = { seat: 'claude', privateCredential: 'recall-secret' };
+  source.messages[0].credential = 'message-secret';
+  source.messages[0].delivery.privateCredential = 'delivery-secret';
+  source.messages[1].claims[0].privateCredential = 'claim-secret';
+  source.messages[4].verifications[0].privateCredential = 'verification-secret';
+  source.evidence[0].privateCredential = 'evidence-secret';
+  source.evidence[0].locator.privateCredential = 'locator-secret';
+  source.issues.I1.privateCredential = 'issue-secret';
+  source.issues.I1.disposition.privateCredential = 'disposition-secret';
+  source.inspectionReceipts.R1.privateCredential = 'receipt-secret';
+  source.resources.privateCredential = 'resources-secret';
+  source.phaseChain[0].privateCredential = 'phase-secret';
+  source.pendingDecision = { reason: 'Need a ruling', privateCredential: 'decision-secret' };
+  source.technicalPause = { reason: 'Need reconciliation', privateCredential: 'pause-secret' };
+  source.recall = { status: 'fallback', reason: 'search unavailable', privateCredential: 'search-secret' };
+
+  const projection = normalizeDialogueProjection(source);
+  assert.notEqual(projection.snapshot, source.snapshot);
+  assert.notEqual(projection.messages[0], source.messages[0]);
+  assert.notEqual(projection.resources, source.resources);
+  assert.equal(JSON.stringify(projection).includes('secret'), false,
+    'unknown/private nested producer fields must not survive in the display carrier');
+  assert.deepEqual(Object.keys(projection.snapshot).sort(), ['completeness', 'digest', 'entries', 'recalled']);
+  assert.deepEqual(Object.keys(projection.messages[0]).sort(),
+    ['action', 'content', 'delivery', 'evidenceIds', 'phase', 'sender']);
+  assert.deepEqual(Object.keys(projection.evidence[0]).sort(), ['id', 'kind', 'locator', 'sourceDigest']);
+  assert.deepEqual(Object.keys(projection.resources).sort(),
+    ['failedLaunches', 'knownUsage', 'providerLaunches', 'repairLaunches', 'usageUnknown']);
+  assert.deepEqual(normalizeDialogueProjection(projection), projection,
+    'dashboard-to-render normalization must preserve the complete allowlisted view');
+});
+
+test('URL userinfo is absent from Markdown and HTML for string and object locators', () => {
+  for (const locator of [
+    'https://alice:fake-secret@example.test/spec',
+    { url: 'https://alice:fake-secret@example.test/spec' },
+  ]) {
+    const input = { ...fixture(), evidence: [{ id: 'userinfo', kind: 'external', locator }] };
+    const markdown = renderDialogueReport(input);
+    const html = renderDialogueHtml(input);
+    for (const rendered of [markdown, html]) {
+      assert.doesNotMatch(rendered, /alice|fake-secret/);
+      assert.match(rendered, /https:\/\/example[.]test\/spec/);
+    }
+    assert.doesNotMatch(html, /href="https:\/\/alice:/);
+  }
 });

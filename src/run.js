@@ -2598,8 +2598,30 @@ export async function run(opts) {
   if (nativeExecution) {
     try { refreshReportProjection({ dir: iso.dir, facts }); }
     catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
       facts.artifacts = { ...(facts.artifacts ?? {}), status: 'failed',
-        refresh: { status: 'failed', error: error instanceof Error ? error.message : String(error) } };
+        refresh: { status: 'failed', error: message } };
+      facts.approved = false;
+      facts.approval = null;
+      facts.outcome = 'needs-pivot';
+      facts.nextAction = 'paused';
+      facts.reason = `required final presentation refresh failed: ${message}`;
+      if (facts.checkpointState) Object.assign(facts.checkpointState, {
+        approved: false,
+        action: 'paused',
+        reason: facts.reason,
+        requiredPresentationFailure: facts.artifacts.refresh,
+      });
+      const durableDirectory = facts.artifacts.directory;
+      if (typeof durableDirectory === 'string') {
+        try { refreshReportProjection({ dir: durableDirectory, facts }); }
+        catch (durableError) {
+          facts.artifacts.refresh.durable = {
+            status: 'failed',
+            error: durableError instanceof Error ? durableError.message : String(durableError),
+          };
+        }
+      }
       try { writeFileSync(join(iso.dir, 'uro-runfacts.json'), JSON.stringify(facts, null, 2)); }
       catch { /* final presentation failure is retained in memory */ }
     }

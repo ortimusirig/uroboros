@@ -184,3 +184,91 @@ matrix; known-pattern credential screening is not universal DLP; native event
 emission is not inferred from schema constructors; a missing special replan command is not invented;
 live-provider comprehension/smoke, actual plugin installation, marketplace state, publication,
 push, merge, and release remain unperformed.
+
+## Task 6 scoped review fix round 1
+
+Independent review of commit `16e99563a1b8be16a7899e3abe6a58356a5f1f5f` returned three
+Important findings, all addressed within the existing projection/report/run ownership. No guide,
+provider/model default, version, approval authority, retention authority, event vocabulary,
+archive/index lifecycle, recovery/accounting behavior, or operational/release path changed.
+
+### Root cause and implementation
+
+- `normalizeDialogueProjection` copied producer-owned nested objects into the client display carrier.
+  It now creates fresh objects and arrays at every level using explicit display-field allowlists for
+  context/recall, messages and delivery, evidence locators, claims, assessments, inspection receipts,
+  issues/dispositions, approval/next/pause state, and cumulative/phase/history/queue resources.
+  Display text is screened before entering the normalized carrier, and normalizing an already
+  normalized carrier is stable without duplicate derived dispositions.
+- URL safety previously checked only the HTTP(S) scheme. String and object locators now remove URL
+  username/password before either visible labels or links are formed. Known credential patterns are
+  still screened, local code paths remain text, and ordinary credential-free HTTP(S) links remain
+  usable.
+- The post-archive source refresh catch recorded an artifact error but retained `review-ready`,
+  approval, and an already-created durable successful report. A required final refresh failure now
+  clears current approval, returns `needs-pivot` with `paused` next action, updates the current
+  checkpoint state and source JSON, and refreshes the already-created durable JSON/Markdown from the
+  same failed facts. If that durable refresh is itself unavailable, the existing refresh helper
+  removes its Markdown rather than leaving stale success visible. This is presentation finalization
+  only: the archive/index pass is not repeated and no event/provider/Git/recovery/resource effect is
+  introduced.
+
+### TDD and verification receipts
+
+Every fix-round wrapper used the process-local deny PATH and
+`URO_TEST_PROVIDER_DENIAL_LOG=...\outputs\coworker-task-6-fix1-provider-denials.log`.
+`outputs/coworker-task-6-fix1-red.tap` is retained but is not a valid combined RED receipt: its first
+version of the filesystem fault injector passed a numeric file descriptor to `path.resolve`, so the
+run failure was a test-injector error. It was corrected before production edits; no receipt was
+overwritten.
+
+| Stage | Command | Raw receipt | True result |
+| --- | --- | --- | --- |
+| Valid combined RED | `node --test --test-reporter=tap test/dialogue-report.test.js test/run-artifacts.test.js` | `outputs/coworker-task-6-fix1-red-valid.tap` plus separate `.stdout.txt`/`.stderr.txt` | exit 1; 8/11, exactly three intended failures: raw nested reference, URL userinfo disclosure, and actual `review-ready` after final source write failure |
+| Projection GREEN attempt | `node --test --test-reporter=tap test/dialogue-report.test.js test/dashboard-transcript.test.js test/report.test.js` | `outputs/coworker-task-6-fix1-projection-green.tap` plus separate streams | exit 1; 36/37; repeated normalization duplicated the issue-derived disposition |
+| Projection GREEN | same | `outputs/coworker-task-6-fix1-projection-green-2.tap` plus separate streams | exit 0; 37/37, zero fail/skip/cancel/todo |
+| Combined focused GREEN | `node --test --test-reporter=tap test/dialogue-report.test.js test/run-artifacts.test.js` | `outputs/coworker-task-6-fix1-focused-green.tap` plus separate streams | exit 0; 11/11, zero fail/skip/cancel/todo |
+| Affected GREEN | `node --test --test-reporter=tap test/dialogue-report.test.js test/conversation-rendering.test.js test/report.test.js test/dashboard-transcript.test.js test/run-journal.test.js test/artifact-retention.test.js test/run-artifacts.test.js` | `outputs/coworker-task-6-fix1-affected.tap` plus separate streams | exit 0; 73/73, zero fail/skip/cancel/todo; 48897.9891 ms |
+| Final whole suite | `node --test --test-reporter=tap` | `outputs/coworker-task-6-fix1-full-final.tap` plus separate streams | exit 0; 1518/1518 (1486 top-level plus 32 nested), zero fail/skip/cancel/todo; 1778375.5629 ms |
+
+The frozen fix source identity is
+`outputs/coworker-task-6-fix1-final-source-hashes.txt`, covering the two production and two test
+files against base/HEAD `16e99563a1b8be16a7899e3abe6a58356a5f1f5f`. The final invocation,
+deny-log value, and resolved `codex.cmd`/`claude.cmd` shim paths are retained in
+`outputs/coworker-task-6-fix1-final-invocation.txt`.
+
+The frozen source inventory still matches 4/4 after the full gate; its SHA256 is
+`D8200BC7DB754D8A84B257EA51ED1B334FA3357B3A9265496C92C973E00C1539`. The final combined TAP
+SHA256 is `59EE384CE7B28CCA244FB2D7A06E980014FB3F9EDC11D996C1795F3E2346B956`, its stdout SHA256 is
+`63976BBAB95872EFBD620317F44F50C4EF86D9265665D12D55B4D7972C32BA2B`, and its stderr is the
+zero-byte empty-file hash. The actual `not ok`/operational-warning scan was empty. The correctly
+configured provider-denial log is also zero bytes, proving no guarded shim was reached. All
+fix-round raw/stdout/stderr receipt hashes are listed in
+`outputs/coworker-task-6-fix1-receipt-hashes.txt` (SHA256
+`6F7DD894348D486BCEF587BB1E8C37C29F2A09A3696C96A2EB5D82F5331D15F8`).
+
+The fix-round dry runs are `outputs/coworker-task-6-fix1-install-dry-run.txt`,
+`outputs/coworker-task-6-fix1-help.txt`, and `outputs/coworker-task-6-fix1-pack-dry-run.txt`; each
+underlying command returned exit 0. Install validation remained 15 commands/1 skill and 256 source
+files with no writes/self-test. Help retained the established syntax. Pack retained 353 entries and
+no bundle. Its separate stderr truthfully retains the deferred `npm warn gitignore-fallback`; no
+`.npmignore` change is part of this fix. The PowerShell orchestration wrapper printed an aggregation
+type error after all three child receipts were finalized; that wrapper error does not replace their
+individually recorded true exits and is not presented as a clean wrapper run.
+
+Fresh instruction application remains bound to unchanged skill SHA256
+`1A07C85F7721CDBB45CBDBD572D6D658CA4475F4F73042DDF6960E4D44D72B48`; the guide and skill were
+not changed in this round, so the prior three-scenario receipt remains applicable. Whole-branch
+acceptance remains pending the controller's scoped fix review and independent final review. No live
+provider, installation, authentication/global-setting change, publication, version change, push,
+merge, or release was performed.
+
+Fix-round self-review checked every review finding against the final diff; mutation checks cover a
+returned producer reference/unknown nested key, URL userinfo in either locator shape, duplicated
+derived disposition on repeated normalization, retained review-ready/approval after the injected
+final write fault, stale durable success, and a second archive/index pass. It also checked current
+approval precedence, safe links/local path text, source/durable JSON, checkpoint pause state, true
+exit mapping, healthy run archival, legacy JSON-only archival, no duplicate report event, and the
+unchanged version/instruction boundary. Working and staged diff checks, exact owned staging, and the
+local fix commit are the remaining mechanical handoff steps; the immutable commit is returned with
+this report rather than self-referenced from within it.

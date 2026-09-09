@@ -9,6 +9,8 @@ import {
   rmSync,
   writeFileSync,
 } from 'node:fs';
+import fs from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
@@ -222,6 +224,71 @@ test('run pauses when required native archive retention fails while preserving i
       'failed required retention must prevent onward success');
   } finally {
     rmSync(scratchRoot, { recursive: true, force: true });
+  }
+});
+
+test('final post-archive presentation failure pauses the run and replaces durable success', async t => {
+  const scratchRoot = temporaryDirectory('final-presentation-');
+  const artifactRoot = temporaryDirectory('final-presentation-records-');
+  const runId = '2026-08-29T07-30-00-000Z-final-presentation';
+  const sourceReport = join(scratchRoot, runId, 'w', 'uro-report.md');
+  const durableDirectory = join(artifactRoot, runId);
+  const durableFacts = join(durableDirectory, 'uro-runfacts.json');
+  const originalWrite = fs.writeFileSync;
+  let faultCount = 0;
+  const restoreWrite = () => {
+    fs.writeFileSync = originalWrite;
+    syncBuiltinESMExports();
+  };
+  t.after(() => {
+    restoreWrite();
+    rmSync(scratchRoot, { recursive: true, force: true });
+    rmSync(artifactRoot, { recursive: true, force: true });
+  });
+
+  fs.writeFileSync = function(path, ...args) {
+    let durableFinalized = false;
+    try { durableFinalized = JSON.parse(readFileSync(durableFacts, 'utf8')).artifacts?.status === 'ok'; }
+    catch { /* archive has not persisted final facts yet */ }
+    if (typeof path === 'string' && resolve(path) === resolve(sourceReport) && durableFinalized) {
+      faultCount += 1;
+      throw new Error('injected final source presentation write failure');
+    }
+    return originalWrite.call(this, path, ...args);
+  };
+  syncBuiltinESMExports();
+
+  let facts;
+  try {
+    facts = await run({
+      task: 'change a.txt', target: 'adapter-target', gate: [], gateRetries: 0,
+      scratchRoot, artifactRoot, runId, env: {}, adapters: adapters(scratchRoot, runId),
+    });
+  } finally { restoreWrite(); }
+
+  assert.equal(faultCount, 1, 'fault belongs only to the final source refresh after durable final facts');
+  assert.equal(facts.outcome, 'needs-pivot');
+  assert.equal(facts.approved, false);
+  assert.equal(facts.approval, null);
+  assert.equal(facts.nextAction, 'paused');
+  assert.match(facts.reason, /required final presentation refresh failed/i);
+  assert.equal(facts.checkpointState.approved, false);
+  assert.equal(facts.checkpointState.action, 'paused');
+  assert.notEqual(exitCodeFor(facts.outcome), 0);
+  const sourceFacts = JSON.parse(readFileSync(join(facts.dir, 'uro-runfacts.json'), 'utf8'));
+  const retainedFacts = JSON.parse(readFileSync(durableFacts, 'utf8'));
+  for (const saved of [sourceFacts, retainedFacts]) {
+    assert.equal(saved.outcome, 'needs-pivot');
+    assert.equal(saved.approved, false);
+    assert.equal(saved.approval, null);
+    assert.equal(saved.checkpointState.action, 'paused');
+  }
+  for (const reportPath of [sourceReport, join(durableDirectory, 'uro-report.md')]) {
+    if (!existsSync(reportPath)) continue;
+    const report = readFileSync(reportPath, 'utf8');
+    assert.doesNotMatch(report, /Approved: yes|Approved: true/);
+    assert.doesNotMatch(report, /^Approval:/m, 'revoked current approval must not fall back to the dialogue history');
+    assert.match(report, /required final presentation refresh failed/i);
   }
 });
 
