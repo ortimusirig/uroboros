@@ -25,10 +25,12 @@ Use questions such as these to explain and challenge a proposed boundary:
 - Which requirement has no responsible task, and which proposed work has no supporting requirement?
 - Which dependencies, source anchors, decisions, and project context must travel with the task?
 
-These are conversation prompts, not mandatory rounds or a new pass/fail rubric. Evidence commands
-in `gate.json` record what happened for the seats to judge; their exit codes do not mechanically
-approve or reject a task. Reviewers may inspect additional authorized context rather than relying
-only on the proposer’s evidence selection.
+These are conversation prompts, not mandatory rounds or a new sizing pass/fail rubric. Evidence
+commands in `gate.json` record what happened for the seats to interpret rather than producing a
+size score or proving that a decomposition is ideal. Current required checks must still be complete,
+fresh, and successful before execution approval; the reviewer judges what that evidence establishes.
+Reviewers may inspect additional authorized context rather than relying only on the proposer’s
+evidence selection.
 
 ## Example: importing a finance statement
 
