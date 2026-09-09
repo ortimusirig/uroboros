@@ -10,8 +10,8 @@ import { assertCurrentPlanApproval, assertPlanOutputAvailable, resolveGoal } fro
 import { detectReview, reviewDigest } from './review.js';
 import { attachQueueCheckpoint, checkpointDigest, readCheckpoint, writeCheckpointAtomic } from './checkpoint.js';
 import { recoverQueueLanding } from './queue-runtime.js';
-import { assertPlanningSidecars } from './planning-dialogue.js';
-import { createSharedContext, persistSharedContext, readSharedContextReference } from './shared-context.js';
+import { assertPlanningSidecars, createPlanningHandoff, readPlanningHandoffReference, planningHistory } from './planning-dialogue.js';
+import { createSharedContext, extendSharedContext, persistSharedContext, readSharedContextReference } from './shared-context.js';
 import { resolveProjectIdentity } from './project-memory.js';
 
 const QUEUE_UNIT_KEYS = new Set(['name', 'task', 'gate', 'goal', 'out', 'tokenBudget', 'rounds']);
@@ -338,6 +338,35 @@ export async function continueQueue({ context, phaseResult, runDirectory, depend
     continuation: { ...context, phaseResult, runDirectory, journal, persistJournal }, dependencies });
 }
 
+function completedExecutionHandoff(entry) {
+  return entry.operationId && entry.launch?.runDirectory && entry.result?.approval?.artifactDigest ? {
+    operationId: entry.operationId, commit: entry.landing?.commit,
+    diffPath: join(entry.launch.runDirectory, 'CHANGES.diff'), artifactDigest: entry.result.approval.artifactDigest,
+  } : undefined;
+}
+
+// Delivery is distinct from the raw recovery journal: retain ordinary protocol
+// records and validated context, not transport/checkpoint/private option bags.
+function priorUnitContext({ entry, unit, target }) {
+  const fields = (value, keys) => Object.fromEntries(keys.filter(key => value?.[key] !== undefined
+    && (value[key] === null || typeof value[key] !== 'object')).map(key => [key, value[key]]));
+  const approval = value => fields(value, ['approved', 'decidedBy', 'basis', 'artifactDigest', 'contextDigest', 'sidecarDigest', 'messageId', 'reason']);
+  const reference = entry.executionContextRef ?? entry.contextRef;
+  const snapshot = reference ? readPlanningHandoffReference({ reference, target,
+    completedExecution: completedExecutionHandoff(entry) }) : null;
+  return {
+    unit: fields(unit, ['index', 'name', 'kind', 'goal', 'task', 'gate', 'out']),
+    ...fields(entry, ['operationId', 'logged']),
+    plan: { ...fields(entry.planResult, ['runId', 'approved', 'reason', 'planPath', 'gatePath']), approval: approval(entry.planResult?.approval) },
+    execution: { ...fields(entry.result, ['runId', 'outcome', 'approved', 'reason', 'phase', 'nextAction']),
+      approval: approval(entry.result?.approval),
+      ...(entry.result?.dialogue ? { history: planningHistory(entry.result.dialogue) } : {}) },
+    landing: fields(entry.landing, ['commit', 'landed', 'reason']),
+    judgement: fields(entry.judgement, ['approved', 'reasoning']),
+    ...(snapshot ? { context: snapshot } : {}),
+  };
+}
+
 // Exact generated files only. Never exempt the output directory or unrelated
 // untracked source; revalidate the saved plan receipt before each use.
 export function queueContinuationPaths(context) {
@@ -345,6 +374,10 @@ export function queueContinuationPaths(context) {
   for (const entry of Object.values(context.journal?.units ?? {})) if (entry.contextRef) {
     readSharedContextReference({ reference: entry.contextRef, target: context.options.target });
     paths.push(entry.contextRef.path);
+    if (entry.executionContextRef) {
+      readPlanningHandoffReference({ reference: entry.executionContextRef, target: context.options.target, completedExecution: completedExecutionHandoff(entry) });
+      paths.push(entry.executionContextRef.path);
+    }
   }
   for (const unit of context.queue.units.filter(unit => unit.kind === 'goal')) {
     const result = (unit.index === context.unitIndex ? (context.phase === 'planning' ? context.phaseResult : context.planResult) : null)
@@ -452,7 +485,7 @@ async function executeQueue({
     if (journal) journal.units ??= {};
     const unitJournal = journal ? (journal.units[unit.index] ??= {}) : {};
     const persist = persistQueue;
-    const childControls = () => {
+    const childControls = (execution = false) => {
       const parentRemaining = tokenBudget === undefined ? Infinity : tokenBudget - totalTokens.total;
       const itemRemaining = unit.tokenBudget === undefined ? Infinity : unit.tokenBudget - (totalTokens.total - beforeUnit.totalTokens.total);
       const remaining = Math.min(parentRemaining, itemRemaining);
@@ -465,7 +498,8 @@ async function executeQueue({
           unitId: `${journal.runId}:${unit.index}`, phase: 'queue', sourceRevision: queueFileDigest,
           entries: [{ id: 'requirements', kind: 'requirement', content: unit.goal ?? readFileSync(unit.task, 'utf8'),
             sourceIdentity: queueFileDigest, status: 'required', provenance: { origin: 'queue', unitIndex: unit.index } },
-          { id: 'prior-units', kind: 'queue-results', content: JSON.stringify(Object.entries(journal.units).filter(([id]) => Number(id) < unit.index)),
+          { id: 'prior-units', kind: 'queue-results', content: JSON.stringify(Object.entries(journal.units).filter(([id]) => Number(id) < unit.index)
+            .map(([id, entry]) => [id, priorUnitContext({ entry, unit: queue.units.find(previous => previous.index === Number(id)), target })])),
             sourceIdentity: queueFileDigest, status: 'historical', provenance: { origin: 'queue', runId: journal.runId } }] });
         const path = persistSharedContext({ directory: queue.directory, snapshot });
         unitJournal.contextRef = { schemaVersion: 1, path, projectId: project.projectId, runId: snapshot.runId,
@@ -474,7 +508,9 @@ async function executeQueue({
       }
       readSharedContextReference({ reference: unitJournal.contextRef, target });
       allowedQueuePaths = [...new Set([...allowedQueuePaths, unitJournal.contextRef.path, ...(journal.path ? [journal.path] : [])])];
-      return { contextRef: unitJournal.contextRef, ...(Number.isFinite(remaining) ? { tokenBudget: remaining } : {}),
+      const reference = execution && unitJournal.executionContextRef ? unitJournal.executionContextRef : unitJournal.contextRef;
+      if (execution) readPlanningHandoffReference({ reference, target });
+      return { contextRef: reference, ...(Number.isFinite(remaining) ? { tokenBudget: remaining } : {}),
         ...((unit.rounds ?? rounds) === undefined ? {} : { rounds: unit.rounds ?? rounds }) };
     };
     if (unitJournal.logged) {
@@ -573,6 +609,26 @@ async function executeQueue({
           break;
         }
         assertCurrentPlanApproval({ unit, result: planResult, mode });
+        if (planResult.approval.contextDigest || planResult.approval.sidecarDigest || planResult.planningArtifacts
+          || planResult.checkpointState?.version === 2 || planResult.sharedContext || planResult.dialogue) {
+          if (!unitJournal.executionContextRef) {
+            if (unitJournal.launch || unitJournal.launching || unitJournal.result || resuming && continuation.phase === 'execution') throw new Error('required saved planning execution handoff missing; replay refused');
+            const handoff = createPlanningHandoff({ target, directory: unit.out, result: planResult });
+            const parent = readSharedContextReference({ reference: unitJournal.contextRef, target });
+            const snapshot = extendSharedContext({ snapshot: parent, entries: [{ id: 'current-planning-handoff', kind: 'planning-handoff',
+              content: JSON.stringify(handoff), sourceIdentity: planResult.approval.contextDigest,
+              provenance: { origin: 'validated-planning-approval', runId: planResult.runId }, status: 'required' }] });
+            const path = persistSharedContext({ directory: queue.directory, snapshot });
+            unitJournal.executionContextRef = { ...unitJournal.contextRef, path, contextDigest: snapshot.digest,
+              planningHandoff: { directory: unit.out, runId: planResult.runId, contextDigest: planResult.approval.contextDigest,
+                artifactDigest: planResult.approval.artifactDigest, sidecarDigest: planResult.approval.sidecarDigest } };
+            persist();
+          }
+          readPlanningHandoffReference({ reference: unitJournal.executionContextRef, target, completedExecution: completedExecutionHandoff(unitJournal) });
+          if (unitJournal.executionContextRef.planningHandoff.contextDigest !== planResult.approval.contextDigest
+            || unitJournal.executionContextRef.planningHandoff.runId !== planResult.runId) throw new Error('saved planning handoff is stale');
+          allowedQueuePaths.push(unitJournal.executionContextRef.path);
+        }
         approvedPlans[unit.index] = { approved: true, runId: planResult.runId,
           planPath: planResult.planPath, gatePath: planResult.gatePath, approval: planResult.approval,
           ...(planResult.planningArtifacts ? { planningArtifacts: planResult.planningArtifacts } : {}) };
@@ -595,7 +651,7 @@ async function executeQueue({
       } else {
         if (unitJournal.launching) throw new Error('queue child was already launched without a recorded result; automatic replay refused');
         if (journal) { unitJournal.launching = true; persist(); }
-        launch = await launchRun({ unit: implementationUnit, target: resolve(target), mode, claudeModel, codexModel, codexEffort, ...childControls() });
+        launch = await launchRun({ unit: implementationUnit, target: resolve(target), mode, claudeModel, codexModel, codexEffort, ...childControls(true) });
         facts = await readRunFacts(launch);
       }
       if (journal) { unitJournal.result = facts; unitJournal.launch = launch; delete unitJournal.launching; persist(); }

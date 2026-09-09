@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, existsSync, writeFileSync, symlinkSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, existsSync, writeFileSync, symlinkSync, unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runPlan, runPlanCandidateSet, assertCurrentPlanApproval } from '../src/plan.js';
@@ -496,6 +496,83 @@ test('new manual disputed planning saves v2 and applies an identified human appr
   assert.equal(result.approval.decidedBy, 'human');
   assert.equal(readFileSync(result.planPath, 'utf8'), 'Keep local login\n');
   assert.deepEqual(await resumeRun({ runDirectory: opts.out, decisionFile, adapters }), result);
+});
+
+for (const problem of ['redacted-required-context', 'unrelated-blocker', 'unrelated-dispute', 'unrelated-premise']) {
+  test(`final integration human approval refuses ${problem} without another inference`, async t => {
+    const opts = fixture(t);
+    if (problem === 'redacted-required-context') opts.goal += '\napi_key=synthetic-only-not-a-real-credential';
+    const pending = await runPlan({ ...opts, adapters: {
+      author: r => ({ plan: 'Keep local login', gate: [], dialogue: reply(r, 'propose', {
+        ...(problem === 'unrelated-blocker' ? { issues: [{ id: 'other', title: 'Unresolved unrelated blocker', status: 'open', blocking: true, claimIds: [] }] } : {}),
+        ...(problem === 'unrelated-dispute' ? { issues: [
+          { id: 'other', title: 'Earlier unrelated dispute', status: 'disputed', blocking: true, claimIds: [] },
+          { id: 'I1', title: 'Identified dispute', status: 'disputed', blocking: true, claimIds: [] },
+        ] } : {}),
+      }) }),
+      reviewer: r => {
+        if (problem === 'unrelated-dispute') {
+          const response = approve(r);
+          response.dialogue.issues = [{ id: 'I1', status: 'resolved', disposition: { kind: 'accepted', reason: 'Proposed scoped resolution', claimIds: ['briefing-requirement'] } }];
+          return response;
+        }
+        return { dialogue: reply(r, 'decide', {
+        ...(problem === 'unrelated-premise' ? { claims: [{ id: 'briefing-requirement', kind: 'fact', text: 'An unrelated assertion needs review.', evidenceIds: [r.state.evidence[0].id] }] } : {}),
+        issues: [{ id: 'I1', title: 'Identified dispute', status: 'disputed', blocking: true, claimIds: [] }],
+        }) };
+      },
+    } });
+    assert.equal(pending.reason, 'needs-decision', pending.reason);
+    if (problem === 'redacted-required-context') assert.equal(pending.sharedContext.completeness.complete, false);
+    const checkpoint = JSON.parse(readFileSync(join(opts.out, 'uro-checkpoint.json'), 'utf8'));
+    const decisionFile = join(opts.artifactRoot, 'final-answer.json');
+    writeFileSync(decisionFile, JSON.stringify({ schemaVersion: 1, runId: pending.runId, artifactDigest: checkpoint.artifactDigest,
+      answers: [{ id: checkpoint.pending.questions[0].id, answer: 'approve: accept the identified dispute.' }] }));
+    await assert.rejects(resumeRun({ runDirectory: opts.out, decisionFile, adapters: {
+      author: () => assert.fail('no extra inference'), reviewer: () => assert.fail('no extra inference'),
+    } }), /required context incomplete|unrelated.*block|requires reviewer support/);
+    assert.equal(existsSync(join(opts.out, 'plan.md')), false, 'refused approval must not publish a plan');
+  });
+}
+
+for (const control of ['accepted', 'shared-premise', 'missing-evidence', 'stale-evidence']) test(`final integration identified human risk acceptance ${control} preserves evidence and support boundaries`, async t => {
+  const opts = fixture(t);
+  const pending = await runPlan({ ...opts, adapters: {
+    author: r => ({ plan: 'Keep local login', gate: [], dialogue: reply(r, 'propose'),
+      ...(['missing-evidence', 'stale-evidence'].includes(control) ? { observations: { evidence: [captureEvidence({ projectId: r.state.projectId,
+        root: opts.target, directory: join(opts.out, '__uro_evidence'), evidence: { id: 'risk-code', kind: 'code', projectId: r.state.projectId,
+          claimIds: ['briefing-requirement'], locator: { path: 'source.js', line: 1 }, sourceIdentity: r.state.snapshot.sourceRevision } })], receipts: [] } } : {}) }),
+    reviewer: r => ({ dialogue: reply(r, 'decide', {
+      claims: [{ id: 'briefing-requirement', kind: 'fact', text: 'This disputed interpretation remains unsupported.', evidenceIds: [(r.state.evidence.find(e => e.id === 'risk-code') ?? r.state.evidence[0]).id] }],
+      issues: [{ id: 'I1', title: 'Accept uncertainty in this interpretation', status: 'disputed', blocking: true, claimIds: ['briefing-requirement'] },
+        ...(control === 'shared-premise' ? [{ id: 'other', title: 'Separate open dependency', status: 'open', blocking: false, claimIds: ['briefing-requirement'] }] : [])],
+      memoryProposals: [{ id: 'risk-memory', kind: 'lesson', content: 'This remains an unsupported interpretation.', claimIds: ['briefing-requirement'], issueId: 'I1', tags: [] }],
+    }) }),
+  } });
+  const checkpoint = JSON.parse(readFileSync(join(opts.out, 'uro-checkpoint.json'), 'utf8'));
+  const decisionFile = join(opts.artifactRoot, 'risk-answer.json');
+  writeFileSync(decisionFile, JSON.stringify({ schemaVersion: 1, runId: pending.runId, artifactDigest: checkpoint.artifactDigest,
+    answers: [{ id: checkpoint.pending.questions[0].id, answer: 'approve: I accept this identified uncertainty.' }] }));
+  if (control === 'missing-evidence') unlinkSync(pending.dialogue.evidence.find(e => e.id === 'risk-code').capturedPath);
+  if (control === 'stale-evidence') writeFileSync(join(opts.target, 'source.js'), 'export const localLogin = false;\n');
+  const resume = () => resumeRun({ runDirectory: opts.out, decisionFile, adapters: {
+    author: () => assert.fail('no extra inference'), reviewer: () => assert.fail('no extra inference'),
+  } });
+  if (control !== 'accepted') {
+    await assert.rejects(resume(), /requires reviewer support|ENOENT|evidence|source|manifest|sidecar|target identity or content changed/i);
+    assert.equal(existsSync(join(opts.out, 'plan.md')), false);
+    return;
+  }
+  const result = await resume();
+  assert.equal(result.approved, true, result.reason);
+  assert.deepEqual(result.dialogue.claims, pending.dialogue.claims);
+  assert.deepEqual(result.dialogue.verifications, pending.dialogue.verifications);
+  assert.deepEqual(result.dialogue.inspectionReceipts, pending.dialogue.inspectionReceipts);
+  assert.equal(result.dialogue.issues.I1.status, 'resolved');
+  assert.equal(result.dialogue.issues.I1.disposition.by, 'human');
+  assert.equal(result.dialogue.issues.I1.disposition.basis, 'risk-acceptance');
+  const records = openProjectMemory({ artifactRoot: opts.artifactRoot, project: resolveProjectIdentity({ target: opts.target }) }).list();
+  assert.ok(records.length); assert.ok(records.every(record => record.status !== 'verified'));
 });
 
 test('both planning seats can independently inspect a new source and the next input extends material context', async t => {

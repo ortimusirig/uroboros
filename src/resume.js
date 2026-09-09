@@ -62,7 +62,7 @@ export async function resumeRun({ runDirectory, decisionFile, technicalContinue 
     }
     try {
       await validateCheckpointWorkspace(checkpoint, directory, { completed: receipt?.identity, recoveredLanding });
-      if (!receipt && checkpoint.continuation.version === 2) validateNativeContinuation(checkpoint.continuation, { technicalContinue });
+      if (!receipt && checkpoint.continuation.version === 2) validateNativeContinuation(checkpoint.continuation, { technicalContinue, humanRuling: ruling });
     } catch (error) {
       checkpoint.history.push({ status: 'invalidated', reason: error.message, at: new Date().toISOString() });
       persist();

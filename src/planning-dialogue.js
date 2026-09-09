@@ -3,13 +3,13 @@ import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, lstatSync, readdirSync, realpathSync } from 'node:fs';
 import { join, resolve, relative, isAbsolute } from 'node:path';
 import { homedir } from 'node:os';
-import { createSharedContext, extendSharedContext, persistSharedContext, validateSharedContext, contextDigest, renderSharedContext } from './shared-context.js';
+import { createSharedContext, extendSharedContext, persistSharedContext, validateSharedContext, contextDigest, renderSharedContext, readSharedContextReference } from './shared-context.js';
 import { captureEvidence, validateEvidence } from './context-evidence.js';
 import { resolveProjectIdentity, openProjectMemory } from './project-memory.js';
 import { resolveArtifactRoot } from './artifacts.js';
 import { readEnv } from './env-compat.js';
 import { openDialogueJournal } from './dialogue-journal.js';
-import { createDialogueState, parseDialogueEnvelope, applyDialogueEnvelope } from './dialogue.js';
+import { createDialogueState, parseDialogueEnvelope, applyDialogueEnvelope, validateDialogueEvidence, canApproveDialogue } from './dialogue.js';
 import { runIssueDialogue, registerObservations, installMaterialEvidence } from './dialogue-dispatch.js';
 import { canonicalPlanningArtifact, planningArtifactDigest, RepairableArtifactError, MAX_ARTIFACT_REPAIRS, dialoguePromptText } from './conversation.js';
 import { reportEvent } from './events.js';
@@ -63,6 +63,139 @@ export function assertPlanningSidecars({ directory, runId, approval, manifest })
     registeredPaths: manifest.files.map(file => join(directory, file.path)) });
   if (contextDigest({ manifest: actual }) !== approval.sidecarDigest) throw new Error('planning sidecar manifest changed');
   return manifest.files.map(file => join(directory, file.path));
+}
+
+/** Validate the durable native producer before delivering its attributed records. */
+export function validatePlanningHandoff({ handoff, target, directory = handoff?.directory, completedExecution }) {
+  const approval = handoff?.approval, project = resolveProjectIdentity({ target });
+  if (handoff?.schemaVersion !== 1 || !approval || resolve(handoff.directory) !== resolve(directory)
+    || planningArtifactDigest(handoff.requirements, handoff.proposal) !== approval.artifactDigest) throw new Error('required planning handoff identity missing or stale');
+  validateSharedContext({ snapshot: handoff.snapshot, projectId: project.projectId });
+  if (handoff.snapshot.completeness?.complete !== true || approval.contextDigest !== handoff.snapshot.digest
+    || handoff.snapshot.runId !== handoff.runId || handoff.snapshot.phase !== 'planning') throw new Error('planning handoff context incomplete or stale');
+  assertPlanningSidecars({ directory, runId: handoff.runId, approval, manifest: handoff.planningArtifacts });
+  // History is established by a real landed operation and its exact reviewed
+  // diff, including a commit whose return/log receipt was interrupted.
+  let historical = false;
+  if (completedExecution) {
+    const { operationId, commit, diffPath, artifactDigest } = completedExecution;
+    if (!/^[a-f0-9]{64}$/.test(operationId) || commit && !/^[a-f0-9]{40,64}$/.test(commit)) throw new Error('invalid completed queue operation identity');
+    const git = (...args) => execFileSync('git', ['-C', target, ...args], { encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    const revision = commit ?? 'HEAD';
+    if (git('show', '-s', '--format=%B', revision).split(/\r?\n/).includes(`Uroboros-Operation: ${operationId}`)) {
+      const diff = readFileSync(diffPath, 'utf8');
+      if (createHash('sha256').update(diff).digest('hex') !== artifactDigest || git('diff', `${revision}^`, revision) !== diff) throw new Error('completed queue operation differs from reviewed execution');
+      git('merge-base', '--is-ancestor', revision, 'HEAD');
+      historical = true;
+    } else if (commit) throw new Error('saved completed queue operation commit changed');
+  }
+  const journal = openDialogueJournal({ directory, runId: handoff.runId, projectId: project.projectId });
+  try {
+    const events = journal.read(), tail = events.at(-1), dialogue = events.findLast(event => event.type === 'state')?.state;
+    if (!dialogue || tail.hash !== handoff.journalIdentity?.hash || tail.sequence !== handoff.journalIdentity?.sequence
+      || contextDigest({ state: dialogue }) !== handoff.stateDigest || dialogue.artifactDigest !== approval.artifactDigest
+      || dialogue.snapshot.digest !== handoff.snapshot.digest
+      || contextDigest(planningHistory(dialogue)) !== contextDigest(handoff.history)) throw new Error('planning handoff journal or history identity changed');
+    const targetRoot = realpathSync.native(target), evidenceRoot = realpathSync.native(join(directory, '__uro_evidence'));
+    if (contextDigest(dialogue.scope) !== contextDigest({ sourceRoots: [targetRoot], evidenceRoots: [evidenceRoot] })) throw new Error('planning handoff scope changed');
+    const stored = JSON.parse(readFileSync(join(directory, '__uro_context', `${handoff.snapshot.id}.json`), 'utf8'));
+    validateSharedContext({ snapshot: stored, projectId: project.projectId });
+    if (stored.digest !== handoff.snapshot.digest) throw new Error('planning handoff stored context changed');
+    assertCompletedEffects({ journal }, dialogue);
+    const checkEvidence = historical ? (state, evidence) => {
+      const captured = realpathSync.native(evidence.capturedPath), captureRel = relative(evidenceRoot, captured);
+      if (captureRel.startsWith('..') || isAbsolute(captureRel)) throw new Error('historical evidence capture outside scope');
+      if (evidence.kind === 'code') {
+        const sourceRel = relative(targetRoot, resolve(targetRoot, evidence.locator.path));
+        if (sourceRel.startsWith('..') || isAbsolute(sourceRel)) throw new Error('historical source outside scope');
+      }
+      const valid = validateEvidence({ evidence, projectId: state.projectId, roots: [targetRoot, evidenceRoot] });
+      if (!valid.valid && !(evidence.kind === 'code' && ['evidence is stale: current source digest differs', 'current evidence source is missing'].includes(valid.reason))) throw new Error(valid.reason);
+    } : validateDialogueEvidence;
+    if (approval.decidedBy === 'human') humanPlanningApproval({ state: dialogue }, checkEvidence);
+    else if (approval.decidedBy !== 'codex' || (historical
+      ? dialogue.approval?.seat !== 'codex' || dialogue.approval.artifactDigest !== approval.artifactDigest || dialogue.approval.contextDigest !== approval.contextDigest
+      : !canApproveDialogue({ state: dialogue, seat: 'codex' }).approved)) throw new Error('planning handoff lacks current approval');
+    for (const evidence of dialogue.evidence) checkEvidence(dialogue, evidence);
+    if (!Array.isArray(handoff.evidenceCaptures) || handoff.evidenceCaptures.length !== dialogue.evidence.length
+      || dialogue.evidence.some((e, i) => handoff.evidenceCaptures[i].id !== e.id
+        || handoff.evidenceCaptures[i].bytes !== readFileSync(e.capturedPath, 'utf8'))) throw new Error('planning handoff evidence capture changed');
+  } finally { journal.close(); }
+  return handoff;
+}
+
+// This is the complete public protocol history, not a display summary. Preserve
+// ordinary text and attribution without copying opaque envelope extensions.
+const historyIdentity = ['id', 'sender', 'speaker', 'phase', 'operationId', 'sequence', 'artifactDigest', 'contextDigest', 'messageId', 'decisionId'];
+function historyFields(value, fields) {
+  return Object.fromEntries(fields.filter(key => value?.[key] !== undefined && (value[key] === null
+    || typeof value[key] !== 'object' || Array.isArray(value[key]) && value[key].every(item => item === null || typeof item !== 'object')))
+    .map(key => [key, value[key]]));
+}
+const historyDisposition = value => historyFields(value, [...historyIdentity, 'kind', 'by', 'basis', 'seat', 'reason', 'claimIds', 'issueId']);
+const historyVerification = value => historyFields(value, [...historyIdentity, 'claimId', 'evidenceIds', 'inspectionReceiptIds', 'result', 'reason', 'seat']);
+function historyClaim(value) {
+  return { ...historyFields(value, [...historyIdentity, 'kind', 'text', 'evidenceIds', 'status']),
+    ...(value.retirement ? { retirement: historyDisposition(value.retirement) } : {}) };
+}
+function historyIssue(value) {
+  return { ...historyFields(value, ['id', 'title', 'status', 'kind', 'blocking', 'claimIds', 'openedBy', 'needsHuman']),
+    ...(value.disposition ? { disposition: historyDisposition(value.disposition) } : {}) };
+}
+function historyQuestion(value) {
+  return { ...historyFields(value, [...historyIdentity, 'authority', 'kind', 'question', 'reason', 'decisionKind', 'issueIds', 'disputedIssueIds']),
+    ...(value.issues ? { issues: value.issues.map(historyIssue) } : {}) };
+}
+function historyMessage(value) {
+  return { ...historyFields(value, [...historyIdentity, 'schemaVersion', 'action', 'replyTo', 'content']),
+    ...(value.claims ? { claims: value.claims.map(historyClaim) } : {}),
+    ...(value.issues ? { issues: value.issues.map(historyIssue) } : {}),
+    ...(value.evidence ? { evidence: value.evidence.map(item => typeof item === 'string' ? item : item.id) } : {}),
+    ...(value.verifications ? { verifications: value.verifications.map(historyVerification) } : {}),
+    ...(value.next !== undefined ? { next: value.next === null ? null : historyFields(value.next, ['seat', 'action', 'reason']) } : {}),
+    ...(value.requests ? { requests: value.requests.map(item => historyFields(item, ['evidenceId', 'path', 'line', 'claimIds'])) } : {}),
+    ...(value.memoryProposals ? { memoryProposals: value.memoryProposals.map(item => historyFields(item, ['id', 'content', 'kind', 'claimIds', 'issueId', 'tags'])) } : {}),
+    ...(value.replan ? { replan: historyFields(value.replan, ['issueId', 'evidenceIds', 'novelty']) } : {}),
+  };
+}
+export function planningHistory(state) {
+  const map = (value, project) => Object.fromEntries(Object.entries(value).map(([id, item]) => [id, project(item)]));
+  return { messages: state.messages.map(historyMessage), issues: map(state.issues, historyIssue), claims: map(state.claims, historyClaim),
+    evidence: state.evidence, inspectionReceipts: state.inspectionReceipts, verifications: state.verifications.map(historyVerification),
+    ...(state.humanRuling ? { humanRuling: { ...historyFields(state.humanRuling, [...historyIdentity, 'action']),
+      answers: state.humanRuling.answers.map(item => historyFields(item, ['id', 'answer'])),
+      ...(state.humanRuling.question ? { question: historyQuestion(state.humanRuling.question) } : {}),
+    } } : {}) };
+}
+
+export function createPlanningHandoff({ result, target, directory }) {
+  const saved = result?.checkpointState, state = saved?.dialogue;
+  if (saved?.version !== 2 || saved.phase !== 'planning' || saved.tier !== 'plan' || !state
+    || saved.runId !== result.runId || resolve(saved.directory) !== resolve(directory)
+    || contextDigest(saved.approval) !== contextDigest(result.approval)
+    || contextDigest(saved.planningArtifacts) !== contextDigest(result.planningArtifacts)
+    || contextDigest({ state }) !== contextDigest({ state: result.dialogue })
+    || state.snapshot.digest !== result.sharedContext?.digest
+    || contextDigest(state.snapshot) !== contextDigest(result.sharedContext)) throw new Error('required native planning handoff records missing or stale');
+  return validatePlanningHandoff({ target, directory, handoff: { schemaVersion: 1, runId: saved.runId, directory,
+    requirements: saved.requirements, proposal: saved.proposal, approval: result.approval, snapshot: state.snapshot,
+    stateDigest: contextDigest({ state }), history: planningHistory(state), journalIdentity: saved.journalIdentity,
+    planningArtifacts: saved.planningArtifacts,
+    evidenceCaptures: state.evidence.map(e => ({ id: e.id, bytes: readFileSync(e.capturedPath, 'utf8') })),
+  } });
+}
+
+export function readPlanningHandoffReference({ reference, target, completedExecution }) {
+  const snapshot = readSharedContextReference({ reference, target });
+  const entries = snapshot.entries.filter(entry => entry.kind === 'planning-handoff');
+  if (!reference.planningHandoff && entries.length === 0) return snapshot;
+  if (!reference.planningHandoff || entries.length !== 1 || entries[0].status !== 'required'
+    || snapshot.completeness?.complete !== true) throw new Error('required planning handoff reference missing or incomplete');
+  const handoff = validatePlanningHandoff({ handoff: JSON.parse(entries[0].content), target, directory: reference.planningHandoff.directory, completedExecution });
+  if (handoff.runId !== reference.planningHandoff.runId || handoff.approval.contextDigest !== reference.planningHandoff.contextDigest
+    || handoff.approval.artifactDigest !== reference.planningHandoff.artifactDigest
+    || handoff.approval.sidecarDigest !== reference.planningHandoff.sidecarDigest) throw new Error('planning handoff reference identity changed');
+  return snapshot;
 }
 
 /** Create required common grounding before any author, selector or reviewer launch. */
@@ -216,10 +349,16 @@ function assertTechnicalContinuation({ session, state: saved, account = session.
 }
 
 /** Validate the complete native input before accepting an answer or continuation receipt. */
-export function validateNativeContinuation(continuation, { technicalContinue = false } = {}) {
+export function validateNativeContinuation(continuation, { technicalContinue = false, humanRuling } = {}) {
   if (continuation.version !== 2 || !(continuation.dialogue ?? continuation.preparationSnapshot)) throw new Error('native dialogue or preparation checkpoint required');
   const workspace = continuation.workspace?.dir ?? continuation.executionContinuation?.workspace?.dir;
+  if (continuation.options?.contextRef) readPlanningHandoffReference({ reference: continuation.options.contextRef,
+    target: continuation.workspace.targetPath });
   const question = nativeHumanQuestion(continuation);
+  if (continuation.phase === 'planning' && question?.decisionKind === 'manual-dispute'
+    && /^approve(?:\s*:|\s*$)/i.test(humanRuling?.answers?.[0]?.answer ?? '')) {
+    assertHumanPlanningApproval({ state: continuation.dialogue, question, humanRuling });
+  }
   if (question?.decisionKind === 'merge-conflicting-intent') {
     const progress = continuation.dialogue.mergeProgress;
     const operation = continuation.dialogue.operations[question.operationId];
@@ -539,6 +678,42 @@ function promoteMemory(session, state) {
 export const contextLifecycle = Object.freeze({ checkContext, registerEvidenceFiles, persistContext, promoteMemory,
   manifest: planningSidecarManifest });
 
+/** Direct human artifact authority is scoped risk acceptance, never a fabricated verification. */
+export function assertHumanPlanningApproval(options) { return humanPlanningApproval(options, validateDialogueEvidence); }
+
+function humanPlanningApproval({ state, question = state?.humanRuling?.question, humanRuling = state?.humanRuling }, checkEvidence) {
+  validateSharedContext({ snapshot: state?.snapshot, projectId: state?.projectId });
+  if (state.phase !== 'planning' || state.interactionMode !== 'manual' || question?.decisionKind !== 'manual-dispute'
+    || question.artifactDigest !== state.artifactDigest || question.contextDigest !== state.snapshot.digest
+    || !humanRuling?.decisionId || humanRuling.answers?.length !== 1 || humanRuling.answers[0].id !== question.id
+    || !/^approve(?:\s*:|\s*$)/i.test(humanRuling.answers[0].answer)) throw new Error('human approval question or answer identity changed');
+  if (state.snapshot.completeness?.complete !== true) throw new Error('required context incomplete');
+  if (state.technicalPause || state.pendingArtifact || state.pendingOperation) throw new Error('human approval has pending technical work');
+  const scope = new Set(question.disputedIssueIds);
+  if (!scope.size) throw new Error('human approval has no identified dispute');
+  for (const id of scope) {
+    const issue = state.issues[id];
+    if (!issue || !(issue.status === 'disputed' || issue.status === 'resolved' && issue.disposition?.by === 'human'
+      && issue.disposition.decisionId === humanRuling.decisionId)) throw new Error('human approval dispute scope changed');
+  }
+  const open = issue => ['open', 'awaiting-answer', 'awaiting-verification', 'disputed'].includes(issue.status);
+  if (Object.values(state.issues).some(issue => issue.blocking && open(issue) && !scope.has(issue.id))) throw new Error('unrelated open blocking issue prevents human approval');
+  const current = item => item.artifactDigest === state.artifactDigest && item.contextDigest === state.snapshot.digest;
+  for (const claim of Object.values(state.claims).filter(claim => claim.status !== 'retired' && ['fact', 'inference'].includes(claim.kind))) {
+    const scoped = [...scope].some(id => state.issues[id].claimIds.includes(claim.id));
+    if (!scoped && !current(claim)) continue;
+    if (!claim.evidenceIds?.length) throw new Error(`claim ${claim.id} requires evidence`);
+    for (const id of claim.evidenceIds) checkEvidence(state, state.evidence.find(e => e.id === id));
+    const usedElsewhere = Object.values(state.issues).some(issue => !scope.has(issue.id)
+      && (open(issue) && issue.claimIds?.includes(claim.id) || issue.disposition?.claimIds?.includes(claim.id)));
+    if (scoped && !usedElsewhere) continue;
+    const assessments = state.verifications.filter(v => v.claimId === claim.id && current(v));
+    if (!assessments.some(v => v.seat === state.reviewer && v.result === 'supports')
+      || assessments.some(v => v.result !== 'supports')) throw new Error(`claim ${claim.id} requires reviewer support verification`);
+  }
+  return true;
+}
+
 /** New runs use explicit dialogue; historical runConversation remains a separate reader. */
 export async function runPlanningDialogue({ requirements, target, directory, tier = 'plan', interactionMode = 'manual',
   rounds, runId = `planning-${randomUUID()}`, seats, strategy, reporter, context, artifactRoot, env, searchIndex,
@@ -583,11 +758,19 @@ export async function runPlanningDialogue({ requirements, target, directory, tie
       if (planningArtifactDigest(requirements, proposal) !== state.artifactDigest) throw new Error('saved planning artifact identity changed');
       const content = humanRuling.answers.map(answer => answer.answer).join('\n');
       humanAction = /^approve(?:\s*:|\s*$)/i.test(content) ? 'approve' : /^stop(?:\s*:|\s*$)/i.test(content) ? 'stop' : null;
+      if (humanAction === 'approve') assertHumanPlanningApproval({ state, question, humanRuling });
       state = structuredClone(state);
       state.messages.push({ id: `${runId}:human:${humanRuling.decisionId}`, sender: 'human', speaker: 'human',
         phase: 'planning', action: 'decide', content, artifactDigest: state.artifactDigest, contextDigest: state.snapshot.digest,
         decisionId: humanRuling.decisionId, sequence: state.messages.length + 1 });
-      state.humanRuling = { ...humanRuling, action: humanAction, artifactDigest: state.artifactDigest, contextDigest: state.snapshot.digest };
+      state.humanRuling = { ...humanRuling, question, action: humanAction, artifactDigest: state.artifactDigest, contextDigest: state.snapshot.digest };
+      if (humanAction === 'approve') for (const id of question.disputedIssueIds) {
+        state.issues[id] = { ...state.issues[id], status: 'resolved', disposition: {
+          kind: 'accepted', by: 'human', basis: 'risk-acceptance', reason: content, claimIds: [],
+          decisionId: humanRuling.decisionId, messageId: state.messages.at(-1).id,
+          artifactDigest: state.artifactDigest, contextDigest: state.snapshot.digest,
+        } };
+      }
       state.pendingDecision = null;
       state.next = { seat: 'codex', action: 'verify', reason: 'Assess the human clarification' };
       session.journal.append({ type: 'human-ruling', ruling: state.humanRuling });

@@ -681,7 +681,7 @@ async function runDecomposition(kind, {
   });
   result.checkpointState.planningContext = { kind, request, context,
     options: { claudeModel: claudeModel ?? arbiterModel, codexModel, codexEffort, executorTimeout, arbiterTimeout } };
-  if (result.reason === 'needs-decision') {
+  if (result.reason === 'needs-decision' || result.checkpointState.dialogue?.technicalPause || result.checkpointState.technicalPause) {
     const { saveCheckpoint } = await import('./checkpoint.js');
     const directory = request.out ?? request.tasksDir;
     const source = isGoal ? request.goalSpecPath : request.projectSource;
@@ -698,7 +698,7 @@ async function runDecomposition(kind, {
 export function runDecomposeGoal(options) { return runDecomposition('goal', options); }
 export function runDecomposeProject(options) { return runDecomposition('project', options); }
 
-export async function continueDecomposition({ checkpointState, humanRuling, adapters = {}, reporter, env }) {
+export async function continueDecomposition({ checkpointState, humanRuling, technicalContinue = false, adapters = {}, reporter, env }) {
   const state = structuredClone(checkpointState);
   const { kind, request, context, options } = state.planningContext;
   const isGoal = kind === 'goal';
@@ -706,7 +706,7 @@ export async function continueDecomposition({ checkpointState, humanRuling, adap
   const result = await (state.version === 2 ? runPlanningDialogue : runConversation)({ runId: state.runId, reporter, rounds: state.roundsLimit ?? undefined,
     tier: kind, requirements: state.requirements, interactionMode: state.interactionMode,
     ...(state.version === 2 ? { target: request.target, directory: state.directory } : {}),
-    continuation: state, humanRuling,
+    continuation: state, humanRuling, ...(state.version === 2 ? { technicalContinue } : {}),
     seats: createPlanningSeats({ target: request.target, ...options, runId: state.runId, reporter, env, adapters,
       authorPrompt: r => (isGoal ? goalDraftingPrompt : projectDraftingPrompt)({ ...context, ...r, seat: 'Claude' }),
       reviewPrompt: r => (isGoal ? goalReviewPrompt : projectReviewPrompt)({ ...context, ...r, seat: 'Codex' }) }),

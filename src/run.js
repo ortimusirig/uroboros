@@ -39,8 +39,8 @@ import { saveCheckpoint, nativeHumanQuestion } from './checkpoint.js';
 import { runExecutionDialogue } from './execution-dialogue.js';
 import { canApproveDialogue, parseDialogueEnvelope } from './dialogue.js';
 import { captureEvidence, validateEvidence } from './context-evidence.js';
-import { contextDigest, readSharedContextReference } from './shared-context.js';
-import { contextLifecycle, assertPlanningSidecars, reopenPlanningContext, applyScopedHumanRuling, resumeTechnicalDialogue } from './planning-dialogue.js';
+import { contextDigest } from './shared-context.js';
+import { contextLifecycle, assertPlanningSidecars, reopenPlanningContext, applyScopedHumanRuling, resumeTechnicalDialogue, assertHumanPlanningApproval, readPlanningHandoffReference } from './planning-dialogue.js';
 import { EXECUTION_REVIEW_PROMPT, completeReviewPass } from './verifier.js';
 import { createRunMarker, releaseRunMarker } from './prune.js';
 import { physicalRunIdFor } from './run-id.js';
@@ -483,7 +483,7 @@ export async function run(opts) {
     debateRounds, tokenBudget, pivotCandidates = DEFAULT_PIVOT_CANDIDATES,
     adapters = {}, reporter,
   } = opts;
-  const parentContext = opts.contextRef ? readSharedContextReference({ reference: opts.contextRef, target }) : null;
+  const parentContext = opts.contextRef ? readPlanningHandoffReference({ reference: opts.contextRef, target }) : null;
   const physicalRunId = physicalRunIdFor(runId);
   if (mode !== 'manual' && mode !== 'autonomous') {
     throw new Error(`invalid mode: ${mode}; expected manual or autonomous`);
@@ -997,6 +997,7 @@ export async function run(opts) {
       return events;
     };
     const checkChain = () => {
+      if (opts.contextRef) readPlanningHandoffReference({ reference: opts.contextRef, target });
       for (const item of nativePhases) checkPhase(item);
       for (const link of nativeLinks) {
         checkDirectory(link.directory);
@@ -1471,6 +1472,7 @@ export async function run(opts) {
         && dialogue.humanRuling.decisionId === opts[nativeRecovery]?.humanRuling?.decisionId
         && dialogue.humanRuling.artifactDigest === dialogue.artifactDigest
         && dialogue.humanRuling.contextDigest === dialogue.snapshot.digest;
+      if (manualPlanApproval) assertHumanPlanningApproval({ state: dialogue });
       if (!selected || generated.runId !== phase.runId || dialogue?.runId !== phase.runId || dialogue.interactionMode !== mode
         || !manualPlanApproval && (generated.approval?.decidedBy !== 'codex' || !canApproveDialogue({ state: dialogue, seat: 'codex' }).approved)
         || generated.approval.artifactDigest !== planningArtifactDigest(originalPlan, { plan: selected.plan, gate: selected.gate })
@@ -2502,7 +2504,7 @@ export async function run(opts) {
         activeConflict, mergeConflicts, mergeResolutions, conflictingIntent, mergePreparationFailure,
         observedWorkspace: observedMergeWorkspace, pendingOperation: nativeResult.state?.pendingOperation,
         next: nativeResult.state?.next, executionChecks: nativeResult.state?.executionChecks } }),
-      options: { target, scratchRoot, artifactRoot: opts.artifactRoot, baseRef, branch, branchName, gateRetries,
+      options: { target, scratchRoot, artifactRoot: opts.artifactRoot, contextRef: opts.contextRef, baseRef, branch, branchName, gateRetries,
         correctsRunId, campaignId, campaignBase, round, unitId, campaignUnitKind, perspective, unitKind, captureTestCount,
         executorModel, executorEffort, verifierModel, verifierBin, arbiterModel, arbiterBin,
         challengeRounds, debateRounds: maxDebateRounds, tokenBudget, pivotCandidates, superpowers,

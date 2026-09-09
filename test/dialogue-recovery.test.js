@@ -266,7 +266,7 @@ test('required journal corruption rejects a native answer before providers', asy
   assert.equal(readFileSync(f.counter, 'utf8'), '1');
 });
 
-for (const manualArtifact of [false, true]) test(`public retained planning ${manualArtifact ? 'manual artifact approval' : 'scoped answer'} resumes the selected phase and only remaining execution`, async () => {
+for (const manualArtifact of [false, true, 'incomplete']) test(`public retained planning ${manualArtifact === 'incomplete' ? 'incomplete context refusal' : manualArtifact ? 'manual artifact approval' : 'scoped answer'} resumes the selected phase and only remaining execution`, async () => {
   const base = mkdtempSync(join(process.platform === 'win32' ? 'C:/ccc-test' : tmpdir(), 'uro-retained-resume-'));
   const target = join(base, 'target'); mkdirSync(target); writeFileSync(join(target, 'source.js'), 'before\n');
   let writes = 0, reviews = 0, drafts = 0, planningReviews = 0;
@@ -292,7 +292,8 @@ for (const manualArtifact of [false, true]) test(`public retained planning ${man
         disposition: { kind: 'accepted', reason: 'The current captured compatibility requirement supports the remaining policy', claimIds: ['briefing-requirement'] } }] },
       usage: { inputTokens: 1, outputTokens: 1 } },
   });
-  const pending = await run(withVerifiedSuperpowers({ target, task: 'Preserve compatibility', gate: [],
+  const pending = await run(withVerifiedSuperpowers({ target, task: manualArtifact === 'incomplete'
+    ? 'Preserve compatibility\napi_key=synthetic-only-not-a-real-credential' : 'Preserve compatibility', gate: [],
     mode: manualArtifact ? 'manual' : 'autonomous', scratchRoot: join(base, 'scratch'), artifactRoot: join(base, 'artifacts'),
     runId: 'retained-public', pivotCandidates: 1, adapters }));
   assert.equal(pending.outcome, 'needs-decision', pending.reason);
@@ -302,6 +303,13 @@ for (const manualArtifact of [false, true]) test(`public retained planning ${man
   assert.equal(writes, 1); assert.equal(drafts, 1);
   writeFileSync(decisionFile, JSON.stringify({ schemaVersion: 1, runId: saved.runId, artifactDigest: saved.artifactDigest,
     answers: [{ id: saved.pending.questions[0].id, answer: manualArtifact ? 'approve: preserve compatibility' : 'Preserve old input compatibility' }] }));
+  if (manualArtifact === 'incomplete') {
+    assert.equal(saved.continuation.dialogue.snapshot.completeness.complete, false);
+    await assert.rejects(resumeRun({ runDirectory: pending.dir, decisionFile, adapters }), /required context incomplete/);
+    assert.equal(writes, 1); assert.equal(drafts, 1); assert.equal(planningReviews, 1);
+    assert.equal(readFileSync(join(pending.dir, 'source.js'), 'utf8'), 'retained\n');
+    return;
+  }
   const result = await resumeRun({ runDirectory: pending.dir, decisionFile, adapters });
   assert.equal(result.approved, true, result.reason);
   assert.equal(writes, 2); assert.equal(drafts, 1); assert.equal(planningReviews, manualArtifact ? 1 : 2);

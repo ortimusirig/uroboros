@@ -38,6 +38,10 @@ function checkedEvidence(state, item) {
   if (!result.valid) throw new Error(result.reason);
 }
 
+// Trusted phase handoffs and human decisions retain the reducer's separate
+// source/capture authorities; approval authority never weakens evidence scope.
+export const validateDialogueEvidence = checkedEvidence;
+
 function validateEnvelope(envelope) {
   if (!envelope || typeof envelope !== 'object' || Array.isArray(envelope) || envelope.schemaVersion !== 1
     || !ACTIONS.has(envelope.action)) throw new Error('invalid dialogue envelope action or schema');
