@@ -1,0 +1,121 @@
+{
+  "schemaVersion": 1,
+  "digest": "0432be8a37133c2d08d0fef216c440e2d9cff48f7a1d4251a18f6d74fb89f061",
+  "profiles": [
+    {
+      "id": "bmad",
+      "adapterRevision": 1,
+      "upstream": {
+        "repository": "https://github.com/bmad-code-org/BMAD-METHOD",
+        "commit": "abe4eb1bce919c9d22cd18b3519353d5824c4b75"
+      },
+      "sources": [
+        {
+          "path": "skills/bmad-create-epics-and-stories/steps/step-02-design-epics.md",
+          "localPath": "upstream/bmad/skills/bmad-create-epics-and-stories/steps/step-02-design-epics.md",
+          "sha256": "7a3e431d885015fc5db3e7d2e0f0cc06f9cefed6a27c714681fd0771cebc39fa"
+        },
+        {
+          "path": "skills/bmad-correct-course/SKILL.md",
+          "localPath": "upstream/bmad/skills/bmad-correct-course/SKILL.md",
+          "sha256": "87a2d147b0c963e98afb12a535eddafd0d7ff9b71c66d2ea480234d43ae8a17d"
+        }
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "localPath": "upstream/bmad/LICENSE",
+          "sha256": "0aa79baf6328b4a1e694ce10a12ffc36d7666554da128dff0e8fcda0fc536a66"
+        },
+        {
+          "path": "TRADEMARK.md",
+          "localPath": "upstream/bmad/TRADEMARK.md",
+          "sha256": "ce57ad749e43277c6021e5d5085980b33c9bf8f67a070bbbf07e041ccdddc58b"
+        }
+      ],
+      "sections": [
+        {
+          "id": "planning",
+          "phases": ["planning"],
+          "path": "adapted/bmad-planning.md",
+          "localPath": "adapted/bmad-planning.md",
+          "sha256": "dbc99fe55828040b7d438261968ccf51d71b643ef1de48f863bcd639fb6a1f2b"
+        },
+        {
+          "id": "execution",
+          "phases": ["execution"],
+          "path": "adapted/bmad-execution.md",
+          "localPath": "adapted/bmad-execution.md",
+          "sha256": "caec3c04854250d6c958ecbf77253644780c9b011b4619bf4131cd521b865425"
+        },
+        {
+          "id": "acceptance",
+          "phases": ["acceptance"],
+          "path": "adapted/bmad-acceptance.md",
+          "localPath": "adapted/bmad-acceptance.md",
+          "sha256": "23091717e58103851d7fc6ad65ecd6b2077b4a7f4eb5e66226efe1babe9f09e1"
+        }
+      ]
+    },
+    {
+      "id": "spec-kit",
+      "adapterRevision": 1,
+      "upstream": {
+        "repository": "https://github.com/github/spec-kit",
+        "commit": "0c8e31ff0a98c362696c2edb6a1bb25a37f68544"
+      },
+      "sources": [
+        {
+          "path": "templates/tasks-template.md",
+          "localPath": "upstream/spec-kit/templates/tasks-template.md",
+          "sha256": "1e448e9153462e8c5b5a55231a54c756d870a82950d4dd9425a2bf5b7008a0d9"
+        },
+        {
+          "path": "templates/commands/implement.md",
+          "localPath": "upstream/spec-kit/templates/commands/implement.md",
+          "sha256": "d70c8b66470cfe8e9fe86a6eb3c75ae12ac4b44b2178932a146bf26eac4613b2"
+        },
+        {
+          "path": "templates/commands/analyze.md",
+          "localPath": "upstream/spec-kit/templates/commands/analyze.md",
+          "sha256": "ef9850532cc69f972025e5e742d0dd833ba1d28c31e6798d5edd3c5af73b2e7c"
+        },
+        {
+          "path": "templates/commands/converge.md",
+          "localPath": "upstream/spec-kit/templates/commands/converge.md",
+          "sha256": "a6dbe49b66ef34f421294e4148afce2af93ba02cb1b861bd80f72f753ee52eed"
+        }
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "localPath": "upstream/spec-kit/LICENSE",
+          "sha256": "2510b446bc1f0cf9702453075d20cd88631e20e5642658edb7325d9c1eb534f7"
+        }
+      ],
+      "sections": [
+        {
+          "id": "planning",
+          "phases": ["planning"],
+          "path": "adapted/spec-kit-planning.md",
+          "localPath": "adapted/spec-kit-planning.md",
+          "sha256": "c30dd1791bdc0b259e4db60f3cca18f61e773253122392a28ddb76e782780d88"
+        },
+        {
+          "id": "execution",
+          "phases": ["execution"],
+          "path": "adapted/spec-kit-execution.md",
+          "localPath": "adapted/spec-kit-execution.md",
+          "sha256": "cfa728e985509119da0b96e5881130d3b7fc24af656f1b70bdd7822458d8ccb0"
+        },
+        {
+          "id": "acceptance",
+          "phases": ["acceptance"],
+          "path": "adapted/spec-kit-acceptance.md",
+          "localPath": "adapted/spec-kit-acceptance.md",
+          "sha256": "d06f570e23ec40f5caa30e920047e944df3ddc0c7382c57d00e562545be92ba1"
+        }
+      ]
+    }
+  ]
+}
