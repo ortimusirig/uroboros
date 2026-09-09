@@ -1,6 +1,6 @@
 # BMAD and Spec Kit workflow integration
 
-Date: 2026-09-08. Status: bundled approach approved in conversation; this concrete specification awaits written review. No integration code has been implemented.
+Date: 2026-09-08. Status: written specification approved by the user's subsequent “go ahead”; implementation planning and local execution authorized. Runtime integration is not yet complete.
 
 ## Intent and scope
 
