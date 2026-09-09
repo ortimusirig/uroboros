@@ -74,7 +74,8 @@ specification and target:
 node bin/loop.js decompose --goal goals/G1-statement-import/spec.md --target .
 ```
 
-This produces `plan.md`/`gate.json` task pairs and a `queue.json` beside that goal under `tasks/`.
+This produces task pairs such as `tasks/T1-plan.md` and `tasks/T1-gate.json`, plus
+`tasks/queue.json`, beneath the goal directory.
 
 ## Optional open-source references
 
