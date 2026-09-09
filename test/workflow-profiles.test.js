@@ -164,6 +164,39 @@ test('snapshot binding marker and entry agree and reject conflicts', async () =>
   assert.throws(() => module.readWorkflowBinding({ snapshot: { entries: [entry] } }), /marker|workflow/i);
 });
 
+test('snapshot binding accepts reordered equivalent bound marker and expected identity fields', async () => {
+  const module = await shippedModule();
+  const binding = module.loadWorkflowBinding();
+  const entry = module.workflowSnapshotEntry({ binding });
+  const identity = module.workflowIdentity({ binding });
+  const reordered = { digest: identity.digest, mode: 'bound', schemaVersion: 1 };
+  assert.deepEqual(module.readWorkflowBinding({
+    snapshot: { workflow: reordered, entries: [entry] },
+    expected: { mode: 'bound', schemaVersion: 1, digest: identity.digest },
+  }), binding);
+});
+
+test('legacy absence accepts only an equivalent legacy expected identity', async () => {
+  const module = await shippedModule();
+  const absent = { entries: [] };
+  assert.deepEqual(module.readWorkflowBinding({
+    snapshot: absent,
+    expected: { mode: 'legacy-unbound', schemaVersion: 1 },
+    allowLegacy: true,
+  }), { schemaVersion: 1, mode: 'legacy-unbound' });
+  const binding = module.loadWorkflowBinding();
+  assert.throws(() => module.readWorkflowBinding({
+    snapshot: absent,
+    expected: module.workflowIdentity({ binding }),
+    allowLegacy: true,
+  }), /expected|binding/i);
+  assert.throws(() => module.readWorkflowBinding({
+    snapshot: absent,
+    expected: { mode: 'bound', schemaVersion: 1, digest: 'not-a-sha256' },
+    allowLegacy: true,
+  }), /expected|identity/i);
+});
+
 test('guidance projects only the requested fixed phase and summaries are curated', async () => {
   const module = await shippedModule();
   const binding = module.loadWorkflowBinding();

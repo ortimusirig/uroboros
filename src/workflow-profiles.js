@@ -260,7 +260,7 @@ export function workflowSnapshotEntry({ binding }) {
 }
 
 function sameIdentity(actual, expected) {
-  return JSON.stringify(actual) === JSON.stringify(expected);
+  return JSON.stringify(sorted(actual)) === JSON.stringify(sorted(expected));
 }
 
 function validIdentity(identity) {
@@ -275,7 +275,11 @@ export function readWorkflowBinding({ snapshot, expected, allowLegacy = false })
   const candidates = Array.isArray(snapshot.entries) ? snapshot.entries.filter((entry) => entry
     && typeof entry === 'object' && (entry.id === BINDING_ENTRY_ID || entry.kind === 'workflow-binding')) : [];
   if (!Object.hasOwn(snapshot, 'workflow') && candidates.length === 0 && allowLegacy) {
-    return { schemaVersion: 1, mode: 'legacy-unbound' };
+    const legacy = { schemaVersion: 1, mode: 'legacy-unbound' };
+    if (expected !== undefined && (!validIdentity(expected) || !sameIdentity(expected, legacy))) {
+      throw new Error('workflow snapshot expected identity conflicts with binding');
+    }
+    return legacy;
   }
   if (!validIdentity(snapshot.workflow)) throw new Error('workflow snapshot marker is invalid');
   if (candidates.length !== 1) throw new Error('workflow snapshot requires one workflow binding entry');
