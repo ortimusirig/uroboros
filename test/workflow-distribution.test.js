@@ -30,6 +30,41 @@ function save(directory, name, result) {
     error: result.error?.message, stdoutSha256: sha(result.stdout ?? ''), stderrSha256: sha(result.stderr ?? '') }, null, 2));
 }
 
+function findNpmCli(nodeExecutable) {
+  const candidates = [
+    join(dirname(nodeExecutable), 'node_modules/npm/bin/npm-cli.js'),
+    join(dirname(nodeExecutable), '../lib/node_modules/npm/bin/npm-cli.js'),
+  ];
+  const npmCli = candidates.find(candidate => existsSync(candidate));
+  assert.ok(npmCli, `npm CLI unavailable; checked: ${candidates.join(', ')}`);
+  return npmCli;
+}
+
+for (const [layout, relativeCli] of [
+  ['Windows-adjacent', 'bin/node_modules/npm/bin/npm-cli.js'],
+  ['Unix-prefix', 'lib/node_modules/npm/bin/npm-cli.js'],
+]) test(`npm discovery supports the ${layout} installation layout`, t => {
+  const directory = scratch(t), nodeExecutable = join(directory, 'bin/node');
+  const expected = join(directory, relativeCli);
+  mkdirSync(dirname(nodeExecutable), { recursive: true });
+  writeFileSync(nodeExecutable, 'disposable Node executable placeholder');
+  mkdirSync(dirname(expected), { recursive: true });
+  writeFileSync(expected, '// disposable npm CLI placeholder\n');
+  assert.equal(findNpmCli(nodeExecutable), expected);
+});
+
+test('npm discovery reports checked installation locations when npm is absent', t => {
+  const directory = scratch(t), nodeExecutable = join(directory, 'bin/node');
+  mkdirSync(dirname(nodeExecutable), { recursive: true });
+  writeFileSync(nodeExecutable, 'disposable Node executable placeholder');
+  assert.throws(() => findNpmCli(nodeExecutable), error => {
+    assert.match(error.message, /npm CLI unavailable; checked:/);
+    assert.ok(error.message.includes(join(directory, 'bin/node_modules/npm/bin/npm-cli.js')));
+    assert.ok(error.message.includes(join(directory, 'lib/node_modules/npm/bin/npm-cli.js')));
+    return true;
+  });
+});
+
 for (const [name, file, tamper] of [
   ['missing adapted profile', 'adapted/bmad-planning.md', false],
   ['missing MIT notice', 'upstream/spec-kit/LICENSE', false],
@@ -58,8 +93,7 @@ for (const [name, file, tamper] of [
 test('actual npm archive retains pinned workflow assets and loads its module and CLI offline', t => {
   const directory = scratch(t), extracted = join(directory, 'extracted');
   mkdirSync(extracted);
-  const npmCli = join(dirname(process.execPath), 'node_modules/npm/bin/npm-cli.js');
-  assert.ok(existsSync(npmCli), `npm CLI must be available at ${npmCli}`);
+  const npmCli = findNpmCli(process.execPath);
   const packed = run(process.execPath, [npmCli, 'pack', '--offline', '--ignore-scripts', '--json',
     '--pack-destination', directory, '--cache', join(directory, 'npm-cache')], { cwd: root });
   save(directory, 'npm-pack', packed);
