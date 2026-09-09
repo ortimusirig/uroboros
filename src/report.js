@@ -6,7 +6,7 @@ import { DEFAULT_VERIFIER_MODEL } from './verifier.js';
 import { DEFAULT_ARBITER_MODEL } from './arbiter.js';
 import { addUsage, EMPTY_USAGE } from './usage.js';
 import { encodeRecordedText, decodeRecordedText } from './execution-record.js';
-import { renderDialogueReport } from './dialogue-report.js';
+import { normalizeDialogueProjection, renderDialogueReport, renderWorkflowSummary } from './dialogue-report.js';
 
 export function participantsFromMessages(messages, models = {}) {
   const participants = new Map();
@@ -361,6 +361,7 @@ export function buildReportMarkdown(facts, {
     if (facts.dialogue) {
       md.push('', '## Coworker dialogue', '', renderDialogueReport(facts));
     } else {
+      md.push('', renderWorkflowSummary(normalizeDialogueProjection(facts).workflow));
       md.push('', '## Decision', '',
         `Phase: ${facts.phase}; mode: ${facts.interactionMode}; authority: ${facts.authority ?? facts.approval?.decidedBy ?? 'not recorded'}`,
         `Approved: ${facts.approved}; Converged: ${facts.converged === null ? 'not recorded' : facts.converged}`);

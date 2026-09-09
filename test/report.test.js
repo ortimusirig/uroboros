@@ -9,6 +9,18 @@ import { DEFAULT_VERIFIER_MODEL } from '../src/verifier.js';
 import { DEFAULT_ARBITER_MODEL } from '../src/arbiter.js';
 import { EMPTY_USAGE } from '../src/usage.js';
 
+test('true-v1 execution facts report visible unbound methodology while preserving the historical decision', () => {
+  // Same facts/continuation shape as saved-v1-execution.js; no native-v2 capture is stripped.
+  const historical = buildRunFacts({ runId: 'v1', iterations: [], outcome: 'needs-decision',
+    phase: 'execution', interactionMode: 'manual', authority: 'human', approved: false,
+    messages: [{ speaker: 'codex', phase: 'execution', role: 'implementation-author', content: 'Retained v1 implementation' }],
+    checkpointState: { version: 1, phase: 'execution', stage: 'execution-dispute', messages: [] } });
+  assert.equal(historical.dialogue, undefined);
+  assert.match(buildReportMarkdown(historical), /Workflow: legacy-unbound/);
+  assert.match(buildReportMarkdown(historical), /Retained v1 implementation/);
+  assert.doesNotMatch(buildReportMarkdown(historical), /Workflow: bound|BMAD planning adaptation/);
+});
+
 test('new facts retain provider roles, approval and dissent without phantom usage rows', () => {
   const messages = [
     { speaker: 'claude', role: 'author', phase: 'planning', content: 'I retain my concern', transport: { usage: null } },

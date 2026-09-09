@@ -85,6 +85,16 @@ function withDashboardEnabled(env) {
   return enabled;
 }
 
+for (const fixture of [fakeCodex, fakeAgent]) test(`fake provider refuses an absent grounding header instead of parsing unrelated JSON (${fixture.split(/[\\/]/).at(-1)})`, async t => {
+  const cwd = mkdtempSync(join(tmpdir(), 'cli-events-'));
+  t.after(() => rmSync(cwd, { recursive: true, force: true }));
+  const input = '\n{\n  "artifactDigest": "artifact",\n  "next": {"action":"propose"},\n  "inspectionReceipts": {}\n}';
+  const result = await spawnCapture(process.execPath, [fixture], { input, cwd });
+  assert.notEqual(result.code, 0);
+  assert.match(result.stderr, /missing supported shared grounding snapshot header/);
+  assert.equal(existsSync(join(cwd, 'a.py')), false);
+});
+
 test('normal CLI native execution writes files checks them and approves with retained source identity', async t => {
   const fixture = cliFixture();
   writeFileSync(join(fixture.root, 'gate.json'), JSON.stringify([{ bin: process.execPath, args: ['-e', "if(!require('node:fs').existsSync('a.py'))process.exit(4)"] }]));

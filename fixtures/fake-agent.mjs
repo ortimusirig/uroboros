@@ -11,7 +11,12 @@ if (process.argv.includes('--version')) {
   const start = input.lastIndexOf('\n{\n  "artifactDigest":');
   if (start >= 0 && !process.argv.includes('legacy')) {
     const state = JSON.parse(input.slice(start + 1, input.indexOf('\n}', start) + 2));
-    const grounding = input.indexOf('Shared grounding snapshot (content identity only; evidence still requires inspection):\n');
+    const header = [
+      'Shared grounding snapshot delivery projection (original snapshot digest below; projected bytes differ; evidence still requires inspection):\n',
+      'Shared grounding snapshot (content identity only; evidence still requires inspection):\n',
+    ].find(value => input.includes(value));
+    if (!header) throw new Error('missing supported shared grounding snapshot header');
+    const grounding = input.indexOf(header);
     const snapshotStart = input.indexOf('{', grounding);
     const snapshot = JSON.parse(input.slice(snapshotStart, input.indexOf('\n}', snapshotStart) + 2));
     const receipts = Object.values(state.inspectionReceipts).filter(r => r.seat === 'claude');

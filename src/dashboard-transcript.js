@@ -1,6 +1,6 @@
 import { decodeRecordedText } from './execution-record.js';
 import { DEFAULT_DASHBOARD_FILTER, filterDashboardRuns } from './dashboard-filters.js';
-import { renderDialogueHtml } from './dialogue-report.js';
+import { renderDialogueHtml, renderWorkflowSummary } from './dialogue-report.js';
 
 export function escapeHtml(value) {
   return String(value ?? '')
@@ -97,7 +97,8 @@ function renderConversation(run) {
         ? '<p>This view was truncated. Inspect the original message content field in uro-runfacts.json for the complete retained message.</p>'
         : '<p>This historical record was truncated; the original complete content was not retained in this record.</p>' : '') + '</details>';
   }).join('');
-  return '<section class="conversation-decision"><h3>' + escapeHtml(status) + '</h3><p>'
+  return '<section class="conversation-decision"><h3>' + escapeHtml(status) + '</h3>'
+    + '<pre>' + escapeHtml(renderWorkflowSummary(run.workflow)) + '</pre><p>'
     + escapeHtml(decision.phase + ' / ' + decision.interactionMode + '; agreement: '
       + (decision.converged === null ? 'not recorded' : String(decision.converged))) + '</p>'
     + (approval ? '<p>' + escapeHtml(approval.decidedBy + ' / ' + approval.basis + ' / ' + approval.artifactDigest)

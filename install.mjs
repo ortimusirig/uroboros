@@ -18,6 +18,7 @@ import { homedir } from 'node:os';
 import { dirname, join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CLI_COMMANDS, CLI_USAGE } from './src/cli-help.js';
+import { loadWorkflowBinding } from './src/workflow-profiles.js';
 
 const SRC = dirname(fileURLToPath(import.meta.url));
 const META_DIRECTORY = join(SRC, '.claude-plugin');
@@ -260,8 +261,10 @@ function printPluginInstructions(marketplaceName) {
 
 let manifests;
 let payload;
+let workflow;
 try {
   manifests = validatePlugin();
+  workflow = loadWorkflowBinding();
   payload = payloadFiles();
   for (const source of payload) sha(source);
 } catch (error) {
@@ -272,6 +275,7 @@ try {
 console.log('MODE=plugin-verifier');
 console.log(`source: ${SRC}`);
 console.log(`plugin validation: PASS (${CLI_COMMANDS.length} commands, 1 skill)`);
+console.log(`workflow validation: PASS (${workflow.profiles.map(profile => profile.id).join(', ')}; digest ${workflow.digest})`);
 
 warnAboutSkillDirectory(
   currentPersonalDest,

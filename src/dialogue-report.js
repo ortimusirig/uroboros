@@ -1,4 +1,31 @@
 import { decodeRecordedText } from './execution-record.js';
+import { readWorkflowBinding, summarizeWorkflowBinding } from './workflow-profiles.js';
+
+// A display projection has deliberately lost raw authentication material. Keep its
+// validated summary privately for the in-process dashboard -> HTML path; serialized
+// or caller-supplied summaries are never accepted as captured bindings.
+const projectedWorkflows = new WeakMap();
+const reservedWorkflowEntry = entry => entry?.id === 'uroboros-workflow-binding' || entry?.kind === 'workflow-binding';
+
+function workflowProjection(input, snapshot, checkpoint, phase) {
+  const prior = projectedWorkflows.get(input);
+  if (prior) return prior.phase === phase && prior.snapshot === JSON.stringify(snapshot) && checkpoint.workflow === undefined
+    ? structuredClone(prior.workflow) : { mode: 'invalid', profiles: [] };
+  try {
+    const binding = readWorkflowBinding({ snapshot: snapshot ?? {}, expected: checkpoint.workflow, allowLegacy: true });
+    return summarizeWorkflowBinding({ binding, phase: ['planning', 'execution', 'acceptance'].includes(phase) ? phase : undefined });
+  } catch {
+    return { mode: 'invalid', profiles: [] };
+  }
+}
+
+/** Formats only the curated summary produced by the report projection. */
+export function renderWorkflowSummary(workflow) {
+  const lines = [`Workflow: ${scalar(workflow?.mode, 'unavailable')}${workflow?.digest ? `; digest ${scalar(workflow.digest)}` : ''}`];
+  for (const profile of workflow?.profiles ?? []) lines.push(`- ${scalar(profile.id)} / adapter revision ${scalar(profile.adapterRevision)} / upstream ${scalar(profile.upstreamCommit)} / sections: ${(profile.sections ?? []).map(screenText).join(', ')}`);
+  lines.push('Guidance delivery does not demonstrate comprehension or quality; approval still requires evidence and reviewer judgment.');
+  return lines.join('\n');
+}
 
 function screenText(value) {
   let text = String(value ?? '');
@@ -160,7 +187,17 @@ function normalizeSnapshot(snapshot) {
     }
   }
   result.entries = Array.isArray(snapshot.entries)
-    ? snapshot.entries.map(entry => textFields(entry, ['id', 'kind', 'status', 'content', 'reference']) ?? {}) : [];
+    ? snapshot.entries.map(entry => {
+      if (reservedWorkflowEntry(entry)) return { ...(textFields(entry, ['id', 'kind', 'status']) ?? {}),
+        content: 'Captured workflow binding; see the curated workflow summary.' };
+      // Known harness carriers may contain entire nested snapshots/bindings. Their
+      // opaque capture is retained on disk, not repeated in the display manifest.
+      if (['queueParent', 'retained-phase', 'planning-handoff'].includes(entry?.kind)) {
+        return { ...(textFields(entry, ['id', 'kind', 'status', 'reference']) ?? {}),
+          content: 'Captured parent context; inspect the retained snapshot for details.' };
+      }
+      return textFields(entry, ['id', 'kind', 'status', 'content', 'reference']) ?? {};
+    }) : [];
   result.recalled = Array.isArray(snapshot.recalled) ? snapshot.recalled.map(item => {
     const recalled = textFields(item, ['versionId', 'id', 'logicalId', 'entryId', 'status', 'attribution']) ?? {};
     if (item?.provenance && typeof item.provenance === 'object') {
@@ -196,8 +233,10 @@ export function normalizeDialogueProjection(input = {}) {
   const issues = rawIssues.map(normalizeIssue);
   const rawReceipts = valuesOf(dialogue.inspectionReceipts).length
     ? valuesOf(dialogue.inspectionReceipts) : valuesOf(dialogue.receipts);
-  return {
-    phase: scalar(input.phase ?? dialogue.phase ?? checkpoint.phase ?? null, null),
+  const phase = scalar(input.phase ?? dialogue.phase ?? checkpoint.phase ?? null, null);
+  const result = {
+    phase,
+    workflow: workflowProjection(input, rawSnapshot, checkpoint, phase),
     authority: scalar(input.authority ?? dialogue.authority ?? null, null),
     interactionMode: scalar(input.interactionMode ?? dialogue.interactionMode ?? null, null),
     approved: input.approved ?? dialogue.approved ?? (rawApproval ? true : null),
@@ -227,6 +266,8 @@ export function normalizeDialogueProjection(input = {}) {
     technicalPause: textFields(dialogue.technicalPause ?? checkpoint.technicalPause, ['reason']),
     recall: textFields(input.recall ?? checkpoint.recall, ['status', 'detail', 'reason']),
   };
+  projectedWorkflows.set(result, { phase, snapshot: JSON.stringify(result.snapshot), workflow: structuredClone(result.workflow) });
+  return result;
 }
 
 export function renderDialogueReport(input) {
@@ -235,6 +276,7 @@ export function renderDialogueReport(input) {
     `Shared context: ${scalar(state.snapshot?.digest)}`,
     `Phase: ${scalar(state.phase)}; authority: ${scalar(state.authority)}; mode: ${scalar(state.interactionMode)}`,
     `Approved: ${state.approved === true ? 'yes' : state.approved === false ? 'no' : 'not recorded'}`,
+    renderWorkflowSummary(state.workflow),
   ];
   if (state.approval) lines.push(`Approval: ${scalar(state.approval.seat ?? state.approval.decidedBy)} / message ${scalar(state.approval.messageId)} / artifact ${scalar(state.approval.artifactDigest)} / context ${scalar(state.approval.contextDigest)}`);
   lines.push(`Next action: ${state.next?.seat ? `${scalar(state.next.seat)} / ` : ''}${scalar(state.nextAction)}${state.next?.reason ? ` — ${scalar(state.next.reason)}` : ''}`);

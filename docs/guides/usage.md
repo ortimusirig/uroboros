@@ -3,6 +3,12 @@
 See [Coworker dialogue](coworker-dialogue.md) for shared context, evidence and inspection
 semantics, reviewer/human authority, retained-work replanning, and safe recovery.
 
+[Bundled workflow profiles](workflow-profiles.md) explains the BMAD and Spec Kit adaptations
+delivered by native planning, direct execution, queue/campaign children and goal acceptance.
+There is no workflow-selection flag or toolkit install. Saved resume retains its captured
+version; historical work stays unbound. Added guidance costs prompt tokens in existing calls,
+without adding mandatory review rounds. A supplied `run --task` keeps its direct execution path.
+
 ## Updating an existing installation
 
 For an existing installation, run these in a terminal:

@@ -77,9 +77,12 @@ node bin/loop.js decompose --goal goals/G1-statement-import/spec.md --target .
 This produces task pairs such as `tasks/T1-plan.md` and `tasks/T1-gate.json`, plus
 `tasks/queue.json`, beneath the goal directory.
 
-## Optional open-source references
+## Bundled adaptations and upstream references
 
-These projects are references, not installed Uroboros integrations or sizing oracles:
+Uroboros now bundles bounded BMAD and Spec Kit adaptations through its native workflow
+binding. Read the [workflow profiles guide](workflow-profiles.md) for applicable sections,
+pins, evidence limits, historical behavior and notices. The original projects remain
+references; their toolkits and controllers are not installed. OpenSpec remains a reference only:
 
 - [BMAD-METHOD epic design](https://github.com/bmad-code-org/BMAD-METHOD/blob/abe4eb1bce919c9d22cd18b3519353d5824c4b75/skills/bmad-create-epics-and-stories/steps/step-02-design-epics.md)
   emphasizes user outcomes and useful feedback or risk boundaries.

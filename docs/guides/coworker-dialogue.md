@@ -8,6 +8,13 @@ Uroboros captures the goal, required constraints, evidence references, and selec
 
 Planning is **Claude author → Codex reviewer**. Execution is **Codex implementer → Claude reviewer**. Either seat can ask, answer, inspect, challenge, rebut, withdraw, verify, decide, replan, or approve as its role permits. Conversation-only actions are read-only. Only the designated author or implementer changes the artifact during an explicit revision or implementation action.
 
+[Bundled BMAD and Spec Kit adaptations](workflow-profiles.md) travel in a validated captured
+binding. Both seats receive the applicable planning, execution or acceptance sections through
+the common input projection; saved snapshots retain the complete binding. Queues, campaigns,
+retained replans and resume preserve the selected version. Reports expose curated identity
+and applicability, summarize nested parent captures, and label invalid or historical unbound
+state honestly. Guidance delivery is distinct from inspection, assessment and approval.
+
 ## Messages, issues, and evidence
 
 Substantive factual claims identify resolvable evidence. Code references bind captured bytes to a path/symbol and source identity; command evidence records actual argv, cwd, status, exit, output, and code identity. External and recalled sources retain their version and attribution. Missing, stale, irrelevant, out-of-scope, or unknown evidence stays visible and cannot support approval.

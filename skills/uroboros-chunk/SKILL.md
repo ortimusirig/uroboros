@@ -9,6 +9,13 @@ Claude prepares bounded goals in the calling session using its project context. 
 plan or decomposition then follows the same reviewed planning protocol as `plan` and `decompose`:
 Claude authors, Codex reviews, and both answer the actual previous arguments.
 
+Before preparing units, read the [bundled workflow profile guide](../../docs/guides/workflow-profiles.md)
+and its relevant adapted BMAD and Spec Kit sections: planning for boundaries/replans,
+execution for development/review, acceptance for whole-goal completion. These references
+identify the pinned source revisions and retained notices. Calling-session preparation is
+outside native harness enforcement; route its output through the existing reviewed
+`plan`/`decompose` and queue paths before treating it as approved native planning work.
+
 ## Mode and approval contract
 
 Use `--mode manual` by default on `plan`, `decompose`, `queue`, `batch`, and `run`.

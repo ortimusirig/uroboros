@@ -152,6 +152,50 @@ test('direct supplied execution pins workflow before provider launch and transpo
   assert.deepEqual(result.checkpointState.workflow, delivered[0].snapshot.workflow);
 });
 
+// Characterizes existing evidence prerequisites: methodology delivery/checkboxes
+// cannot replace actual source observation and an inspection receipt.
+for (const basis of ['workflow guidance', 'checked task list']) test(`native review cannot verify a source claim from ${basis} alone`, async t => {
+  const f = fixture(t), { run } = await copyNativeWorkflowPackage(t).module('run.js'); initGit(f.target);
+  const result = await run({ ...f, scratchRoot: join(f.root, 'scratch'), task: f.goal, gate: [],
+    runId: 'unsupported-method-claim', mode: 'autonomous', adapters: {
+      runExecutor: r => ({ dialogue: planningEnvelope(r, 'propose'), usage }),
+      runReview: r => ({ dialogue: planningEnvelope(r, 'approve', {
+        content: basis === 'workflow guidance' ? 'BMAD and Spec Kit guidance says the source is correct.' : '[x] implementation [x] tests [x] correct source',
+        claims: [{ id: 'source-claim', kind: 'fact', text: 'source.js preserves local login.',
+          evidenceIds: basis === 'workflow guidance' ? ['uroboros-workflow-binding'] : [] }],
+        verifications: [{ claimId: 'source-claim', result: 'supports', reason: 'The method was followed.',
+          evidenceIds: basis === 'workflow guidance' ? ['uroboros-workflow-binding'] : [], inspectionReceiptIds: [] }],
+      }), usage }),
+    } });
+  assert.equal(result.approved, false);
+  assert.equal(result.dialogue.approval, null);
+  assert.equal(Object.values(result.dialogue.verifications ?? {}).some(v => v.claimId === 'source-claim' && v.result === 'supports'), false);
+  assert.equal(Object.values(result.dialogue.inspectionReceipts ?? {}).length, 0);
+});
+
+test('native review can verify the same source claim after actual source inspection', async t => {
+  const f = fixture(t), { run } = await copyNativeWorkflowPackage(t).module('run.js'); initGit(f.target);
+  let reviews = 0;
+  const result = await run({ ...f, scratchRoot: join(f.root, 'scratch'), task: f.goal, gate: [],
+    runId: 'observed-source-claim', mode: 'autonomous', adapters: {
+      runExecutor: r => ({ dialogue: planningEnvelope(r, 'propose'), usage }),
+      runReview: r => {
+        if (++reviews === 1) return { dialogue: planningEnvelope(r, 'inspect', { requests: [{ path: 'source.js', line: 1, claimIds: ['source-claim'] }] }), usage };
+        assert.match(r.prompt, /export const localLogin = true;/);
+        const evidence = r.state.evidence.find(e => e.kind === 'code');
+        const receipt = Object.values(r.state.inspectionReceipts).find(item => item.evidenceIds.includes(evidence.id));
+        assert.equal(readFileSync(evidence.capturedPath, 'utf8'), 'export const localLogin = true;\n');
+        return { dialogue: planningEnvelope(r, 'approve', {
+          claims: [{ id: 'source-claim', kind: 'fact', text: 'source.js preserves local login.', evidenceIds: [evidence.id] }],
+          verifications: [{ claimId: 'source-claim', result: 'supports', reason: 'The captured source enables local login.', evidenceIds: [evidence.id], inspectionReceiptIds: [receipt.id] }],
+        }), usage };
+      },
+    } });
+  assert.equal(result.approved, true, result.reason);
+  assert.equal(reviews, 2);
+  assert.ok(result.dialogue.verifications.some(v => v.claimId === 'source-claim' && v.result === 'supports'));
+});
+
 for (const historical of [false, true]) test(`public planning resume preserves ${historical ? 'authentic historical unbound' : 'captured bound'} lineage with unavailable installed bundle`, async t => {
   const f = fixture(t), pkg = copyNativeWorkflowPackage(t, { historical });
   const { runPlan: oldPlan } = await pkg.module('plan.js');

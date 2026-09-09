@@ -25,7 +25,12 @@ if (process.argv[2] === 'plugin' && process.argv[3] === 'list') {
   if (start >= 0 && !process.argv.includes('legacy')) {
     native = true;
     const state = JSON.parse(input.slice(start + 1, input.indexOf('\n}', start) + 2));
-    const grounding = input.indexOf('Shared grounding snapshot (content identity only; evidence still requires inspection):\n');
+    const header = [
+      'Shared grounding snapshot delivery projection (original snapshot digest below; projected bytes differ; evidence still requires inspection):\n',
+      'Shared grounding snapshot (content identity only; evidence still requires inspection):\n',
+    ].find(value => input.includes(value));
+    if (!header) throw new Error('missing supported shared grounding snapshot header');
+    const grounding = input.indexOf(header);
     const snapshotStart = input.indexOf('{', grounding);
     const snapshot = JSON.parse(input.slice(snapshotStart, input.indexOf('\n}', snapshotStart) + 2));
     nativeWrites = ['propose', 'revise'].includes(state.next.action);

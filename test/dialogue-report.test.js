@@ -1,6 +1,90 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { normalizeDialogueProjection, renderDialogueHtml, renderDialogueReport } from '../src/dialogue-report.js';
+import { createSharedContext } from '../src/shared-context.js';
+import { loadWorkflowBinding } from '../src/workflow-profiles.js';
+
+function boundFixture(phase = 'planning') {
+  const snapshot = createSharedContext({ projectId: 'p', runId: 'r', unitId: 'u', phase,
+    sourceRevision: 'source', entries: [], workflowBinding: loadWorkflowBinding() });
+  return { phase, dialogue: { phase, snapshot } };
+}
+
+for (const phase of ['planning', 'execution', 'acceptance']) test(`workflow report preserves authenticated ${phase} identity through Markdown and HTML projection`, () => {
+  const input = boundFixture(phase), before = JSON.stringify(input);
+  input.workflow = { mode: 'bound', digest: 'PRIVATE_SENTINEL' };
+  const projected = normalizeDialogueProjection(input);
+  assert.equal(projected.workflow.mode, 'bound');
+  assert.equal(projected.workflow.digest, '0432be8a37133c2d08d0fef216c440e2d9cff48f7a1d4251a18f6d74fb89f061');
+  assert.deepEqual(projected.workflow.profiles, [
+    { id: 'bmad', adapterRevision: 1, upstreamCommit: 'abe4eb1bce919c9d22cd18b3519353d5824c4b75', sections: [phase] },
+    { id: 'spec-kit', adapterRevision: 1, upstreamCommit: '0c8e31ff0a98c362696c2edb6a1bb25a37f68544', sections: [phase] },
+  ]);
+  assert.deepEqual(normalizeDialogueProjection(projected), projected);
+  for (const rendered of [renderDialogueReport(input), renderDialogueHtml(input), renderDialogueHtml(projected)]) {
+    assert.match(rendered, /Workflow: bound/);
+    assert.match(rendered, /bmad.*revision 1.*abe4eb1b.*sections: /);
+    assert.match(rendered, /spec-kit.*revision 1.*0c8e31ff/);
+    assert.match(rendered, /delivery.*comprehension.*quality/i);
+    assert.doesNotMatch(rendered, /PRIVATE_SENTINEL|BMAD adapted|Spec Kit adapted|"sources"|"notices"/);
+  }
+  delete input.workflow;
+  assert.equal(JSON.stringify(input), before);
+});
+
+for (const damage of ['malformed', 'missing-entry', 'missing-marker', 'unknown-field']) test(`workflow report labels ${damage} capture invalid without exposing reserved content`, () => {
+  const input = structuredClone(boundFixture());
+  const snapshot = input.dialogue.snapshot;
+  if (damage === 'malformed') snapshot.entries[0].content = 'PRIVATE_SENTINEL malformed binding';
+  if (damage === 'missing-entry') snapshot.entries = [];
+  if (damage === 'missing-marker') delete snapshot.workflow;
+  if (damage === 'unknown-field') {
+    const binding = JSON.parse(snapshot.entries[0].content); binding.private = 'PRIVATE_SENTINEL';
+    snapshot.entries[0].content = JSON.stringify(binding);
+  }
+  const projected = normalizeDialogueProjection(input);
+  assert.equal(projected.workflow.mode, 'invalid');
+  assert.deepEqual(projected.workflow.profiles, []);
+  for (const rendered of [JSON.stringify(projected), renderDialogueReport(input), renderDialogueHtml(input)]) {
+    assert.doesNotMatch(rendered, /PRIVATE_SENTINEL|BMAD adapted|Spec Kit adapted/);
+  }
+  assert.match(renderDialogueHtml(input), /Workflow: invalid/);
+});
+
+test('workflow display summaries supplied without authenticated capture cannot certify a bound run', () => {
+  const input = structuredClone(normalizeDialogueProjection(boundFixture()));
+  assert.equal(normalizeDialogueProjection(input).workflow.mode, 'invalid', 'a serialized display projection is not raw capture');
+  const forged = { phase: 'execution', workflow: { mode: 'bound', digest: 'forged', profiles: [] },
+    checkpointState: { workflow: { schemaVersion: 1, mode: 'bound', digest: 'a'.repeat(64) } } };
+  assert.equal(normalizeDialogueProjection(forged).workflow.mode, 'invalid');
+});
+
+test('mutating a previously normalized capture cannot reuse its authenticated workflow summary', () => {
+  const projection = normalizeDialogueProjection(boundFixture());
+  projection.snapshot.entries = [];
+  projection.checkpointState = { workflow: { schemaVersion: 1, mode: 'bound', digest: 'a'.repeat(64) } };
+  assert.equal(normalizeDialogueProjection(projection).workflow.mode, 'invalid');
+});
+
+test('known nested workflow captures cannot bypass the curated report through context content', () => {
+  const input = structuredClone(boundFixture()), nested = structuredClone(input.dialogue.snapshot);
+  nested.entries[0].content = 'PRIVATE_SENTINEL';
+  for (const [kind, content] of [
+    ['queueParent', nested], ['retained-phase', { parentEntries: nested.entries }],
+    ['planning-handoff', { snapshot: nested, workflowBinding: { private: 'PRIVATE_SENTINEL' } }],
+  ]) input.dialogue.snapshot.entries.push({ id: kind, kind, status: 'required', content: JSON.stringify(content) });
+  for (const output of [JSON.stringify(normalizeDialogueProjection(input)), renderDialogueReport(input), renderDialogueHtml(input)]) {
+    assert.doesNotMatch(output, /PRIVATE_SENTINEL/);
+    assert.match(output, /queueParent/);
+  }
+});
+
+test('historical native snapshot is visibly legacy-unbound and gains no methodology', () => {
+  const input = { phase: 'planning', dialogue: { snapshot: { entries: [], digest: 'historical' } } };
+  assert.deepEqual(normalizeDialogueProjection(input).workflow, { mode: 'legacy-unbound', profiles: [] });
+  assert.match(renderDialogueHtml(input), /Workflow: legacy-unbound/);
+  assert.doesNotMatch(renderDialogueReport(input), /BMAD adapted|Spec Kit adapted/);
+});
 
 function fixture() {
   return {

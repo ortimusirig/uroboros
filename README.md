@@ -8,6 +8,12 @@
 
 Claude authors plans and Codex reviews them. Codex implements in a Git-isolated workspace; Claude reviews the implementation, answering Codex corrections and rebuttals. The harness retains command evidence, complete delivered messages, decisions and dissent.
 
+Native work uses offline [BMAD and Spec Kit workflow profiles](docs/guides/workflow-profiles.md)
+for outcome planning, retained replanning, implementation and evidence review. The harness
+validates and delivers pinned adaptations to both seats, preserving the captured version on
+resume. Reports distinguish bound, historical unbound and invalid captures; delivery is not
+proof of comprehension or quality. No upstream toolkit or additional provider round is required.
+
 ## Install
 
 Run these two commands inside Claude Code (not a terminal):
