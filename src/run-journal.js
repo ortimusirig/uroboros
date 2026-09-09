@@ -123,6 +123,9 @@ function count(value) {
 }
 
 function totalTokens(facts) {
+  if (isObject(facts.resources?.knownUsage)) {
+    return count(facts.resources.knownUsage.inputTokens) + count(facts.resources.knownUsage.outputTokens);
+  }
   const recordedTotal = facts.tokens?.total;
   if (isObject(recordedTotal)) {
     return count(recordedTotal.inputTokens) + count(recordedTotal.outputTokens);
@@ -155,6 +158,10 @@ function frontmatterFor(facts, touchedFiles) {
     `evidenceNonZero: ${yamlScalar((facts.evidence ?? []).filter((entry) => entry.code !== 0).length)}`,
     `findingsLastRound: ${yamlScalar((facts.debate?.roundHistory?.at(-1)?.findings ?? []).length)}`,
     `tokensTotal: ${totalTokens(facts)}`,
+    `usageUnknown: ${facts.resources?.usageUnknown === true ? 'true' : 'false'}`,
+    `phase: ${yamlScalar(facts.phase)}`,
+    `authority: ${yamlScalar(facts.authority)}`,
+    `nextAction: ${yamlScalar(facts.nextAction)}`,
     `branch: ${yamlScalar(facts.branch)}`,
   ];
   if (touchedFiles.length === 0) {

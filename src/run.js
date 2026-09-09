@@ -17,7 +17,7 @@ import {
   REVIEW_PROMPT,
   runReviewPass as realReviewPass,
 } from './verifier.js';
-import { buildRunFacts, writeReport } from './report.js';
+import { buildRunFacts, refreshReportProjection, writeReport } from './report.js';
 import { spawnCapture } from './spawn.js';
 import {
   addUsage,
@@ -2594,6 +2594,15 @@ export async function run(opts) {
     }
     try { writeFileSync(join(iso.dir, 'uro-runfacts.json'), JSON.stringify(facts, null, 2)); }
     catch { /* artifact retention is non-fatal */ }
+  }
+  if (nativeExecution) {
+    try { refreshReportProjection({ dir: iso.dir, facts }); }
+    catch (error) {
+      facts.artifacts = { ...(facts.artifacts ?? {}), status: 'failed',
+        refresh: { status: 'failed', error: error instanceof Error ? error.message : String(error) } };
+      try { writeFileSync(join(iso.dir, 'uro-runfacts.json'), JSON.stringify(facts, null, 2)); }
+      catch { /* final presentation failure is retained in memory */ }
+    }
   }
   return facts;
   } finally {

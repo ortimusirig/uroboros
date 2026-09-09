@@ -102,13 +102,18 @@ before relying on the result.
 
 ## How the loop works
 
-One `loop run` is one pass:
+Each phase starts from an explicit shared-context snapshot delivered to both seats:
 
+```text
+query/goal ──► shared context ──► Claude plans ⇄ Codex reviews
+                       │
+                       └────────► Codex implements ⇄ Claude reviews ──► current approval/report
+                                      │                    ▲
+                                      └─ evidence/issues ──┘
 ```
-plan.md ──► Codex writes (isolated copy) ──► commands run once (evidence) ──► debate ──► report
-                                                                        │
-                Claude reviews ──► findings ──► Codex corrects/rebuts ──► Claude responds
-```
+
+Questions, inspections, challenges and rebuttals can continue without changing the artifact.
+Only an explicit author/implementation step mutates it. See the [coworker-dialogue guide](docs/guides/coworker-dialogue.md).
 
 Above one plan, `loop decompose` builds the hierarchy that feeds the loop: a project
 converges into MVP-first, dependency-ordered goals, and each goal converges in turn into
@@ -141,7 +146,10 @@ loop queue --file queue.json --mode autonomous --max-runs 3 --token-budget 50000
 For goal units Claude authors and Codex reviews the exact goal, plan and gate artifact.
 Manual disputes now save `uro-checkpoint.json`. Continue with
 `node bin/loop.js resume --run <run-directory> --decision-file <answers.json>`.
-The saved phase, workspace and manual mode are preserved. See [manual resume](docs/guides/usage.md#manual-resume)
+An eligible saved technical pause with no human question uses
+`node bin/loop.js resume --run <run-directory> --continue`. The routes are mutually exclusive;
+`--continue` reconciles validated state and never retries an uncertain effect or bypasses authority,
+evidence, budgets, or approval. The saved phase, workspace, mode and limits are preserved. See [manual resume](docs/guides/usage.md#manual-resume)
 for the answer schema, same-workspace recovery and replay/staleness limits.
 
 The default `--mode manual` sends unresolved disputes to the human. With `--mode autonomous`,
@@ -156,11 +164,10 @@ The executor/arbiter aliases remain with conflict detection. `--planner-model` a
 `--verifier-model` are obsolete and rejected; campaign JSON uses `mode`, `claudeModel`,
 `codexModel` and `codexEffort`.
 
-Wherever an approach is being chosen — the initial plan, and again when the arbiter decides an
-approach is dead rather than merely wrong — several candidates are drafted from deliberately
-distinct declared perspectives and one is selected, so the loop compares approaches instead of
-polishing the first one it thought of. Autonomous replanning requires a reviewed replacement;
-manual pivots offer correction, fresh planning over retained work, or stop.
+Initial planning defaults to one candidate. Explicit alternatives remain available; fresh/replan
+exploration currently defaults to three candidates. In both modes, substantive planning errors use
+a reviewed replacement over useful retained code, evidence and history rather than a reset. Human
+involvement is limited to authenticated missing decisions or unresolved manual disputes.
 The queue stops on the first non-approved result. A change lands only with valid current-diff execution approval and every blocking finding resolved,
 including a validated human ruling in manual mode, AND Claude, reading the diff first-hand at
 landing time, approves it; a refusal or an unreachable final review always stops the queue
@@ -184,6 +191,8 @@ Claude and Codex alternate author and reviewer roles so the agent producing an a
 - The harness runs declared commands as evidence and retains complete stdout/stderr in `__uro_evidence/`. Agents judge what those results mean. A valid bundle explicitly declares `clean`, `issues` or `inconclusive`; missing, conflicting, incomplete or failed review never implies approval.
 - Blocking findings stay open until explicitly resolved or withdrawn after Codex can answer and current test evidence is available. In manual mode the human settles unresolved disputes through the saved checkpoint. A validated human ruling settles only its named current dispute; it does not waive unrelated blockers or an unavailable review.
 - Autonomous execution decisions belong to Claude. It may request correction, a reviewed replacement plan or a stop. Final queue landing separately checks the current diff and records Claude's judgement before committing locally.
+- Delivery, inspection, assessment, disposition and approval are separate records. Every substantive factual claim identifies evidence; a digest identifies bytes/context, not semantic truth.
+- Final-review questions remain available and reviewer depth is discretionary. A sufficient already-running approval response does not require a redundant extra provider call. There is no default dialogue-call, round or elapsed ceiling; explicit budgets and operational limits remain separate.
 
 A standalone run leaves reviewed changes in its isolate. A queue applies approved diffs to a clean target and commits them locally. Publishing is a separate explicit action.
 
@@ -193,7 +202,7 @@ Each provider CLI owns authentication. Uroboros does not introduce an API-key in
 
 Windows is the most exercised platform in this repository. macOS and Linux use the same Node implementation, but platform-specific behavior still needs verification on the machine running it.
 
-`loop dashboard` provides a read-only transcript and run board. The transcript shows delivered messages, touched files, evidence and diffs. The board highlights active runs, unresolved decisions and retained dissent, with Active, Today and All filters. When an encoded view is shortened it is visibly marked; the original message remains inspectable in `uro-runfacts.json`.
+`loop dashboard` provides a read-only transcript and run board. Native views show the current context/recall identity, attributed questions/answers/rebuttals, issues/dispositions, evidence/inspection/assessment state, current authority/next action and separately labelled resource scopes. The board highlights active runs, unresolved decisions and retained dissent, with Active, Today and All filters. Unknown usage is not displayed as zero. When an encoded view is shortened it is visibly marked; the original message remains inspectable in `uro-runfacts.json`.
 
 After plugin installation, these are the fifteen namespaced slash commands:
 
@@ -230,8 +239,9 @@ node bin/loop.js plan --goal "Add the requested behavior" --target . --out campa
 node bin/loop.js decompose --goal goals/G1-demo/spec.md --target .
 ```
 
-For the full command surface, every flag, campaign shapes, outcomes, and configuration, see
-[docs/guides/usage.md](docs/guides/usage.md). For GitHub publishing and the confidentiality guard, see
+For the shared-context, evidence, authority and recovery model, see
+[docs/guides/coworker-dialogue.md](docs/guides/coworker-dialogue.md). For the full command surface,
+every flag, campaign shape, outcome and configuration, see [docs/guides/usage.md](docs/guides/usage.md). For GitHub publishing and the confidentiality guard, see
 [docs/guides/publishing.md](docs/guides/publishing.md).
 
 ## Smoke test
@@ -242,8 +252,10 @@ A `plan.md` saying *"create hello.txt containing HELLO WORLD"*, this `gate.json`
 [{ "bin": "node", "args": ["-e", "process.exit(require('fs').existsSync('hello.txt')?0:1)"] }]
 ```
 
-and any throwaway folder as `--target`. Expect `outcome: review-ready`, an `evidence` list
-recording each command run, and the review's findings in `debate.roundHistory`.
+and any throwaway folder as `--target`. A current native run records command evidence and its
+allowlisted `dialogue`, `resources`, current authority and next action in `uro-runfacts.json`.
+Historical v1 records may instead retain findings under `debate.roundHistory`; readability of that
+field does not imply native dialogue emits legacy debate rounds.
 
 
 ## Known gotchas

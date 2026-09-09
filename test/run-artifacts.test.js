@@ -212,6 +212,9 @@ test('run pauses when required native archive retention fails while preserving i
     assert.equal(facts.approval, null);
     assert.equal(facts.nextAction, 'paused');
     assert.match(facts.reason, /required artifact retention failed/);
+    const finalReport = readFileSync(join(facts.dir, 'uro-report.md'), 'utf8');
+    assert.match(finalReport, /Approved: no|Approved: false/);
+    assert.match(finalReport, /required artifact retention failed/i);
     assert.equal(existsSync(join(facts.dir, '__uro_dialogue', 'journal-tail.jsonl')), true);
     assert.equal(readFileSync(join(blockedRoot, runId), 'utf8'), 'not a directory');
     assert.equal(existsSync(join(blockedRoot, runId, '__uro_context')), false);

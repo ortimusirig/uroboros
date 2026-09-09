@@ -39,6 +39,33 @@ test('execution unknown agreement and skipped review do not invent consensus or 
   assert.deepEqual(current.participants.map(p => p.provider), ['codex']);
   assert.match(buildReportMarkdown(current), /Converged: not recorded/);
 });
+
+test('native run facts keep the allowlisted dialogue carrier and render current authority instead of a historical signer', () => {
+  const current = buildRunFacts({ runId: 'native-report', target: 'C:/proj', dir: 'C:/ccc/w', isRepo: true,
+    branch: 'ccc/native-report', iterations: [], outcome: 'needs-pivot', phase: 'execution',
+    interactionMode: 'manual', authority: 'claude', approved: false, converged: null,
+    approval: { decidedBy: 'codex', basis: 'historical', artifactDigest: 'old-artifact', reason: 'old' },
+    messages: [], dialogue: {
+      snapshot: { digest: 'current-context', entries: [], recalled: [] },
+      messages: [{ sender: 'codex', action: 'ask', phase: 'execution', content: 'Is this requirement current?' }],
+      issues: [{ id: 'I1', title: 'Requirement ambiguity', status: 'open', blocking: true }],
+      dispositions: [],
+      technicalPause: { reason: 'required journal reconciliation' },
+    }, resources: { providerLaunches: 2, knownUsage: { inputTokens: 8, outputTokens: 3 }, usageUnknown: true },
+    reason: 'required journal reconciliation', nextAction: 'paused',
+    checkpointState: { phaseResources: { providerLaunches: 1, knownUsage: { inputTokens: 4, outputTokens: 1 }, usageUnknown: false },
+      phaseChain: [{ phase: 'planning', runId: 'plan-1', action: 'complete', resources: { providerLaunches: 1, knownUsage: { inputTokens: 4, outputTokens: 2 }, usageUnknown: false } }] },
+  });
+  assert.equal(current.dialogue.snapshot.digest, 'current-context');
+  assert.equal(current.resources.usageUnknown, true);
+  const markdown = buildReportMarkdown(current);
+  assert.match(markdown, /Shared context: current-context/);
+  assert.match(markdown, /Phase: execution; authority: claude/);
+  assert.match(markdown, /codex \/ ask/);
+  assert.match(markdown, /Technical pause/);
+  assert.match(markdown, /Cumulative run resources.*usage unknown: yes/s);
+  assert.doesNotMatch(markdown, /authority: codex/);
+});
 test('participant aggregation does not charge reused or skipped receipts', () => {
   const usage = { inputTokens: 7, outputTokens: 3 };
   const message = { speaker: 'claude', phase: 'planning', role: 'author', content: 'Candidate',

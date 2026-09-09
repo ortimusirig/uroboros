@@ -150,7 +150,7 @@ test('frontmatter parses with every required property and Bases-compatible types
   const { parsed } = parseFrontmatter(note);
   const required = [
     'runId', 'date', 'outcome', 'evidenceNonZero', 'findingsLastRound',
-    'tokensTotal', 'branch', 'filesChanged',
+    'tokensTotal', 'usageUnknown', 'phase', 'authority', 'nextAction', 'branch', 'filesChanged',
   ];
   assert.deepEqual(Object.keys(parsed), required);
   assert.equal(typeof parsed.runId, 'string');
@@ -163,12 +163,31 @@ test('frontmatter parses with every required property and Bases-compatible types
   assert.equal(parsed.findingsLastRound, 2);
   assert.equal(typeof parsed.tokensTotal, 'number');
   assert.equal(parsed.tokensTotal, 124, 'cached and reasoning subsets must not be double-counted');
+  assert.equal(parsed.usageUnknown, false);
+  assert.equal(parsed.phase, null);
+  assert.equal(parsed.authority, null);
+  assert.equal(parsed.nextAction, null);
   assert.ok(Array.isArray(parsed.filesChanged));
   assert.deepEqual(parsed.filesChanged, [
     '[[src/run.js]]',
     '[[docs/schema: "quoted".md]]',
     '[[src/earlier-retry.js]]',
   ]);
+});
+
+test('native journal frontmatter uses authoritative known subtotal and keeps unknown usage explicit', () => {
+  const { parsed, body } = parseFrontmatter(buildRunJournalNote({ ...fixtureFacts,
+    phase: 'execution', authority: 'claude', nextAction: 'paused',
+    resources: { knownUsage: { inputTokens: 6, outputTokens: 2 }, usageUnknown: true },
+    dialogue: { snapshot: { digest: 'journal-context', entries: [], recalled: [] }, messages: [], issues: [], dispositions: [] },
+  }));
+  assert.equal(parsed.tokensTotal, 8);
+  assert.equal(parsed.usageUnknown, true);
+  assert.equal(parsed.phase, 'execution');
+  assert.equal(parsed.authority, 'claude');
+  assert.equal(parsed.nextAction, 'paused');
+  assert.match(body, /journal-context/);
+  assert.match(body, /known subtotal: input 6, output 2.*usage unknown: yes/s);
 });
 
 test('colon, double quote, and newline findings cannot corrupt frontmatter or body', () => {

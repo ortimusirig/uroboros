@@ -7,6 +7,7 @@ import {
   readFileSync,
   rmSync,
   symlinkSync,
+  unlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { join, resolve } from 'node:path';
@@ -17,6 +18,7 @@ import {
   archiveRunArtifacts,
   resolveArtifactRoot,
 } from '../src/artifacts.js';
+import { writeReport } from '../src/report.js';
 
 const TEST_ROOT = fileURLToPath(new URL('../.ccc-test-artifacts/', import.meta.url));
 
@@ -30,7 +32,11 @@ test('required native archive failure revokes onward approval and retains comple
     writeFileSync(join(worktree, '__uro_context', 'current.json'), 'complete current grounding');
     writeFileSync(join(worktree, '__uro_dialogue', 'journal.jsonl'), 'complete operation history');
     writeFileSync(artifactRoot, 'not a directory');
-    const runFacts = { ...facts('required-context'), approved: true, approval: { decidedBy: 'claude' }, checkpointState: { version: 2 } };
+    const runFacts = { ...facts('required-context'), phase: 'execution', interactionMode: 'autonomous', authority: 'claude',
+      approved: true, converged: null, approval: { decidedBy: 'claude', basis: 'reviewer', artifactDigest: 'old', reason: 'clean' },
+      dialogue: { snapshot: { digest: 'retention-context', entries: [], recalled: [] }, messages: [], issues: [], dispositions: [] },
+      checkpointState: { version: 2 } };
+    writeReport({ dir: worktree, facts: runFacts });
     const result = archiveRunArtifacts({ dir: worktree, runId: runFacts.runId, facts: runFacts,
       scratchRoot: root, artifactRoot, requiredRetention: true, startedAt: new Date(), endedAt: new Date() });
     assert.equal(result.status, 'failed');
@@ -38,8 +44,85 @@ test('required native archive failure revokes onward approval and retains comple
     assert.equal(runFacts.approval, null);
     assert.equal(runFacts.nextAction, 'paused');
     assert.match(runFacts.reason, /required.*retention|archive/);
+    assert.match(readFileSync(join(worktree, 'uro-report.md'), 'utf8'), /Approved: no|Approved: false/);
+    assert.match(readFileSync(join(worktree, 'uro-report.md'), 'utf8'), /required artifact retention failed/i);
     assert.equal(readFileSync(join(worktree, '__uro_context', 'current.json'), 'utf8'), 'complete current grounding');
     assert.equal(readFileSync(join(worktree, '__uro_dialogue', 'journal.jsonl'), 'utf8'), 'complete operation history');
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('a required copy failure refreshes source and already-created durable Markdown from final facts', () => {
+  const root = temporaryDirectory('final-projection-');
+  const worktree = join(root, 'work'), artifactRoot = join(root, 'records'), outside = join(root, 'outside');
+  try {
+    writeProducedArtifacts(worktree);
+    mkdirSync(outside);
+    mkdirSync(join(worktree, '__uro_review'));
+    writeFileSync(join(outside, 'private.txt'), 'outside');
+    symlinkSync(outside, join(worktree, '__uro_review', 'escape'), process.platform === 'win32' ? 'junction' : 'dir');
+    const runFacts = { ...facts('2026-08-29T01-02-03-004Z-final-projection'), phase: 'execution',
+      interactionMode: 'autonomous', authority: 'claude', approved: true, converged: null,
+      approval: { decidedBy: 'claude', basis: 'reviewer', artifactDigest: 'before-retention', reason: 'clean' },
+      dialogue: { snapshot: { digest: 'final-context', entries: [], recalled: [] }, messages: [], issues: [], dispositions: [] },
+      checkpointState: { version: 2 } };
+    writeReport({ dir: worktree, facts: runFacts });
+    const archived = archiveRunArtifacts({ dir: worktree, runId: runFacts.runId, facts: runFacts,
+      scratchRoot: root, artifactRoot, requiredRetention: true, startedAt: new Date(), endedAt: new Date() });
+    assert.equal(archived.status, 'failed');
+    assert.equal(runFacts.approved, false);
+    for (const reportPath of [join(worktree, 'uro-report.md'), join(artifactRoot, runFacts.runId, 'uro-report.md')]) {
+      const report = readFileSync(reportPath, 'utf8');
+      assert.match(report, /Approved: no|Approved: false/, reportPath);
+      assert.match(report, /required artifact retention failed/i, reportPath);
+      assert.doesNotMatch(report, /Approved: yes|Approved: true/);
+    }
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+for (const failedProjection of ['source', 'durable']) test(`an unsafe ${failedProjection} report refresh fails visibly without exposing stale approval`, () => {
+  const root = temporaryDirectory(`unsafe-${failedProjection}-report-`);
+  const worktree = join(root, 'work'), artifactRoot = join(root, 'records');
+  try {
+    writeProducedArtifacts(worktree);
+    const runFacts = { ...facts(`2026-08-29T01-02-03-004Z-${failedProjection}-report`), phase: 'execution',
+      interactionMode: 'autonomous', authority: 'claude', approved: true, converged: null,
+      approval: { decidedBy: 'claude', basis: 'reviewer', artifactDigest: 'before-retention', reason: 'clean' },
+      dialogue: { snapshot: { digest: 'unsafe-report-context', entries: [], recalled: [] }, messages: [], issues: {} },
+      checkpointState: { version: 2 } };
+    writeReport({ dir: worktree, facts: runFacts });
+    const stale = join(root, `${failedProjection}-stale.md`);
+    writeFileSync(stale, 'Approved: yes\n');
+    const unsafe = failedProjection === 'source' ? join(worktree, 'uro-report.md')
+      : join(artifactRoot, runFacts.runId, 'uro-report.md');
+    if (failedProjection === 'source') unlinkSync(unsafe);
+    else mkdirSync(join(artifactRoot, runFacts.runId), { recursive: true });
+    symlinkSync(stale, unsafe, 'file');
+
+    const archived = archiveRunArtifacts({ dir: worktree, runId: runFacts.runId, facts: runFacts,
+      scratchRoot: root, artifactRoot, requiredRetention: true, startedAt: new Date(), endedAt: new Date() });
+    assert.equal(archived.status, 'failed');
+    assert.equal(runFacts.approved, false);
+    assert.equal(existsSync(unsafe), false, 'unsafe presentation must be removed instead of retaining stale approval');
+    assert.equal(readFileSync(stale, 'utf8'), 'Approved: yes\n', 'refresh must not follow or modify an external link');
+    if (failedProjection === 'durable') assert.doesNotMatch(readFileSync(join(worktree, 'uro-report.md'), 'utf8'), /Approved: yes|Approved: true/);
+    assert.equal(archived[failedProjection === 'source' ? 'factsWrite' : 'refresh'].status, 'failed');
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('a legacy direct archive without a source report preserves JSON behavior and does not invent Markdown', () => {
+  const root = temporaryDirectory('legacy-json-only-');
+  const worktree = join(root, 'work'), artifactRoot = join(root, 'records');
+  try {
+    writeProducedArtifacts(worktree);
+    unlinkSync(join(worktree, 'uro-report.md'));
+    const runFacts = facts('2026-08-29T01-02-03-004Z-legacy-json-only');
+    const archived = archiveRunArtifacts({ dir: worktree, runId: runFacts.runId, facts: runFacts,
+      scratchRoot: root, artifactRoot, startedAt: new Date(), endedAt: new Date() });
+    assert.equal(archived.status, 'ok');
+    assert.equal(existsSync(join(worktree, 'uro-report.md')), false);
+    assert.equal(existsSync(join(artifactRoot, runFacts.runId, 'uro-report.md')), false);
+    assert.equal(JSON.parse(readFileSync(join(worktree, 'uro-runfacts.json'), 'utf8')).artifacts.status, 'ok');
+    assert.equal(JSON.parse(readFileSync(join(artifactRoot, runFacts.runId, 'uro-runfacts.json'), 'utf8')).artifacts.status, 'ok');
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 

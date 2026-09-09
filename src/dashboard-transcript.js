@@ -1,5 +1,6 @@
 import { decodeRecordedText } from './execution-record.js';
 import { DEFAULT_DASHBOARD_FILTER, filterDashboardRuns } from './dashboard-filters.js';
+import { renderDialogueHtml } from './dialogue-report.js';
 
 export function escapeHtml(value) {
   return String(value ?? '')
@@ -84,6 +85,7 @@ function providerLabel(event, fallback) {
 }
 
 function renderConversation(run) {
+  if (run.dialogue) return renderDialogueHtml(run.dialogue);
   if (!run.decision) return '';
   const decision = run.decision, approval = decision.approval;
   const status = decision.approved ? (decision.converged === false ? 'Approved; dissent retained' : 'Approved')

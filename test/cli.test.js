@@ -17,6 +17,8 @@ import { delimiter, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnCapture } from '../src/spawn.js';
 import { startDashboard } from '../src/dashboard.js';
+import { createSharedContext, persistSharedContext } from '../src/shared-context.js';
+import { resolveProjectIdentity } from '../src/project-memory.js';
 
 const cli = fileURLToPath(new URL('../bin/loop.js', import.meta.url));
 const fakeCodex = fileURLToPath(new URL('../fixtures/fake-codex.mjs', import.meta.url));
@@ -102,6 +104,27 @@ test('normal CLI native execution writes files checks them and approves with ret
     const completed = events.find(e => e.type === 'complete' && e.operationId === operation.operationId);
     assert.equal(completed.delivery.sha256, createHash('sha256').update(operation.input).digest('hex'), 'the prepared input must be the actual submitted CLI input');
   }
+});
+
+test('run CLI consumes the validated stdin context reference and carries it into the actual run option', async t => {
+  const fixture = cliFixture();
+  t.after(() => { rmSync(fixture.root, { recursive: true, force: true }); rmSync(fixture.scratchRoot, { recursive: true, force: true }); });
+  const target = fixture.args[fixture.args.indexOf('--target') + 1];
+  const project = resolveProjectIdentity({ target });
+  const parent = createSharedContext({ projectId: project.projectId, runId: 'queue-parent', unitId: 'unit-1',
+    phase: 'queue', sourceRevision: 'fixture', entries: [{ id: 'queue-requirement', kind: 'requirement',
+      content: 'Carry this exact queue context', sourceIdentity: 'fixture', status: 'required', provenance: { origin: 'test' } }] });
+  const path = persistSharedContext({ directory: fixture.root, snapshot: parent });
+  const reference = { schemaVersion: 1, path, projectId: parent.projectId, runId: parent.runId,
+    unitId: parent.unitId, contextDigest: parent.digest };
+  const result = await spawnCapture(process.execPath, [...fixture.args, '--quiet', '--context-stdin'], {
+    env: fixture.env, input: JSON.stringify(reference),
+  });
+  assert.equal(result.code, 0, result.stderr);
+  const facts = JSON.parse(result.stdout);
+  const carried = facts.dialogue.snapshot.entries.find(entry => entry.id === 'queueParent');
+  assert.ok(carried, 'the actual run must receive the parsed contextRef option');
+  assert.match(carried.content, new RegExp(parent.digest));
 });
 
 function listen(server) {

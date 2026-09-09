@@ -27,6 +27,7 @@ test('the queue command sends parsed limits, mode, target, and runtime seams to 
     mode: 'autonomous',
     claudeModel: undefined, codexModel: undefined, codexEffort: undefined,
     maxRuns: 2,
+    rounds: 6,
     tokenBudget: 5000,
     acceptGoalSpec: 'goals/G1-first/spec.md',
     dryRun: true,
@@ -46,6 +47,7 @@ test('the queue command sends parsed limits, mode, target, and runtime seams to 
     mode: 'autonomous',
     claudeModel: undefined, codexModel: undefined, codexEffort: undefined,
     maxRuns: 2,
+    rounds: 6,
     tokenBudget: 5000,
     acceptGoalSpec: 'goals/G1-first/spec.md',
     dryRun: true,
@@ -93,6 +95,7 @@ test('help documents the queue file, autonomous mode, limits, acceptance, and dr
   assert.match(CLI_USAGE, /--accept-goal <spec[.]md>/);
   assert.match(CLI_USAGE, /--mode <manual\|autonomous>/);
   assert.match(CLI_USAGE, /--max-runs <n>/);
+  assert.match(CLI_USAGE, /--rounds <n>/);
   assert.match(CLI_USAGE, /--token-budget <tokens>/);
   assert.match(CLI_USAGE, /--dry-run/);
   assert.match(CLI_USAGE, /queue\s+Run and safely land queue units in order/);

@@ -20,6 +20,7 @@ import {
   renderRunTranscript,
   renderTranscriptDashboard,
 } from './dashboard-transcript.js';
+import { normalizeDialogueProjection } from './dialogue-report.js';
 
 export const MAX_RENDERED_DIFF_BYTES = 128 * 1024;
 
@@ -358,6 +359,7 @@ function digestRunDirectory(runDirectory) {
       answeredBy: typeof event.answeredBy === 'string' ? event.answeredBy : null,
     })),
     decision: facts?.phase === undefined ? null : Object.fromEntries(['phase', 'interactionMode', 'authority', 'approved', 'converged', 'approval'].map(key => [key, facts[key] ?? null])),
+    ...(facts?.dialogue ? { dialogue: normalizeDialogueProjection(facts) } : {}),
     participants: facts?.participants ?? null,
     messages: [...(facts?.planningMessages ?? []), ...(facts?.messages ?? [])],
     dissent: facts?.dissent ?? [],

@@ -320,7 +320,8 @@ for (const failed of [false, true]) test(`planning retains every delivered Codex
   } else {
     assert.equal(result.reason, 'needs-decision');
     assert.ok(prompts[1].includes(first));
-    assert.ok(retained.every(message => message.stance === 'disagree'));
+    assert.ok(retained.every(message => message.stance === 'neutral'),
+      'legacy prose without a validated explicit dialogue action must not invent disagreement');
   }
 });
 const artifact = (text = 'Plan with "quotes"\nand newlines') =>

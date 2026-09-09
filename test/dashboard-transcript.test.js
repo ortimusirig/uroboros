@@ -35,6 +35,33 @@ test('dashboard projects and escapes role-bound conversation and separate approv
     assert.doesNotMatch(html, /<script>retained dissent/);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
+
+test('dashboard snapshot carries and renders only the normalized native dialogue projection', () => {
+  const root = mkdtempSync(join(tmpdir(), 'uro-native-dialogue-transcript-'));
+  try {
+    const { directory, worktreeDirectory } = makeRun(root, 'native-dialogue', [event('native-dialogue', 'report', 'finish')]);
+    writeFileSync(join(worktreeDirectory, 'uro-runfacts.json'), JSON.stringify({
+      runId: 'native-dialogue', outcome: 'needs-pivot', phase: 'execution', interactionMode: 'autonomous',
+      authority: 'claude', approved: false, reason: '<b>inspection needed</b>', nextAction: 'inspect',
+      dialogue: { snapshot: { digest: 'snapshot-native', entries: [], recalled: [] },
+        messages: [{ sender: 'codex', action: 'ask', phase: 'execution', content: '<script>question</script>' }],
+        issues: [{ id: 'I1', title: '<i>source issue</i>', status: 'open', blocking: true }],
+        dispositions: [], secret: 'never-project-this' },
+      resources: { providerLaunches: 1, knownUsage: { inputTokens: 4, outputTokens: 2 }, usageUnknown: true },
+      checkpointState: { privateOptions: { password: 'never-project-this-either' },
+        phaseResources: { providerLaunches: 1, knownUsage: { inputTokens: 4, outputTokens: 2 }, usageUnknown: true }, phaseChain: [] },
+    }));
+    const snapshot = buildDashboardSnapshot({ runDirectory: directory });
+    assert.equal(snapshot.runs[0].dialogue.snapshot.digest, 'snapshot-native');
+    assert.equal(Object.hasOwn(snapshot.runs[0].dialogue, 'privateOptions'), false);
+    const html = renderDashboardContent(snapshot);
+    assert.match(html, /snapshot-native/);
+    assert.match(html, /codex \/ ask/);
+    assert.match(html, /&lt;script&gt;question&lt;\/script&gt;/);
+    assert.match(html, /usage unknown: yes/i);
+    assert.doesNotMatch(html, /never-project-this|<script>question|<i>source issue/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
 import { startDashboard } from '../src/dashboard.js';
 import {
   buildDashboardSnapshot,

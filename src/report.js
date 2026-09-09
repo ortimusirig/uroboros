@@ -1,4 +1,4 @@
-import { writeFileSync } from 'node:fs';
+import { lstatSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { reportEvent } from './events.js';
 import { DEFAULT_EXECUTOR_EFFORT, DEFAULT_EXECUTOR_MODEL } from './executor.js';
@@ -6,6 +6,7 @@ import { DEFAULT_VERIFIER_MODEL } from './verifier.js';
 import { DEFAULT_ARBITER_MODEL } from './arbiter.js';
 import { addUsage, EMPTY_USAGE } from './usage.js';
 import { encodeRecordedText, decodeRecordedText } from './execution-record.js';
+import { renderDialogueReport } from './dialogue-report.js';
 
 export function participantsFromMessages(messages, models = {}) {
   const participants = new Map();
@@ -75,7 +76,8 @@ export function buildRunFacts({
   skills = null,
   superpowers = null,
   phase, interactionMode, approved, converged, approval = null, authority,
-  messages, planningMessages = [], dissent = [],
+  messages, planningMessages = [], dissent = [], dialogue, resources, reason, nextAction,
+  checkpointState, queueResult,
 }) {
   const facts = {
     runId,
@@ -155,6 +157,12 @@ export function buildRunFacts({
     facts.tokens = { total: addUsage(EMPTY_USAGE, tokens.total), participants: facts.participants
       .filter(p => p.usage !== null).map(({ provider, phase, role, usage }) => ({ provider, phase, role, usage })) };
   }
+  if (dialogue !== undefined) facts.dialogue = dialogue;
+  if (resources !== undefined) facts.resources = resources;
+  if (reason !== undefined) facts.reason = reason;
+  if (nextAction !== undefined) facts.nextAction = nextAction;
+  if (checkpointState !== undefined) facts.checkpointState = checkpointState;
+  if (queueResult !== undefined) facts.queueResult = queueResult;
   if (unitKind !== undefined) facts.unitKind = unitKind;
   if (merge !== undefined) facts.merge = merge;
   if (mutation !== undefined) facts.mutation = mutation;
@@ -350,15 +358,19 @@ export function buildReportMarkdown(facts, {
       ...(facts.checkpoint?.status === 'failed' ? [`Checkpoint persistence failed: ${facts.checkpoint.error}`] : []));
   }
   if (facts.phase !== undefined) {
-    md.push('', '## Decision', '',
-      `Phase: ${facts.phase}; mode: ${facts.interactionMode}; authority: ${facts.authority ?? facts.approval?.decidedBy ?? 'not recorded'}`,
-      `Approved: ${facts.approved}; Converged: ${facts.converged === null ? 'not recorded' : facts.converged}`);
-    if (facts.approval) md.push(`Decision: ${facts.approval.decidedBy}; basis: ${facts.approval.basis}; digest: ${facts.approval.artifactDigest}`,
-      facts.approval.reason);
-    md.push('', '## Delivered conversation');
-    for (const message of [...(facts.planningMessages ?? []), ...(facts.messages ?? [])]) {
-      md.push('', `### ${message.provider ?? message.speaker} / ${message.phase} / ${message.role}`, '',
-        ...messageText(message).split('\n').map(line => `> ${line}`));
+    if (facts.dialogue) {
+      md.push('', '## Coworker dialogue', '', renderDialogueReport(facts));
+    } else {
+      md.push('', '## Decision', '',
+        `Phase: ${facts.phase}; mode: ${facts.interactionMode}; authority: ${facts.authority ?? facts.approval?.decidedBy ?? 'not recorded'}`,
+        `Approved: ${facts.approved}; Converged: ${facts.converged === null ? 'not recorded' : facts.converged}`);
+      if (facts.approval) md.push(`Decision: ${facts.approval.decidedBy}; basis: ${facts.approval.basis}; digest: ${facts.approval.artifactDigest}`,
+        facts.approval.reason);
+      md.push('', '## Delivered conversation');
+      for (const message of [...(facts.planningMessages ?? []), ...(facts.messages ?? [])]) {
+        md.push('', `### ${message.provider ?? message.speaker} / ${message.phase} / ${message.role}`, '',
+          ...messageText(message).split('\n').map(line => `> ${line}`));
+      }
     }
     if (facts.dissent?.length) {
       md.push('', '## Retained dissent');
@@ -492,4 +504,31 @@ export function writeReport({ dir, facts, reporter, runId = facts.runId }) {
     file: 'uro-runfacts.json', files: ['uro-runfacts.json', 'uro-report.md'],
   });
   return { jsonPath, mdPath };
+}
+
+/** Refresh already-created report files without emitting a second lifecycle event. */
+export function refreshReportProjection({ dir, facts }) {
+  const jsonPath = join(dir, 'uro-runfacts.json');
+  const mdPath = join(dir, 'uro-report.md');
+  try {
+    for (const [path, label] of [[jsonPath, 'run facts'], [mdPath, 'Markdown report']]) {
+      const stat = lstatSync(path);
+      if (stat.isSymbolicLink() || !stat.isFile()) {
+        if (stat.isSymbolicLink()) unlinkSync(path);
+        throw new Error(`${label} refresh target must be an existing regular file`);
+      }
+    }
+    const json = JSON.stringify(facts, null, 2);
+    const markdown = buildReportMarkdown(facts);
+    writeFileSync(jsonPath, json);
+    writeFileSync(mdPath, markdown);
+    return { jsonPath, mdPath };
+  } catch (error) {
+    // A failed final refresh must not leave an older approved Markdown projection visible.
+    try {
+      const stat = lstatSync(mdPath);
+      if (stat.isFile() || stat.isSymbolicLink()) unlinkSync(mdPath);
+    } catch { /* absent/non-removable target remains an explicit refresh failure */ }
+    throw error;
+  }
 }

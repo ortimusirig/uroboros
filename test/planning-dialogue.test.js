@@ -8,10 +8,19 @@ import { createInspectionReceipt } from '../src/context-evidence.js';
 import { resumeRun } from '../src/resume.js';
 import { openProjectMemory, resolveProjectIdentity } from '../src/project-memory.js';
 import { captureEvidence } from '../src/context-evidence.js';
-import { assertPlanningSidecars, runPlanningDialogue } from '../src/planning-dialogue.js';
+import { assertPlanningSidecars, compatibleDialogueStance, runPlanningDialogue } from '../src/planning-dialogue.js';
 import { contextDigest, renderSharedContext } from '../src/shared-context.js';
 
 const superpowers = { seats: { claude: { verified: true }, codex: { verified: true } } };
+
+test('compatible transcript stance follows validated action and leaves questions rebuttals and unreadable replies neutral', () => {
+  for (const action of ['ask', 'answer', 'rebut', 'inspect', undefined]) {
+    assert.equal(compatibleDialogueStance({ action, transport: {}, content: 'AGREE: yes' }), 'neutral', action);
+  }
+  assert.equal(compatibleDialogueStance({ action: 'approve', transport: {}, content: '' }), 'agree');
+  assert.equal(compatibleDialogueStance({ action: 'challenge', transport: {}, content: '' }), 'disagree');
+  assert.equal(compatibleDialogueStance({ action: 'stop', transport: { error: 'unreadable response' }, content: '' }), 'unavailable');
+});
 
 for (const scenario of [
   { name: 'first draft', count: 2, limit: 10, expected: [] },

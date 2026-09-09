@@ -18,6 +18,13 @@ import { MERGE_LEDGER_FILENAME } from './merge.js';
 
 const digestBytes = path => createHash('sha256').update(readFileSync(path)).digest('hex');
 
+export function compatibleDialogueStance({ action, transport, content }) {
+  if (transport?.error) return 'unavailable';
+  if (action === 'approve') return 'agree';
+  if (['challenge', 'withdraw'].includes(action)) return 'disagree';
+  return 'neutral';
+}
+
 const sidecarRoots = ['__uro_context', '__uro_dialogue', '__uro_evidence'];
 function assertSidecarInventory({ directory, registeredPaths }) {
   if (lstatSync(directory).isSymbolicLink()) throw new Error('planning sidecar root must not be a symbolic link');
@@ -646,7 +653,7 @@ export async function runPlanningDialogue({ requirements, target, directory, tie
         : message?.content ?? transport.content ?? transport.answer ?? transport.lastMessage ?? '';
       return { ...message, speaker: operation.seat, role: operation.seat === 'claude' ? 'author' : 'reviewer',
         content, transport, ...(transport.error ? { error: transport.error } : {}),
-        stance: transport.error ? 'unavailable' : /AGREE:\s*no/i.test(content) ? 'disagree' : 'agree',
+        stance: compatibleDialogueStance({ action: message?.action, transport, content }),
         ...(message?.action === 'stop' ? { decision: 'stop' } : {}) };
     });
     messages.push(...state.messages.filter(m => m.sender === 'human'));

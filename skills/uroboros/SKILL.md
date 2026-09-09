@@ -13,25 +13,35 @@ to authorize skipping or combining a step is itself the defect.
 
 1. **Plan** — Claude authors plans and decompositions. Codex reviews the current artifact.
    Claude answers or revises, then Codex responds to the actual previous arguments. Retain full
-   delivered messages, evidence and dissent. Approval binds the current goal, plan and evidence
-   configuration.
+   delivered messages, evidence and dissent. Both seats receive the same explicit versioned
+   shared-context snapshot, required evidence and selected attributed recall. Approval binds the
+   current goal, plan, context and evidence configuration; a digest identifies bytes, not truth.
 2. **Choose authority by mode** — All workflows default to `--mode manual`: the human settles
    unresolved disputes in both phases. With `--mode autonomous`, Codex makes final planning
    decisions and Claude makes final execution decisions. TTY presence does not change authority.
+   A clean evidenced artifact still uses the phase reviewer's sign-off in manual mode; the human
+   settles authenticated missing decisions and unresolved disputes, not every review.
    Planning `approved: true, converged: false` means approval with retained dissent, not consensus.
    Execution uses `converged: null` when review approved the current diff but mutual agreement
    was not explicitly recorded. Ordinary corrections are not dissent; explicit rebuttals and
    upheld objections are retained as dissent, and every delivered reply remains in the record.
 3. **Build** — Codex implements in isolation. Claude does not implement.
-4. **Collect evidence** — The harness records true exit codes and full command output.
+4. **Collect evidence** — The harness records true exit codes and full command output. Every
+   substantive factual claim identifies resolvable evidence. Delivery, inspection receipt,
+   semantic assessment, issue disposition and approval are distinct records; none implies the next.
    Never infer PASS from stdout or a pipeline's final status. Preserve protected reviewer tests.
 5. **Review and reconcile** — Claude reviews correctness, regressions, security, edge cases,
    tests, intent, scope and invariants. Codex corrects or rebuts findings; Claude explicitly
    resolves, withdraws or upholds each finding with reasons. Omission is not closure. New
-   reviewer tests run through the harness and their output reaches both agents.
-6. **Handle unfinished work** — Preserve pending manual questions and checkpoints for a human
-   ruling. Autonomous decisions belong to the phase reviewer. Silence, quota/auth failures,
-   stale evidence, unreadable replies and exhausted bounds never approve or fabricate agreement.
+   reviewer tests run through the harness and their output reaches both agents. Questions remain
+   available during final review and reviewer depth is discretionary. A sufficient approval in the
+   already-running response needs no separate redundant final-review call. `decide` settles named
+   issues; only `approve` signs off the whole current artifact/context.
+6. **Handle unfinished work** — Preserve human questions and technical pauses as different saved
+   checkpoints. Autonomous decisions belong to the phase reviewer. Replanning in both modes keeps
+   useful code, evidence and history while Claude authors and Codex reviews the replacement.
+   Silence, quota/auth failures, stale evidence, unreadable replies, uncertain effects and exhausted
+   bounds never approve, fabricate agreement or authorize blind replay.
 7. **Land and publish** — Current approved work follows existing landing checks. Queue landings
    receive Claude's first-hand review and remain local commits. Publishing is a separate action.
 
@@ -39,7 +49,13 @@ Monitor continuously and intervene only when a run is stuck: **stalled** means n
 the stall threshold; **circling** means events still arrive but the same files are rewritten with
 no gate progress. Slow is not stuck.
 
-## Debate protocol with superpowers
+There is no default dialogue-round, provider-call or elapsed-conversation ceiling. Candidate
+breadth, proposal/correction cycles, challenge limits, campaign rounds, token budgets, gate retries
+and operational timeouts are explicit separate controls; ordinary Q&A consumes none of those cycles.
+
+For operator-facing detail, read [`docs/guides/coworker-dialogue.md`](../../docs/guides/coworker-dialogue.md).
+
+## Coworker dialogue with superpowers
 
 Claude is the hub of the debate protocol and uses these exact skills at its decision points:
 
@@ -146,7 +162,10 @@ For a simple Graph, keep the flag form: give every task a `--unit-id`, then repe
   `doctor` probes and `publish` commands use their own bounded command timeouts.
   The arbiter uses `URO_ARBITER_TIMEOUT_MS`/`--arbiter-timeout` and otherwise inherits the
   verifier timeout.
-- **Ordinary seats do not receive campaign context.** The Codex and Claude reviewer are not
+  Under an enforced token budget, an in-flight writer with unknown usage denies a concurrent paid
+  liveness judge; the harness does not invent a zero, estimate or reservation.
+- **Ordinary seats share bounded phase/project context, not campaign topology.** Both receive the
+  same versioned current context and selected recall. The Codex and Claude reviewer are not
   told about sibling units, the dependency Graph, or the campaign. A perspective value reaches
   no seat; its presence only infers a candidate set. Derived Merge is the exception: its
   generated `TASK.md` names ordered parents and merge requirements, but still does not describe
@@ -163,9 +182,11 @@ hazard is reuse of a unit id in the flat scratch root.
 
 ## Invoking the commands
 
-Install the plugin from a clone by running `node install.mjs`, then paste the two exact Claude
-Code commands it prints: `/plugin marketplace add <absolute-clone-path>` followed by
-`/plugin install uroboros@uroboros`. The plugin registers these fifteen namespaced slash
+For a released version, install with `/plugin marketplace add ortimusirig/uroboros` followed by
+`/plugin install uroboros@uroboros`. Registering an absolute clone path is development-only;
+`node install.mjs` validates/prepares a checkout and does not mutate installed plugin state.
+Local validation is not a live-provider, marketplace-update, publication or release claim.
+The plugin registers these fifteen namespaced slash
 commands while the direct Node CLI remains available:
 
 - `/uroboros:run`
@@ -193,6 +214,7 @@ The direct CLI surface is:
 
     node bin/loop.js run ...
     node bin/loop.js resume --run <run-directory> --decision-file <answers.json>
+    node bin/loop.js resume --run <run-directory> --continue
     node bin/loop.js mutate ...
     node bin/loop.js plan ...
     node bin/loop.js decompose ...
@@ -217,8 +239,9 @@ To measure which added production statements no selected test depends on:
 
 Mutation survivors are measurements for arbiter judgement, not a widened gate verdict. A dry
 run lists semantic units and their selected tests without executing tests or agent seats.
-On a normal run, `--mutate` performs this advisory measurement after a passing gate and records
-it beside the unchanged gate and verifier verdicts.
+On a native run, requested analysis occurs after successful required checks and before the next
+discretionary Claude review. Identical completed analysis input can reuse its receipt; genuine
+code/test/policy change can repeat optional spend. It does not require a separate final-review call.
 
 To debate a goal into a mechanically checked plan and gate without modifying the target:
 
@@ -237,7 +260,7 @@ code passes or fails the change.
 
 For an ordered queue whose approved units should land in the current clean Git worktree:
 
-    node bin/loop.js queue --file <queue.json> [--mode manual|autonomous] [--max-runs N] [--token-budget TOKENS] [--dry-run]
+    node bin/loop.js queue --file <queue.json> [--mode manual|autonomous] [--max-runs N] [--rounds N] [--token-budget TOKENS] [--dry-run]
 
 Queue units inherit mode and provider options into both planning and execution. Current review
 approval and existing landing checks are required. Pending manual work stops with its checkpoint;
@@ -318,6 +341,16 @@ For a saved manual decision, use the direct CLI:
 
     node bin/loop.js resume --run <run-directory> --decision-file <answers.json>
 
+For an eligible saved technical pause with no human question, use:
+
+    node bin/loop.js resume --run <run-directory> --continue
+
+The two routes are mutually exclusive. Technical continuation reconciles the validated current
+checkpoint; it is not a human answer, approval, mode/limit override, new run, generic “continue
+anyway,” or retry permission. Human-pending, stale/corrupt, exhausted/incomplete-accounting and
+uncertain external/writer/Git effects remain refused or paused. A consumed receipt alone does not
+promise exit zero.
+
 Read `uro-checkpoint.json` in that run's isolated workspace (or its durable artifact directory).
 For standalone planning or decomposition, the checkpoint is in the reported output directory.
 Create the answer file in an external directory, outside both the target source tree and the
@@ -354,7 +387,8 @@ a genuinely revised Claude-authored/Codex-reviewed plan over the saved workspace
 current code, diff, history and protected evidence, with no reset to the pre-debate base.
 Implementation waits for current plan approval. If this planning debate raises another manual
 question, read the new checkpoint and resume that saved proposal with the same command; do not
-redraft candidates or repeat completed execution. Autonomous fresh-reset behavior is unchanged.
+redraft candidates or repeat completed execution. The retained-work rule applies in autonomous
+mode too, with Codex retaining final planning authority.
 
 Resume continues the saved phase and existing workspace. The saved manual mode is immutable:
 there is no resume `--mode` flag. Re-running the original task creates new work and is not resume.

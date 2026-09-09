@@ -14,6 +14,7 @@ import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { readEnv } from './env-compat.js';
 import { createHash } from 'node:crypto';
 import { isSafePhysicalRunId, physicalRunIdFor } from './run-id.js';
+import { refreshReportProjection } from './report.js';
 
 // Files written by the harness inside an isolated worktree. Keep this list central:
 // every Git staging/diff operation must exclude the same paths. Both prefixes are listed
@@ -131,14 +132,16 @@ function persistFinalFacts({ dir, durableDirectory, facts, result }) {
   const sourceFacts = join(dir, 'uro-runfacts.json');
   if (!existsSync(sourceFacts)) return;
   try {
-    writeFileSync(sourceFacts, JSON.stringify(facts, null, 2));
+    if (existsSync(join(dir, 'uro-report.md'))) refreshReportProjection({ dir, facts });
+    else writeFileSync(sourceFacts, JSON.stringify(facts, null, 2));
   } catch (error) {
     result.status = 'failed';
     result.factsWrite = { status: 'failed', error: errorMessage(error) };
   }
   if (durableDirectory === null || !existsSync(durableDirectory)) return;
   try {
-    writeFileSync(join(durableDirectory, 'uro-runfacts.json'), JSON.stringify(facts, null, 2));
+    if (existsSync(join(durableDirectory, 'uro-report.md'))) refreshReportProjection({ dir: durableDirectory, facts });
+    else writeFileSync(join(durableDirectory, 'uro-runfacts.json'), JSON.stringify(facts, null, 2));
   } catch (error) {
     result.status = 'failed';
     result.refresh = { status: 'failed', error: errorMessage(error) };
