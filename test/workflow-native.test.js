@@ -16,11 +16,103 @@ import { createInspectionReceipt } from '../src/context-evidence.js';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { checkpointDigest } from '../src/checkpoint.js';
+import { runQueue } from '../src/queue.js';
+import { landQueueDiff } from '../src/queue-runtime.js';
+import { run } from '../src/run.js';
 
 const usage = { inputTokens: 1, outputTokens: 1 };
 function contextReference(snapshot, path) {
   return { schemaVersion: 1, projectId: snapshot.projectId, runId: snapshot.runId, unitId: snapshot.unitId, contextDigest: snapshot.digest, path };
 }
+
+function sectionCounts(input, binding) {
+  return binding.profiles.map(profile => profile.sections.map(section =>
+    input.split(section.content.split(/\r?\n/)[0]).length - 1));
+}
+
+// Removing queue-results projection leaks every captured phase through later history.
+test('five-unit queue history delivers only the current workflow sections', t => {
+  const binding = loadWorkflowBinding(), history = [], captures = [], observations = [];
+  for (let unit = 1; unit <= 5; unit++) {
+    const snapshot = createSharedContext({ projectId: 'p', runId: 'queue', unitId: String(unit), phase: 'execution',
+      sourceRevision: 'fixture', workflowBinding: binding, entries: [
+        { id: 'requirements', kind: 'requirement', content: `Keep requirement ${unit}`, sourceIdentity: 'brief', status: 'required', provenance: { origin: 'queue' } },
+        { id: 'prior-units', kind: 'queue-results', content: JSON.stringify(history), sourceIdentity: 'queue', status: 'historical', provenance: { origin: 'queue' } },
+      ] });
+    captures.push({ snapshot, bytes: JSON.stringify(snapshot) });
+    const input = renderSharedContext({ snapshot });
+    observations.push({ unit, counts: sectionCounts(input, binding), bytes: Buffer.byteLength(input) });
+    history.push([String(unit), { unit: { index: unit }, context: snapshot, landing: { commit: `commit-${unit}` },
+      execution: { history: { receipts: [{ id: `receipt-${unit}` }], messages: [{ content: `Reviewer evidence ${unit}` }] } } }]);
+  }
+  t.diagnostic(JSON.stringify(observations));
+  for (const capture of captures) assert.equal(JSON.stringify(capture.snapshot), capture.bytes);
+  for (const row of observations) assert.deepEqual(row.counts, [[0, 1, 0], [0, 1, 0]], `unit ${row.unit}`);
+  const last = renderSharedContext({ snapshot: captures.at(-1).snapshot });
+  for (let prior = 1; prior < 5; prior++) {
+    assert.ok(last.includes(`Keep requirement ${prior}`));
+    assert.ok(last.includes(`receipt-${prior}`));
+    assert.ok(last.includes(`Reviewer evidence ${prior}`));
+  }
+  const visit = snapshot => {
+    const entry = snapshot.entries.find(e => e.kind === 'workflow-binding');
+    assert.deepEqual(JSON.parse(entry.content), { schemaVersion: 1, mode: 'bound', digest: binding.digest });
+    const prior = JSON.parse(snapshot.entries.find(e => e.kind === 'queue-results').content);
+    for (const [, row] of prior) visit(row.context);
+  };
+  const projected = JSON.parse(last.slice(last.indexOf('\n') + 1));
+  for (const [, row] of JSON.parse(projected.entries.find(e => e.kind === 'queue-results').content)) visit(row.context);
+});
+
+test('multi-unit native queue projects workflow history at both planning and execution seats', async t => {
+  const f = fixture(t), binding = loadWorkflowBinding(), delivered = [], captures = [], results = new Map(); initGit(f.target);
+  execFileSync('git', ['-C', f.target, 'config', 'user.name', 'Fixture']);
+  execFileSync('git', ['-C', f.target, 'config', 'user.email', 'fixture@example.test']);
+  const file = join(f.root, 'queue.json');
+  writeFileSync(file, JSON.stringify(Array.from({ length: 3 }, (_, i) => ({ name: `goal-${i + 1}`, goal: `Preserve local login and add marker ${i + 1}`, out: join(f.root, `plan-${i + 1}`) }))));
+  const capture = (r, input, seat) => delivered.push({ input, seat, phase: r.state.snapshot.phase, snapshot: r.state.snapshot, bytes: JSON.stringify(r.state.snapshot) });
+  const captureReference = ref => captures.push({ path: ref.path, bytes: readFileSync(ref.path) });
+  const result = await runQueue({ file, target: f.target, mode: 'autonomous', dependencies: {
+    assertCleanTarget: async () => {},
+    launchPlan: async ({ unit, contextRef }) => {
+      captureReference(contextRef);
+      return runPlan({ ...f, out: unit.out, goal: unit.goal, contextRef, mode: 'autonomous', adapters: {
+        author: r => { capture(r, r.input, 'claude'); return { plan: unit.goal, gate: [], dialogue: planningEnvelope(r, 'propose'), usage }; },
+        reviewer: r => { capture(r, r.input, 'codex'); return { ...planningApproval(r), usage }; },
+      } });
+    },
+    launchRun: async ({ unit, contextRef }) => {
+      captureReference(contextRef);
+      const facts = await run({ ...f, task: readFileSync(unit.task, 'utf8'), gate: [], contextRef, mode: 'autonomous',
+        scratchRoot: join(f.root, 'scratch'), runId: `queue-native-${unit.index}`, adapters: {
+          runExecutor: r => { capture(r, r.plan, 'codex'); writeFileSync(join(r.cwd, `marker-${unit.index}.txt`), `Completed unit ${unit.index}`); return { dialogue: planningEnvelope(r, 'propose'), usage }; },
+          runReview: r => { capture(r, r.prompt, 'claude'); return executionApproval(r); },
+        } });
+      results.set(facts.runId, facts); return { runId: facts.runId, runDirectory: facts.dir };
+    },
+    readRunFacts: launch => results.get(launch.runId),
+    judgeLanding: ({ runDirectory }) => { assert.match(readFileSync(join(runDirectory, 'CHANGES.diff'), 'utf8'), /Completed unit/); return { approved: true, reasoning: 'Read the marker diff', usage }; },
+    landDiff: landQueueDiff,
+  } });
+  assert.equal(result.stop, null, result.stop?.reason); assert.equal(result.landedCount, 3);
+  assert.equal(delivered.length, 12);
+  t.diagnostic(JSON.stringify(delivered.map(({ phase, seat, input }) => ({ phase, seat, counts: sectionCounts(input, binding), bytes: Buffer.byteLength(input) }))));
+  for (const { path, bytes } of captures) assert.deepEqual(readFileSync(path), bytes, 'original context file stays immutable');
+  for (const row of delivered) {
+    assert.equal(JSON.stringify(row.snapshot), row.bytes, 'original provider input snapshot stays immutable');
+    assert.equal(row.snapshot.workflow.digest, binding.digest);
+    assert.deepEqual(sectionCounts(row.input, binding), row.phase === 'planning' ? [[1, 0, 0], [1, 0, 0]] : [[0, 1, 0], [0, 1, 0]], `${row.phase} ${row.seat}`);
+  }
+  for (const row of delivered.slice(-4)) {
+    assert.match(row.input, /Preserve local login and add marker 1/);
+    assert.match(row.input, /The saved briefing was read/);
+    assert.match(row.input, /inspectionReceiptIds/);
+    const receipts = Object.values(results.get('queue-native-1').dialogue.inspectionReceipts);
+    assert.ok(receipts.length > 0);
+    for (const receipt of receipts) assert.ok(row.input.includes(receipt.id));
+  }
+  for (let unit = 1; unit <= 3; unit++) assert.equal(readFileSync(join(f.target, `marker-${unit}.txt`), 'utf8'), `Completed unit ${unit}`);
+});
 
 test('validated parent reference pins planning and projects nested queue binding only once', async t => {
   const f = fixture(t), binding = loadWorkflowBinding(), pkg = copyNativeWorkflowPackage(t);
@@ -96,6 +188,26 @@ test('non-snapshot caller carrier content retains original delivery bytes', () =
   const snapshot = createSharedContext({ projectId: 'p', runId: 'r', unitId: 'u', phase: 'planning', sourceRevision: 's',
     entries: [{ id: 'queueParent', kind: 'queueParent', sourceIdentity: 'user', provenance: { origin: 'user' }, status: 'required', content }] });
   assert.match(renderSharedContext({ snapshot }), /This is a user note, not a serialized parent reference\./);
+});
+
+test('queue history projection preserves historical and caller non-snapshot content', () => {
+  const legacy = createSharedContext({ projectId: 'p', runId: 'old', unitId: 'old', phase: 'execution', sourceRevision: 'old', entries: [] });
+  const bound = createSharedContext({ projectId: 'p', runId: 'bound', unitId: 'bound', phase: 'execution', sourceRevision: 'bound', entries: [], workflowBinding: loadWorkflowBinding() });
+  for (const [content, origin] of [
+    ['A prior-work note without serialized records.', 'queue'],
+    [JSON.stringify([['1', { context: legacy, execution: { history: { messages: ['historical work'] } } }]]), 'queue'],
+    [JSON.stringify([['1', { context: { entries: bound.entries }, note: 'caller JSON without a snapshot' }]]), 'queue'],
+    [JSON.stringify([['1', { context: bound }]]), 'user'],
+    [JSON.stringify({ context: bound, note: 'ordinary JSON object' }), 'queue'],
+  ]) {
+    const snapshot = createSharedContext({ projectId: 'p', runId: 'r', unitId: 'u', phase: 'execution', sourceRevision: 's', entries: [
+      { id: 'prior-units', kind: 'queue-results', content, provenance: { origin }, sourceIdentity: 'prior', status: 'historical' },
+    ] });
+    const before = JSON.stringify(snapshot), delivered = JSON.parse(renderSharedContext({ snapshot }).split('\n').slice(1).join('\n'));
+    assert.equal(delivered.entries[0].content, content);
+    assert.equal(delivered.entries[0].delivery, undefined);
+    assert.equal(JSON.stringify(snapshot), before);
+  }
 });
 function executionApproval(r) {
   const evidence = r.state.evidence.find(e => e.id === 'requirement-briefing'); readFileSync(evidence.capturedPath);

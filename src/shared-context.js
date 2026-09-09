@@ -255,7 +255,8 @@ export function renderSharedContext({ snapshot }) {
     if (reservedWorkflowEntry(entry)) return { ...entry,
       content: nested ? JSON.stringify(workflowIdentity({ binding: JSON.parse(entry.content) })) : renderWorkflowGuidance({ binding, phase: value.phase }),
       delivery: { projection: true, originalContentDigest: contextDigest({ content: entry.content }) } };
-    if (!['queueParent', 'retained-phase', 'planning-handoff'].includes(entry.kind)) return entry;
+    const queueResults = entry.kind === 'queue-results' && entry.id === 'prior-units' && entry.provenance?.origin === 'queue';
+    if (!queueResults && !['queueParent', 'retained-phase', 'planning-handoff'].includes(entry.kind)) return entry;
     let content;
     try { content = JSON.parse(entry.content); } catch { return entry; }
     if (!content || typeof content !== 'object') return entry;
@@ -268,6 +269,13 @@ export function renderSharedContext({ snapshot }) {
     if (entry.kind === 'queueParent') projectCarrier(content, 'entries');
     if (entry.kind === 'retained-phase') projectCarrier(content, 'parentEntries');
     if (entry.kind === 'planning-handoff') projectCarrier(content.snapshot, 'entries');
+    // Queue results are [unit id, prior-work record] tuples. Only their captured
+    // context carries a workflow; keep the surrounding evidence/history intact.
+    if (queueResults && Array.isArray(content)) for (const row of content) {
+      if (!Array.isArray(row) || row.length !== 2 || typeof row[0] !== 'string') continue;
+      const snapshot = row[1]?.context;
+      if (snapshot?.schemaVersion === 1 && /^context-[a-f0-9]{64}$/.test(snapshot.id)) projectCarrier(snapshot, 'entries');
+    }
     if (!changed) return entry;
     return { ...entry, content: JSON.stringify(content), delivery: { projection: true, originalContentDigest: contextDigest({ content: entry.content }) } };
   });
