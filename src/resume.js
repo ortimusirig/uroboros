@@ -5,7 +5,7 @@ import { CHECKPOINT_FILE, answerIdentity, checkpointDigest, checkpointPhaseIdent
 import { continuePlanning } from './plan.js';
 import { continueExecution, continueExecutionPlanning } from './run.js';
 import { continueDecomposition } from './decompose.js';
-import { continueQueue, queueContinuationPaths } from './queue.js';
+import { continueQueue, queueContinuationPaths, validateQueueWorkflow } from './queue.js';
 import { createQueueRuntime, recoverQueueLanding } from './queue-runtime.js';
 import { writeReport } from './report.js';
 import { archiveRunArtifacts } from './artifacts.js';
@@ -48,6 +48,8 @@ export async function resumeRun({ runDirectory, decisionFile, technicalContinue 
     };
     let receipt = checkpoint[receiptKey]?.find(item => item.decisionId === decisionId);
     if (receipt?.status === 'applied') return receipt.result;
+    const queueWorkflowBinding = checkpoint.queue ? validateQueueWorkflow({ context: checkpoint.queue, journal: checkpoint.queueJournal,
+      continuation: receipt?.result?.checkpointState ?? checkpoint.continuation }) : null;
     let recoveredLanding = false;
     let recoveredEntry, recoveredResult;
     if (receipt?.status === 'phase-complete' && checkpoint.queueJournal) {
@@ -70,8 +72,11 @@ export async function resumeRun({ runDirectory, decisionFile, technicalContinue 
     }
     if (recoveredEntry) recoveredEntry.landing = recoveredResult;
     if (checkpoint.status !== pendingStatus && receipt?.status !== 'phase-complete') throw new Error('decision already accepted');
+    if (!receipt && checkpoint.schemaVersion === 1) checkpoint = migrateCheckpointV1(checkpoint);
+    // Annotate only after original integrity checks, including v1 migration.
+    // Re-pausing a historical child preserves an explicit parent lineage too.
+    if (queueWorkflowBinding) (checkpoint.queueJournal ??= {}).workflowBinding ??= structuredClone(queueWorkflowBinding);
     if (!receipt) {
-      if (checkpoint.schemaVersion === 1) checkpoint = migrateCheckpointV1(checkpoint);
       receipt = { decisionId, artifactDigest: ruling?.artifactDigest ?? checkpoint.artifactDigest, ...(ruling ? { answers: ruling.answers, envelope } : { technicalContinue: true }),
       questions: checkpoint.pending.questions, phase: checkpoint.phase, stage: checkpoint.continuation.stage,
       status: 'accepted', acceptedAt: new Date().toISOString() };

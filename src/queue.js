@@ -11,7 +11,8 @@ import { detectReview, reviewDigest } from './review.js';
 import { attachQueueCheckpoint, checkpointDigest, readCheckpoint, writeCheckpointAtomic } from './checkpoint.js';
 import { recoverQueueLanding } from './queue-runtime.js';
 import { assertPlanningSidecars, createPlanningHandoff, readPlanningHandoffReference, planningHistory } from './planning-dialogue.js';
-import { createSharedContext, extendSharedContext, persistSharedContext, readSharedContextReference } from './shared-context.js';
+import { createSharedContext, extendSharedContext, persistSharedContext, readSharedContextReference, resolveNativeWorkflowBinding } from './shared-context.js';
+import { workflowIdentity, validateWorkflowBinding, readWorkflowBinding } from './workflow-profiles.js';
 import { resolveProjectIdentity } from './project-memory.js';
 
 const QUEUE_UNIT_KEYS = new Set(['name', 'task', 'gate', 'goal', 'out', 'tokenBudget', 'rounds']);
@@ -334,8 +335,42 @@ export async function runQueue(options) {
 
 export async function continueQueue({ context, phaseResult, runDirectory, dependencies = {}, journal = {}, persistJournal = () => {} }) {
   if (checkpointDigest(readFileSync(context.queue.path, 'utf8')) !== context.fileDigest) throw new Error('queue file changed; saved cursor is invalid');
+  validateQueueWorkflow({ context, journal, continuation: phaseResult?.checkpointState });
   return executeQueue({ ...context.options, queue: context.queue,
     continuation: { ...context, phaseResult, runDirectory, journal, persistJournal }, dependencies });
+}
+
+// The parent capture and independent checkpoint identity must agree before
+// native continuation, landing recovery, or another child may cause effects.
+export function validateQueueWorkflow({ context, journal = context.journal ?? {}, continuation }) {
+  const schema = journal.schemaVersion ?? 1;
+  if (![1, 2, 3].includes(schema)) throw new Error('unsupported queue workflow journal schema');
+  const legacy = { schemaVersion: 1, mode: 'legacy-unbound' };
+  const binding = validateWorkflowBinding({ binding: schema === 3 ? journal.workflowBinding : journal.workflowBinding ?? legacy });
+  if (schema === 3 && (binding.mode !== 'bound' || !context.workflow)) throw new Error('required queue workflow identity missing');
+  if (schema !== 3 && binding.mode !== 'legacy-unbound') throw new Error('historical queue workflow cannot become bound');
+  const expected = workflowIdentity({ binding });
+  const agree = identity => {
+    if (checkpointDigest({ workflow: identity }) !== checkpointDigest({ workflow: expected })) throw new Error('queue workflow identity conflict');
+  };
+  if (context.workflow !== undefined) agree(context.workflow);
+  if (context.options?.workflowBinding !== undefined) agree(workflowIdentity({ binding: context.options.workflowBinding }));
+  const check = snapshot => readWorkflowBinding({ snapshot, expected, allowLegacy: schema !== 3 });
+  for (const entry of Object.values(journal.units ?? {})) {
+    if (entry.contextRef) check(readSharedContextReference({ reference: entry.contextRef, target: context.options.target }));
+    if (entry.executionContextRef) check(readPlanningHandoffReference({ reference: entry.executionContextRef,
+      target: context.options.target, completedExecution: completedExecutionHandoff(entry) }));
+  }
+  if (continuation) {
+    const phases = [...(continuation.phaseChain ?? []).map(phase => phase.checkpointState), continuation];
+    for (const phase of phases) {
+      const snapshot = phase?.dialogue?.snapshot ?? phase?.preparationSnapshot;
+      if (snapshot) check(snapshot);
+      if (phase?.workflow !== undefined) agree(phase.workflow);
+      else if (schema === 3) throw new Error('required child workflow identity missing');
+    }
+  }
+  return binding;
 }
 
 function completedExecutionHandoff(entry) {
@@ -370,6 +405,7 @@ function priorUnitContext({ entry, unit, target }) {
 // Exact generated files only. Never exempt the output directory or unrelated
 // untracked source; revalidate the saved plan receipt before each use.
 export function queueContinuationPaths(context) {
+  validateQueueWorkflow({ context });
   const paths = [context.queue.logPath, ...(context.journal?.path ? [context.journal.path] : [])];
   for (const entry of Object.values(context.journal?.units ?? {})) if (entry.contextRef) {
     readSharedContextReference({ reference: entry.contextRef, target: context.options.target });
@@ -407,6 +443,7 @@ async function executeQueue({
   dryRun = false,
   dependencies = {},
   queue, continuation,
+  workflowBinding,
 }) {
   if (!QUEUE_MODES.has(mode)) {
     throw new TypeError(`invalid queue mode: ${mode}; expected manual or autonomous`);
@@ -445,10 +482,15 @@ async function executeQueue({
   const appendLog = dependencies.appendLog ?? appendQueueLog;
   const now = dependencies.now ?? (() => Date.now());
 
+  workflowBinding = structuredClone(continuation ? validateQueueWorkflow({ context: continuation })
+    : resolveNativeWorkflowBinding({ workflowBinding }));
   let allowedQueuePaths = continuation ? queueContinuationPaths(continuation) : [queue.logPath];
   await assertCleanTarget(target, { allowedPaths: [...allowedQueuePaths] });
   const queueFileDigest = continuation?.fileDigest ?? checkpointDigest(readFileSync(queue.path, 'utf8'));
-  const queueJournal = continuation?.journal ?? { schemaVersion: 2, runId: `queue-${randomUUID()}`, units: {}, debits: {} };
+  const queueJournal = continuation?.journal ?? { schemaVersion: workflowBinding.mode === 'bound' ? 3 : 2,
+    workflowBinding, runId: `queue-${randomUUID()}`, units: {}, debits: {} };
+  queueJournal.workflowBinding ??= workflowBinding;
+  const parentContext = { queue, workflow: workflowIdentity({ binding: workflowBinding }), options: { mode, target }, journal: queueJournal };
   if (!continuation) queueJournal.path = join(queue.directory, '__uro_context', `${queueJournal.runId}-queue.json`);
   const persistQueue = () => {
     if (queueJournal.path) writeCheckpointAtomic(queueJournal.path, { ...queueJournal, checksum: checkpointDigest(queueJournal) });
@@ -494,7 +536,7 @@ async function executeQueue({
       if (!unitJournal.contextRef) {
         const project = resolveProjectIdentity({ target });
         journal.runId ??= `queue-${randomUUID()}`;
-        const snapshot = createSharedContext({ projectId: project.projectId, runId: journal.runId,
+        const snapshot = createSharedContext({ projectId: project.projectId, runId: journal.runId, workflowBinding,
           unitId: `${journal.runId}:${unit.index}`, phase: 'queue', sourceRevision: queueFileDigest,
           entries: [{ id: 'requirements', kind: 'requirement', content: unit.goal ?? readFileSync(unit.task, 'utf8'),
             sourceIdentity: queueFileDigest, status: 'required', provenance: { origin: 'queue', unitIndex: unit.index } },
@@ -510,7 +552,8 @@ async function executeQueue({
       allowedQueuePaths = [...new Set([...allowedQueuePaths, unitJournal.contextRef.path, ...(journal.path ? [journal.path] : [])])];
       const reference = execution && unitJournal.executionContextRef ? unitJournal.executionContextRef : unitJournal.contextRef;
       if (execution) readPlanningHandoffReference({ reference, target });
-      return { contextRef: reference, ...(Number.isFinite(remaining) ? { tokenBudget: remaining } : {}),
+      validateQueueWorkflow({ context: parentContext });
+      return { contextRef: reference, workflowBinding: structuredClone(workflowBinding), ...(Number.isFinite(remaining) ? { tokenBudget: remaining } : {}),
         ...((unit.rounds ?? rounds) === undefined ? {} : { rounds: unit.rounds ?? rounds }) };
     };
     if (unitJournal.logged) {
@@ -523,7 +566,7 @@ async function executeQueue({
     }
     const savePending = async (directory, phase, planResult) => {
       if (!directory || !existsSync(join(directory, 'uro-checkpoint.json'))) return;
-      const checkpoint = await attachQueueCheckpoint(directory, { version: 1, queue,
+      const checkpoint = await attachQueueCheckpoint(directory, { version: 1, queue, workflow: workflowIdentity({ binding: workflowBinding }),
         fileDigest: checkpointDigest(readFileSync(queue.path, 'utf8')), unitIndex: unit.index, phase,
         ...beforeUnit, planResult, approvedPlans, options: { file, target: resolve(target), mode,
           claudeModel, codexModel, codexEffort, maxRuns, tokenBudget, rounds, acceptGoalSpec } }, journal);
@@ -760,7 +803,7 @@ async function executeQueue({
         try {
           if (unit.kind === 'goal') assertCurrentPlanApproval({ unit, result: planResult, mode });
           assertCurrentExecutionApproval(facts, launch.runDirectory);
-          allowedQueuePaths = queueContinuationPaths({ queue, options: { mode, target }, approvedPlans, journal });
+          allowedQueuePaths = queueContinuationPaths({ ...parentContext, approvedPlans });
           if (journal) {
             unitJournal.operationId ??= checkpointDigest({ queue: queueFileDigest, unit: unit.index,
               runId: facts.runId, diff: facts.approval.artifactDigest });
@@ -949,6 +992,7 @@ async function executeQueue({
         if (!acceptanceJournal.result) { acceptanceJournal.started = true; persistAcceptance(); }
         acceptance = acceptanceJournal.result ?? await acceptGoal({
           claudeModel,
+          workflowBinding: structuredClone(workflowBinding),
           goalSpecPath: resolve(acceptGoalSpec),
           target: resolve(target),
           logPath: queue.logPath,

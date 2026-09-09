@@ -30,6 +30,8 @@ import {
   verifySuperpowersSeats,
 } from './superpowers.js';
 import { run as realRun } from './run.js';
+import { resolveNativeWorkflowBinding } from './shared-context.js';
+import { workflowIdentity } from './workflow-profiles.js';
 import { resolveStageTimeouts } from './timeouts.js';
 import {
   addUsage,
@@ -611,6 +613,7 @@ async function runCampaignRound(options) {
           }
           return runUnit({
             ...runOptions,
+            workflowBinding: structuredClone(runOptions.workflowBinding),
             // The scheduler remains authoritative for cross-unit dispatch, while the
             // unit uses the currently remaining campaign budget as its per-round backstop.
             tokenBudget: Math.min(tokenBudget - consumedTokens, unit.tokenBudget ?? Infinity),
@@ -1054,6 +1057,12 @@ function iterativeRollup(rounds, tokenBudget, stopReason) {
 
 export async function runCampaign(options) {
   if (!isRecord(options)) throw new TypeError('campaign options must be an object');
+  const workflowBinding = structuredClone(resolveNativeWorkflowBinding({ workflowBinding: options.runOptions?.workflowBinding }));
+  const assertRoundWorkflow = declaration => {
+    if (declaration?.runOptions?.workflowBinding !== undefined
+      && JSON.stringify(workflowIdentity({ binding: declaration.runOptions.workflowBinding }))
+        !== JSON.stringify(workflowIdentity({ binding: workflowBinding }))) throw new Error('conflicting campaign round workflow binding');
+  };
   const environment = options.env ?? options.runOptions?.env ?? process.env;
   const suppliedSuperpowers = options.superpowers ?? options.runOptions?.superpowers;
   const verifySuperpowers = options.verifySuperpowers ?? verifySuperpowersSeats;
@@ -1075,7 +1084,7 @@ export async function runCampaign(options) {
   const providers = normalizeProviderOptions({ ...providerRunOptions, ...options,
     mode: options.interactionMode ?? options.mode ?? options.runOptions?.mode });
   options = { ...options, superpowers, interactionMode: providers.interactionMode,
-    runOptions: { ...options.runOptions, superpowers, env: environment, mode: providers.interactionMode,
+    runOptions: { ...options.runOptions, workflowBinding, superpowers, env: environment, mode: providers.interactionMode,
       ...(providers.codexModel === undefined ? {} : { executorModel: providers.codexModel }),
       ...(providers.codexEffort === undefined ? {} : { executorEffort: providers.codexEffort }),
       ...(providers.claudeModel === undefined ? {} : { arbiterModel: providers.claudeModel, verifierModel: providers.claudeModel }),
@@ -1088,6 +1097,7 @@ export async function runCampaign(options) {
   // it adds no stop reason or rounds collection and emits the same lifecycle records.
   if (configuration.maxRounds === DEFAULT_ROUNDS) {
     if (firstDeclaration === undefined) return runCampaignRound(options);
+    assertRoundWorkflow(firstDeclaration);
     const {
       rounds: _rounds,
       roundPlans: _roundPlans,
@@ -1096,7 +1106,8 @@ export async function runCampaign(options) {
       shouldStop: _shouldStop,
       ...singleOptions
     } = options;
-    return runCampaignRound({ ...singleOptions, ...firstDeclaration });
+    return runCampaignRound({ ...singleOptions, ...firstDeclaration,
+      runOptions: { ...(firstDeclaration.runOptions ?? singleOptions.runOptions), workflowBinding } });
   }
 
   if (options.round !== undefined && options.round !== 1) {
@@ -1133,6 +1144,7 @@ export async function runCampaign(options) {
 
   try {
     for (let round = 1; round <= configuration.maxRounds; round++) {
+      assertRoundWorkflow(next);
       const tasks = withRoundUnitIds(next.tasks, campaignId, round);
       const validation = validateIterativeRound(tasks, campaignId, seenUnitIds, expectedBaseRef);
       expectedBaseRef ??= validation.baseRef;

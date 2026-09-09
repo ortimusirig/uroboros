@@ -21,6 +21,9 @@ import { runGate } from '../src/gate.js';
 import { execFileSync } from 'node:child_process';
 import { parseArgs } from '../src/args.js';
 import { runQueue } from '../src/queue.js';
+import { writeCheckpointAtomic } from '../src/checkpoint.js';
+import { loadWorkflowBinding } from '../src/workflow-profiles.js';
+import { copyNativeWorkflowPackage } from './fixtures/workflow-profile-fixture.js';
 import { assertCleanTarget, landQueueDiff } from '../src/queue-runtime.js';
 const resumeModule = await import('../src/resume.js').catch(() => ({}));
 const resume = { ...resumeModule, resumeRun: options => resumeModule.resumeRun({ ...options,
@@ -106,7 +109,8 @@ test('a further planning dispute atomically replaces pending state without a fal
   assert.deepEqual(replay.checkpoint, next.checkpoint);
 });
 
-for (const interruption of ['log', 'return']) test(`an explicit human acceptance resumes the edited Git isolate and recovers ${interruption} interruption`, async () => {
+for (const interruption of ['log', 'return']) test(`an explicit human acceptance resumes the edited Git isolate and recovers ${interruption} interruption`, async t => {
+  const { runQueue: historicalQueue } = await copyNativeWorkflowPackage(t, { historical: true }).module('queue.js');
   const base = process.platform === 'win32' ? 'C:/ccc-test' : tmpdir();
   mkdirSync(base, { recursive: true });
   const root = mkdtempSync(join(base, 'uro-resume-exec-'));
@@ -179,7 +183,7 @@ for (const interruption of ['log', 'return']) test(`an explicit human acceptance
       appendFileSync(path, `${JSON.stringify(row)}\n`);
     },
   };
-  const stoppedQueue = await runQueue({ file: queueFile, target, dependencies: queueDependencies });
+  const stoppedQueue = await historicalQueue({ file: queueFile, target, dependencies: queueDependencies });
   assert.equal(pending.outcome, 'needs-decision');
   const saved = JSON.parse(readFileSync(join(pending.dir, 'uro-checkpoint.json'), 'utf8'));
   assert.equal(stoppedQueue.stop.checkpoint?.artifactDigest, saved.artifactDigest);
@@ -233,6 +237,7 @@ for (const interruption of ['log', 'return']) test(`an explicit human acceptance
 for (const twoGoals of [false, true]) test(`queued saved planning inside the target resumes with real cleanliness and exact generated-path allowances${twoGoals ? ' across two goals' : ''}`, async () => {
   const root = mkdtempSync(join(process.platform === 'win32' ? 'C:/ccc-test' : tmpdir(), 'uro-goal-attach-'));
   const target = join(root, 'target'), out = join(target, 'planned');
+  const workflowDigest = loadWorkflowBinding().digest;
   mkdirSync(target);
   const git = (...args) => execFileSync('git', ['-C', target, ...args], { encoding: 'utf8' });
   git('init', '-q'); git('config', 'user.name', 'Test'); git('config', 'user.email', 'test@local'); git('config', 'core.autocrlf', 'false');
@@ -265,6 +270,8 @@ for (const twoGoals of [false, true]) test(`queued saved planning inside the tar
               }) };
           } } }));
       assert.equal(facts.approved, true, facts.reason);
+      assert.equal(facts.checkpointState.workflow.digest, workflowDigest);
+      assert.equal(facts.dialogue.snapshot.workflow.digest, workflowDigest);
       assert.equal(facts.resources.providerLaunches, 2);
       const check = facts.dialogue.evidence.find(item => item.kind === 'command');
       assert.equal(check.stdout, 'queued-child-check');
@@ -283,6 +290,9 @@ for (const twoGoals of [false, true]) test(`queued saved planning inside the tar
   const pending = await runQueue({ file: queueFile, target, dependencies });
   assert.equal(pending.stop.kind, 'plan-not-approved');
   const checkpoint = JSON.parse(readFileSync(join(out, 'uro-checkpoint.json'), 'utf8'));
+  assert.equal(checkpoint.queue.workflow.digest, workflowDigest);
+  assert.equal(checkpoint.queueJournal.workflowBinding.digest, workflowDigest);
+  assert.equal(checkpoint.continuation.workflow.digest, workflowDigest);
   const decisionFile = join(root, 'answers.json');
   writeFileSync(decisionFile, JSON.stringify({ schemaVersion: 1, runId: checkpoint.runId, artifactDigest: checkpoint.artifactDigest,
     answers: [{ id: checkpoint.pending.questions[0].id, answer: 'approve' }] }));
@@ -303,6 +313,14 @@ for (const twoGoals of [false, true]) test(`queued saved planning inside the tar
     assert.equal(implementations, 1);
     await assert.rejects(resume.resumeRun({ runDirectory: out, decisionFile, adapters: planningAdapters, queueDependencies: dependencies }), /two-goal interruption/);
     const completedDrafts = drafts;
+    const checkpointPath = join(out, 'uro-checkpoint.json'), savedRecovery = JSON.parse(readFileSync(checkpointPath, 'utf8'));
+    const corruptRecovery = structuredClone(savedRecovery);
+    delete corruptRecovery.queueJournal.workflowBinding;
+    writeCheckpointAtomic(checkpointPath, corruptRecovery);
+    await assert.rejects(resume.resumeRun({ runDirectory: out, decisionFile, adapters: planningAdapters, queueDependencies: dependencies }), /workflow binding/i);
+    assert.equal(drafts, completedDrafts);
+    assert.equal(implementations, 2);
+    writeCheckpointAtomic(checkpointPath, savedRecovery);
     writeFileSync(priorPlan, 'Changed prior plan during landing recovery.');
     await assert.rejects(resume.resumeRun({ runDirectory: out, decisionFile, adapters: planningAdapters, queueDependencies: dependencies }), /approval.*stale/);
     writeFileSync(priorPlan, savedPlan);

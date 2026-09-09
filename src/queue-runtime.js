@@ -9,7 +9,10 @@ import {
 } from 'node:path';
 import { assertCurrentPlanApproval } from './plan.js';
 import { spawnCapture } from './spawn.js';
-import { DEFAULT_ARBITER_MODEL, parseAcceptanceJudgement, parseLandingJudgement, runArbiter } from './arbiter.js';
+import { DEFAULT_ARBITER_MODEL, buildArbiterPrompt, parseAcceptanceJudgement, parseLandingJudgement, runArbiter } from './arbiter.js';
+import { resolveNativeWorkflowBinding } from './shared-context.js';
+import { renderWorkflowGuidance } from './workflow-profiles.js';
+import { readPlanningHandoffReference } from './planning-dialogue.js';
 
 const GIT_TIMEOUT_MS = 30_000;
 // Git's well-known empty-tree object hash — valid in any repository without
@@ -47,6 +50,8 @@ export async function launchLoopRun({ unit, target, mode = 'manual', ...models }
   env,
 } = {}) {
   const resolvedTarget = resolve(target);
+  if (models.workflowBinding !== undefined) resolveNativeWorkflowBinding({ workflowBinding: models.workflowBinding,
+    parentSnapshots: [readPlanningHandoffReference({ reference: models.contextRef, target: resolvedTarget })] });
   const result = await runCommand(nodePath, [
     loopPath,
     'run',
@@ -93,6 +98,8 @@ export async function launchLoopPlan({ unit, target, mode = 'manual', ...models 
   env,
 } = {}) {
   const resolvedTarget = resolve(target);
+  if (models.workflowBinding !== undefined) resolveNativeWorkflowBinding({ workflowBinding: models.workflowBinding,
+    parentSnapshots: [readPlanningHandoffReference({ reference: models.contextRef, target: resolvedTarget })] });
   const result = await runCommand(nodePath, [
     loopPath,
     'plan',
@@ -429,11 +436,13 @@ function readQueueLogRows(logPath) {
 // trail is refused rather than judged partial. An unreachable or unreadable
 // judgement — Claude's or Git's — returns approved: null; the queue treats
 // anything but an explicit yes as a stop.
-export async function judgeGoalAcceptance({ goalSpecPath, target, logPath, claudeModel = DEFAULT_ARBITER_MODEL }, {
+export async function judgeGoalAcceptance({ goalSpecPath, target, logPath, claudeModel = DEFAULT_ARBITER_MODEL, workflowBinding }, {
   arbiter = runArbiter,
   runCommand = spawnCapture,
   cwd = process.cwd(),
 } = {}) {
+  workflowBinding = resolveNativeWorkflowBinding({ workflowBinding });
+  const guidance = renderWorkflowGuidance({ binding: workflowBinding, phase: 'acceptance' });
   const readOptional = (path) => {
     try { return readFileSync(path, 'utf8'); } catch { return ''; }
   };
@@ -533,7 +542,7 @@ export async function judgeGoalAcceptance({ goalSpecPath, target, logPath, claud
   };
   let result;
   try {
-    result = await arbiter({ cwd, request, model: claudeModel });
+    result = await arbiter({ cwd, request, prompt: `${buildArbiterPrompt(request)}\n\n${guidance}`, model: claudeModel });
   } catch (error) {
     return {
       approved: null,

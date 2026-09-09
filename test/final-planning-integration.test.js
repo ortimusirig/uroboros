@@ -11,6 +11,7 @@ import { run as runExecution } from '../src/run.js';
 import { runDecomposeProject, runDecomposeGoal } from '../src/decompose.js';
 import { resumeRun } from '../src/resume.js';
 import { checkpointDigest } from '../src/checkpoint.js';
+import { loadWorkflowBinding, workflowIdentity } from '../src/workflow-profiles.js';
 import { planningEnvelope, planningApproval } from './fixtures/planning-responses.js';
 import { createInspectionReceipt, captureEvidence } from '../src/context-evidence.js';
 import { landQueueDiff } from '../src/queue-runtime.js';
@@ -67,6 +68,7 @@ for (const tier of ['project', 'goal']) test(`final integration ${tier} technica
 });
 
 for (const recovery of ['direct', 'planning', 'execution', 'landed-log', 'landed-return', 'prior-landed', 'next-unit']) test(`final integration goal queue ${recovery} delivers current native planning history to both execution seats`, async t => {
+  const workflowBinding = loadWorkflowBinding();
   const landed = ['landed-log', 'landed-return', 'prior-landed'].includes(recovery);
   const f = fixture(t), git = (...args) => execFileSync('git', ['-C', f.target, ...args], { encoding: 'utf8', windowsHide: true });
   git('init', '-q'); git('config', 'core.autocrlf', 'false'); git('config', 'user.name', 'Fixture'); git('config', 'user.email', 'fixture@example.test');
@@ -126,7 +128,7 @@ for (const recovery of ['direct', 'planning', 'execution', 'landed-log', 'landed
   };
   let result;
   if (landed) {
-    await assert.rejects(runQueue({ file, target: f.target, mode: 'autonomous', dependencies }).then(value => { throw new Error('queue returned: ' + JSON.stringify(value.stop)); }), /lost landed log/);
+    await assert.rejects(runQueue({ file, target: f.target, mode: 'autonomous', workflowBinding, dependencies }).then(value => { throw new Error('queue returned: ' + JSON.stringify(value.stop)); }), /lost landed log/);
     const journalPath = fs.readdirSync(join(f.root, '__uro_context')).find(name => name.endsWith('-queue.json'));
     const journal = JSON.parse(fs.readFileSync(join(f.root, '__uro_context', journalPath), 'utf8'));
     assert.equal(journal.units[1].logged, undefined);
@@ -136,7 +138,7 @@ for (const recovery of ['direct', 'planning', 'execution', 'landed-log', 'landed
       journal.units[1].logged = true;
       journal.units[1].afterUnit = { attemptedCount: 1, landedCount: 1, totalTokens: { inputTokens: 5, outputTokens: 5, total: 10 } };
     }
-    result = await continueQueue({ context: { queue: loadedQueue, fileDigest: checkpointDigest(fs.readFileSync(file, 'utf8')),
+    result = await continueQueue({ context: { queue: loadedQueue, workflow: workflowIdentity({ binding: workflowBinding }), fileDigest: checkpointDigest(fs.readFileSync(file, 'utf8')),
       unitIndex: 1, phase: 'execution', planResult: planning, attemptedCount: 0, landedCount: 0,
       totalTokens: { inputTokens: 0, outputTokens: 0, total: 0 }, options: { file, target: f.target, mode: 'autonomous' } },
       journal, phaseResult: facts, runDirectory: facts.dir, dependencies: { ...dependencies, appendLog: undefined,
@@ -146,7 +148,7 @@ for (const recovery of ['direct', 'planning', 'execution', 'landed-log', 'landed
     assert.equal(result.stop, null, result.stop?.reason);
     assert.equal(git('rev-list', '--count', 'HEAD').trim(), '2');
     assert.equal(result.totalTokens.total, 10, 'recovered planning, execution and landing are debited exactly once');
-  } else result = await runQueue({ file, target: f.target, mode: recovery === 'planning' ? 'manual' : 'autonomous', dependencies });
+  } else result = await runQueue({ file, target: f.target, workflowBinding, mode: recovery === 'planning' ? 'manual' : 'autonomous', dependencies });
   if (['planning', 'execution'].includes(recovery)) {
     const directory = recovery === 'planning' ? planning.out : facts.dir;
     const checkpoint = JSON.parse(fs.readFileSync(join(directory, 'uro-checkpoint.json'), 'utf8'));
