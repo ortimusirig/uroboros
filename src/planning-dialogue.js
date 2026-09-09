@@ -4,6 +4,8 @@ import { existsSync, mkdirSync, readFileSync, lstatSync, readdirSync, realpathSy
 import { join, resolve, relative, isAbsolute } from 'node:path';
 import { homedir } from 'node:os';
 import { createSharedContext, extendSharedContext, persistSharedContext, validateSharedContext, contextDigest, renderSharedContext, readSharedContextReference } from './shared-context.js';
+import { assertNativeContext, resolveNativeWorkflowBinding } from './shared-context.js';
+import { workflowIdentity, readWorkflowBinding } from './workflow-profiles.js';
 import { captureEvidence, validateEvidence } from './context-evidence.js';
 import { resolveProjectIdentity, openProjectMemory } from './project-memory.js';
 import { resolveArtifactRoot } from './artifacts.js';
@@ -192,6 +194,7 @@ export function readPlanningHandoffReference({ reference, target, completedExecu
   if (!reference.planningHandoff || entries.length !== 1 || entries[0].status !== 'required'
     || snapshot.completeness?.complete !== true) throw new Error('required planning handoff reference missing or incomplete');
   const handoff = validatePlanningHandoff({ handoff: JSON.parse(entries[0].content), target, directory: reference.planningHandoff.directory, completedExecution });
+  resolveNativeWorkflowBinding({ parentSnapshots: [snapshot, handoff.snapshot] });
   if (handoff.runId !== reference.planningHandoff.runId || handoff.approval.contextDigest !== reference.planningHandoff.contextDigest
     || handoff.approval.artifactDigest !== reference.planningHandoff.artifactDigest
     || handoff.approval.sidecarDigest !== reference.planningHandoff.sidecarDigest) throw new Error('planning handoff reference identity changed');
@@ -200,7 +203,11 @@ export function readPlanningHandoffReference({ reference, target, completedExecu
 
 /** Create required common grounding before any author, selector or reviewer launch. */
 export function openPlanningContext({ requirements, target, directory, runId, tier = 'plan', context = {},
-  artifactRoot, env = process.env, searchIndex, phase = 'planning', retained }) {
+  artifactRoot, env = process.env, searchIndex, phase = 'planning', retained, workflowBinding }) {
+  assertNativeContext(context);
+  if (retained) retained.validate();
+  workflowBinding = resolveNativeWorkflowBinding({ workflowBinding,
+    parentSnapshots: retained?.snapshot ? [retained.snapshot] : [] });
   mkdirSync(directory, { recursive: true });
   assertSidecarInventory({ directory, registeredPaths: [] });
   const project = resolveProjectIdentity({ target });
@@ -213,7 +220,7 @@ export function openPlanningContext({ requirements, target, directory, runId, ti
   const text = typeof requirements === 'string' ? requirements : JSON.stringify(requirements);
   const recalled = memory.search({ text });
   const sourceIdentity = contextDigest({ requirements, sourceRevision });
-  const entries = Object.entries({ requirements, target: project, ...context })
+  const entries = Object.entries({ ...context, requirements, target: project })
     .filter(([, value]) => value !== undefined && value !== null && value !== '')
     .map(([id, value]) => ({ id, kind: id, content: typeof value === 'string' ? value : JSON.stringify(value),
       sourceIdentity, provenance: { origin: 'phase-controller', runId }, status: 'required' }));
@@ -247,12 +254,13 @@ export function openPlanningContext({ requirements, target, directory, runId, ti
     }
   }
   const snapshot = createSharedContext({ projectId: project.projectId, runId, unitId: `${runId}:${tier}`,
-    phase, sourceRevision, entries, evidence: [evidence, ...imported], recalled: recalled.map(record => ({
+    phase, sourceRevision, workflowBinding, entries, evidence: [evidence, ...imported], recalled: recalled.map(record => ({
       ...record, id: record.versionId, notebookEntryId: record.id, status: 'historical', notebookStatus: record.status,
     })) });
   const path = persistSharedContext({ directory, snapshot });
   const journal = openDialogueJournal({ directory, runId, projectId: project.projectId });
-  return { snapshot, journal, memory, project, directory, artifactRoot: root, evidenceDirectory, contextPaths: new Map([[path, digestBytes(path)]]),
+  journal.append({ type: 'workflow-start', workflow: workflowIdentity({ binding: workflowBinding }), contextDigest: snapshot.digest });
+  return { snapshot, workflowBinding, journal, memory, project, directory, artifactRoot: root, evidenceDirectory, contextPaths: new Map([[path, digestBytes(path)]]),
     ownedFiles: new Map([[path, digestBytes(path)], ...[evidence, ...imported].map(item => [item.capturedPath, digestBytes(item.capturedPath)]),
       ...['journal.jsonl', 'journal-tail.jsonl'].map(name => [join(directory, '__uro_dialogue', name), null])]),
     preparationMessages: [], retained,
@@ -280,8 +288,12 @@ export function reopenPlanningContext({ continuation, target, directory }) {
     const preparing = !continuation.dialogue && Boolean(continuation.preparationSnapshot);
     const latest = events.filter(e => preparing ? ['preparation-state', 'preparation-paused'].includes(e.type) : e.type === 'state').at(-1)?.state;
     if (contextDigest({ state: latest ?? null }) !== contextDigest({ state: preparing ? continuation.preparationState : continuation.dialogue })) throw new Error('saved planning dialogue differs from journal');
+    const workflowStart = events.find(event => event.type === 'workflow-start');
+    const workflowBinding = readWorkflowBinding({ snapshot, expected: continuation.workflow, allowLegacy: true });
+    if (workflowBinding.mode === 'bound' && (!workflowStart || !continuation.workflow)) throw new Error('bound workflow continuation identity missing');
+    if (workflowStart) readWorkflowBinding({ snapshot, expected: workflowStart.workflow, allowLegacy: true });
     if (latest) createDialogueState({ ...latest, continuation: latest });
-    return { snapshot, journal, project, directory, ...(preparing ? { preparationMessages: latest?.messages ?? [], resourceBudget: continuation.resourceBudget } : { dialogue: latest }), artifactRoot: continuation.artifactRoot,
+    return { snapshot, workflowBinding, journal, project, directory, ...(preparing ? { preparationMessages: latest?.messages ?? [], resourceBudget: continuation.resourceBudget } : { dialogue: latest }), artifactRoot: continuation.artifactRoot,
       memory: openProjectMemory({ artifactRoot: continuation.artifactRoot, project }),
       evidenceDirectory: join(directory, '__uro_evidence'),
       ownedFiles: new Map(manifest.files.map(file => [join(directory, file.path), file.path.startsWith('__uro_dialogue/') ? null : file.sha256])),
@@ -374,6 +386,7 @@ export function validateNativeContinuation(continuation, { technicalContinue = f
   const phases = [...(continuation.phaseChain ?? []).filter(item => item.runId !== continuation.runId),
     { runId: continuation.runId, directory: continuation.directory, phase: continuation.phase, checkpointState: continuation }];
   const ids = new Set();
+  let workflowBinding;
   const total = { knownUsage: { inputTokens: 0, outputTokens: 0 }, usageUnknown: false };
   for (const phase of phases) {
     const state = phase.checkpointState, dialogue = state?.dialogue, snapshot = dialogue?.snapshot ?? state?.preparationSnapshot;
@@ -387,6 +400,7 @@ export function validateNativeContinuation(continuation, { technicalContinue = f
     const target = workspace ?? continuation.planningContext?.request?.target;
     const session = reopenPlanningContext({ continuation: state, target, directory: phase.directory });
     try {
+      workflowBinding = resolveNativeWorkflowBinding({ workflowBinding, parentSnapshots: [session.snapshot] });
       assertCompletedEffects(session, session.dialogue ?? state.preparationState ?? {});
       const account = session.journal.account();
       total.usageUnknown ||= account.usageUnknown;
@@ -717,9 +731,10 @@ function humanPlanningApproval({ state, question = state?.humanRuling?.question,
 /** New runs use explicit dialogue; historical runConversation remains a separate reader. */
 export async function runPlanningDialogue({ requirements, target, directory, tier = 'plan', interactionMode = 'manual',
   rounds, runId = `planning-${randomUUID()}`, seats, strategy, reporter, context, artifactRoot, env, searchIndex,
-  session: suppliedSession, continuation, humanRuling, technicalContinue = false, prelude, budget, resourceBudget, retained }) {
+  session: suppliedSession, continuation, humanRuling, technicalContinue = false, prelude, budget, resourceBudget, retained, workflowBinding }) {
   const session = suppliedSession ?? (continuation ? reopenPlanningContext({ continuation, target, directory })
-    : openPlanningContext({ requirements, target, directory, runId, tier, context, retained, artifactRoot, env, searchIndex }));
+    : openPlanningContext({ requirements, target, directory, runId, tier, context, retained, workflowBinding, artifactRoot, env, searchIndex }));
+  resolveNativeWorkflowBinding({ workflowBinding, parentSnapshots: [session.snapshot] });
   let proposal = prelude?.proposal ?? continuation?.proposal ?? null;
   let state = session.dialogue ?? continuation?.dialogue ?? (prelude?.preparationOperationId ? selectedPreparationState(session, prelude, requirements) : createDialogueState({ runId, projectId: session.project.projectId,
     phase: 'planning', interactionMode, snapshot: session.snapshot,
@@ -842,6 +857,7 @@ export async function runPlanningDialogue({ requirements, target, directory, tie
     messages.push(...state.messages.filter(m => m.sender === 'human'));
     const tail = session.journal.read().at(-1);
     const checkpointState = { version: 2, phase: 'planning', tier, runId, interactionMode, requirements,
+      workflow: workflowIdentity({ binding: session.workflowBinding }),
       proposal: canonicalPlanningArtifact(proposal), artifactDigest: state.artifactDigest, approval,
       dialogue: state, directory, roundsLimit: rounds ?? null, pendingDecision,
       messages, artifactRepairs: state.artifactRepairs ?? 0, roundHistory: [], memoryDirectory: session.memory.directory, artifactRoot: session.artifactRoot,

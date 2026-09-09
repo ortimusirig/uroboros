@@ -39,7 +39,8 @@ import { saveCheckpoint, nativeHumanQuestion } from './checkpoint.js';
 import { runExecutionDialogue } from './execution-dialogue.js';
 import { canApproveDialogue, parseDialogueEnvelope } from './dialogue.js';
 import { captureEvidence, validateEvidence } from './context-evidence.js';
-import { contextDigest } from './shared-context.js';
+import { contextDigest, assertNativeContext, resolveNativeWorkflowBinding } from './shared-context.js';
+import { readWorkflowBinding, workflowIdentity } from './workflow-profiles.js';
 import { contextLifecycle, assertPlanningSidecars, reopenPlanningContext, applyScopedHumanRuling, resumeTechnicalDialogue, assertHumanPlanningApproval, readPlanningHandoffReference } from './planning-dialogue.js';
 import { EXECUTION_REVIEW_PROMPT, completeReviewPass } from './verifier.js';
 import { createRunMarker, releaseRunMarker } from './prune.js';
@@ -374,6 +375,7 @@ function stopManualExecution(state, humanRuling, reason = 'human-stopped', plann
 
 function manualPlanningOptions(state, adapters, env, reporter) {
   return { target: state.workspace.dir, claudeModel: state.options.arbiterModel,
+    workflowBinding: { schemaVersion: 1, mode: 'legacy-unbound' },
     codexModel: state.options.executorModel, codexEffort: state.options.executorEffort,
     executorTimeout: state.stageTimeouts.executor, timeoutMs: state.stageTimeouts.arbiter,
     runId: state.runId, env, reporter,
@@ -484,6 +486,12 @@ export async function run(opts) {
     adapters = {}, reporter,
   } = opts;
   const parentContext = opts.contextRef ? readPlanningHandoffReference({ reference: opts.contextRef, target }) : null;
+  assertNativeContext(opts.context);
+  const workflowBinding = nativeSaved
+    ? resolveNativeWorkflowBinding({ workflowBinding: readWorkflowBinding({ snapshot: nativeSaved.dialogue?.snapshot ?? nativeSaved.preparationSnapshot,
+      expected: nativeSaved.workflow, allowLegacy: true }), parentSnapshots: parentContext ? [parentContext] : [] })
+    : nativeExecution ? resolveNativeWorkflowBinding({ workflowBinding: opts.workflowBinding, parentSnapshots: parentContext ? [parentContext] : [] })
+      : { schemaVersion: 1, mode: 'legacy-unbound' };
   const physicalRunId = physicalRunIdFor(runId);
   if (mode !== 'manual' && mode !== 'autonomous') {
     throw new Error(`invalid mode: ${mode}; expected manual or autonomous`);
@@ -998,7 +1006,11 @@ export async function run(opts) {
     };
     const checkChain = () => {
       if (opts.contextRef) readPlanningHandoffReference({ reference: opts.contextRef, target });
-      for (const item of nativePhases) checkPhase(item);
+      for (const item of nativePhases) {
+        checkPhase(item);
+        readWorkflowBinding({ snapshot: item.checkpointState.dialogue?.snapshot ?? item.checkpointState.preparationSnapshot,
+          expected: workflowIdentity({ binding: workflowBinding }), allowLegacy: true });
+      }
       for (const link of nativeLinks) {
         checkDirectory(link.directory);
         if (lstatSync(link.path).isSymbolicLink() || reviewDigest(readFileSync(link.path)) !== link.digest) throw new Error('retained phase handoff changed');
@@ -1052,7 +1064,8 @@ export async function run(opts) {
       try { writeFileSync(fd, JSON.stringify(context)); fsyncSync(fd); } finally { closeSync(fd); }
       nativeLinks.push({ path, digest: reviewDigest(readFileSync(path)), ...phase });
       checkChain();
-      return { context, validate: checkChain, evidence: parent.checkpointState.dialogue?.evidence ?? [],
+      return { context, snapshot: parent.checkpointState.dialogue?.snapshot ?? parent.checkpointState.preparationSnapshot,
+        workflowBinding, validate: checkChain, evidence: parent.checkpointState.dialogue?.evidence ?? [],
         evidenceRoots: parent.checkpointState.dialogue?.scope.evidenceRoots ?? [] };
     };
     const readMergeHead = () => {
@@ -1291,7 +1304,7 @@ export async function run(opts) {
       if (phase.phase === 'execution') {
       const initial = await capture({ readOnly: merge !== undefined });
       const prior = totalResources();
-      nativeResult = await runExecutionDialogue({ target: iso.dir, directory: phase.directory, runId: phase.runId, retained,
+      nativeResult = await runExecutionDialogue({ target: iso.dir, directory: phase.directory, runId: phase.runId, retained, workflowBinding,
         ...(reopened ? { session: reopened, state: reopened.dialogue, snapshot: reopened.snapshot, journal: reopened.journal } : {}),
         artifactRoot: resolveArtifactRoot({ scratchRoot, artifactRoot: opts.artifactRoot, env: runEnvironment }),
         requirements: originalPlan, plan: approvedExecutionPlan,
@@ -1411,7 +1424,8 @@ export async function run(opts) {
         execution = parent.checkpointState.dialogue;
         message = context.trigger.message; trigger = context.trigger;
         if (message?.id !== execution.messages.at(-1)?.id || message.action !== 'replan') throw new Error('retained planning trigger identity changed');
-        retained = { context, validate: checkChain, evidence: execution.evidence, evidenceRoots: execution.scope.evidenceRoots };
+        retained = { context, snapshot: parent.checkpointState.dialogue.snapshot, workflowBinding,
+          validate: checkChain, evidence: execution.evidence, evidenceRoots: execution.scope.evidenceRoots };
       }
       const held = retained;
       interruptedPlanningObservations = [];
@@ -1451,7 +1465,7 @@ export async function run(opts) {
       }) : await generatePlanCandidates({ goal: originalPlan, target: iso.dir, directory: phase.directory, runId: phase.runId,
         mode: 'fresh', count: pivotCandidates, interactionMode: mode, failedPlan: plan, previousPlan: originalPlan,
         pivot: 'Preserve completed work; plan and authorize only remaining work using the retained evidence and decisions.',
-        priorMessages: execution.messages, retained, artifactRoot: resolveArtifactRoot({ scratchRoot, artifactRoot: opts.artifactRoot, env: runEnvironment }),
+        priorMessages: execution.messages, retained, workflowBinding, artifactRoot: resolveArtifactRoot({ scratchRoot, artifactRoot: opts.artifactRoot, env: runEnvironment }),
         ...(tokenBudget === undefined ? {} : { resourceBudget: { tokenBudget, prior: totalResources() } }),
         claudeModel: arbiterModel, codexModel: executorModel, codexEffort: executorEffort,
         timeoutMs: stageTimeouts.arbiter, executorTimeout: stageTimeouts.executor, env: runEnvironment, reporter: eventReporter,
@@ -2127,6 +2141,7 @@ export async function run(opts) {
                 : async () => { throw new Error('fresh planning adapter unavailable'); });
             const generated = await generatePlanCandidates({
               goal: originalPlan,
+              workflowBinding,
               target: iso.dir,
               count: pivotCandidates,
               mode: 'fresh',

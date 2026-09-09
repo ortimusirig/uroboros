@@ -10,6 +10,26 @@ import {
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { resolveProjectIdentity } from './project-memory.js';
+import { loadWorkflowBinding, validateWorkflowBinding, workflowIdentity, workflowSnapshotEntry, readWorkflowBinding, renderWorkflowGuidance } from './workflow-profiles.js';
+
+const reservedWorkflowEntry = entry => entry?.id === 'uroboros-workflow-binding' || entry?.kind === 'workflow-binding';
+export function assertNativeContext(context = {}) {
+  for (const key of ['workflow', 'workflowBinding', 'uroboros-workflow-binding', 'requirements', 'target']) {
+    if (Object.hasOwn(context, key)) throw new Error(`reserved native context key: ${key}`);
+  }
+  if (Array.isArray(context.entries) && context.entries.some(reservedWorkflowEntry)) throw new Error('reserved workflow context entry');
+}
+
+/** Only internal options and authenticated parent snapshots may reach this seam. */
+export function resolveNativeWorkflowBinding({ workflowBinding, parentSnapshots = [] } = {}) {
+  const bindings = [workflowBinding, ...parentSnapshots.map(snapshot => readWorkflowBinding({ snapshot, allowLegacy: true }))].filter(value => value !== undefined);
+  for (const binding of bindings) validateWorkflowBinding({ binding });
+  if (bindings.some(binding => contextDigest({ workflow: workflowIdentity({ binding }) })
+    !== contextDigest({ workflow: workflowIdentity({ binding: bindings[0] }) }))) {
+    throw new Error('conflicting inherited workflow bindings');
+  }
+  return bindings[0] ?? loadWorkflowBinding();
+}
 
 /** A context reference carries grounding, never filesystem or action authority. */
 export function readSharedContextReference({ reference, target }) {
@@ -146,6 +166,7 @@ function buildSnapshot(input, inheritedReasons = []) {
     unitId: input.unitId,
     phase: input.phase,
     sourceRevision: input.sourceRevision,
+    ...(input.workflow === undefined ? {} : { workflow: input.workflow }),
     entries: sanitizedEntries.value,
     evidence: sanitizedEvidence.value,
     recalled: sanitizedRecalled.value,
@@ -166,11 +187,16 @@ export function createSharedContext({
   evidence = [],
   parent = null,
   recalled = [],
+  workflowBinding,
 }) {
   const parentDigest = parent === null ? null : (typeof parent === 'string' ? parent : parent.digest);
   if (parent !== null) requireString(parentDigest, 'parent digest');
+  if ((entries ?? []).some(reservedWorkflowEntry)) throw new Error('reserved workflow context entry');
   return buildSnapshot({
-    projectId, runId, unitId, phase, sourceRevision, entries, evidence, parentDigest, recalled,
+    projectId, runId, unitId, phase, sourceRevision,
+    entries: workflowBinding === undefined ? entries : [...(entries ?? []), workflowSnapshotEntry({ binding: workflowBinding })],
+    ...(workflowBinding === undefined ? {} : { workflow: workflowIdentity({ binding: workflowBinding }) }),
+    evidence, parentDigest, recalled,
   });
 }
 
@@ -183,11 +209,13 @@ export function extendSharedContext({
   recalled = [],
 }) {
   const current = validateSharedContext({ snapshot, projectId: snapshot?.projectId });
+  if (entries.some(reservedWorkflowEntry)) throw new Error('reserved workflow context entry cannot be replaced');
   return buildSnapshot({
     projectId: current.projectId,
     runId: current.runId,
     unitId: current.unitId,
     phase,
+    workflow: current.workflow,
     sourceRevision,
     entries: [...current.entries, ...entries],
     evidence: [...current.evidence, ...evidence],
@@ -211,6 +239,7 @@ export function validateSharedContext({ snapshot, projectId }) {
   }
   if (snapshot.parentDigest !== null) requireString(snapshot.parentDigest, 'snapshot parent digest');
   validateEntries(snapshot.entries);
+  readWorkflowBinding({ snapshot, allowLegacy: true });
   validateReferences(snapshot.evidence, 'evidence');
   validateReferences(snapshot.recalled, 'recalled entry');
   const actualDigest = contextDigest(snapshot);
@@ -220,9 +249,31 @@ export function validateSharedContext({ snapshot, projectId }) {
 
 export function renderSharedContext({ snapshot }) {
   const value = validateSharedContext({ snapshot, projectId: snapshot?.projectId });
+  const binding = readWorkflowBinding({ snapshot: value, allowLegacy: true });
+  // Project only known harness carriers. Original snapshots and conversation remain immutable.
+  const projectEntries = (entries, nested = false) => entries.map(entry => {
+    if (reservedWorkflowEntry(entry)) return { ...entry,
+      content: nested ? JSON.stringify(workflowIdentity({ binding: JSON.parse(entry.content) })) : renderWorkflowGuidance({ binding, phase: value.phase }),
+      delivery: { projection: true, originalContentDigest: contextDigest({ content: entry.content }) } };
+    if (!['queueParent', 'retained-phase', 'planning-handoff'].includes(entry.kind)) return entry;
+    let content;
+    try { content = JSON.parse(entry.content); } catch { return entry; }
+    if (!content || typeof content !== 'object') return entry;
+    let changed = false;
+    const projectCarrier = (owner, key) => {
+      if (!Array.isArray(owner?.[key])) return;
+      const projected = projectEntries(owner[key], true);
+      if (projected.some((value, index) => value !== owner[key][index])) { owner[key] = projected; changed = true; }
+    };
+    if (entry.kind === 'queueParent') projectCarrier(content, 'entries');
+    if (entry.kind === 'retained-phase') projectCarrier(content, 'parentEntries');
+    if (entry.kind === 'planning-handoff') projectCarrier(content.snapshot, 'entries');
+    if (!changed) return entry;
+    return { ...entry, content: JSON.stringify(content), delivery: { projection: true, originalContentDigest: contextDigest({ content: entry.content }) } };
+  });
   return [
-    'Shared grounding snapshot (content identity only; evidence still requires inspection):',
-    JSON.stringify(canonical(value), null, 2),
+    'Shared grounding snapshot delivery projection (original snapshot digest below; projected bytes differ; evidence still requires inspection):',
+    JSON.stringify(canonical({ ...value, workflow: workflowIdentity({ binding }), entries: projectEntries(value.entries) }), null, 2),
   ].join('\n');
 }
 

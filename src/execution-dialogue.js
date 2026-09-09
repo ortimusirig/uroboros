@@ -1,7 +1,8 @@
 import { createDialogueState } from './dialogue.js';
 import { runIssueDialogue, registerObservations } from './dialogue-dispatch.js';
 import { openPlanningContext, contextLifecycle } from './planning-dialogue.js';
-import { extendSharedContext } from './shared-context.js';
+import { extendSharedContext, resolveNativeWorkflowBinding } from './shared-context.js';
+import { workflowIdentity } from './workflow-profiles.js';
 import { runProtectedOperation, captureReviewSnapshot, restoreReviewSnapshot } from './review-protection.js';
 import { detectReview } from './review.js';
 import { buildLivenessJudgePrompt, DEFAULT_LIVENESS_JUDGE_TIMEOUT_MS } from './liveness-judge.js';
@@ -14,7 +15,7 @@ export async function runExecutionDialogue({ state, journal, snapshot, artifactD
   execute, review, completeReview, discuss, inspect, capture, selectChecks, runChecks, selectMerge, runMerge,
   selectMutation, runMutation, observeMutationSource, captureMutationEvidence,
   judgeLiveness, selectPreservation, preserveExecutorWork, livenessJudgeTimeoutMs = DEFAULT_LIVENESS_JUDGE_TIMEOUT_MS,
-  budget, reporter, env, searchIndex, retained, reviewInstructions = '', session: suppliedSession }) {
+  budget, reporter, env, searchIndex, retained, workflowBinding, reviewInstructions = '', session: suppliedSession }) {
   // A retained handoff initializes a distinct phase; it is never a supplied-session reopening.
   if (retained && (state || journal || snapshot || suppliedSession)) throw new Error('retained successor must start a new execution phase');
   if (retained) {
@@ -26,7 +27,8 @@ export async function runExecutionDialogue({ state, journal, snapshot, artifactD
     }
   }
   const session = suppliedSession ?? openPlanningContext({ requirements, target, directory, runId,
-    artifactRoot, interactionMode, context: { ...context, approvedPlan: plan, executionTask: task }, retained, phase: 'execution', tier: 'execution', env, searchIndex });
+    artifactRoot, interactionMode, context: { ...context, approvedPlan: plan, executionTask: task }, retained, workflowBinding, phase: 'execution', tier: 'execution', env, searchIndex });
+  resolveNativeWorkflowBinding({ workflowBinding, parentSnapshots: [session.snapshot, ...(snapshot ? [snapshot] : []), ...(state ? [state.snapshot] : [])] });
   journal ??= session.journal;
   snapshot ??= session.snapshot;
   state ??= { ...createDialogueState({ runId, projectId: snapshot.projectId, phase: 'execution', interactionMode,
@@ -417,6 +419,7 @@ export async function runExecutionDialogue({ state, journal, snapshot, artifactD
     let tail;
     try { tail = journal.read().at(-1); } catch (error) { integrityValid = false; pause(error); }
     const checkpointState = { version: 2, phase: 'execution', runId, interactionMode, requirements, plan, task: result.state.executionTask ?? plan,
+      workflow: workflowIdentity({ binding: session.workflowBinding }),
       directory, artifactRoot: session.artifactRoot, dialogue: result.state,
       artifactDigest: result.state.artifactDigest, pendingDecision: result.state.pendingDecision,
       journalIdentity: tail ? { sequence: tail.sequence, hash: tail.hash } : null, recall: session.recall };

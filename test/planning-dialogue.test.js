@@ -576,9 +576,11 @@ for (const control of ['accepted', 'shared-premise', 'missing-evidence', 'stale-
 });
 
 test('both planning seats can independently inspect a new source and the next input extends material context', async t => {
-  const opts = fixture(t), digests = []; let authors = 0, reviews = 0;
+  const opts = fixture(t), digests = [], workflows = []; let authors = 0, reviews = 0;
   const result = await runPlan({ ...opts, adapters: {
     author: async r => {
+      workflows.push(r.state.snapshot.workflow.digest);
+      assert.match(r.input, /BMAD/); assert.match(r.input, /Spec Kit/);
       digests.push(r.state.snapshot.digest);
       if (++authors === 1) return { dialogue: reply(r, 'inspect', { requests: [{ path: 'source.js', line: 1, claimIds: ['source-author'] }] }) };
       if (authors === 2) { assert.match(r.input, /export const localLogin = true/);
@@ -586,12 +588,15 @@ test('both planning seats can independently inspect a new source and the next in
       return { plan: 'Keep local login', gate: [], dialogue: reply(r, 'propose') };
     },
     reviewer: async r => {
+      workflows.push(r.state.snapshot.workflow.digest);
+      assert.match(r.input, /BMAD/); assert.match(r.input, /Spec Kit/);
       if (++reviews === 1) return { dialogue: reply(r, 'inspect', { requests: [{ path: 'source.js', line: 1, claimIds: ['source-reviewer'] }] }) };
       assert.match(r.input, /export const localLogin = true/);
       return approve(r);
     },
   } });
   assert.equal(result.approved, true, result.reason);
+  assert.equal(new Set(workflows).size, 1, 'source inspections extend grounding while preserving both-seat workflow identity');
   assert.notEqual(digests[0], digests[1]);
   assert.equal(result.sharedContext.evidence.filter(e => e.kind === 'code').length, 2);
   assert.equal(result.rounds, 1);

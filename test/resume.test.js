@@ -245,10 +245,10 @@ for (const twoGoals of [false, true]) test(`queued saved planning inside the tar
   const planningAdapters = { author: async () => { drafts++; return { plan: 'Change source.\n', gate: [command], agree: twoGoals && planningUnit === 1, readable: true }; },
     reviewer: async r => ({ agree: twoGoals && planningUnit === 1, readable: true, artifactDigest: r.artifactDigest, suggestions: [{ id: 'S1', text: 'Prefer another change.' }] }) };
   const dependencies = { assertCleanTarget,
-    launchPlan: ({ unit }) => { planningUnit = unit.index; return runPlan(withVerifiedSuperpowers({ goal: unit.goal, target, out: unit.out, candidates: 1, adapters: planningAdapters })); },
-    launchRun: async ({ unit }) => {
+    launchPlan: ({ unit, contextRef }) => { planningUnit = unit.index; return runPlan(withVerifiedSuperpowers({ goal: unit.goal, target, out: unit.out, contextRef, candidates: 1, adapters: planningAdapters })); },
+    launchRun: async ({ unit, contextRef }) => {
       implementations++;
-      facts = await run(withVerifiedSuperpowers({ task: unit.task, gate: unit.gate, target, scratchRoot: join(root, 'scratch'), runId: `goal-run-${implementations}`,
+      facts = await run(withVerifiedSuperpowers({ task: unit.task, gate: unit.gate, target, contextRef, scratchRoot: join(root, 'scratch'), runId: `goal-run-${implementations}`,
         adapters: { runExecutor: async request => {
           writeFileSync(join(request.cwd, 'source.js'), `changed ${implementations}\n`);
           return { exitCode: 0, usage: { inputTokens: 1, outputTokens: 1 }, dialogue: envelope(request, request.action) };

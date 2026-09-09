@@ -10,6 +10,7 @@ import { reportEvent } from './events.js';
 import { createPlanningSeats, planningPreflight } from './plan.js';
 import { buildRepoMap, DEFAULT_MAP_BUDGET } from './repo-map.js';
 import { resolveStageTimeouts } from './timeouts.js';
+import { resolveNativeWorkflowBinding } from './shared-context.js';
 
 const TIER2_INCREMENTAL_LAW = 'every task is a self-contained increment of the GOAL — runnable and testable alone, exactly one capability';
 
@@ -629,13 +630,14 @@ async function runDecomposition(kind, {
   arbiterTimeout = resolveStageTimeouts().arbiter,
   runId = `decompose-${kind}-${randomUUID()}`, reporter,
   env = process.env, home = homedir(), superpowers, adapters = {},
-  artifactRoot, searchIndex,
+  artifactRoot, searchIndex, workflowBinding,
 } = {}) {
   decisionAuthority({ interactionMode, phase: 'planning' });
   if (plannerModel !== undefined || verifierModel !== undefined) {
     throw new TypeError('plannerModel/verifierModel are ambiguous; use claudeModel or codexModel');
   }
   if (rounds !== undefined && (!Number.isSafeInteger(rounds) || rounds < 1)) throw new TypeError('rounds must be a positive integer');
+  workflowBinding = resolveNativeWorkflowBinding({ workflowBinding });
   await planningPreflight({ adapters, superpowers, env, home });
   const isGoal = kind === 'goal';
   const request = isGoal ? validateDecomposeGoalRequest({ goalSpecPath, target })
@@ -651,7 +653,7 @@ async function runDecomposition(kind, {
   const { runPlanningDialogue } = await import('./planning-dialogue.js');
   const result = await runPlanningDialogue({
     runId, reporter, rounds, tier: kind, requirements, interactionMode,
-    target: request.target, directory: request.out ?? request.tasksDir, context, env, artifactRoot, searchIndex,
+    target: request.target, directory: request.out ?? request.tasksDir, context, env, artifactRoot, searchIndex, workflowBinding,
     seats: createPlanningSeats({
       target: request.target, claudeModel: claudeModel ?? arbiterModel, codexModel, codexEffort,
       executorTimeout, arbiterTimeout, runId, env, reporter, adapters,
