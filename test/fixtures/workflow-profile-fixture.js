@@ -1,8 +1,9 @@
-import { cpSync, existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 
 const fixtureDirectory = dirname(fileURLToPath(import.meta.url));
 const sourceDirectory = join(fixtureDirectory, '..', '..', 'src');
@@ -30,10 +31,14 @@ export function copyNativeWorkflowPackage(t, { historical = false } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'uro-workflow-runtime-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   if (historical) {
-    const archive = join(root, 'historical.tar');
-    execFileSync('git', ['archive', '--format=tar', `--output=${archive}`, '3051ccbe52d84dd7a93d80604e4230d089421038', 'src', 'package.json'],
-      { cwd: join(sourceDirectory, '..'), windowsHide: true });
-    execFileSync('tar', ['-xf', archive, '-C', root], { windowsHide: true });
+    // Immutable authentic source; see native-preintegration-3051ccb.md for provenance.
+    const archive = join(fixtureDirectory, 'native-preintegration-3051ccb.tar.gz');
+    if (!existsSync(archive)) throw new Error('Historical fixture archive missing');
+    const bytes = readFileSync(archive);
+    if (createHash('sha256').update(bytes).digest('hex') !== '513463b5c25b1ac0f2d65de11c8b5a6e86167f83dd1ce6c9d0bdfafbb0db85cc') {
+      throw new Error('Historical fixture archive integrity mismatch');
+    }
+    execFileSync('tar', ['-xzf', '-', '-C', root], { input: bytes, windowsHide: true });
   } else {
     cpSync(sourceDirectory, join(root, 'src'), { recursive: true });
     cpSync(join(sourceDirectory, '..', 'package.json'), join(root, 'package.json'));

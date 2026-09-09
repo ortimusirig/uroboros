@@ -125,3 +125,60 @@ Retained receipt and raw output SHA-256 inventory (all files under the persisten
 | workflow-task2-resume-red-02 | 1897 | `BD10F895406C78ECCFA9578D3F84908E7CA68A4D9E8B9C0D6CEFFB2C099D2862` | `3a9775f23e6bda8b14cde9757a85910798ebe74926d3c523e3a56ac3e2a16439` |
 | workflow-task2-self-review-green-01 | 2077 | `9D4CA5DFE77CB3479A7DA850D6E2DCBEF6B05E198899D6022660DF5D1610A15C` | `d4f533e7a8e47b7d4aa058ac4fb245e8b437b1e4fb70fde7b5107f3b93e1a398` |
 | workflow-task2-self-review-red-01 | 2012 | `8F71179DAB7190BE90B804B89B8BD918C3B141FEA40891CC63076759181277E5` | `2a59fa3e615152017670146f8d4b4fa79a23804e759e73ce43db6ac4bfc6fada` |
+
+## Review fix round 1 — offline authentic historical fixture
+
+Latest status: DONE, locally fixed and verified; scoped independent rereview remains with the controller. This addendum supersedes the historical-object portability concern above without replacing or reattributing earlier evidence. Base: `2edb8f82bacd45394cecc7619e2df6952da9caa0`. Scoped commit accompanying this addendum: `test: vendor authentic offline native workflow fixture`.
+
+The Important finding in `task-2-review.md` was reproduced under systematic-debugging/TDD: the real copied helper invoked `git archive` from a disposable source-only package with no `.git`, raising `fatal: not a git repository (or any of the parent directories): .git`. The genuine first RED fails its `doesNotThrow` compatibility assertion before any helper edit. Increasing checkout depth cannot fix a source archive; the root dependency on repository history is removed from the fixture helper instead. No runtime production file, existing workflow-native assertion, CI configuration, or dependency changed.
+
+The helper now consumes the checked-in immutable `test/fixtures/native-preintegration-3051ccb.tar.gz`. It contains exact pre-integration commit `3051ccbe52d84dd7a93d80604e4230d089421038` archival bytes for all `src/`, `package.json`, and the authentic MIT `LICENSE`: 80 regular files, no extra extracted files. Generation was a one-time offline mechanical data operation:
+
+```powershell
+git archive --format=tar.gz --output=test/fixtures/native-preintegration-3051ccb.tar.gz 3051ccbe52d84dd7a93d80604e4230d089421038 src package.json LICENSE
+```
+
+Generation exited 0. A separate Node verification exited 0: `assert.deepEqual` checked archive bytes against a fresh `execFileSync('git', ['archive', '--format=tar.gz', commit, 'src', 'package.json', 'LICENSE'])`; extracted each file through the actual helper and compared bytes with `execFileSync('git', ['show', commit + ':' + path])`; checked the complete extracted regular-file set against `git ls-tree -r` for those paths. All 80 source-file comparisons and the whole-archive comparison matched. The exact file/blob/byte/SHA-256 results are retained in `test/fixtures/native-preintegration-3051ccb.inventory.json`; adjacent `.md` records provenance and immutable maintenance rules. This authoring verification uses the original source object; normal tests do not.
+
+Runtime fixture loading pins archive SHA-256 `513463b5c25b1ac0f2d65de11c8b5a6e86167f83dd1ce6c9d0bdfafbb0db85cc`, rejects a missing/corrupt archive explicitly, and feeds the same verified Buffer to existing system `tar` via stdin. There is no fetch, download, regeneration, current-source fallback, synthesized legacy metadata, or historical-test skip. Existing target-repository Git operations and system `tar` remain test prerequisites; private Git history is not. The portability test imports the real helper from a disposable source copy, creates and imports the historical planning module, verifies absence of the new workflow module, and verifies the retained license. Separate real-file mutations exercise missing and tampered archive rejection.
+
+### Exact retained verification
+
+All commands ran in `C:/Users/aiuser4/OneDrive - Applexus Technologies/Uroboros/work/uroboros-two-agent`, with the existing provider-denial capture helper, in this order:
+
+```powershell
+node 'C:/Users/aiuser4/OneDrive - Applexus Technologies/Uroboros/tools/workflow-capture.cjs' workflow-task2-fix1-portability-red-01 --test --test-reporter=tap test/workflow-fixture.test.js
+node 'C:/Users/aiuser4/OneDrive - Applexus Technologies/Uroboros/tools/workflow-capture.cjs' workflow-task2-fix1-integrity-red-01 --test --test-reporter=tap test/workflow-fixture.test.js
+node 'C:/Users/aiuser4/OneDrive - Applexus Technologies/Uroboros/tools/workflow-capture.cjs' workflow-task2-fix1-portability-green-01 --test --test-reporter=tap test/workflow-fixture.test.js
+node 'C:/Users/aiuser4/OneDrive - Applexus Technologies/Uroboros/tools/workflow-capture.cjs' workflow-task2-fix1-affected-green-01 --test --test-reporter=tap test/workflow-fixture.test.js test/workflow-profiles.test.js test/workflow-native.test.js
+```
+
+| Prefix | Pass/total | Numeric exit | Elapsed ms | Result |
+| --- | ---: | ---: | ---: | --- |
+| workflow-task2-fix1-portability-red-01 | 0/1 | 1 | 3484 | Expected actual helper failure: source-only package lacks Git history. |
+| workflow-task2-fix1-integrity-red-01 | 0/3 | 1 | 3130 | Original helper still invokes Git; missing/tampered local archives do not produce the required explicit archive errors. |
+| workflow-task2-fix1-portability-green-01 | 3/3 | 0 | 1986 | Source-only import, missing archive, and tampered archive checks pass. |
+| workflow-task2-fix1-affected-green-01 | 49/49 | 0 | 74565 | Complete fixture/profile/native consumers pass; no fail/cancel/skip/todo. |
+
+Final affected gate start `2026-09-09T07:52:02.984Z`, end `2026-09-09T07:53:17.549Z`. Source/tests/archive remained frozen throughout; only this report was edited afterward. The final gate includes both authentic historical consumers, `public planning resume preserves authentic historical unbound lineage with unavailable installed bundle` and `retained execution planning execution keeps authentic historical lineage and completed work`, alongside all native valid-upgrade, retained-work/debit, execution/decomposition/planning input, and workflow-profile checks. The previous broad 258 gate was not rerun because its unchanged runtime scope remains covered by its earlier evidence; whole-project integration stays with the controller.
+
+All four receipts/raw streams are retained under `C:/Users/aiuser4/OneDrive - Applexus Technologies/Uroboros/outputs/` as `<prefix>.receipt.json`, `.stdout.txt`, `.stderr.txt`, and `.provider-denials.log`. All stderr and denial files are 0 bytes, SHA-256 `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`. GREEN stdout contains only successful TAP, without warnings or unexpected diagnostics; the RED stdout intentionally preserves the Git failure evidence. Each receipt confirms provider-deny-first resolution and its own `URO_TEST_PROVIDER_DENIAL_LOG` path.
+
+| Prefix | Receipt SHA-256 | Stdout bytes | Stdout SHA-256 |
+| --- | --- | ---: | --- |
+| workflow-task2-fix1-portability-red-01 | `D9FD84E1FEBB03EC50040258AC7FB19109C171D6B5E7B5B86D3846392AEFB804` | 2472 | `3e08fefe85ea8db92bd37ea1ca14d9230ccdf814739246889d658c84038482bc` |
+| workflow-task2-fix1-integrity-red-01 | `93E053D2F50DF9D7CE8971889CDB3BF2820FD1669AB58179167B6B7203D711ED` | 7143 | `a119b0dc6dec86fb0560f4a2293fdc7e95e8f8d0c192579373d1d92053a668e3` |
+| workflow-task2-fix1-portability-green-01 | `F4EDE9B9EC034DA40BBFB812F17CBB8A135C4CA5740407D2C5176EED2636752F` | 746 | `68ffc41cf9aa220b0ecf2d0a94233eb1906e3db8395e6868ae7cff8e68d56be6` |
+| workflow-task2-fix1-affected-green-01 | `1FB4C7F6CE1567DA2614D6E5B373FE91A8AA0F2323C693DC9EF01D6D9A15D4B9` | 10856 | `4f981698d7bcf941689a966601648faa59e005cf995ae36d0d99226da73b13fc` |
+
+### Final changed fixture inventory and self-review
+
+| Path | Bytes | SHA-256 |
+| --- | ---: | --- |
+| test/fixtures/workflow-profile-fixture.js | 2447 | `8B1F1332433D627B164CA2E8BCDDE1E958FEAA2E6F5A816D7970AF0738C28D0C` |
+| test/workflow-fixture.test.js | 2251 | `3A2E78CFC2DF8666436D87913F30507C89405D96698D60CF95FE7DE147146E14` |
+| test/fixtures/native-preintegration-3051ccb.inventory.json | 19315 | `9768A49447526C21C03A6EA03099CC6D23138DB41A48CFE5A0CEA19D9432B447` |
+| test/fixtures/native-preintegration-3051ccb.md | 2159 | `44FEB96BA0BB6209D08BDCB47EEC0CAD65D4338D6C00B496BBFD67290F68EDC1` |
+| test/fixtures/native-preintegration-3051ccb.tar.gz | 321746 | `513463B5C25B1AC0F2D65DE11C8B5A6E86167F83DD1CE6C9D0BDFAFBB0DB85CC` |
+
+Self-review: the mutation checks catch renewed Git-history dependency, current-source substitution, absent artifact, and changed artifact bytes. The checksum precedes extraction and extraction consumes that exact checked buffer. Archive source/license authenticity and exact file-set completeness were independently checked. No source/test/archive edits followed the affected GREEN; `git diff --check` is clean and `git diff --name-only -- src` is empty relative to the fix base. The original Important portability finding is locally resolved; no additional unresolved fix-round concern was found. This remains local Windows offline evidence, not a claim that CI or another platform was executed.
