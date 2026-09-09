@@ -5,6 +5,7 @@ Start with the [project overview and installation](../README.md).
 ## Current guides
 
 - [Usage and command reference](guides/usage.md), including [manual resume](guides/usage.md#manual-resume)
+- [Sizing goals and task units by outcome](guides/task-sizing.md)
 - [GitHub publishing and confidentiality guard](guides/publishing.md)
 - [Moving between machines](guides/porting.md)
 

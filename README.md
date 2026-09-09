@@ -128,6 +128,10 @@ Goal    ──► task units     (loop decompose --goal; plan.md + gate.json eac
 Task    ──► landed commit  (loop queue; evidence → debate → final landing review)
 ```
 
+Choose goal and task boundaries by independently useful, testable outcomes rather than file counts,
+hours, story points, or a fixed task count. See [sizing goals and task units by outcome](docs/guides/task-sizing.md)
+for practical questions, an example, and retained-work replanning guidance.
+
 Run approved plans sequentially with `loop queue`. Relative task, gate, goal-file, and output
 paths are resolved beside the queue file; the current directory is the target repository.
 Each unit carries either `task` plus `gate`, or `goal` plus `out`:

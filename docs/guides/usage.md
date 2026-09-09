@@ -493,3 +493,7 @@ embedded Obsidian Bases campaign table.
 ## Chunking wave goals
 
 Large goals should be decomposed BEFORE the loop runs: the `uroboros-chunk` skill (skills/uroboros-chunk/SKILL.md) runs in the calling session, cuts the goal into small units from reasoning (never size rules), verifies declared structure (acyclic dependencies, disjoint parallel files) as report-back advisories, executes each unit's evidence commands so they are provably runnable today, and emits the queue/campaign file. The loop core is unchanged; it simply receives smaller units.
+
+Use [outcome-based goal and task sizing](task-sizing.md) to reason about those boundaries,
+challenge missing or unnecessary work, and preserve completed evidence when remaining work must be
+replanned. The questions are planning prompts, not numerical limits or automated acceptance rules.
