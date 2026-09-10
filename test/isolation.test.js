@@ -155,12 +155,17 @@ test('harness files are git-invisible inside a harness-owned isolated worktree',
     writeFileSync(join(iso.dir, 'CHANGES.diff'), 'diff --git a/x b/x\n');
     mkdirSync(join(iso.dir, '__uro_review'), { recursive: true });
     writeFileSync(join(iso.dir, '__uro_review', 'REVIEW.md'), 'findings\n');
+    for (const name of ['__uro_context', '__uro_dialogue']) {
+      mkdirSync(join(iso.dir, name));
+      writeFileSync(join(iso.dir, name, 'record.json'), '{}');
+    }
     writeFileSync(join(iso.dir, 'real-work.txt'), 'genuine change\n');
     const status = await gitOk(iso.dir, 'status', '--porcelain');
     assert.doesNotMatch(status, /TASK\.md/);
     assert.doesNotMatch(status, /events\.jsonl/);
     assert.doesNotMatch(status, /CHANGES\.diff/);
     assert.doesNotMatch(status, /__uro_review/);
+    assert.doesNotMatch(status, /__uro_context|__uro_dialogue/);
     assert.match(status, /real-work\.txt/, 'a non-harness untracked file must still be reported');
   } finally {
     await iso?.cleanup();

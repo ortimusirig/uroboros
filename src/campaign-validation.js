@@ -149,9 +149,11 @@ export function normalizeUnits(tasks, unitKind, campaignId) {
     if (perspective !== undefined && (typeof perspective !== 'string' || perspective.trim() === '')) {
       throw new TypeError(`campaign unit "${unitId}" perspective must be a non-empty string`);
     }
+    if (isObject && raw.tokenBudget !== undefined) positiveInteger(raw.tokenBudget, `campaign unit "${unitId}" tokenBudget`);
     return {
       index, task, unitKind: kind, unitId, baseRef, branch, parents,
       perspective: perspective?.trim(),
+      ...(isObject && raw.tokenBudget !== undefined ? { tokenBudget: raw.tokenBudget } : {}),
       explicitUnitKind: isObject && Object.hasOwn(raw, 'unitKind'),
     };
   });

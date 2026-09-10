@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { EventEmitter } from 'node:events';
+import { spawn } from 'node:child_process';
 import { createLivenessDeadline, spawnCapture, commandExists } from '../src/spawn.js';
 
 function controlledClock() {
@@ -71,6 +72,46 @@ function fakeChild() {
   child.kill = () => {};
   return child;
 }
+
+test('spawn capture records requested and actual child launch identities separately', async () => {
+  const child = fakeChild();
+  let actual;
+  child.stdin.end = () => queueMicrotask(() => child.emit('close', 0));
+  const result = await spawnCapture(process.execPath, ['-e', 'process.exit(0)'], {
+    cwd: tmpdir(), spawnProcess: (bin, args, options) => { actual = { argv: [bin, ...args], cwd: options.cwd }; return child; },
+  });
+  assert.deepEqual(result.launch, { requested: { bin: process.execPath, args: ['-e', 'process.exit(0)'] },
+    argv: actual.argv, cwd: actual.cwd });
+});
+
+test('stdin submission observation follows end and never asserts child consumption', async () => {
+  const child = fakeChild(), seen = [];
+  child.stdin.end = value => { assert.equal(value, 'hello'); seen.push('end'); queueMicrotask(() => child.emit('close', 0)); };
+  const result = await spawnCapture('fixture', [], { input: 'hello', spawnProcess: () => child,
+    onInputSubmitted: receipt => seen.push(receipt) });
+  assert.equal(result.code, 0);
+  assert.equal(seen[0], 'end');
+  assert.deepEqual(seen[1], { kind: 'stdin-submitted', bytes: 5,
+    sha256: '2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824', consumption: 'unknown' });
+});
+
+test('stdin submission failure kills the child and emits no successful receipt', async () => {
+  const child = fakeChild(); let killed = false;
+  child.stdin.end = () => { throw new Error('write failed'); };
+  await assert.rejects(spawnCapture('fixture', [], { input: 'hello', spawnProcess: () => child,
+    onInputSubmitted: () => assert.fail('failed write is not submission'),
+    killProcessTree: async () => { killed = true; queueMicrotask(() => child.emit('close', 1)); },
+  }), /write failed/);
+  assert.equal(killed, true);
+});
+
+test('an optional submission observer failure does not leak the child or lose captured completion', async () => {
+  const child = fakeChild();
+  child.stdin.end = () => queueMicrotask(() => child.emit('close', 0));
+  const result = await spawnCapture('fixture', [], { input: 'hello', spawnProcess: () => child,
+    onInputSubmitted: () => { throw new Error('observer unavailable'); } });
+  assert.equal(result.code, 0);
+});
 
 function livenessSupervision(clock) {
   return {
@@ -206,6 +247,35 @@ test('captures stdout and exit code 0', async () => {
   assert.equal(r.stdout, 'hi');
 });
 
+test('required preservation failure contains the owned child and exposes the failure', async () => {
+  const controller = new AbortController();
+  let calls = 0;
+  const result = await spawnCapture(process.execPath, ['-e', 'process.stdout.write("ready"); setInterval(() => {}, 100);'], {
+    signal: controller.signal,
+    onStdout: () => controller.abort({ kind: 'test-stop' }),
+    beforeKillRequired: async () => { calls++; throw new Error('required preservation sink failed'); },
+  });
+  assert.equal(calls, 1);
+  assert.equal(result.aborted, true);
+  assert.match(result.preservationError, /required preservation sink failed/);
+  assert.equal(result.preservation, null);
+});
+
+test('actual child close during required preservation records the result without signalling its closed pid', async () => {
+  const controller = new AbortController(); let closeChild, kills = 0;
+  const closed = new Promise(resolve => { closeChild = resolve; });
+  const result = await spawnCapture(process.execPath, ['-e', 'process.stdout.write("ready");'], {
+    signal: controller.signal, onStdout: () => controller.abort({ kind: 'test-stop' }),
+    spawnProcess: (bin, args, opts) => { const child = spawn(bin, args, opts); child.once('close', closeChild); return child; },
+    beforeKillRequired: async () => { await closed; return { status: 'completed', retained: true }; },
+    killProcessTree: child => { kills++; child.kill(); },
+  });
+  assert.equal(kills, 0);
+  assert.equal(result.aborted, true);
+  assert.deepEqual(result.preservation, { status: 'completed', retained: true });
+  assert.equal(result.preservationError, null);
+});
+
 test('captures a non-zero exit code without throwing', async () => {
   const r = await spawnCapture(process.execPath, ['-e', 'process.exit(3)']);
   assert.equal(r.code, 3);
@@ -270,6 +340,11 @@ test('runs a .cmd on Windows and preserves space-bearing args', { skip: process.
   assert.equal(r.code, 0);
   assert.match(r.stdout, /ARG=\[hello\]/);
   assert.match(r.stdout, /ARG=\[a b c\]/, 'space-bearing arg must survive as one arg');
+  assert.deepEqual(r.launch.requested, { bin: cmd, args: ['hello', 'a b c'] });
+  assert.match(r.launch.argv[0], /cmd\.exe$/i);
+  assert.deepEqual(r.launch.argv.slice(1, 4), ['/d', '/s', '/c']);
+  assert.ok(r.launch.argv[4].includes('a b c'));
+  assert.equal(r.launch.cwd, process.cwd());
 });
 
 test('a short timeout kills a clearly slower child and marks the result', async () => {

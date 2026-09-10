@@ -6,16 +6,21 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
+  symlinkSync,
+  unlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import {
   applyStatementDeletion,
   createMutationJudge,
+  createMutationArbiter,
+  discoverMutationPlan,
   filterMutableAddedLines,
   formatMutationSummary,
   groupMutationStatements,
@@ -30,6 +35,10 @@ import {
 import { createEvent, EVENT_PAIRS, EVENT_STAGES, EVENT_TYPES } from '../src/events.js';
 import { run as executeRun } from '../src/run.js';
 import { withVerifiedSuperpowers } from '../fixtures/verified-superpowers.mjs';
+import { spawnCapture } from '../src/spawn.js';
+import { createHash } from 'node:crypto';
+import { createInspectionReceipt } from '../src/context-evidence.js';
+import { runGate } from '../src/gate.js';
 const run = (options) => executeRun(withVerifiedSuperpowers(options));
 
 function statement(id, line, {
@@ -84,6 +93,362 @@ async function withPlan(statements, callback, tests) {
 }
 
 const greenBaseline = async () => ({ passed: true, code: 0 });
+
+async function withObservedMutation(callback) {
+  const root = mkdtempSync(join(tmpdir(), 'uro-mutation-effects-'));
+  try {
+    const git = (...args) => execFileSync('git', ['-C', root, ...args], { windowsHide: true, stdio: 'pipe' });
+    git('init', '-q');
+    writeFileSync(join(root, 'work.js'), 'module.exports = function work() {\n  return 1;\n};\n');
+    writeFileSync(join(root, 'check.cjs'), "console.log(require('node:fs').readFileSync('work.js','utf8'));\n");
+    git('add', '-A');
+    git('-c', 'user.email=test@example.com', '-c', 'user.name=test', 'commit', '-qm', 'base');
+    const events = [];
+    const effects = { analysisIdentity: 'fixture-analysis-1',
+      codeIdentity: async ({ cwd }) => createHash('sha256').update(readFileSync(join(cwd, 'work.js'))).digest('hex'),
+      run: async request => {
+        events.push({ stage: 'prepare', ...request, operation: undefined });
+        const result = await request.operation();
+        events.push({ stage: 'complete', key: request.key, result });
+        return result;
+      } };
+    const plan = { root, target: root, base: 'HEAD', diff: '', statements: [statement('ret', 2, { path: 'work.js', content: '  return 1;' })],
+      tests: ['check.cjs'], testsByFile: { 'work.js': ['check.cjs'] }, changedFiles: ['work.js'] };
+    await callback({ root, plan, effects, events, git });
+  } finally { rmSync(root, { recursive: true, force: true }); }
+}
+
+test('mutation observable effects prepare actual disposable writes, commands and cleanup in scoped order', async () => {
+  await withObservedMutation(async ({ root, plan, effects, events }) => {
+    const original = readFileSync(join(root, 'work.js'), 'utf8');
+    const result = await runMutate({ target: root, plan, effects, tests: { command: { bin: process.execPath, args: ['check.cjs'] } } });
+    assert.equal(result.summary.survivors, 1);
+    const intents = events.filter(value => value.stage === 'prepare');
+    assert.ok(intents.length > 8);
+    assert.ok(intents.every(value => value.key.startsWith('fixture-analysis-1:')));
+    const allocation = intents.find(value => value.purpose === 'mutation-workspace-allocation');
+    assert.ok(allocation.input.directory);
+    assert.notEqual(allocation.input.directory, root);
+    const deletion = intents.find(value => value.purpose === 'mutation-deletion');
+    assert.equal(deletion.input.directory, allocation.input.directory);
+    const checks = events.filter(value => value.stage === 'complete' && value.result?.evidence?.requested?.bin === process.execPath);
+    assert.equal(checks.length, 2);
+    assert.equal(checks[0].result.evidence.cwd, root);
+    assert.equal(checks[1].result.evidence.cwd, allocation.input.directory);
+    assert.notEqual(checks[0].result.evidence.codeIdentity, checks[1].result.evidence.codeIdentity);
+    assert.match(checks[1].result.stdout, /uro mutation deleted ret/);
+    assert.equal(readFileSync(join(root, 'work.js'), 'utf8'), original);
+    assert.equal(existsSync(allocation.input.directory), false);
+    assert.equal(result.examined[0].testResult.workspace.cleanup.status, 'completed');
+  });
+});
+
+test('mutation observable overlay excludes live journal appends while retaining selected reviewer test bytes', async () => {
+  await withObservedMutation(async ({ root, plan, effects, events }) => {
+    mkdirSync(join(root, '__uro_dialogue'));
+    writeFileSync(join(root, '__uro_dialogue', 'journal.jsonl'), 'initial journal');
+    mkdirSync(join(root, '__uro_review'));
+    writeFileSync(join(root, '__uro_review', 'selected.test.cjs'), "require('../work.js'); console.log('selected reviewer test ran');");
+    plan.tests = ['__uro_review/selected.test.cjs'];
+    plan.testsByFile['work.js'] = plan.tests;
+    const runEffect = effects.run;
+    effects.run = async request => {
+      if (request.purpose === 'mutation-overlay') writeFileSync(join(root, '__uro_dialogue', 'journal.jsonl'), 'owner appended after intent');
+      if (request.purpose === 'mutation-deletion') {
+        assert.equal(existsSync(join(request.input.directory, '__uro_dialogue', 'journal.jsonl')), false);
+        assert.equal(readFileSync(join(request.input.directory, '__uro_review', 'selected.test.cjs'), 'utf8'), "require('../work.js'); console.log('selected reviewer test ran');");
+      }
+      return runEffect(request);
+    };
+    const result = await runMutate({ plan, effects, tests: { command: { bin: process.execPath, args: ['__uro_review/selected.test.cjs'] } } });
+    assert.equal(result.survivors.length, 1);
+    assert.match(result.examined[0].testResult.stdout, /selected reviewer test ran/);
+    assert.equal(events.find(e => e.purpose === 'mutation-overlay').input.files.some(f => f.path.startsWith('__uro_dialogue/')), false);
+  });
+});
+
+test('mutation observable overlay still refuses source bytes changed after intent', async () => {
+  await withObservedMutation(async ({ root, plan, effects }) => {
+    const runEffect = effects.run;
+    writeFileSync(join(root, 'work.js'), 'module.exports = function work() {\n  return 2;\n};\n');
+    effects.run = async request => {
+      if (request.purpose === 'mutation-overlay') writeFileSync(join(root, 'work.js'), 'unowned post-intent source');
+      return runEffect(request);
+    };
+    await assert.rejects(runMutate({ plan, effects }), /mutation overlay source changed after intent/);
+  });
+});
+
+test('mutation observable selected reviewer test keeps its sibling support module', async () => {
+  await withObservedMutation(async ({ root, plan, effects }) => {
+    mkdirSync(join(root, '__uro_review'));
+    writeFileSync(join(root, '__uro_review', 'selected.test.cjs'), "require('../work.js'); require('./helper.cjs'); console.log('support loaded');");
+    writeFileSync(join(root, '__uro_review', 'helper.cjs'), 'module.exports = true;');
+    plan.tests = ['__uro_review/selected.test.cjs']; plan.testsByFile['work.js'] = plan.tests;
+    const result = await runMutate({ plan, effects, tests: { command: { bin: process.execPath, args: ['__uro_review/selected.test.cjs'] } } });
+    assert.equal(result.baseline.passed, true);
+    assert.equal(result.survivors.length, 1, 'missing support cannot be misclassified as killing a mutant');
+    assert.match(result.examined[0].testResult.stdout, /support loaded/);
+  });
+});
+
+test('mutation observable support inventory rejects stale escaping and nonregular files', async () => {
+  for (const kind of ['stale', 'escape', 'directory', 'metadata']) await withObservedMutation(async ({ root, plan, effects, events }) => {
+    mkdirSync(join(root, '__uro_review', 'tests'), { recursive: true });
+    const path = kind === 'escape' ? '__uro_review/tests/../../work.js' : kind === 'metadata' ? '__uro_review/REVIEW.md' : '__uro_review/tests/helper.cjs';
+    if (kind === 'directory') mkdirSync(join(root, path));
+    else if (kind !== 'escape') writeFileSync(join(root, path), 'module.exports = true;');
+    effects.testSupportFiles = [{ path, sha256: 'not-the-source-digest' }];
+    await assert.rejects(runMutate({ plan, effects, tests: { command: { bin: process.execPath, args: ['check.cjs'] } } }),
+      /support|regular file|unsafe review destination/);
+    assert.equal(events.some(event => event.purpose === 'mutation-deletion'), false);
+  });
+});
+
+test('mutation effect rejection before allocation and baseline sink loss prevent later work', async () => {
+  for (const stage of ['allocation', 'baseline-result']) await withObservedMutation(async ({ root, plan, effects, events }) => {
+    const record = effects.run;
+    effects.run = async request => {
+      if (stage === 'allocation' && request.purpose === 'mutation-workspace-allocation') {
+        assert.equal(existsSync(request.input.parent), false);
+        throw new Error('allocation preparation refused');
+      }
+      const result = await record(request);
+      if (stage === 'baseline-result' && request.purpose === 'mutation-baseline') throw new Error('baseline result sink lost');
+      return result;
+    };
+    await assert.rejects(runMutate({ target: root, plan, effects }), stage === 'allocation' ? /allocation preparation refused/ : /baseline result sink lost/);
+    assert.equal(events.some(value => value.purpose === 'mutation-deletion'), false);
+    if (stage === 'baseline-result') assert.equal(events.some(value => value.purpose === 'mutation-workspace-allocation'), false);
+  });
+});
+
+test('mutation required concurrent sink loss settles owned cleanup and preserves each trial observation', async () => {
+  await withObservedMutation(async ({ root, plan, effects, events }) => {
+    plan.statements.push(statement('second', 1, { path: 'work.js', content: 'module.exports = function work() {', functionName: 'second' }));
+    let lost = false;
+    const record = effects.run;
+    effects.run = async request => {
+      if (lost) throw new Error('required store unavailable');
+      const result = await record(request);
+      if (request.purpose === 'mutation-trial-test') { lost = true; throw new Error('trial result sink lost'); }
+      return result;
+    };
+    const error = await runMutate({ target: root, plan, effects, concurrency: 2,
+      tests: { command: { bin: process.execPath, args: ['check.cjs'] } } }).then(() => null, error => error);
+    assert.equal(error?.mutationRequired, true);
+    assert.equal(error.mutationTrials.length, 2);
+    const allocated = events.filter(event => event.purpose === 'mutation-workspace-allocation');
+    assert.equal(allocated.length, 2);
+    assert.equal(new Set(error.mutationTrials.map(trial => trial.state?.directory)).size, 2);
+    for (const entry of allocated) assert.equal(existsSync(entry.input.parent), false, 'owned cleanup finishes despite failed recording');
+    assert.ok(error.mutationTrials.some(trial => trial.state.cleanup.recording === 'unrecorded'));
+  });
+});
+
+test('mutation primary trial error and failed cleanup retain exact disposable directory', async () => {
+  await withObservedMutation(async ({ root, plan, effects, git }) => {
+    let retained;
+    try {
+      const error = await runMutate({ target: root, plan, effects,
+        tests: { command: { bin: process.execPath, args: ['check.cjs'] } },
+        adapters: { runCommand: async (bin, args, options) => {
+          if (bin === process.execPath && options.cwd !== root) throw new Error('trial launch failed');
+          if (bin === 'git' && args.includes('remove')) return spawnCapture(process.execPath, ['-e', "console.error('fixture removal failed');process.exitCode=9"], options);
+          return spawnCapture(bin, args, options);
+        } } }).then(() => null, error => error);
+      assert.match(error.message, /trial launch failed/);
+      retained = error.mutationState;
+      assert.equal(retained.primaryError, 'trial launch failed');
+      assert.equal(retained.cleanup.status, 'failed');
+      assert.equal(retained.cleanup.retained, true);
+      assert.equal(retained.cleanup.registered, true);
+      assert.match(retained.cleanup.errors.map(error => error.message).join('\n'), /fixture removal failed/);
+      assert.match(readFileSync(join(retained.directory, 'work.js'), 'utf8'), /uro mutation deleted ret/);
+      assert.doesNotMatch(readFileSync(join(root, 'work.js'), 'utf8'), /uro mutation deleted/);
+    } finally {
+      if (retained?.directory) git('worktree', 'remove', '--force', retained.directory);
+      if (retained?.parent && dirname(retained.parent) === realpathSync.native(tmpdir())) rmSync(retained.parent, { recursive: true, force: true });
+    }
+  });
+});
+
+test('mutation missing command identity is a required failure before launch', async () => {
+  await withObservedMutation(async ({ root, plan, effects, events }) => {
+    effects.codeIdentity = async () => { throw new Error('actual source identity lost'); };
+    const error = await runMutate({ target: root, plan, effects }).then(() => null, error => error);
+    assert.equal(error?.mutationRequired, true);
+    assert.match(error.message, /actual source identity lost/);
+    assert.equal(events.length, 0);
+  });
+});
+
+test('mutation command refuses changed code after effect preparation before launching', async () => {
+  await withObservedMutation(async ({ root, plan, effects, events }) => {
+    const record = effects.run;
+    effects.run = async request => {
+      if (request.purpose === 'mutation-baseline') writeFileSync(join(root, 'work.js'), 'changed after intent');
+      return record(request);
+    };
+    const error = await runMutate({ target: root, plan, effects }).then(() => null, error => error);
+    assert.equal(error?.mutationRequired, true);
+    assert.match(error.message, /code identity changed/);
+    assert.equal(events.some(event => event.stage === 'complete'), false);
+  });
+});
+
+test('mutation required effects reject opaque adapters before any operation', async () => {
+  await withObservedMutation(async ({ root, plan, effects, events }) => {
+    for (const key of ['runTests', 'runTrial', 'createWorkspace']) {
+      const error = await runMutate({ target: root, plan, effects, adapters: { [key]: async () => { throw new Error('must not enter'); } } }).then(() => null, error => error);
+      assert.equal(error?.mutationRequired, true);
+      assert.match(error.message, /opaque/);
+      assert.equal(events.length, 0);
+    }
+  });
+});
+
+test('mutation dependency linking and unlinking expose the actual owned paths', async () => {
+  await withObservedMutation(async ({ root, plan, effects, events }) => {
+    mkdirSync(join(root, 'node_modules'));
+    writeFileSync(join(root, 'node_modules', 'fixture'), 'retained dependency');
+    writeFileSync(join(root, '.gitignore'), 'node_modules/\n');
+    const result = await runMutate({ target: root, plan, effects });
+    const link = events.find(event => event.purpose === 'mutation-dependency-link');
+    const unlink = events.find(event => event.purpose === 'mutation-dependency-unlink');
+    assert.equal(link.input.source, join(root, 'node_modules'));
+    assert.equal(unlink.input.path, link.input.destination);
+    assert.equal(result.examined[0].testResult.workspace.cleanup.status, 'completed');
+    assert.equal(readFileSync(join(root, 'node_modules', 'fixture'), 'utf8'), 'retained dependency');
+  });
+});
+
+test('runSelectedTests never classifies a timed-out command as a survivor', async () => {
+  const result = await runSelectedTests({ cwd: process.cwd(), tests: ['fixture'],
+    runCommand: async () => ({ code: 0, timedOut: true, stdout: '', stderr: '' }) });
+  assert.equal(result.passed, false);
+  assert.equal(result.timedOut, true);
+});
+
+test('mutation overlay refuses an escaped disposable destination before changing external bytes', async () => {
+  await withObservedMutation(async ({ root, plan, effects, git }) => {
+    const external = mkdtempSync(join(tmpdir(), 'uro-mutation-external-'));
+    try {
+      writeFileSync(join(external, 'work.js'), 'external fixture must remain');
+      mkdirSync(join(root, 'src'));
+      writeFileSync(join(root, 'src', 'work.js'), 'old fixture');
+      git('add', '-A'); git('-c', 'user.email=test@example.com', '-c', 'user.name=test', 'commit', '-qm', 'nested base');
+      writeFileSync(join(root, 'src', 'work.js'), 'new overlay bytes');
+      const record = effects.run;
+      effects.run = async request => {
+        if (request.purpose === 'mutation-overlay') {
+          const destination = join(request.input.directory, 'src');
+          rmSync(destination, { recursive: true, force: true });
+          symlinkSync(external, destination, process.platform === 'win32' ? 'junction' : 'dir');
+        }
+        return record(request);
+      };
+      const error = await runMutate({ target: root, plan, effects }).then(() => null, error => error);
+      assert.ok(error);
+      assert.equal(readFileSync(join(external, 'work.js'), 'utf8'), 'external fixture must remain');
+    } finally { rmSync(external, { recursive: true, force: true }); }
+  });
+});
+
+test('mutation provider hooks preserve both real Codex role results and reject before paid launch', async () => {
+  await withObservedMutation(async ({ root, plan, effects, events }) => {
+    const provider = join(root, 'seat.cjs'), counter = join(root, 'launches');
+    writeFileSync(provider, `let input='';process.stdin.on('data',v=>input+=v);process.stdin.on('end',()=>{
+      require('node:fs').appendFileSync(${JSON.stringify(counter)},'1');
+      const value=input.includes('# Mutation grouping')?{units:[{name:'return',statementIds:['ret']}]}:{verdict:'acceptable',reasoning:'Fixture evidence'};
+      console.log(JSON.stringify({type:'item.completed',item:{type:'agent_message',text:JSON.stringify(value)}}));
+      console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:5,output_tokens:2}}));
+    });`);
+    const config = { cwd: root, runSeat: (_bin, _args, options) => spawnCapture(process.execPath, [provider], options) };
+    const options = { target: root, plan, effects, tests: { command: { bin: process.execPath, args: ['check.cjs'] } },
+      judge: createMutationJudge(config), arbiter: createMutationArbiter(config) };
+    const result = await runMutate(options);
+    assert.equal(result.grouping.judged, true);
+    assert.equal(result.survivors[0].judgement.verdict, 'acceptable');
+    assert.equal(readFileSync(counter, 'utf8'), '11');
+    const providers = events.filter(event => event.effect === 'provider');
+    assert.deepEqual(providers.map(event => event.purpose), ['mutation-grouping', 'mutation-survivor']);
+    for (const provider of providers) {
+      const done = events.find(event => event.stage === 'complete' && event.key === provider.key);
+      assert.equal(done.result.usage.inputTokens, 5);
+      assert.equal(done.result.usage.outputTokens, 2);
+      assert.equal(done.result.requestedLaunch.bin, 'codex');
+      assert.equal(done.result.delivery.sha256, createHash('sha256').update(provider.input.input).digest('hex'));
+    }
+    effects.run = async request => { if (request.effect === 'provider') throw new Error('provider intent refused'); return request.operation(); };
+    const error = await runMutate(options).then(() => null, error => error);
+    assert.equal(error.mutationRequired, true);
+    assert.equal(readFileSync(counter, 'utf8'), '11');
+  });
+});
+
+test('mutation auxiliary transports retain actual launch, submitted input and usage for both Codex roles', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'uro-mutation-transport-'));
+  try {
+    const child = join(root, 'seat.cjs');
+    writeFileSync(child, `let input=''; process.stdin.on('data', value => input += value); process.stdin.on('end', () => {
+      console.log(JSON.stringify({type:'item.completed',item:{type:'agent_message',text:JSON.stringify({units:[],verdict:'acceptable',reasoning:'Observed fixture'})}}));
+      console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:7,output_tokens:3}}));
+    });`);
+    for (const factory of [createMutationJudge, createMutationArbiter]) {
+      const seat = factory({ cwd: root, runSeat: (_bin, _args, options) => spawnCapture(process.execPath, [child], options) });
+      const result = await seat({ statements: [] });
+      assert.equal(result.usage?.inputTokens, 7);
+      assert.equal(result.usage?.outputTokens, 3);
+      assert.equal(result.requestedLaunch?.bin, 'codex');
+      assert.ok(result.requestedLaunch.args.includes('read-only'));
+      assert.deepEqual(result.launch?.argv, [process.execPath, child]);
+      assert.equal(result.launch.cwd, root);
+      assert.equal(result.delivery?.kind, 'stdin-submitted');
+      assert.ok(result.delivery.bytes > 100);
+      assert.equal(result.delivery.consumption, 'unknown');
+      assert.equal(result.exitCode, 0);
+      assert.match(result.stdout, /turn.completed/);
+    }
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('mutation failed launch preserves requested transport and unknown usage', async () => {
+  const seat = createMutationJudge({ cwd: process.cwd(), bin: join(tmpdir(), 'missing-uro-mutation-provider'), runSeat: spawnCapture });
+  const result = await seat({ statements: [] });
+  assert.equal(result.available, false);
+  assert.equal(result.usage, null);
+  assert.equal(result.launch, null);
+  assert.equal(result.requestedLaunch.cwd, process.cwd());
+  assert.match(result.reason, /could not start/);
+});
+
+test('mutation required command evidence records actual command bytes and stops on sink loss', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'uro-mutation-evidence-'));
+  try {
+    const counter = join(root, 'counter');
+    const child = join(root, 'check.cjs');
+    writeFileSync(child, `require('node:fs').appendFileSync(${JSON.stringify(counter)}, '1'); console.log('full stdout'); console.error('full stderr'); process.exitCode=4;`);
+    const captured = [];
+    const result = await runSelectedTests({ cwd: root, tests: ['check.cjs'], command: { bin: process.execPath, args: [child] },
+      requiredEvidence: true, codeIdentity: async () => 'actual-fixture-code', onEvidence: async value => { captured.push(value); } });
+    assert.equal(result.passed, false);
+    assert.equal(captured.length, 1);
+    assert.deepEqual(captured[0].argv, [process.execPath, child]);
+    assert.equal(captured[0].cwd, root);
+    assert.equal(captured[0].codeIdentity, 'actual-fixture-code');
+    assert.equal(captured[0].exitCode, 4);
+    assert.equal(captured[0].status, 'completed');
+    assert.equal(captured[0].stdout.trim(), 'full stdout');
+    assert.equal(captured[0].stderr.trim(), 'full stderr');
+    await assert.rejects(runSelectedTests({ cwd: root, tests: ['check.cjs'], command: { bin: process.execPath, args: [child] },
+      requiredEvidence: true, codeIdentity: async () => 'actual-fixture-code', onEvidence: async () => { throw new Error('required sink lost'); } }), /required sink lost/);
+    assert.equal(readFileSync(counter, 'utf8'), '11');
+    await assert.rejects(runSelectedTests({ cwd: root, tests: ['check.cjs'], command: { bin: process.execPath, args: [child] },
+      requiredEvidence: true, onEvidence: async () => {} }), /code identity/);
+    assert.equal(readFileSync(counter, 'utf8'), '11', 'missing provenance prevents another command');
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
 
 test('mutation discriminates a survivor and a depended-upon statement, subdividing a killed group', async () => {
   await withPlan([
@@ -663,20 +1028,21 @@ test('survivors do not widen a passing gate verdict', async () => {
 });
 
 test('an opted-in passing run records mutation survivors without changing its outcome', async () => {
-  const root = mkdtempSync(join(tmpdir(), 'uro-mutate-run-wiring-'));
+  const scratchBase = process.env.URO_TEST_SCRATCH_ROOT ?? (process.platform === 'win32' ? 'C:/ccc-test' : tmpdir());
+  mkdirSync(scratchBase, { recursive: true });
+  const root = mkdtempSync(join(scratchBase, 'uro-mutate-run-wiring-'));
   const target = join(root, 'target');
-  const isolated = join(root, 'isolated');
   mkdirSync(target, { recursive: true });
-  mkdirSync(isolated, { recursive: true });
   const order = [];
-  const mutation = {
-    status: 'finished',
-    grouping: { method: 'semantic-judge', judged: true },
-    summary: { unitsExamined: 1, survivors: 1, kills: 0, unexamined: 0 },
-    survivors: [{ name: 'unobserved statement' }],
-    kills: [],
-    unexamined: [],
-  };
+  const envelope = (r, action, extra = {}) => ({ schemaVersion: 1, action, artifactDigest: r.state.artifactDigest,
+    contextDigest: r.state.snapshot.digest, replyTo: null, content: 'Review the actual optional measurement',
+    claims: [], issues: [], evidence: [], verifications: [], next: null, ...extra });
+  execFileSync('git', ['init', '-q', target]);
+  execFileSync('git', ['-C', target, 'config', 'core.autocrlf', 'false']);
+  writeFileSync(join(target, 'work.js'), 'module.exports = function work() {\n  return 1;\n};\n');
+  writeFileSync(join(target, 'work.test.cjs'), "require('./work.js'); console.log('real advisory command');");
+  execFileSync('git', ['-C', target, 'add', '.']);
+  execFileSync('git', ['-C', target, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.test', 'commit', '-qm', 'base']);
   try {
     const facts = await run({
       task: 'exercise advisory mutation wiring',
@@ -684,43 +1050,44 @@ test('an opted-in passing run records mutation survivors without changing its ou
       gate: [],
       gateRetries: 0,
       scratchRoot: join(root, 'scratch'),
+      artifactRoot: join(root, 'artifacts'),
       runId: 'mutation-wiring',
-      mutation: true,
+      mode: 'autonomous',
+      mutation: { budget: 1, concurrency: 1, tests: { command: { bin: process.execPath, args: ['work.test.cjs'] } } },
       adapters: {
-        isolate: async () => ({
-          dir: isolated,
-          isRepo: true,
-          baseRef: 'HEAD',
-          baseCommit: 'abc123',
-          branch: 'uro/mutation-wiring',
-        }),
-        runExecutor: async () => {
+        runExecutor: async r => {
           order.push('executor');
-          return { changedFiles: ['src/change.js'], lastMessage: 'implemented change' };
+          writeFileSync(join(r.cwd, 'work.js'), 'module.exports = function work() {\n  return 2;\n};\n');
+          return { exitCode: 0, usage: { inputTokens: 1, outputTokens: 1 }, dialogue: envelope(r, r.action) };
         },
-        runGate: async () => {
+        runGate: async request => {
           order.push('gate');
-          return { passed: true, results: [] };
+          return runGate(request);
         },
-        diffText: async () => 'diff --git a/src/change.js b/src/change.js\n+changed();\n',
-        captureWorktreeSnapshot: async ({ cwd }) => ({ cwd }),
-        restoreWorktreeSnapshot: async () => ({ restoredPaths: [] }),
-        runReview: async ({ cwd }) => {
+        runReview: async r => {
           order.push('reviewer');
-          mkdirSync(join(cwd, '__uro_review'), { recursive: true });
-          writeFileSync(join(cwd, '__uro_review', 'REVIEW.md'), 'Reviewed. No findings.\n');
-          return { conclusion: 'clean', launchFailed: false, timedOut: false };
+          const item = r.state.evidence.find(e => e.id === 'requirement-briefing');
+          const receipt = createInspectionReceipt({ operationId: r.operationId, seat: 'claude', evidence: [item], inspected: true, result: 'read' });
+          assert.ok(r.state.evidence.some(e => e.mutation?.purpose === 'mutation-trial-test'));
+          return { usage: { inputTokens: 1, outputTokens: 1 }, observations: { evidence: [], receipts: [receipt] }, dialogue: envelope(r, 'approve', {
+            claims: [{ id: 'briefing-requirement', kind: 'fact', text: 'Saved briefing is present.', evidenceIds: [item.id] }],
+            verifications: [{ claimId: 'briefing-requirement', evidenceIds: [item.id], inspectionReceiptIds: [receipt.id], result: 'supports', reason: 'Read saved briefing' }] }) };
         },
-        runMutation: async () => {
-          order.push('mutation');
-          return mutation;
+        runMutationSeat: (bin, args, opts) => {
+          if (!order.includes('mutation')) order.push('mutation');
+          return spawnCapture(process.execPath, ['-e', `let input='';process.stdin.on('data',c=>input+=c);process.stdin.on('end',()=>{
+            const value=JSON.parse(input.trim().split('\\n').at(-1));
+            const answer=input.includes('# Mutation grouping judge') ? {units:[{name:'changed return',statementIds:value.statements.map(s=>s.id)}]} : {verdict:'gap',reasoning:'A surviving advisory measurement'};
+            console.log(JSON.stringify({type:'item.completed',item:{type:'agent_message',text:JSON.stringify(answer)}}));
+            console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:1,output_tokens:1}}));});`], opts);
         },
       },
     });
-    assert.deepEqual(order, ['executor', 'gate', 'reviewer', 'mutation']);
+    assert.deepEqual(order, ['executor', 'gate', 'mutation', 'reviewer']);
     assert.equal(facts.outcome, 'review-ready');
-    assert.equal(facts.mutation, mutation);
-    assert.match(readFileSync(join(isolated, 'uro-report.md'), 'utf8'), /Mutation survivors:\*\* 1/);
+    assert.equal(facts.mutation.survivors.length, 1);
+    assert.equal(facts.mutation.grouping.judged, true);
+    assert.match(readFileSync(join(facts.dir, 'uro-report.md'), 'utf8'), /Mutation survivors:\*\* 1/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -956,11 +1323,110 @@ test('loop mutate prints the human summary, not only the JSON result', () => {
 
     // formatMutationSummary was unreachable dead code until it was wired here;
     // asserting through the CLI is what keeps it reachable.
+    assert.equal(result.status, 0, result.stderr);
     assert.match(result.stderr, /Mutation dry run: \d+ unit\(s\); no commands executed\./);
     assert.match(result.stdout, /"status": "dry-run"/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+async function withMutationRepository(callback) {
+  const directory = realpathSync.native(mkdtempSync(join(tmpdir(), 'uro-mutate-path-')));
+  const root = join(directory, 'canonical-repository');
+  const alias = join(directory, 'alias-repository');
+  const git = (...args) => execFileSync('git', ['-C', root, ...args], { stdio: 'pipe' });
+  try {
+    mkdirSync(root);
+    git('init', '-q');
+    git('config', 'core.autocrlf', 'false');
+    for (const folder of ['src', 'other', '..data']) {
+      mkdirSync(join(root, folder));
+      writeFileSync(join(root, folder, 'work.js'), 'export function work() {\n  return 1;\n}\n');
+    }
+    git('add', '-A');
+    git('-c', 'user.email=test@example.com', '-c', 'user.name=uro test', 'commit', '-qm', 'base');
+    for (const folder of ['src', 'other', '..data']) {
+      writeFileSync(join(root, folder, 'work.js'),
+        'export function work() {\n  recordFact();\n  return 1;\n}\n');
+      writeFileSync(join(root, folder, 'new.js'), 'export function added() {\n  return 2;\n}\n');
+    }
+    await callback({ root, alias, directory });
+  } finally {
+    // Remove the known link itself before deleting this owned fixture directory.
+    if (existsSync(alias)) unlinkSync(alias);
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+test('mutation discovery accepts an aliased repository root', async () => {
+  await withMutationRepository(async ({ root, alias }) => {
+    symlinkSync(root, alias, process.platform === 'win32' ? 'junction' : 'dir');
+    const plan = await discoverMutationPlan({ target: alias });
+    assert.equal(plan.scopedPath, '.');
+    assert.equal(plan.target, alias, 'reported target retains the caller\'s spelling');
+    assert.deepEqual(plan.changedFiles.toSorted(), [
+      '..data/new.js', '..data/work.js', 'other/new.js', 'other/work.js', 'src/new.js', 'src/work.js',
+    ]);
+  });
+});
+
+test('mutation discovery confines aliased subdirectories to their tracked and untracked changes', async () => {
+  await withMutationRepository(async ({ root, alias }) => {
+    symlinkSync(root, alias, process.platform === 'win32' ? 'junction' : 'dir');
+    const plan = await discoverMutationPlan({ target: join(alias, 'src') });
+    assert.equal(plan.scopedPath, 'src');
+    assert.deepEqual(plan.changedFiles.toSorted(), ['src/new.js', 'src/work.js']);
+    assert.doesNotMatch(plan.diff, /(?:other|\.\.data)\//);
+  });
+});
+
+test('mutation discovery accepts real Windows short paths without widening a subtree', {
+  skip: process.platform !== 'win32',
+}, async (t) => {
+  await withMutationRepository(async ({ root }) => {
+    const short = execFileSync('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command',
+      '$taskFso = New-Object -ComObject Scripting.FileSystemObject; $taskFso.GetFolder($env:URO_TEST_ALIAS_TARGET).ShortPath',
+    ], { encoding: 'utf8', env: { ...process.env, URO_TEST_ALIAS_TARGET: root } }).trim();
+    if (resolve(short).toLowerCase() === root.toLowerCase()) {
+      t.skip('this volume does not expose a distinct Windows 8.3 path');
+      return;
+    }
+    assert.equal(realpathSync.native(short).toLowerCase(), root.toLowerCase());
+    const whole = await discoverMutationPlan({ target: short });
+    assert.equal(whole.scopedPath, '.');
+    assert.equal(whole.changedFiles.length, 6);
+    assert.equal(whole.target, resolve(short));
+    const subtree = await discoverMutationPlan({ target: join(short, 'src') });
+    assert.deepEqual(subtree.changedFiles.toSorted(), ['src/new.js', 'src/work.js']);
+    assert.doesNotMatch(subtree.diff, /(?:other|\.\.data)\//);
+  });
+});
+
+test('mutation discovery rejects a target outside the discovered root before reading changes', async () => {
+  await withMutationRepository(async ({ root, directory }) => {
+    const unrelatedRoot = join(directory, 'unrelated-repository');
+    mkdirSync(unrelatedRoot);
+    const commands = [];
+    await assert.rejects(discoverMutationPlan({
+      target: join(root, 'src'),
+      runCommand: async (bin, args) => {
+        assert.equal(bin, 'git');
+        commands.push(args[2]);
+        if (args[2] !== 'rev-parse') throw new Error('Git change discovery reached an unrelated root');
+        return { code: 0, stdout: `${unrelatedRoot}\n`, stderr: '' };
+      },
+    }), /target is outside repository/);
+    assert.deepEqual(commands, ['rev-parse']);
+  });
+});
+
+test('mutation discovery permits a legitimate directory beginning with two dots', async () => {
+  await withMutationRepository(async ({ root }) => {
+    const plan = await discoverMutationPlan({ target: join(root, '..data') });
+    assert.equal(plan.scopedPath, '..data');
+    assert.deepEqual(plan.changedFiles.toSorted(), ['..data/new.js', '..data/work.js']);
+  });
 });
 
 test('a golden fixture under test/ is not selected as a runnable test', () => {

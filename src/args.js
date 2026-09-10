@@ -182,9 +182,12 @@ export function parseArgs(argv) {
   }
   if (command === 'resume') {
     const { values } = nodeParseArgs({ args: argv.slice(1), strict: true, allowPositionals: false,
-      options: { run: { type: 'string' }, 'decision-file': { type: 'string' } } });
-    if (!values.run?.trim() || !values['decision-file']?.trim()) throw new Error('resume requires --run and --decision-file');
-    return { command, runDirectory: values.run, decisionFile: values['decision-file'] };
+      options: { run: { type: 'string' }, 'decision-file': { type: 'string' }, continue: { type: 'boolean' } } });
+    if (!values.run?.trim() || Boolean(values.continue) === Boolean(values['decision-file']?.trim())) {
+      throw new Error('resume requires --run and exactly one of --decision-file or --continue');
+    }
+    return { command, runDirectory: values.run, ...(values.continue
+      ? { technicalContinue: true } : { decisionFile: values['decision-file'] }) };
   }
   if (command === 'doctor') {
     const { values } = nodeParseArgs({
@@ -262,6 +265,7 @@ export function parseArgs(argv) {
         file: { type: 'string' },
         mode: { type: 'string' },
         'max-runs': { type: 'string' },
+        rounds: { type: 'string' },
         'token-budget': { type: 'string' },
         'accept-goal': { type: 'string' },
         'dry-run': { type: 'boolean' },
@@ -278,6 +282,7 @@ export function parseArgs(argv) {
       command,
       ...providerValues(values),
       file: values.file,
+      ...(values.rounds === undefined ? {} : { rounds: strictInt(values.rounds, undefined, 1, Number.MAX_SAFE_INTEGER) }),
       mode,
       ...(values['max-runs'] === undefined ? {} : {
         maxRuns: strictInt(values['max-runs'], undefined, 1, Number.MAX_SAFE_INTEGER),
@@ -297,6 +302,8 @@ export function parseArgs(argv) {
         goal: { type: 'string' },
         target: { type: 'string' },
         out: { type: 'string' },
+        'context-stdin': { type: 'boolean' },
+        'token-budget': { type: 'string' },
         rounds: { type: 'string' },
         candidates: { type: 'string' },
         'pivot-candidates': { type: 'string' },
@@ -317,10 +324,12 @@ export function parseArgs(argv) {
       goal: values.goal,
       target: values.target,
       out: values.out,
+      ...(values['context-stdin'] ? { contextStdin: true } : {}),
+      ...(values['token-budget'] === undefined ? {} : { tokenBudget: strictInt(values['token-budget'], undefined, 1, Number.MAX_SAFE_INTEGER) }),
       ...(values.rounds === undefined ? {} : {
         rounds: strictInt(values.rounds, undefined, 1, Number.MAX_SAFE_INTEGER),
       }),
-      candidates: strictInt(values.candidates, 3, 1, MAX_PLAN_CANDIDATES),
+      candidates: strictInt(values.candidates, 1, 1, MAX_PLAN_CANDIDATES),
       pivotCandidates: strictInt(
         values['pivot-candidates'], 3, 1, MAX_PLAN_CANDIDATES,
       ),
@@ -453,6 +462,9 @@ export function parseArgs(argv) {
       target: { type: 'string' },
       gate: { type: 'string' },
       'gate-retries': { type: 'string' },
+      'context-stdin': { type: 'boolean' },
+      'token-budget': { type: 'string' },
+      rounds: { type: 'string' },
       corrects: { type: 'string' },
       'executor-model': { type: 'string' },
       'executor-effort': { type: 'string' },
@@ -507,6 +519,9 @@ export function parseArgs(argv) {
       ...providers,
       mode: providers.interactionMode,
       correctsRunId: values.corrects,
+      ...(values['context-stdin'] ? { contextStdin: true } : {}),
+      ...(values['token-budget'] === undefined ? {} : { tokenBudget: strictInt(values['token-budget'], undefined, 1, Number.MAX_SAFE_INTEGER) }),
+      ...(values.rounds === undefined ? {} : { debateRounds: strictInt(values.rounds, undefined, 1, Number.MAX_SAFE_INTEGER) }),
       executorModel: providers.codexModel,
       executorEffort,
       arbiterModel: providers.claudeModel,

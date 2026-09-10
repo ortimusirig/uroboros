@@ -7,76 +7,309 @@ import {
   rmSync,
   writeFileSync,
 } from 'node:fs';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
+import { tmpdir } from 'node:os';
 import test from 'node:test';
-import { PIVOT_CONCLUDE, PIVOT_FRESH } from '../src/debate.js';
-import { createFreshPivotBranch, run } from '../src/run.js';
+import { createFreshPivotBranch, run as executeRun } from '../src/run.js';
 import { execFileSync } from 'node:child_process';
-import { assertSafeScratchRoot } from '../src/isolation.js';
-import { materializeReviewBundle } from '../src/review.js';
+import { createHash } from 'node:crypto';
+import { isolate } from '../src/isolation.js';
+import { planningEnvelope, planningApproval } from './fixtures/planning-responses.js';
+import { createInspectionReceipt } from '../src/context-evidence.js';
+import { runPlanCandidateSet } from '../src/plan.js';
 
-test('autonomous actual-Git fresh pivot retains complete command evidence through final archive without collisions', async t => {
-  const base = process.env.URO_TEST_SCRATCH_ROOT ?? (process.platform === 'win32' ? 'C:/ccc-test' : '/tmp/ccc-test');
-  assertSafeScratchRoot(base);
-  mkdirSync(base, { recursive: true });
-  const root = mkdtempSync(join(base, 'uro-evidence-pivot-'));
+async function retainedScenario(t, config = {}) {
+  const base = process.platform === 'win32' ? 'C:/ccc-test' : tmpdir(); mkdirSync(base, { recursive: true });
+  const root = mkdtempSync(join(base, 'uro-native-replan-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
-  const cwd = join(root, 'worktree'); mkdirSync(cwd);
-  const git = (...args) => execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8' }).trim();
-  git('init', '-b', 'main');
-  git('config', 'core.autocrlf', 'false');
-  writeFileSync(join(cwd, 'source.txt'), 'base\n'); git('add', 'source.txt');
+  const target = join(root, 'project'); mkdirSync(target);
+  const git = (...args) => execFileSync('git', ['-C', target, ...args], { encoding: 'utf8' }).trim();
+  git('init', '-b', 'main'); git('config', 'core.autocrlf', 'false');
+  writeFileSync(join(target, 'seed.txt'), 'seed'); git('add', '.');
   git('-c', 'user.name=Test', '-c', 'user.email=test@local', 'commit', '-qm', 'base');
-  const baseCommit = git('rev-parse', 'HEAD');
-  const stdout = 'BEGIN COMPLETE STDOUT\n' + 'full-output-'.repeat(500) + '\nEND STDOUT';
-  const stderr = 'BEGIN COMPLETE STDERR\n' + 'full-error-'.repeat(500) + '\nEND STDERR';
-  let reviews = 0, pivoted = false, evidenceCalls = 0;
-  const facts = await run({ task: 'Implement a replacement.', mode: 'autonomous', target: cwd, gate: [],
-    gateRetries: 0, debateRounds: 6, scratchRoot: root, artifactRoot: join(root, 'archive'),
-    runId: 'actual-git-evidence-pivot', superpowers: TEST_SUPERPOWERS,
-    adapters: {
-      isolate: async () => ({ dir: cwd, isRepo: true, branch: 'main', baseCommit, baseRef: 'HEAD' }),
-      diffText: async () => git('diff', 'HEAD', '--', 'source.txt'),
-      runExecutor: async () => {
-        if (pivoted) {
-          assert.equal(readFileSync(join(cwd, '__uro_evidence/round-1-01.out.txt'), 'utf8'), stdout);
-          assert.equal(readFileSync(join(cwd, '__uro_evidence/round-1-01.err.txt'), 'utf8'), stderr);
-          assert.equal(readFileSync(join(cwd, '__uro_review/tests/f1.test.js'), 'utf8'), executableProof.toString());
+  const order = [], contexts = new Map(); let writes = 0, reviews = 0;
+  const usage = config.unknown ? undefined : { inputTokens: 1, outputTokens: 1 };
+  const task = 'Keep first work and finish remaining work';
+  const facts = await executeRun({ task, target,
+    gate: [{ bin: process.execPath, args: ['-e', "process.stdout.write('retained-output-'.repeat(1000));process.stderr.write('retained-error-'.repeat(1000))"] }],
+    scratchRoot: join(root, 'scratch'), artifactRoot: join(root, 'archive'), runId: 'native-retained',
+    mode: 'autonomous', superpowers: TEST_SUPERPOWERS, ...config.options, adapters: {
+      ...(config.protection ? { isolate: async options => {
+        const result = await isolate(options); mkdirSync(join(result.dir, '__uro_review/tests'), { recursive: true });
+        writeFileSync(join(result.dir, '__uro_review/tests/proof.test.js'), executableProof);
+        writeFileSync(join(result.dir, '__uro_review/REVIEW.md'), proofBytes);
+        return result;
+      } } : {}),
+      runExecutor: r => {
+        order.push('execute'); writes++;
+        if (writes === 1) writeFileSync(join(r.cwd, 'first.txt'), '1');
+        else {
+          assert.equal(readFileSync(join(r.cwd, 'first.txt'), 'utf8'), '1');
+          assert.equal(r.remainingWork, true);
+          writeFileSync(join(r.cwd, 'remaining.txt'), 'done');
         }
-        writeFileSync(join(cwd, 'source.txt'), pivoted ? 'replacement\n' : 'failed approach\n');
-        return { exitCode: 0, changedFiles: ['source.txt'], lastMessage: 'Answered prior evidence.' };
+        return { usage, exitCode: 0, dialogue: planningEnvelope(r, r.action) };
       },
-      runGate: async ({ onEvidence }) => {
-        evidenceCalls++;
-        onEvidence({ bin: 'fixture', args: [], code: 0, stdout: evidenceCalls === 1 ? stdout : `later ${evidenceCalls}`,
-          stderr: evidenceCalls === 1 ? stderr : '' });
-        return { results: [] };
+      runReview: r => {
+        if (++reviews <= (config.replans ?? 1)) {
+          config.beforeReplan?.(r);
+          const item = r.state.evidence.find(e => e.kind === 'command');
+          return { usage, dialogue: planningEnvelope(r, 'replan', {
+            issues: [{ id: 'R1', title: 'Remaining work needs a new plan', status: 'open', blocking: true }],
+            replan: { issueId: 'R1', evidenceIds: [item.id], novelty: 'The completed first segment exposes remaining work; preserve first.txt and finish only remaining.txt.', ...config.trigger },
+          }) };
+        }
+        const item = r.state.evidence.find(e => e.id === 'requirement-briefing'); readFileSync(item.capturedPath);
+        const receipt = createInspectionReceipt({ operationId: r.operationId, seat: 'claude', evidence: [item], inspected: true, result: 'read' });
+        return { usage, observations: { evidence: [], receipts: [receipt] }, dialogue: planningEnvelope(r, 'approve', {
+          claims: [{ id: 'briefing-requirement', kind: 'fact', text: item.text, evidenceIds: [item.id] }],
+          verifications: [{ claimId: 'briefing-requirement', evidenceIds: [item.id], inspectionReceiptIds: [receipt.id], result: 'supports', reason: 'Read original requirement' }],
+        }) };
       },
-      runReview: async options => {
-        reviews++;
-        const bundle = { version: 1, conclusion: pivoted ? 'clean' : 'issues',
-          report: pivoted ? 'Checked replacement diff and all retained evidence. No blockers remain.' : reviewText,
-          tests: [{ path: 'tests/f1.test.js', content: executableProof.toString() }],
-          dispositions: pivoted ? [{ id: 'F1', status: 'resolved', reason: 'Replacement meets the original boundary.' }] : [] };
-        return { answer: JSON.stringify(bundle), artifact: await materializeReviewBundle({ ...options, bundle }) };
+      draftPlanCandidate: r => {
+        order.push('claude-plan'); assert.equal(readFileSync(join(r.target, 'first.txt'), 'utf8'), '1');
+        const context = r.state.snapshot.entries.find(entry => entry.id === 'retained-phase').content;
+        if (contexts.has(r.state.runId)) assert.equal(context, contexts.get(r.state.runId));
+        else contexts.set(r.state.runId, context);
+        const command = r.state.evidence.find(e => e.kind === 'command');
+        assert.equal(command.stdout, 'retained-output-'.repeat(1000));
+        assert.equal(command.stderr, 'retained-error-'.repeat(1000));
+        assert.match(r.input, /Remaining work needs a new plan/);
+        if (config.draft) return config.draft(r);
+        return { usage, plan: config.identical ? task : 'Finish remaining.txt only; preserve first.txt', gate: config.remainingGate ?? [], dialogue: planningEnvelope(r, 'propose') };
       },
-      detectCircling: () => !pivoted && reviews >= 2,
-      runArbiter: async ({ request }) => { assert.equal(request.type, 'pivot'); return { decision: 'fresh', reason: 'Replace the failed strategy.' }; },
-      draftPlanCandidate: async request => ({ plan: `replacement ${request.candidateId}`, gate: [], agree: true, readable: true, content: 'AGREE: yes' }),
-      selectPlanCandidate: async () => ({ selectedCandidateId: 'candidate-1', reason: 'Meets the contract.' }),
-      reviewPlanCandidate: async request => ({ agree: true, readable: true, content: 'AGREE: yes', artifactDigest: request.artifactDigest }),
-      createFreshPivotBranch: async options => { const result = await createFreshPivotBranch(options); pivoted = true; return result; },
+      selectPlanCandidate: r => { order.push('codex-select'); return { usage, selectedCandidateId: r.candidates[0].id, dialogue: planningEnvelope(r, 'verify') }; },
+      reviewPlanCandidate: r => {
+        order.push('codex-plan'); assert.ok(r.state.evidence.some(e => e.kind === 'command'));
+        assert.equal(r.state.snapshot.entries.find(entry => entry.id === 'retained-phase').content, contexts.get(r.state.runId));
+        assert.equal(readFileSync(join(r.state.scope.sourceRoots[0], 'first.txt'), 'utf8'), '1');
+        return config.review ? config.review(r) : { usage, ...planningApproval(r) };
+      },
+      createFreshPivotBranch: () => { throw new Error('must never reset retained work'); },
+      ...config.adapters,
     } });
-  assert.equal(pivoted, true);
-  assert.equal(facts.approved, true);
-  assert.equal(facts.artifacts.status, 'ok');
-  assert.equal(new Set(facts.evidence.map(entry => entry.outFile)).size, facts.evidence.length);
-  for (const dir of [cwd, facts.artifacts.directory]) {
-    assert.equal(readFileSync(join(dir, '__uro_evidence/round-1-01.out.txt'), 'utf8'), stdout);
-    assert.equal(readFileSync(join(dir, '__uro_evidence/round-1-01.err.txt'), 'utf8'), stderr);
-  }
-  assert.ok(!git('diff', '--name-only').includes('__uro_review'));
+  return { facts, writes, order };
+}
+
+test('native retained replan keeps completed work and approves remaining work in distinct phases', async t => {
+  const { facts, writes, order } = await retainedScenario(t);
+  assert.equal(facts.approved, true, facts.reason);
+  assert.equal(writes, 2);
+  assert.deepEqual(order, ['execute', 'claude-plan', 'claude-plan', 'claude-plan', 'codex-select', 'codex-plan', 'execute']);
+  assert.equal(facts.resources.providerLaunches, 9);
+  assert.equal(facts.checkpointState.phaseChain.length, 3);
+  assert.equal(new Set(facts.checkpointState.phaseChain.map(p => p.runId)).size, 3);
+  assert.equal(readFileSync(join(facts.dir, 'first.txt'), 'utf8'), '1');
+  assert.equal(readFileSync(join(facts.dir, 'remaining.txt'), 'utf8'), 'done');
 });
+
+test('native retained replan preserves the actual technical planning checkpoint', async t => {
+  const { facts, writes } = await retainedScenario(t, { draft: () => ({ unavailable: true, usage: { inputTokens: 1, outputTokens: 1 } }) });
+  assert.equal(facts.approved, false); assert.equal(writes, 1);
+  assert.equal(facts.checkpointState.phase, 'planning');
+  assert.equal(facts.checkpointState.interactionMode, 'autonomous');
+  assert.ok(facts.checkpointState.planningArtifacts, facts.reason);
+  assert.ok(facts.checkpointState.journalIdentity);
+  assert.equal(facts.reason, 'author-unavailable');
+  assert.equal(readFileSync(join(facts.dir, 'first.txt'), 'utf8'), '1');
+});
+
+test('native retained replan includes planning messages in run facts with actual roles', async t => {
+  const { facts } = await retainedScenario(t, { options: { pivotCandidates: 1 }, identical: true });
+  assert.equal(facts.approved, true, facts.reason);
+  assert.ok(facts.planningMessages.some(m => m.phase === 'planning' && m.speaker === 'claude'));
+});
+
+test('native retained replan irreparable and selector failures retain actual preparation without another writer', async t => {
+  const usage = { inputTokens: 1, outputTokens: 1 };
+  for (const reason of ['proposal-irreparable', 'reviewer-unavailable', 'selection-unreadable']) {
+    const config = reason === 'proposal-irreparable'
+      ? { draft: r => ({ usage, answer: '<PLAN_MD>Missing gate artifact</PLAN_MD>', dialogue: planningEnvelope(r, 'propose') }) }
+      : { adapters: { selectPlanCandidate: r => reason === 'reviewer-unavailable' ? { usage, unavailable: true }
+        : { usage, selectedCandidateId: 'missing', dialogue: planningEnvelope(r, 'verify') } } };
+    const { facts, writes } = await retainedScenario(t, config);
+    assert.equal(facts.approved, false); assert.equal(writes, 1); assert.equal(facts.reason, reason);
+    const checkpoint = facts.checkpointState;
+    assert.equal(checkpoint.phase, 'planning'); assert.equal(checkpoint.interactionMode, 'autonomous');
+    assert.ok(checkpoint.planningArtifacts); assert.ok(checkpoint.journalIdentity);
+    assert.equal(checkpoint.proposal, null); assert.equal(checkpoint.approval, null);
+    assert.ok(checkpoint.preparationState);
+    const prepared = checkpoint.preparationHistory.filter(event => event.type === 'prepare');
+    const completed = checkpoint.preparationHistory.filter(event => event.type === 'complete');
+    assert.ok(prepared.length >= 4); assert.equal(completed.length, prepared.length);
+    assert.equal(facts.resources.providerLaunches, 2 + completed.length);
+    assert.equal(facts.resources.knownUsage.inputTokens, facts.resources.providerLaunches);
+    assert.equal(facts.resources.usageUnknown, false);
+    assert.equal(checkpoint.preparationHistory.some(event => event.type === 'preparation-paused'), false);
+    assert.equal(readFileSync(join(facts.dir, 'first.txt'), 'utf8'), '1');
+  }
+});
+
+test('native retained replan protection precheck failure records no fabricated provider launch', async t => {
+  const { facts, writes, order } = await retainedScenario(t, { adapters: { runPlanCandidateSet: options => {
+    const protect = options.retained.protect;
+    options.retained.protect = async (...args) => {
+      execFileSync('git', ['-C', options.target, '-c', 'user.name=Test', '-c', 'user.email=test@local', 'commit', '--allow-empty', '-qm', 'external HEAD change'], { windowsHide: true });
+      return protect(...args);
+    };
+    return runPlanCandidateSet(options);
+  } } });
+  assert.equal(facts.approved, false); assert.equal(writes, 1); assert.deepEqual(order, ['execute']);
+  assert.match(facts.reason, /required retained source integrity/);
+  assert.equal(facts.resources.providerLaunches, 2); assert.equal(facts.resources.knownUsage.inputTokens, 2);
+  assert.equal(facts.resources.usageUnknown, false);
+  const phase = facts.checkpointState.phaseChain.at(-1);
+  assert.match(phase.integrityFailure, /HEAD changed/);
+  assert.equal(phase.phase, 'planning'); assert.deepEqual(phase.observations, []);
+  assert.equal(phase.checkpointState.planningArtifacts, undefined);
+});
+
+test('native retained replan twice retains exact manifests and cumulative execution cycles', async t => {
+  const { facts, writes } = await retainedScenario(t, { replans: 2, options: { pivotCandidates: 1 } });
+  assert.equal(facts.approved, true, facts.reason); assert.equal(writes, 3);
+  assert.equal(facts.resources.providerLaunches, 10);
+  assert.equal(facts.dialogue.proposalCycles, 3); assert.equal(facts.dialogue.correctionCycles, 0);
+  assert.equal(facts.checkpointState.phaseChain.length, 5);
+  assert.equal(new Set(facts.checkpointState.phaseChain.map(p => p.directory)).size, 5);
+  for (const phase of facts.checkpointState.phaseChain) {
+    const manifest = phase.checkpointState.executionArtifacts ?? phase.checkpointState.planningArtifacts;
+    for (const entry of manifest.files) {
+      assert.equal(createHash('sha256').update(readFileSync(join(phase.directory, entry.path))).digest('hex'), entry.sha256);
+    }
+  }
+  const originalOperation = facts.checkpointState.phaseChain[0].checkpointState.dialogue.executionCycle.completedOperationIds[0];
+  assert.match(JSON.stringify(facts.dialogue.priorExecution), new RegExp(originalOperation));
+});
+
+test('native retained replan rejects unknown affected references and untrusted evidence before planning', async t => {
+  for (const trigger of [{ issueId: 'missing' }, { evidenceIds: ['invented'] }, { novelty: '' }]) {
+    const { facts, writes, order } = await retainedScenario(t, { trigger });
+    assert.equal(facts.approved, false); assert.equal(writes, 1); assert.deepEqual(order, ['execute']);
+    assert.match(facts.reason, /retained replan/);
+  }
+});
+
+test('native retained replan rejects stale or missing selected approval with no next writer', async t => {
+  for (const mutate of [result => { result.approval = null; }, result => { result.selected.plan += 'stale'; }]) {
+    const { facts, writes } = await retainedScenario(t, { options: { pivotCandidates: 1 },
+      adapters: { runPlanCandidateSet: async options => { const result = await runPlanCandidateSet(options); mutate(result); return result; } } });
+    assert.equal(facts.approved, false); assert.equal(writes, 1);
+    assert.equal(facts.checkpointState.phase, 'planning');
+  }
+});
+
+test('native retained replan human question stays autonomous planning with useful work retained', async t => {
+  const { facts, writes } = await retainedScenario(t, { options: { pivotCandidates: 1 }, review: r => ({
+    dialogue: planningEnvelope(r, 'ask', { issues: [{ id: 'H1', title: 'Choose remaining product behavior',
+      kind: 'product', needsHuman: true, status: 'open', blocking: true }] }), usage: { inputTokens: 1, outputTokens: 1 },
+  }) });
+  assert.equal(facts.approved, false); assert.equal(writes, 1);
+  assert.equal(facts.phase, 'planning'); assert.equal(facts.checkpointState.phase, 'planning');
+  assert.equal(facts.checkpointState.interactionMode, 'autonomous');
+  assert.equal(facts.checkpointState.dialogue.pendingDecision.authority, 'human');
+  assert.equal(readFileSync(join(facts.dir, 'first.txt'), 'utf8'), '1');
+});
+
+test('native retained replan cumulative budget denies preparation and successor launches exactly once', async t => {
+  for (const [tokenBudget, launches, writes] of [[4, 2, 1], [6, 3, 1], [12, 6, 1], [14, 7, 1], [16, 8, 2]]) {
+    const result = await retainedScenario(t, { options: { tokenBudget } });
+    assert.equal(result.facts.approved, false); assert.equal(result.writes, writes);
+    assert.equal(result.facts.resources.providerLaunches, launches, result.facts.reason);
+    assert.match(result.facts.reason, /budget-exhausted/);
+    assert.equal(result.facts.resources.knownUsage.inputTokens + result.facts.resources.knownUsage.outputTokens, tokenBudget);
+  }
+});
+
+test('native retained replan unknown accounting cannot launch another phase', async t => {
+  const { facts, writes, order } = await retainedScenario(t, { unknown: true, options: { tokenBudget: 20 } });
+  assert.equal(facts.approved, false); assert.equal(writes, 1); assert.deepEqual(order, ['execute']);
+  assert.equal(facts.resources.usageUnknown, true); assert.match(facts.reason, /accounting-incomplete/);
+});
+
+test('native retained replan unknown child usage and exhausted protocol repair launch no further preparation', async t => {
+  for (const unknown of [true, false]) {
+    let drafts = 0;
+    const { facts, writes } = await retainedScenario(t, { options: { tokenBudget: 6 }, draft: r => {
+      drafts++;
+      return unknown ? { plan: 'Remaining work', gate: [], dialogue: planningEnvelope(r, 'propose') }
+        : { content: 'Malformed provider envelope', usage: { inputTokens: 1, outputTokens: 1 } };
+    } });
+    assert.equal(facts.approved, false); assert.equal(writes, 1); assert.equal(drafts, 1);
+    assert.equal(facts.resources.providerLaunches, 3);
+    assert.equal(facts.resources.usageUnknown, unknown);
+    assert.match(facts.reason, unknown ? /accounting-incomplete/ : /budget-exhausted/);
+    assert.equal(facts.checkpointState.phase, 'planning');
+  }
+});
+
+test('native retained replan phase changes preserve an explicit execution cycle ceiling', async t => {
+  const { facts, writes } = await retainedScenario(t, { replans: 2, options: { pivotCandidates: 1, debateRounds: 2 } });
+  assert.equal(facts.approved, false); assert.equal(writes, 2); assert.match(facts.reason, /proposal-cycle limit/);
+  assert.equal(facts.dialogue.proposalCycles, 2);
+});
+
+test('native retained replan preserves reviewer bytes and complete command output through failed planning and archive', async t => {
+  let drafts = 0;
+  const { facts, writes } = await retainedScenario(t, { protection: true, draft: r => {
+    assert.deepEqual(readFileSync(join(r.target, '__uro_review/REVIEW.md')), proofBytes);
+    assert.deepEqual(readFileSync(join(r.target, '__uro_review/tests/proof.test.js')), executableProof);
+    writeFileSync(join(r.target, '__uro_review/REVIEW.md'), 'tamper');
+    writeFileSync(join(r.target, '__uro_review/tests/proof.test.js'), 'tamper');
+    writeFileSync(join(r.target, 'first.txt'), 'tamper');
+    if (++drafts === 1) throw new Error('failed planner after attempted writes');
+    return { usage: { inputTokens: 1, outputTokens: 1 }, plan: 'Finish only remaining.txt', gate: [], dialogue: planningEnvelope(r, 'propose') };
+  } });
+  assert.equal(facts.approved, true, facts.reason); assert.equal(writes, 2);
+  assert.equal(drafts, 3); assert.equal(facts.resources.usageUnknown, true);
+  assert.deepEqual(readFileSync(join(facts.dir, '__uro_review/REVIEW.md')), proofBytes);
+  assert.deepEqual(readFileSync(join(facts.dir, '__uro_review/tests/proof.test.js')), executableProof);
+  assert.equal(facts.artifacts.status, 'ok');
+  for (const phase of facts.checkpointState.phaseChain) {
+    const manifest = phase.checkpointState.executionArtifacts ?? phase.checkpointState.planningArtifacts;
+    for (const file of manifest.files) {
+      const archived = join(facts.artifacts.directory, relative(facts.dir, phase.directory), file.path);
+      assert.equal(createHash('sha256').update(readFileSync(archived)).digest('hex'), file.sha256);
+    }
+  }
+  const command = facts.evidence.find(e => e.kind === 'command');
+  const raw = JSON.parse(readFileSync(command.capturedPath, 'utf8'));
+  assert.equal(raw.stdout, 'retained-output-'.repeat(1000));
+  assert.equal(raw.stderr, 'retained-error-'.repeat(1000));
+});
+
+test('native retained replan required link persistence fails before any planning launch', async t => {
+  const { facts, writes, order } = await retainedScenario(t, { beforeReplan: r => {
+    mkdirSync(join(r.cwd, '.uro-tmp'), { recursive: true });
+    writeFileSync(join(r.cwd, '.uro-tmp/retained-phases'), 'not a directory');
+  } });
+  assert.equal(facts.approved, false); assert.equal(writes, 1); assert.deepEqual(order, ['execute']);
+  assert.equal(readFileSync(join(facts.dir, 'first.txt'), 'utf8'), '1');
+});
+
+test('native retained replan parent integrity loss during planning prevents every following seat', async t => {
+  let calls = 0;
+  const { facts, writes } = await retainedScenario(t, { draft: r => {
+    calls++;
+    const link = JSON.parse(r.state.snapshot.entries.find(entry => entry.id === 'retained-phase').content);
+    writeFileSync(join(link.parent.directory, '__uro_dialogue/journal-tail.jsonl'), 'tampered');
+    return { usage: { inputTokens: 1, outputTokens: 1 }, plan: 'Remaining work', gate: [], dialogue: planningEnvelope(r, 'propose') };
+  } });
+  assert.equal(facts.approved, false); assert.equal(writes, 1); assert.equal(calls, 1);
+  assert.equal(facts.checkpointState.phase, 'planning'); assert.match(facts.reason, /manifest changed/);
+  assert.equal(facts.resources.providerLaunches, 3);
+  assert.equal(facts.resources.knownUsage.inputTokens, 3);
+  assert.equal(facts.resources.knownUsage.outputTokens, 3);
+});
+
+test('native retained replan adopted required commands run before final approval', async t => {
+  const command = { bin: process.execPath, args: ['-e', "if(require('node:fs').readFileSync('remaining.txt','utf8')!=='done')process.exit(4);process.stdout.write('new-required-command')"] };
+  const { facts } = await retainedScenario(t, { options: { pivotCandidates: 1 }, remainingGate: [command] });
+  assert.equal(facts.approved, true, facts.reason);
+  assert.equal(facts.evidence.filter(e => e.stdout === 'new-required-command').length, 1);
+  assert.equal(facts.evidence.at(-1).exitCode, 0);
+  assert.equal(facts.approval.artifactDigest, createHash('sha256').update(readFileSync(join(facts.dir, 'CHANGES.diff'))).digest('hex'));
+});
+
 
 
 const TEST_SUPERPOWERS = {
@@ -88,7 +321,7 @@ const TEST_SUPERPOWERS = {
 };
 
 function fixture(name) {
-  const root = mkdtempSync(join(process.cwd(), `.ccc-test-${name}-`));
+  const root = mkdtempSync(join(tmpdir(), `.ccc-test-${name}-`));
   const target = join(root, 'target');
   const scratchRoot = join(root, 'scratch');
   const worktree = join(scratchRoot, name, 'w');
@@ -154,238 +387,4 @@ test('fresh branch creation uses the pre-debate commit and restores reviewer byt
     assert.deepEqual(readFileSync(proof), proofBytes);
     assert.deepEqual(readFileSync(eventsPath), eventBytes);
   } finally { item.cleanup(); }
-});
-
-async function runFreshScenario({ allCandidatesFail = false, clean = false } = {}) {
-  const item = fixture(allCandidatesFail ? 'fresh-exhausted' : clean ? 'fresh-positive' : 'fresh-run');
-  const events = [];
-  const branchCalls = [];
-  const candidateRequests = [];
-  const selectionRequests = [];
-  const executorPlans = [];
-  let pivotCalls = 0;
-  let currentBranch = 'uro/original';
-  let reviewBytesAtPivot;
-  const facts = await run({
-    task: 'Implement the approved behavior.',
-    mode: 'autonomous',
-    target: item.target,
-    gate: [],
-    gateRetries: 0,
-    scratchRoot: item.scratchRoot,
-    artifactRoot: join(item.root, 'artifacts'),
-    runId: allCandidatesFail ? 'fresh-exhausted' : clean ? 'fresh-positive' : 'fresh-run',
-    pivotCandidates: 3,
-    superpowers: TEST_SUPERPOWERS,
-    reporter: (event) => events.push(event),
-    adapters: {
-      isolate: async ({ baseRef }) => ({
-        dir: item.worktree,
-        isRepo: true,
-        branch: currentBranch,
-        baseRef,
-        baseCommit: 'pre-debate-commit',
-        cleanup: async () => {},
-      }),
-      diffText: async () => 'diff --git a/implementation.txt b/implementation.txt\n',
-      runExecutor: async ({ plan, cwd }) => {
-        executorPlans.push(plan);
-        writeFileSync(join(cwd, 'implementation.txt'), plan.includes('fresh candidate-3 plan')
-          ? 'fresh implementation\n'
-          : 'discarded implementation\n');
-        return {
-          exitCode: 0,
-          changedFiles: ['implementation.txt'],
-          lastMessage: 'implemented',
-        };
-      },
-      runGate: async () => ({ passed: true, results: [] }),
-      runReview: clean ? null : async ({ cwd }) => {
-        const reviewDir = join(cwd, '__uro_review', 'tests');
-        mkdirSync(reviewDir, { recursive: true });
-        writeFileSync(join(cwd, '__uro_review', 'REVIEW.md'), reviewText);
-        writeFileSync(join(reviewDir, 'f1.test.js'), executableProof);
-        return { conclusion: 'issues', launchFailed: false, timedOut: false };
-      },
-      captureWorktreeSnapshot: async () => ({}),
-      restoreWorktreeSnapshot: async () => ({ restoredPaths: [] }),
-      runVerifier: async ({ prompt }) => ({
-        verdict: 'NO_BLOCKERS',
-        launchFailed: false,
-        findings: prompt === INTENT_PROMPT ? 'Intent is preserved.' : 'Implementation checked.',
-      }),
-      runArbiter: async ({ request }) => {
-        if (request.type === 'finding') return { verdict: 'valid' };
-        if (request.type === 'pivot') {
-          return pivotCalls++ === 0
-            ? { decision: PIVOT_FRESH, reason: 'The current framing has failed repeatedly.' }
-            : { decision: PIVOT_CONCLUDE, reason: 'The fresh framing reproduced the blocker.' };
-        }
-        return { verdict: 'valid' };
-      },
-      createFreshPivotBranch: async ({ cwd, baseCommit, branch }) => {
-        branchCalls.push({ baseCommit, branch });
-        reviewBytesAtPivot = readFileSync(join(cwd, '__uro_review', 'tests', 'f1.test.js'));
-        rmSync(join(cwd, 'implementation.txt'), { force: true });
-        rmSync(join(cwd, 'CHANGES.diff'), { force: true });
-        currentBranch = branch;
-        return {
-          branch,
-          branchPoint: baseCommit,
-          reviewPaths: ['__uro_review/tests/f1.test.js'],
-        };
-      },
-      // There is no mechanical plan gate any more. A candidate can only fail by
-      // its DRAFT failing, so the discard scenarios throw from the draft seat.
-      draftPlanCandidate: async (request) => {
-        candidateRequests.push(request);
-        if (allCandidatesFail || request.candidateId === 'candidate-2') {
-          throw new Error(`${request.candidateId} draft failed`);
-        }
-        return {
-          plan: `fresh ${request.candidateId} plan\n`,
-          gate: [],
-          agree: true, readable: true, content: 'AGREE: yes',
-          usage: {
-            inputTokens: request.candidateIndex,
-            cachedInputTokens: 0,
-            outputTokens: 0,
-            reasoningOutputTokens: 0,
-            cacheWriteTokens: 0,
-          },
-        };
-      },
-      selectPlanCandidate: async (request) => {
-        selectionRequests.push(request);
-        return {
-          selectedCandidateId: 'candidate-3',
-          usage: {
-            inputTokens: 5,
-            cachedInputTokens: 0,
-            outputTokens: 0,
-            reasoningOutputTokens: 0,
-            cacheWriteTokens: 0,
-          },
-        };
-      },
-      reviewPlanCandidate: async (request) => ({
-        agree: true, readable: true, content: 'AGREE: yes', artifactDigest: request.artifactDigest,
-      }),
-    },
-  });
-  return {
-    item,
-    facts,
-    events,
-    branchCalls,
-    candidateRequests,
-    selectionRequests,
-    executorPlans,
-    reviewBytesAtPivot,
-  };
-}
-
-test('FRESH replans with ledger-informed candidates, discards failed drafts, and continues', async () => {
-  const scenario = await runFreshScenario();
-  try {
-    const {
-      facts, events, branchCalls, candidateRequests, selectionRequests,
-      executorPlans, reviewBytesAtPivot,
-    } = scenario;
-    assert.ok(facts.participation.claude.roles.includes('author'), 'fresh planning authors are actual participants');
-    assert.ok(facts.participation.codex.roles.includes('reviewer'), 'fresh planning reviewers are actual participants');
-    assert.equal(facts.approved, false, 'an unfinished fresh run is not approved');
-    assert.equal(facts.converged, null, 'execution records approval without inventing mutual agreement');
-    assert.equal(facts.approval, null);
-    assert.deepEqual(branchCalls, [{
-      baseCommit: 'pre-debate-commit',
-      branch: 'uro/original-fresh-1',
-    }]);
-    assert.deepEqual(reviewBytesAtPivot, executableProof);
-    assert.deepEqual(readFileSync(join(facts.dir, '__uro_review', 'tests', 'f1.test.js')), executableProof);
-    assert.equal(candidateRequests.length, 3);
-    assert.equal(new Set(candidateRequests.map((request) => request.perspective)).size, 3);
-    // Both verifier seats found this assertion vacuous, and a counterfactual
-    // confirmed it: dropping ledgerPrompt entirely left the whole suite green,
-    // because 'F1' reaches the prompt by other routes. Assert the ledger block
-    // itself, which only ledgerPrompt can produce.
-    assert.ok(candidateRequests.every((request) => request.input.includes('F1')));
-    assert.ok(candidateRequests.every(
-      (request) => request.input.includes('Debate ledger (evidence from the discarded approach):')),
-    'requirement 4: the ledger block must reach every candidate prompt');
-    // F1 must arrive VIA the ledger, not merely somewhere in the prompt —
-    // that distinction is the whole of the seat's finding.
-    const ledgerBlockOf = (input) => input.slice(input.indexOf('Debate ledger'));
-    assert.ok(candidateRequests.every((request) => ledgerBlockOf(request.input).includes('F1')),
-      'requirement 4: the finding ids must reach candidates inside the ledger block');
-    // request.perspective is assigned from the hardcoded FRESH_PERSPECTIVES
-    // array, so asserting it cannot detect the declaration being dropped from
-    // the prompt. Assert the prompt text, as the initial-STORM test does.
-    assert.ok(candidateRequests.every((request) => request.input.includes('Declared perspective:')),
-      'requirement 3: each FRESH candidate must carry its declared perspective');
-    assert.ok(candidateRequests.every((request) => request.input.includes('Discarded implementation framing')));
-    assert.deepEqual(selectionRequests[0].candidates.map((candidate) => candidate.id), [
-      'candidate-1', 'candidate-3',
-    ]);
-    assert.ok(executorPlans.some((plan) => plan.includes('fresh candidate-3 plan')));
-    assert.equal(facts.branch, 'uro/original-fresh-1');
-    assert.equal(facts.debate.finalPivotDecision, PIVOT_CONCLUDE);
-    assert.equal(facts.debate.pivotHistory[0].decision, PIVOT_FRESH);
-    // Requirement 12: the facts must record each candidate's perspective.
-    // Dropping it from planCandidateFacts left the whole suite green.
-    const recordedPerspectives = facts.debate.pivotHistory[0].candidates
-      .map((candidate) => candidate.perspective);
-    assert.equal(recordedPerspectives.filter(Boolean).length, recordedPerspectives.length,
-      'requirement 12: every recorded candidate must carry its perspective');
-    assert.equal(new Set(recordedPerspectives).size, recordedPerspectives.length,
-      'requirement 12: recorded perspectives must stay distinct');
-    assert.equal(facts.debate.pivotHistory[0].reason,
-      'The current framing has failed repeatedly.');
-    assert.equal(facts.debate.pivotHistory[0].branchPoint, 'pre-debate-commit');
-    assert.equal(facts.debate.pivotHistory[0].selectedCandidateId, 'candidate-3');
-    assert.equal(facts.debate.pivotHistory[0].candidates[1].gatePassed, false);
-    assert.equal(facts.debate.pivotHistory[0].candidates[1].selected, false);
-    assert.equal(facts.debate.ledger.rounds.length, 4,
-      'the post-FRESH finding must extend, not reset, the ledger');
-    // Candidates 1 and 3 drafted (usage 1 + 3) plus selection (5). Candidate 2's
-    // draft threw, so it has no usage to count — a failed draft costs nothing.
-    assert.equal(facts.tokens.planning.inputTokens, 9,
-      'candidate drafting and selection must count against the run budget');
-    for (const pair of [
-      'pivot/replan_start', 'pivot/candidate', 'pivot/selected',
-    ]) {
-      assert.ok(events.some((event) => `${event.stage}/${event.type}` === pair), pair);
-    }
-  } finally { scenario.item.cleanup(); }
-});
-
-test('every FRESH draft failing escalates honestly to CONCLUDE', async () => {
-  const scenario = await runFreshScenario({ allCandidatesFail: true });
-  try {
-    assert.equal(scenario.facts.outcome, 'needs-pivot');
-    assert.equal(scenario.facts.debate.finalPivotDecision, PIVOT_CONCLUDE);
-    assert.equal(scenario.facts.debate.stopReason, 'pivot-exhausted');
-    const fresh = scenario.facts.debate.pivotHistory[0];
-    assert.equal(fresh.exhausted, true);
-    assert.equal(fresh.escalatedTo, PIVOT_CONCLUDE);
-    assert.equal(fresh.selectedCandidateId, null);
-    assert.ok(fresh.candidates.every((candidate) => candidate.gatePassed === false));
-    assert.equal(scenario.executorPlans.some((plan) => plan.includes('fresh candidate')), false);
-    assert.ok(scenario.events.some((event) => (
-      `${event.stage}/${event.type}` === 'pivot/exhausted'
-      && event.decision === PIVOT_CONCLUDE
-    )));
-  } finally { scenario.item.cleanup(); }
-});
-
-test('a non-circling run creates no branch and emits no pivot events', async () => {
-  const scenario = await runFreshScenario({ clean: true });
-  try {
-    assert.equal(scenario.facts.outcome, 'review-ready');
-    assert.equal(scenario.facts.approved, false, 'skipped review is not actual approval');
-    assert.equal(scenario.facts.converged, null);
-    assert.equal(scenario.facts.approval, null);
-    assert.deepEqual(scenario.branchCalls, []);
-    assert.equal(scenario.events.some((event) => event.stage === 'pivot'), false);
-  } finally { scenario.item.cleanup(); }
 });

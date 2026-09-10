@@ -427,7 +427,7 @@ test('plan parses its goal, target, output, rounds, model, and dry-run', () => {
     target: 'repo',
     out: 'generated',
     rounds: 5,
-    candidates: 3,
+    candidates: 1,
     pivotCandidates: 3,
     codexModel: 'gpt-plan',
     interactionMode: 'manual',
@@ -442,7 +442,7 @@ test('plan parses its goal, target, output, rounds, model, and dry-run', () => {
   ]);
   assert.equal(Object.hasOwn(unbounded, 'rounds'), false,
     'omitting --rounds must not invent a planning bound');
-  assert.equal(unbounded.candidates, 3);
+  assert.equal(unbounded.candidates, 1);
   assert.equal(unbounded.pivotCandidates, 3);
   const configured = parseArgs([
     'plan', '--goal', 'x', '--target', 'repo', '--out', 'generated',
@@ -454,6 +454,31 @@ test('plan parses its goal, target, output, rounds, model, and dry-run', () => {
     'plan', '--goal', 'x', '--target', 'repo', '--out', 'generated',
     '--candidates', '6',
   ]), /range \[1-5\]/);
+});
+
+test('run and plan expose context stdin and keep their separate round controls', () => {
+  const run = parseArgs(['run', '--task', 'task.md', '--target', 'repo', '--gate', 'gate.json',
+    '--context-stdin', '--rounds', '7']);
+  assert.equal(run.contextStdin, true);
+  assert.equal(run.debateRounds, 7);
+  assert.equal(Object.hasOwn(run, 'rounds'), false);
+
+  const plan = parseArgs(['plan', '--goal', 'goal', '--target', 'repo', '--out', 'generated',
+    '--context-stdin', '--rounds', '9']);
+  assert.equal(plan.contextStdin, true);
+  assert.equal(plan.rounds, 9);
+  assert.equal(Object.hasOwn(plan, 'debateRounds'), false);
+});
+
+test('resume routes human answers and technical continuation exclusively without accepting run overrides', () => {
+  assert.deepEqual(parseArgs(['resume', '--run', 'C:/ccc-test/run', '--decision-file', 'answers.json']), {
+    command: 'resume', runDirectory: 'C:/ccc-test/run', decisionFile: 'answers.json',
+  });
+  assert.deepEqual(parseArgs(['resume', '--run', 'C:/ccc-test/run', '--continue']), {
+    command: 'resume', runDirectory: 'C:/ccc-test/run', technicalContinue: true,
+  });
+  assert.throws(() => parseArgs(['resume', '--run', 'r', '--decision-file', 'a.json', '--continue']), /exactly one/i);
+  assert.throws(() => parseArgs(['resume', '--run', 'r', '--continue', '--mode', 'autonomous']), /unknown option.*--mode/i);
 });
 
 test('queue parses autonomous mode, limits, dry-run, and the goal to accept', () => {

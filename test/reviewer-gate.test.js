@@ -1,6 +1,31 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { buildReviewerTestCommands } from '../src/gate.js';
+import { mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { runNestedGate } from './fixtures/nested-gate.js';
+
+test('nested gate runs actual Node test bodies and restores the parent marker on success and rejection', async t => {
+  const root = mkdtempSync(join(tmpdir(), 'nested-gate-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const present = Object.hasOwn(process.env, 'NODE_TEST_CONTEXT'), previous = process.env.NODE_TEST_CONTEXT;
+  t.after(() => { if (present) process.env.NODE_TEST_CONTEXT = previous; else delete process.env.NODE_TEST_CONTEXT; });
+  writeFileSync(join(root, 'proof.test.cjs'), "require('node:test')('actual body',()=>{require('node:fs').writeFileSync('body.txt','executed');process.stdout.write('nested-proof-output')});");
+  process.env.NODE_TEST_CONTEXT = 'child-v8';
+  const receipts = [];
+  const result = await runNestedGate({ cwd: root, commands: [{ bin: process.execPath, args: ['--test', 'proof.test.cjs'] }], requiredEvidence: true,
+    codeIdentity: () => 'fixture-before-command', onEvidence: entry => receipts.push(entry) });
+  assert.equal(result.passed, true); assert.equal(readFileSync(join(root, 'body.txt'), 'utf8'), 'executed');
+  assert.match(receipts[0].stdout, /nested-proof-output/); assert.doesNotMatch(receipts[0].stderr, /skipping running files/);
+  assert.deepEqual(receipts[0].argv, [process.execPath, '--test', 'proof.test.cjs']); assert.equal(receipts[0].cwd, root);
+  assert.equal(process.env.NODE_TEST_CONTEXT, 'child-v8');
+  await assert.rejects(runNestedGate({ cwd: root, commands: [], requiredEvidence: true }), /required command evidence/);
+  assert.equal(process.env.NODE_TEST_CONTEXT, 'child-v8');
+  delete process.env.NODE_TEST_CONTEXT;
+  await assert.rejects(runNestedGate({ cwd: root, commands: [], requiredEvidence: true }), /required command evidence/);
+  assert.equal(Object.hasOwn(process.env, 'NODE_TEST_CONTEXT'), false);
+});
 
 test('reviewer tests run after operator commands with the target gate framework', () => {
   const operatorCommands = [

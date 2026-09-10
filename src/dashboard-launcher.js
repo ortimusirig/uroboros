@@ -44,7 +44,9 @@ export function probeDashboard(port, { timeoutMs = DEFAULT_PROBE_TIMEOUT_MS } = 
       try { request?.destroy(); } catch { /* best-effort probe cleanup */ }
       resolve({ status });
     };
-    const timer = setTimeout(() => finish(connected || answered ? 'foreign' : 'vacant'), timeoutMs);
+    // A deadline cannot establish identity or vacancy. Keep an unconfirmed
+    // listener ineligible for spawning until a later probe sees its marker.
+    const timer = setTimeout(() => finish('occupied'), timeoutMs);
 
     try {
       request = httpGet({ host: DASHBOARD_HOST, port, path: '/' }, (incoming) => {
@@ -59,15 +61,17 @@ export function probeDashboard(port, { timeoutMs = DEFAULT_PROBE_TIMEOUT_MS } = 
         incoming.on('end', () => finish(
           body.includes(URO_DASHBOARD_MARKER) ? 'uroboros' : 'foreign',
         ));
-        incoming.on('error', () => finish('foreign'));
+        incoming.on('error', () => finish('occupied'));
       });
       request.on('socket', (socket) => {
         if (!socket.connecting) connected = true;
         socket.once('connect', () => { connected = true; });
       });
-      request.on('error', () => finish(connected ? 'foreign' : 'vacant'));
+      request.on('error', (error) => finish(
+        !connected && !answered && error?.code === 'ECONNREFUSED' ? 'vacant' : 'occupied',
+      ));
     } catch {
-      finish('vacant');
+      finish('occupied');
     }
   });
 }
@@ -144,48 +148,21 @@ export async function launchDashboard(scratchRoot, options = {}) {
     const url = dashboardUrl(port);
     const probe = options.probe ?? probeDashboard;
     const probeTimeoutMs = options.probeTimeoutMs ?? DEFAULT_PROBE_TIMEOUT_MS;
-    const initial = await probe(port, { timeoutMs: probeTimeoutMs });
-    if (initial?.status === 'uroboros') {
-      maybeOpen(url, options);
-      return { status: 'reused', url };
-    }
-    if (initial?.status === 'foreign') {
-      return {
-        status: 'unavailable',
-        reason: `port ${port} is occupied by something other than a CCC dashboard`,
-      };
-    }
-
+    const wait = options.wait ?? delay;
+    const startupTimeoutMs = options.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS;
+    const startupPollMs = options.startupPollMs ?? DEFAULT_STARTUP_POLL_MS;
+    // Initial reuse and child readiness spend the same bounded allowance.
+    const deadline = Date.now() + Math.max(0, startupTimeoutMs);
     const spawn = options.spawn ?? nodeSpawn;
     let spawnError = null;
     let childExit = null;
     let child;
-    try {
-      child = spawn(options.execPath ?? process.execPath, [
-        options.cliPath ?? LOOP_CLI_PATH,
-        'dashboard',
-        '--scratch-root', scratchRoot,
-        '--port', String(port),
-      ], {
-        detached: true,
-        stdio: 'ignore',
-        windowsHide: true,
-      });
-      child.once?.('error', (error) => { spawnError = error; });
-      child.once?.('exit', (code, signal) => { childExit = { code, signal }; });
-      child.unref?.();
-    } catch (error) {
-      return { status: 'unavailable', reason: `could not start dashboard: ${error.message}` };
-    }
-    if (!child) {
-      return { status: 'unavailable', reason: 'could not start dashboard: no child process' };
-    }
-
-    const wait = options.wait ?? delay;
-    const startupTimeoutMs = options.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS;
-    const startupPollMs = options.startupPollMs ?? DEFAULT_STARTUP_POLL_MS;
-    const deadline = Date.now() + Math.max(0, startupTimeoutMs);
-    do {
+    let occupied = false;
+    let ready = await probe(port, {
+      timeoutMs: Math.min(probeTimeoutMs, Math.max(1, deadline - Date.now())),
+    });
+    while (true) {
+      // Child failure can arrive while awaiting HTTP, including a marker response.
       if (spawnError) {
         return { status: 'unavailable', reason: `could not start dashboard: ${spawnError.message}` };
       }
@@ -193,28 +170,57 @@ export async function launchDashboard(scratchRoot, options = {}) {
         const detail = childExit.code === null ? `signal ${childExit.signal}` : `code ${childExit.code}`;
         return { status: 'unavailable', reason: `dashboard process exited with ${detail}` };
       }
-      const remaining = Math.max(1, deadline - Date.now());
-      const ready = await probe(port, { timeoutMs: Math.min(probeTimeoutMs, remaining) });
       if (ready?.status === 'uroboros') {
         maybeOpen(url, options);
-        return { status: 'started', url };
+        return { status: child ? 'started' : 'reused', url };
       }
       if (ready?.status === 'foreign') {
         return {
           status: 'unavailable',
-          reason: `port ${port} became occupied by something other than a CCC dashboard`,
+          reason: `port ${port} ${child ? 'became' : 'is'} occupied by something other than a CCC dashboard`,
         };
       }
+      const wasOccupied = occupied;
+      if (ready?.status !== 'vacant') occupied = true;
       if (Date.now() >= deadline) break;
-      await wait(Math.min(startupPollMs, Math.max(1, deadline - Date.now())));
-    } while (Date.now() <= deadline);
-
-    if (spawnError) {
-      return { status: 'unavailable', reason: `could not start dashboard: ${spawnError.message}` };
+      // Once occupancy was observed, later vacancy cannot authorize a duplicate.
+      if (!child && !occupied) {
+        try {
+          child = spawn(options.execPath ?? process.execPath, [
+            options.cliPath ?? LOOP_CLI_PATH,
+            'dashboard',
+            '--scratch-root', scratchRoot,
+            '--port', String(port),
+          ], {
+            detached: true,
+            stdio: 'ignore',
+            windowsHide: true,
+          });
+          child?.once?.('error', (error) => { spawnError = error; });
+          child?.once?.('exit', (code, signal) => { childExit = { code, signal }; });
+          child?.unref?.();
+        } catch (error) {
+          return { status: 'unavailable', reason: `could not start dashboard: ${error.message}` };
+        }
+        if (!child) {
+          return { status: 'unavailable', reason: 'could not start dashboard: no child process' };
+        }
+      } else if (ready?.status === 'vacant' || wasOccupied) {
+        await wait(Math.min(startupPollMs, Math.max(1, deadline - Date.now())));
+      }
+      // A wait may consume the last budget or deliver a child failure.
+      if (Date.now() >= deadline || spawnError || childExit) continue;
+      const remaining = Math.max(1, deadline - Date.now());
+      // Equal short retries never recognize a consistently slow response. After
+      // unconfirmed occupancy, let the request use the remaining total budget.
+      ready = await probe(port, { timeoutMs: occupied ? remaining : Math.min(probeTimeoutMs, remaining) });
     }
-    if (childExit) {
-      const detail = childExit.code === null ? `signal ${childExit.signal}` : `code ${childExit.code}`;
-      return { status: 'unavailable', reason: `dashboard process exited with ${detail}` };
+
+    if (occupied) {
+      return {
+        status: 'unavailable',
+        reason: `port ${port} did not identify itself as a CCC dashboard within ${startupTimeoutMs}ms`,
+      };
     }
     return {
       status: 'unavailable',

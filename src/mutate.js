@@ -3,8 +3,10 @@ import {
   existsSync,
   mkdtempSync,
   mkdirSync,
+  lstatSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   rmSync,
   symlinkSync,
   unlinkSync,
@@ -14,6 +16,7 @@ import { tmpdir } from 'node:os';
 import {
   dirname,
   extname,
+  isAbsolute,
   join,
   relative,
   resolve,
@@ -22,6 +25,9 @@ import {
 import { buildCodexArgs, parseCodexStream } from './executor.js';
 import { reportEvent } from './events.js';
 import { spawnCapture } from './spawn.js';
+import { createHash, randomUUID } from 'node:crypto';
+import { HARNESS_ARTIFACTS } from './artifacts.js';
+import { assertReviewDestination } from './review.js';
 
 export const DEFAULT_MUTATION_CONCURRENCY = 2;
 export const DEFAULT_MUTATION_BUDGET = 64;
@@ -42,6 +48,95 @@ function unique(values) {
 
 function message(error) {
   return error instanceof Error ? error.message : String(error);
+}
+
+// Trusted, runtime-only effect hooks. The phase owner supplies durability and reuse;
+// this subsystem supplies exact operation boundaries and actual observations.
+function mutationEffects(effects) {
+  if (!effects) return null;
+  if (typeof effects.analysisIdentity !== 'string' || !effects.analysisIdentity
+    || typeof effects.run !== 'function' || typeof effects.codeIdentity !== 'function') {
+    throw Object.assign(new Error('mutation effects require analysisIdentity, run and actual codeIdentity'), { mutationRequired: true });
+  }
+  let failure;
+  const fail = error => {
+    const required = error instanceof Error ? error : new Error(message(error));
+    required.mutationRequired = true; failure ??= required;
+    return required;
+  };
+  const check = () => {
+    if (failure) throw Object.assign(new Error(`mutation stopped after required failure: ${message(failure)}`),
+      { mutationRequired: true, causeOperation: failure.mutationObservation?.key ?? null });
+  };
+  const run = async (key, effect, purpose, input, operation, cleanup = false) => {
+    if (!cleanup) check();
+    let started = false, observed, operationError;
+    const invoke = async () => {
+      if (started) throw new Error('mutation operation callback cannot be invoked twice');
+      started = true;
+      try { observed = await operation(); return observed; }
+      catch (error) { operationError = message(error); throw error; }
+    };
+    try {
+      return await effects.run({ key: `${effects.analysisIdentity}:${key}`, effect, purpose,
+        input: { analysisIdentity: effects.analysisIdentity, ...input }, cleanup, operation: invoke });
+    } catch (error) {
+      const required = fail(error);
+      // A failed required store must still allow containment of this owned workspace.
+      // Never repeat an operation that already started, even if its outcome is unknown.
+      if (cleanup && !started) { try { await invoke(); } catch { /* retained below */ } }
+      required.mutationObservation = { key: `${effects.analysisIdentity}:${key}`, started,
+        result: observed ?? null, error: operationError ?? null, recording: 'unrecorded' };
+      throw required;
+    }
+  };
+  const commands = (scope, purpose, raw = spawnCapture, cleanup = false) => {
+    let sequence = 0;
+    return async (bin, args, options = {}) => {
+      if (!cleanup) check();
+      const cwd = options.cwd ?? (bin === 'git' && args[0] === '-C' ? args[1] : process.cwd());
+      let codeIdentity = null, codeIdentityError = null;
+      try {
+        codeIdentity = await effects.codeIdentity({ cwd });
+        if (typeof codeIdentity !== 'string' || !codeIdentity) throw new Error('actual mutation command code identity unavailable');
+      } catch (error) {
+        const required = fail(error);
+        if (!cleanup) throw required;
+        codeIdentityError = message(error);
+      }
+      return run(`${scope}:command:${++sequence}`, 'mutation-command', purpose,
+        { requested: { bin, args }, cwd, codeIdentity, ...(codeIdentityError ? { codeIdentityError } : {}) }, async () => {
+          if (!cleanup && await effects.codeIdentity({ cwd }) !== codeIdentity) throw new Error('mutation command code identity changed after intent');
+          const result = await raw(bin, args, { ...options, cwd });
+          const evidence = { executed: true, requested: { bin, args }, argv: result.launch?.argv ?? null,
+            cwd: result.launch?.cwd ?? null, codeIdentity, exitCode: result.code,
+            status: result.timedOut ? 'timed-out' : result.aborted ? 'aborted' : result.signal ? 'signalled' : 'completed',
+            stdout: result.stdout ?? '', stderr: result.stderr ?? '' };
+          if (codeIdentityError) evidence.codeIdentityError = codeIdentityError;
+          if (!evidence.argv || !evidence.cwd) throw new Error('actual mutation command launch observation unavailable');
+          return { ...result, evidence };
+        }, cleanup);
+    };
+  };
+  return { run, commands, check, fail, testSupportFiles: effects.testSupportFiles ?? [] };
+}
+
+function mutationFiles(directory, paths) {
+  const root = realpathSync.native(directory);
+  return unique(paths).sort().map(path => {
+    const file = resolve(root, path), rel = relative(root, file);
+    if (!rel || rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)
+      || rel.split(sep).includes('.git')) throw new Error('mutation file escapes disposable source');
+    let ancestor = dirname(file);
+    while (!existsSync(ancestor) && ancestor !== root) ancestor = dirname(ancestor);
+    const ancestorPath = relative(root, realpathSync.native(ancestor));
+    if (ancestorPath === '..' || ancestorPath.startsWith(`..${sep}`) || isAbsolute(ancestorPath)) throw new Error('mutation destination ancestor escapes disposable source');
+    if (!existsSync(file)) return { path, missing: true };
+    const canonical = realpathSync.native(file), actual = relative(root, canonical);
+    if (actual === '..' || actual.startsWith(`..${sep}`) || isAbsolute(actual) || lstatSync(file).isSymbolicLink()
+      || !lstatSync(file).isFile()) throw new Error('mutation source must be a contained regular file');
+    return { path, sha256: createHash('sha256').update(readFileSync(file)).digest('hex') };
+  });
 }
 
 function positiveInteger(value, name, fallback) {
@@ -461,6 +556,7 @@ export async function groupMutationStatements(statements, { judge, diff = '' } =
         units: validateJudgedGroups(judged, statements),
       };
     } catch (error) {
+      if (error?.mutationRequired) throw error;
       return {
         judged: false,
         method: 'enclosing-function',
@@ -506,6 +602,50 @@ function resolveImport(from, specifier, existing) {
     if (existing.has(candidate)) return candidate;
   }
   return null;
+}
+
+/** Exact selected reviewer code closure; observation grants no copy/evidence authority. */
+export function resolveMutationTestSupport({ root, selectedTests = [], testSupportFiles = [] }) {
+  const support = new Map();
+  for (const file of testSupportFiles) {
+    if (typeof file?.path !== 'string' || !file.path.startsWith('__uro_review/tests/')
+      || file.path.split('/').some(part => !part || part === '.' || part === '..')
+      || typeof file.sha256 !== 'string') throw new Error('invalid verified reviewer test support inventory');
+    assertReviewDestination(root, file.path.slice('__uro_review/'.length));
+    const [observed] = mutationFiles(root, [file.path]);
+    if (observed.sha256 !== file.sha256) throw new Error('verified reviewer test support bytes changed');
+    support.set(file.path, file.sha256);
+  }
+  const selected = unique([...selectedTests, ...support.keys()].map(posixPath));
+  for (let index = 0; index < selected.length; index++) {
+    const current = selected[index];
+    if (current.split('/').some(part => part === '..' || part === '.')) throw new Error('selected mutation test requires a canonical contained path');
+    if (!current.startsWith('__uro_review/')) continue;
+    mutationFiles(root, [current]);
+    if (!sourceExtension(current)) {
+      if (!support.has(current)) throw new Error('unsupported non-code reviewer test support');
+      continue; // The verified bundle inventory, not the JS import parser, supplies these code files.
+    }
+    for (const specifier of importsIn(readFileSync(join(root, current), 'utf8'))) {
+      if (!specifier.startsWith('.')) continue;
+      const base = posixPath(join(dirname(current), specifier));
+      const candidates = [...RESOLVE_EXTENSIONS.map(extension => base + extension),
+        ...RESOLVE_EXTENSIONS.slice(1).map(extension => `${base}/index${extension}`)];
+      const dependency = resolveImport(current, specifier, new Set(candidates.filter(path => existsSync(resolve(root, path)))));
+      if (!dependency) throw new Error(`unresolved reviewer test support: ${current} imports ${specifier}`);
+      mutationFiles(root, [dependency]);
+      if (HARNESS_ARTIFACTS.some(path => path.endsWith('/') ? dependency.startsWith(path) : dependency === path)
+        && !dependency.startsWith('__uro_review/')) throw new Error('reviewer support cannot copy correctness-critical harness files');
+      if (dependency.startsWith('__uro_review/') && !selected.includes(dependency)) selected.push(dependency);
+    }
+  }
+  const files = mutationFiles(root, selected);
+  for (const file of files) {
+    if (file.missing) throw new Error('selected mutation test source is missing');
+    if (HARNESS_ARTIFACTS.some(item => item.endsWith('/') ? file.path.startsWith(item) : file.path === item)
+      && !file.path.startsWith('__uro_review/')) throw new Error('selected mutation test cannot copy correctness-critical harness files');
+  }
+  return { files, testSupportFiles: [...support].map(([path, sha256]) => ({ path, sha256 })) };
 }
 
 export function selectTouchingTests({ root, changedFiles, files = listFiles(root) }) {
@@ -614,7 +754,13 @@ export async function discoverMutationPlan({
     throw new TypeError('base must be a non-empty Git ref and may not start with a dash');
   }
   const root = await repositoryRoot(target, { signal, runCommand });
-  const scoped = posixPath(relative(root, resolve(target))) || '.';
+  // Native realpath expands Windows 8.3 names as well as junctions/symlinks;
+  // plain realpathSync can retain short names that differ from Git's root.
+  const targetFromRoot = relative(realpathSync.native(root), realpathSync.native(resolve(target)));
+  if (targetFromRoot === '..' || targetFromRoot.startsWith(`..${sep}`) || isAbsolute(targetFromRoot)) {
+    throw new Error(`target is outside repository: ${target}`);
+  }
+  const scoped = posixPath(targetFromRoot) || '.';
   const tracked = await git(root, [
     'diff', '--no-ext-diff', '--no-color', '--unified=3', base, '--', scoped,
   ], { signal, runCommand });
@@ -690,20 +836,39 @@ export async function runSelectedTests({
   signal,
   timeoutMs = DEFAULT_MUTATION_TRIAL_TIMEOUT_MS,
   runCommand = spawnCapture,
+  requiredEvidence = false,
+  codeIdentity,
+  onEvidence,
 }) {
   const selected = unique(tests ?? []);
   const invocation = commandForTests(command, selected);
   if (selected.length === 0 && (command === null || command === undefined)) {
     return { passed: true, code: 0, tests: [], command: invocation, notRun: true };
   }
+  if (requiredEvidence && typeof codeIdentity !== 'function') throw new Error('required mutation command code identity unavailable');
+  if (requiredEvidence && typeof onEvidence !== 'function') throw new Error('required mutation command evidence sink unavailable');
+  const identity = typeof codeIdentity === 'function' ? await codeIdentity({ cwd, command: invocation }) : null;
+  if (requiredEvidence && (typeof identity !== 'string' || !identity)) throw new Error('required mutation command code identity unavailable');
   const result = await runCommand(invocation.bin, invocation.args, { cwd, signal, timeoutMs });
+  const evidence = { executed: true, requested: invocation, argv: result.launch?.argv ?? null,
+    cwd: result.launch?.cwd ?? null, codeIdentity: identity, exitCode: result.code,
+    status: result.timedOut ? 'timed-out' : result.aborted ? 'aborted' : result.signal ? 'signalled' : 'completed',
+    stdout: result.stdout ?? '', stderr: result.stderr ?? '' };
+  if (requiredEvidence && (!evidence.argv || !evidence.cwd)) throw new Error('required mutation command launch observation unavailable');
+  if (typeof onEvidence === 'function') {
+    try { await onEvidence(evidence); }
+    catch (error) { if (requiredEvidence) { error.mutationRequired = true; throw error; } }
+  }
   return {
-    ...(result.aborted ? { aborted: true } : { passed: result.code === 0 }),
+    ...(result.aborted ? { aborted: true } : { passed: result.code === 0 && !result.timedOut }),
     code: result.code,
     tests: selected,
     command: invocation,
     stdout: result.stdout ?? '',
     stderr: result.stderr ?? '',
+    launch: result.launch ?? null,
+    timedOut: Boolean(result.timedOut),
+    ...(requiredEvidence || result.evidence ? { evidence: result.evidence ?? evidence } : {}),
     ...(result.signal ? { signal: result.signal } : {}),
   };
 }
@@ -770,7 +935,8 @@ function overlayChanges(root, workspace, status) {
 }
 
 async function workingTreeChanges(root, options) {
-  const tracked = await git(root, ['diff', '--name-status', '-z', 'HEAD'], options);
+  const scope = options?.excludeHarness ? ['--', '.', ...HARNESS_ARTIFACTS.map(path => `:(exclude)${path}`)] : [];
+  const tracked = await git(root, ['diff', '--name-status', '-z', 'HEAD', ...scope], options);
   const tokens = tracked.split('\0').filter(Boolean);
   const changes = [];
   for (let index = 0; index < tokens.length;) {
@@ -783,7 +949,7 @@ async function workingTreeChanges(root, options) {
       changes.push({ status, path: posixPath(tokens[index++]) });
     }
   }
-  const untracked = await git(root, ['ls-files', '--others', '--exclude-standard', '-z'], options);
+  const untracked = await git(root, ['ls-files', '--others', '--exclude-standard', '-z', ...scope], options);
   for (const path of untracked.split('\0').filter(Boolean)) {
     changes.push({ status: '??', path: posixPath(path) });
   }
@@ -805,7 +971,8 @@ function linkDependencies(root, workspace) {
   return linked;
 }
 
-export async function createMutationWorkspace({ root, signal, runCommand = spawnCapture }) {
+export async function createMutationWorkspace({ root, signal, runCommand = spawnCapture, effectScope, effectKey, selectedTests }) {
+  if (effectScope) return createObservedMutationWorkspace({ root, signal, runCommand, effectScope, effectKey, selectedTests });
   const parent = mkdtempSync(join(tmpdir(), 'uro-mutate-'));
   const workspace = join(parent, 'w');
   let registered = false;
@@ -856,6 +1023,86 @@ export async function createMutationWorkspace({ root, signal, runCommand = spawn
   }
 }
 
+async function createObservedMutationWorkspace({ root, signal, runCommand, effectScope: scope, effectKey: key, selectedTests = [] }) {
+  const tempRoot = realpathSync.native(tmpdir());
+  const parent = join(tempRoot, `uro-mutate-${randomUUID()}`), directory = join(parent, 'w');
+  let allocated = false, registered = false, registration = 'not-started';
+  const links = [], receipts = [];
+  const commands = scope.commands(`${key}:setup`, 'mutation-workspace-git', async (bin, args, options) => {
+    if (args.includes('add')) registration = 'uncertain';
+    return runCommand(bin, args, options);
+  });
+  const cleanupCommands = scope.commands(`${key}:cleanup`, 'mutation-cleanup-command', runCommand, true);
+  const cleanup = async () => {
+    const errors = [];
+    const attempt = async operation => {
+      try { return await operation(); }
+      catch (error) { errors.push({ message: message(error), observation: error.mutationObservation ?? null });
+        return error.mutationObservation?.result; }
+    };
+    for (const path of links) await attempt(() => scope.run(`${key}:unlink:${links.indexOf(path)}`, 'mutation-cleanup',
+      'mutation-dependency-unlink', { directory, path }, async () => { if (existsSync(path)) unlinkSync(path); return { path, exists: existsSync(path) }; }, true));
+    if (registration !== 'not-started') {
+      const removed = await attempt(() => cleanupCommands('git', ['-C', root, 'worktree', 'remove', '--force', directory]));
+      receipts.push({ operation: 'worktree-remove', result: removed ?? null });
+      if (removed?.code === 0) { registered = false; registration = 'removed'; }
+      else errors.push({ message: `git worktree remove failed: ${removed?.stderr?.trim() || removed?.code || 'unknown'}` });
+    }
+    // Failed removal retains the exact directory and registration for reconciliation.
+    if (allocated && (registration === 'removed' || registration === 'not-started')) {
+      await attempt(() => scope.run(`${key}:remove-parent`, 'mutation-cleanup', 'mutation-parent-cleanup',
+        { parent, directory }, async () => {
+          if (realpathSync.native(parent) !== parent || relative(tempRoot, parent).includes(sep)) throw new Error('mutation cleanup parent identity changed');
+          rmSync(parent, { recursive: true, force: true }); return { parent, exists: existsSync(parent) };
+        }, true));
+    }
+    return { status: errors.length ? 'failed' : 'completed', parent, directory, registered, registration,
+      retained: existsSync(parent), links: [...links], receipts: [...receipts], errors,
+      recording: errors.some(error => error.observation?.recording === 'unrecorded') ? 'unrecorded' : 'hook-acknowledged' };
+  };
+  try {
+    await scope.run(`${key}:allocate`, 'mutation-workspace', 'mutation-workspace-allocation', { root, parent, directory }, async () => {
+      if (existsSync(parent) || dirname(parent) !== tempRoot) throw new Error('mutation allocation path collision or escape');
+      mkdirSync(parent); allocated = true; return { root, parent, directory };
+    });
+    const added = await commands('git', ['-C', root, 'worktree', 'add', '--detach', directory, 'HEAD'], { signal,
+      // The actual callback is below the intent boundary; registration can be uncertain after launch.
+    });
+    registration = added.code === 0 ? 'registered' : 'uncertain'; registered = added.code === 0;
+    if (added.aborted) throw interruptedCommandError('git worktree add', added);
+    if (added.code !== 0) throw new Error(`git worktree add failed: ${added.stderr?.trim() || added.code}`);
+    const changes = await workingTreeChanges(root, { signal, runCommand: commands, excludeHarness: true });
+    const support = resolveMutationTestSupport({ root, selectedTests, testSupportFiles: scope.testSupportFiles });
+    for (const { path } of support.files) {
+      if (!HARNESS_ARTIFACTS.some(item => item.endsWith('/') ? path.startsWith(item) : path === item)) continue;
+      if (!changes.some(change => change.path === path)) changes.push({ status: '??', path });
+    }
+    const files = mutationFiles(root, changes.flatMap(change => [change.path, ...(change.oldPath ? [change.oldPath] : [])]));
+    await scope.run(`${key}:overlay`, 'mutation-write', 'mutation-overlay', { root, directory, changes, files,
+      selectedTests: [...selectedTests], testSupportFiles: support.testSupportFiles, resolvedTestSupport: support.files }, async () => {
+      if (JSON.stringify(mutationFiles(root, files.map(file => file.path))) !== JSON.stringify(files)) throw new Error('mutation overlay source changed after intent');
+      mutationFiles(directory, files.map(file => file.path));
+      overlayChanges(root, directory, changes);
+      return { root, directory, files: mutationFiles(directory, files.map(file => file.path)) };
+    });
+    const dependency = join(root, 'node_modules'), destination = join(directory, 'node_modules');
+    if (existsSync(dependency) && !existsSync(destination)) await scope.run(`${key}:dependencies`, 'mutation-workspace',
+      'mutation-dependency-link', { source: dependency, destination, directory }, async () => {
+        links.push(...linkDependencies(root, directory));
+        return { links: [...links], source: dependency, destination, linked: links.includes(destination) };
+      });
+    return { directory, parent, registered, registration, links: [...links], cleanup };
+  } catch (caught) {
+    const error = scope.fail(caught);
+    // A result sink can fail after Git registered the worktree. Observe the known owned path;
+    // uncertain registration still requires exact-path removal, never another add.
+    if (allocated && registration === 'not-started' && existsSync(directory)) registration = 'uncertain';
+    const outcome = allocated ? await cleanup() : { status: 'not-needed', parent, directory, retained: false, registered: false };
+    error.mutationState = { parent, directory, primaryError: message(error), cleanup: outcome };
+    throw error;
+  }
+}
+
 function replacementLine(line, id) {
   const ending = /\r\n$/.test(line) ? '\r\n' : /\n$/.test(line) ? '\n' : /\r$/.test(line) ? '\r' : '';
   const content = ending === '' ? line : line.slice(0, -ending.length);
@@ -892,29 +1139,55 @@ export async function executeMutationTrial({
   runTests = runSelectedTests,
   createWorkspace = createMutationWorkspace,
   runCommand = spawnCapture,
+  effectScope,
+  effectKey,
 }) {
   let workspace;
-  try { workspace = await createWorkspace({ root: plan.root, signal, runCommand }); }
+  try { workspace = await createWorkspace({ root: plan.root, signal, runCommand, effectScope, effectKey,
+    ...(effectScope ? { selectedTests: tests } : {}) }); }
   catch (error) {
-    if (error?.aborted !== true) throw error;
+    if (error?.aborted !== true || error?.mutationRequired) throw error;
     return interruptedTestResult(error);
   }
   let primaryError;
+  let testResult;
+  let cleanupResult;
   try {
-    applyStatementDeletion(workspace.directory, unit);
-    return await runTests({
-      cwd: workspace.directory, tests, command, signal, timeoutMs, runCommand,
+    if (effectScope) {
+      if (realpathSync.native(workspace.directory) === realpathSync.native(plan.root)) throw new Error('mutation requires a disposable trial source');
+      const files = mutationFiles(workspace.directory, unit.statements.map(item => item.path));
+      await effectScope.run(`${effectKey}:delete`, 'mutation-write', 'mutation-deletion',
+        { directory: workspace.directory, unit: serializeUnit(unit, plan), files }, async () => {
+          if (JSON.stringify(mutationFiles(workspace.directory, files.map(file => file.path))) !== JSON.stringify(files)) throw new Error('mutation deletion source changed after intent');
+          applyStatementDeletion(workspace.directory, unit);
+          return { directory: workspace.directory, files: mutationFiles(workspace.directory, files.map(file => file.path)) };
+        });
+    } else applyStatementDeletion(workspace.directory, unit);
+    testResult = await runTests({
+      cwd: workspace.directory, tests, command, signal, timeoutMs,
+      runCommand: effectScope ? effectScope.commands(`${effectKey}:tests`, 'mutation-trial-test', runCommand) : runCommand,
     });
   } catch (error) {
-    primaryError = error;
-    if (error?.aborted === true) {
-      return interruptedTestResult(error);
-    }
-    throw error;
+    primaryError = effectScope ? effectScope.fail(error) : error;
   } finally {
-    try { await workspace.cleanup(); }
-    catch (error) { if (primaryError === undefined) throw error; }
+    try { cleanupResult = await workspace.cleanup(); }
+    catch (error) { cleanupResult = { status: 'failed', directory: workspace.directory,
+      retained: existsSync(workspace.directory), errors: [{ message: message(error) }] }; }
   }
+  const workspaceState = { directory: workspace.directory, parent: workspace.parent ?? null,
+    registration: workspace.registration ?? null, links: workspace.links ?? [], cleanup: cleanupResult ?? { status: 'completed' } };
+  if (cleanupResult?.status === 'failed') {
+    const error = primaryError ?? new Error(`mutation trial cleanup failed: ${cleanupResult.errors.map(item => item.message).join('; ')}`);
+    error.mutationState = { ...workspaceState, primaryError: primaryError ? message(primaryError) : null };
+    if (effectScope) error.mutationRequired = true;
+    throw error;
+  }
+  if (primaryError) {
+    primaryError.mutationState = { ...workspaceState, primaryError: message(primaryError) };
+    if (primaryError.aborted && !primaryError.mutationRequired) return interruptedTestResult(primaryError);
+    throw primaryError;
+  }
+  return effectScope ? { ...testResult, workspace: workspaceState } : testResult;
 }
 
 function splitUnit(unit) {
@@ -983,6 +1256,7 @@ async function judgeSurvivor(unit, plan, arbiter) {
   try {
     return { evidence, judgement: validateJudgement(await arbiter(evidence)) };
   } catch (error) {
+    if (error?.mutationRequired) throw error;
     return {
       evidence,
       judgement: { verdict: 'unjudged', reasoning: `mutation arbiter failed: ${message(error)}` },
@@ -1027,6 +1301,7 @@ async function runMutateCore({
   signal,
   adapters = {},
   plan: suppliedPlan,
+  effects,
 } = {}) {
   positiveInteger(budget, 'mutation budget', DEFAULT_MUTATION_BUDGET);
   positiveInteger(concurrency, 'mutation concurrency', DEFAULT_MUTATION_CONCURRENCY);
@@ -1037,12 +1312,16 @@ async function runMutateCore({
   const discover = adapters.discoverMutationPlan ?? discoverMutationPlan;
   const runTests = adapters.runTests ?? runSelectedTests;
   const runTrial = adapters.runTrial ?? executeMutationTrial;
+  const effectScope = mutationEffects(effects);
+  if (effectScope && ['runTests', 'runTrial', 'createWorkspace'].some(key => adapters[key] !== undefined)) {
+    throw Object.assign(new Error('observable mutation effects cannot use opaque trial, workspace or test adapters'), { mutationRequired: true });
+  }
   reportEvent(reporter, runId, 'mutate', 'start', {
     target: suppliedPlan?.target ?? target, base: suppliedPlan?.base ?? base, dryRun,
   });
   const plan = suppliedPlan ?? await discover({
     target, base, tests, signal,
-    runCommand: adapters.runCommand,
+    runCommand: effectScope ? effectScope.commands('discovery', 'mutation-discovery-command', adapters.runCommand) : adapters.runCommand,
     selectTests: adapters.selectTests,
   });
   plan.statements ??= [];
@@ -1067,7 +1346,7 @@ async function runMutateCore({
     command,
     signal,
     timeoutMs: trialTimeoutMs,
-    runCommand: adapters.runCommand,
+    runCommand: effectScope ? effectScope.commands('baseline', 'mutation-baseline', adapters.runCommand) : adapters.runCommand,
     phase: 'baseline',
   }));
   if (baseline.aborted) {
@@ -1121,7 +1400,11 @@ async function runMutateCore({
     reportEvent(reporter, runId, 'mutate', 'finish', { status: result.status });
     return result;
   }
-  const grouping = await groupMutationStatements(plan.statements, { judge, diff: plan.diff });
+  const groupingJudge = effectScope && typeof judge === 'function' ? input => effectScope.run('grouping', 'provider', 'mutation-grouping',
+    { input: mutationGroupingPrompt(input), evidence: input }, () => judge(input, { input: mutationGroupingPrompt(input), signal })) : judge;
+  const survivorArbiter = effectScope && typeof arbiter === 'function' ? input => effectScope.run(`survivor:${input.id}`, 'provider', 'mutation-survivor',
+    { input: mutationArbiterPrompt(input), evidence: input }, () => arbiter(input, { input: mutationArbiterPrompt(input), signal })) : arbiter;
+  const grouping = await groupMutationStatements(plan.statements, { judge: groupingJudge, diff: plan.diff });
   const queue = [...grouping.units];
   const examined = [];
   const survivors = [];
@@ -1131,6 +1414,7 @@ async function runMutateCore({
   let interrupted = signal?.aborted === true;
 
   while (queue.length > 0) {
+    effectScope?.check();
     if (signal?.aborted) {
       unexamined.push(...queue.splice(0).map((unit) => ({
         ...serializeUnit(unit, plan), reason: 'mutation interrupted before examination',
@@ -1167,11 +1451,18 @@ async function runMutateCore({
         runTests,
         createWorkspace: adapters.createWorkspace,
         runCommand: adapters.runCommand,
+        effectScope,
+        effectKey: `trial:${unit.id}`,
       });
       return { unit, testResult: normalizeTestResult(raw) };
     }));
     const failedTrial = settled.find((entry) => entry.status === 'rejected');
-    if (failedTrial) throw failedTrial.reason;
+    if (failedTrial) {
+      failedTrial.reason.mutationTrials = settled.map((entry, index) => ({ unitId: batch[index].id,
+        status: entry.status, ...(entry.status === 'fulfilled' ? { result: entry.value } : {
+          error: message(entry.reason), state: entry.reason.mutationState ?? null, observation: entry.reason.mutationObservation ?? null }) }));
+      throw failedTrial.reason;
+    }
     const results = settled.map((entry) => entry.value);
     trials += batch.length;
     const batchInterrupted = results.some(({ testResult }) => testResult?.aborted);
@@ -1203,7 +1494,7 @@ async function runMutateCore({
               reasoning: 'mutation interrupted before arbiter judgement',
             },
           }
-          : await judgeSurvivor(unit, plan, arbiter);
+          : await judgeSurvivor(unit, plan, survivorArbiter);
         const survivor = { ...record, measurement: 'survived', judgement: judged.judgement };
         survivors.push(survivor);
         reportEvent(reporter, runId, 'mutate', 'survivor', {
@@ -1325,26 +1616,35 @@ function createReadOnlyMutationSeat({
     env,
   });
   const launchEnv = { ...process.env, ...env };
-  return async (prompt) => {
+  return async (prompt, { signal } = {}) => {
     let result;
+    let delivery = null;
+    const requestedLaunch = { bin, args: [...args], cwd };
     try {
-      result = await runSeat(bin, args, { cwd, env: launchEnv, input: prompt, timeoutMs });
+      result = await runSeat(bin, args, { cwd, env: launchEnv, input: prompt, timeoutMs, signal,
+        onInputSubmitted: receipt => { delivery = receipt; } });
     }
-    catch (error) { return { available: false, reason: `mutation judge could not start: ${message(error)}` }; }
-    if (result.code !== 0) return { available: false, reason: `mutation judge exited ${result.code}` };
-    return parseJsonObject(parseCodexStream(result.stdout).lastMessage)
-      ?? { available: false, reason: 'mutation judge returned no readable JSON' };
+    catch (error) { return { available: false, reason: `mutation judge could not start: ${message(error)}`,
+      error: message(error), requestedLaunch, launch: null, delivery, usage: null }; }
+    const parsed = parseCodexStream(result.stdout);
+    const metadata = { requestedLaunch, launch: result.launch ?? null, delivery, usage: parsed.usage ?? null,
+      exitCode: result.code, timedOut: Boolean(result.timedOut), aborted: Boolean(result.aborted),
+      stdout: result.stdout ?? '', stderr: result.stderr ?? '' };
+    if (result.code !== 0 || result.timedOut || result.aborted) return { ...metadata, available: false,
+      reason: result.aborted ? 'mutation judge was cancelled' : result.timedOut ? 'mutation judge timed out' : `mutation judge exited ${result.code}` };
+    return { ...(parseJsonObject(parsed.lastMessage)
+      ?? { available: false, reason: 'mutation judge returned no readable JSON' }), ...metadata };
   };
 }
 
 export function createMutationJudge(options = {}) {
   const seat = createReadOnlyMutationSeat(options);
-  return (input) => seat(mutationGroupingPrompt(input));
+  return (input, options) => seat(options?.input ?? mutationGroupingPrompt(input), options);
 }
 
 export function createMutationArbiter(options = {}) {
   const seat = createReadOnlyMutationSeat(options);
-  return (evidence) => seat(mutationArbiterPrompt(evidence));
+  return (evidence, options) => seat(options?.input ?? mutationArbiterPrompt(evidence), options);
 }
 
 export function formatMutationSummary(result) {

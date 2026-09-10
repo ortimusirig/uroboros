@@ -3,6 +3,7 @@ import { StringDecoder } from 'node:string_decoder';
 import { spawnCapture } from './spawn.js';
 import { buildClaudeArgs, parseArbiterStream, runArbiter } from './arbiter.js';
 import { materializeReviewBundle } from './review.js';
+import { parseDialogueEnvelope } from './dialogue.js';
 import { reportEvent } from './events.js';
 import { addUsage, annotateUsageConsistency } from './usage.js';
 import { resolveStageTimeouts } from './timeouts.js';
@@ -82,6 +83,15 @@ export const REVIEW_PROMPT = [
   'Return one JSON artifact bundle: {"version":1,"conclusion":"clean|issues|inconclusive","report":"Markdown report","tests":[{"path":"tests/f1.test.js","content":"executable test source"}],"dispositions":[{"id":"F1","status":"resolved|withdrawn|upheld","reason":"answer to Codex and evidence"}]}. The harness writes the report and tests. Use clean only when you completed review of this current diff and evidence with no unresolved blockers; issues for remaining correctness blockers; inconclusive when review could not be completed. Missing or inconclusive conclusions cannot approve.',
   'For each finding use Markdown: ## F1, Severity: blocking|suggestion, Category: ..., Description: ..., Test: __uro_review/tests/f1.test.js, each on its own line. Blocking findings need a real executable test included in the bundle. A clean review still needs a substantive nonblank report.',
   'Explicitly dispose of EVERY previously open finding with reasons tied to the current diff and evidence. Omission does not close an issue. Keep IDs stable. Include any still-required prior test files. Do not change product intent to eliminate a finding.',
+].join('\n\n');
+
+export const EXECUTION_REVIEW_PROMPT = [
+  '# Claude execution reviewer',
+  'Remain read-only. Review the original requirements, current implementation, shared context, complete command evidence and coworker dialogue. Answer cited questions and rebuttals directly.',
+  'Return the required UROBOROS_DIALOGUE envelope on every turn. Claude judges current execution approval; unresolved manual disputes and explicitly missing user intent or permission require human input.',
+  'For artifact review include beside the envelope one JSON bundle {"version":1,"conclusion":"clean|issues|inconclusive","report":"substantive Markdown report","tests":[],"dispositions":[]}. The harness materializes these isolated artifacts. Approval requires a clean current bundle and current evidenced issue dispositions.',
+  'A concern can cite existing source or command evidence without inventing an executable test. Include new isolated tests only when they are needed. Required check outcomes still need current evidence. A discussion-only answer, question or rebuttal needs no artifact bundle.',
+  'You may approve with final issue dispositions in this response. No additional clean review call is mandatory; conversation can continue whenever an issue needs discussion. decide settles named issues and is not whole-artifact approval.',
 ].join('\n\n');
 
 export function assertUsablePrompt(prompt) {
@@ -479,7 +489,8 @@ function createReviewSupervision({ cwd, env = process.env, reporter, runId, pass
 }
 
 export async function runReviewPass(options) {
-  const { cwd, round = 1, diffDigest = '', prompt = REVIEW_PROMPT,
+  const { cwd, round = 1, diffDigest = '', dialogueMode = false,
+    prompt = dialogueMode ? EXECUTION_REVIEW_PROMPT : REVIEW_PROMPT,
     extraArgv = [], env = process.env, timeoutMs = resolveStageTimeouts(env).verifier } = options;
   assertNoForbiddenFlags(extraArgv);
   if (extraArgv.length) throw new Error('Claude review does not accept extra command flags');
@@ -493,11 +504,34 @@ export async function runReviewPass(options) {
   if (result.launchFailed || !result.resultSeen || !result.resultUsable || !result.answer.trim()) {
     return { ...result, artifact: null, artifactFailed: true };
   }
+  if (dialogueMode && options.deferMaterialization === true) {
+    // The native caller restores provider writes before adopting this saved raw result.
+    // This is not approval: parsing, input binding and bundle validation still follow.
+    return { ...result, artifact: null, artifactFailed: false, materializationDeferred: true };
+  }
+  return completeReviewPass({ result, cwd, round, diffDigest, dialogueMode });
+}
+
+/** Trusted post-protection adoption of one completed transport; launches no provider. */
+export async function completeReviewPass({ result, cwd, round = 1, diffDigest = '', dialogueMode = false, expectedIdentity }) {
+  if (result?.error || result?.launchFailed || result?.timedOut || !result?.resultSeen || !result?.resultUsable
+    || typeof result?.answer !== 'string' || !result.answer.trim()) {
+    return { ...result, artifact: null, artifactFailed: true, materializationDeferred: false };
+  }
   try {
-    const artifact = await materializeReviewBundle({ cwd, bundle: result.answer, round, diffDigest });
-    return { ...result, artifact, artifactFailed: false };
+    const dialogue = dialogueMode ? parseDialogueEnvelope({ response: { content: result.answer } }) : null;
+    if (expectedIdentity && (dialogue?.artifactDigest !== expectedIdentity.artifactDigest
+      || dialogue?.contextDigest !== expectedIdentity.contextDigest)) throw new Error('stale native review input identity');
+    const bundle = dialogueMode
+      ? result.answer.replace(/<UROBOROS_DIALOGUE>[\s\S]*?<\/UROBOROS_DIALOGUE>/, '').trim() : result.answer;
+    if (!bundle && dialogue?.action !== 'approve') return { ...result, dialogue, artifact: null, artifactFailed: false, materializationDeferred: false };
+    if (dialogue?.action === 'approve' && JSON.parse(bundle.replace(/^```json\s*|\s*```$/g, '')).conclusion !== 'clean') {
+      throw new Error('dialogue approval requires a clean current review bundle');
+    }
+    const artifact = await materializeReviewBundle({ cwd, bundle, round, diffDigest });
+    return { ...result, ...(dialogue ? { dialogue } : {}), artifact, artifactFailed: false, materializationDeferred: false };
   } catch (error) {
-    return { ...result, artifact: null, artifactFailed: true,
+    return { ...result, artifact: null, artifactFailed: true, materializationDeferred: false,
       error: error instanceof Error ? error.message : String(error) };
   }
 }

@@ -18,6 +18,15 @@ export const CONVERSATION_DNA = [
   '8. Rations (like the repository map) are reachable-past: read any file directly when the survey is not enough.',
 ].join('\n');
 
+/** Keep historical prompts readable while reconciling new dialogue output rules. */
+export function dialoguePromptText(text) {
+  return String(text ?? '')
+    .replaceAll('Return exactly two tagged artifacts and no prose outside them:',
+      'For an explicit proposal or revision return these two artifact tags alongside the required UROBOROS_DIALOGUE envelope:')
+    .replaceAll('and the reviewer still writes its own independent tests.',
+      'and the reviewer independently inspects evidence, adding tests when useful. Preserve all explicitly required checks.');
+}
+
 /**
  * An artifact that ARRIVED but does not parse, contradicts itself, or cycles.
  * The seat ran and said something, so the conversation can answer it: the

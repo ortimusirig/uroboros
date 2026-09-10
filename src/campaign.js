@@ -30,6 +30,8 @@ import {
   verifySuperpowersSeats,
 } from './superpowers.js';
 import { run as realRun } from './run.js';
+import { resolveNativeWorkflowBinding } from './shared-context.js';
+import { workflowIdentity } from './workflow-profiles.js';
 import { resolveStageTimeouts } from './timeouts.js';
 import {
   addUsage,
@@ -102,6 +104,22 @@ function candidateFailureReason(entry) {
 }
 
 function candidateReview(facts) {
+  const dialogue = facts?.dialogue;
+  if (dialogue?.schemaVersion === 2) {
+    // Reporting an assessment is distinct from signing off the artifact. Only
+    // the current execution reviewer can supply it; old phases stay history.
+    const reported = dialogue.phase === 'execution' && dialogue.reviewer === 'claude'
+      && typeof dialogue.artifactDigest === 'string' && typeof dialogue.snapshot?.digest === 'string'
+      && (dialogue.messages ?? []).some(message => message.sender === dialogue.reviewer
+        && message.phase === dialogue.phase && message.artifactDigest === dialogue.artifactDigest
+        && message.contextDigest === dialogue.snapshot.digest
+        && (message.action === 'approve'
+          || (message.issues ?? []).length > 0 || (message.verifications ?? []).length > 0));
+    const issues = Object.values(dialogue.issues ?? {});
+    return { reported, findings: issues.length,
+      blocking: issues.filter(issue => issue.blocking
+        && ['open', 'awaiting-answer', 'awaiting-verification', 'disputed'].includes(issue.status)).length };
+  }
   const lastRound = facts?.debate?.roundHistory?.at(-1) ?? null;
   return {
     reported: lastRound !== null,
@@ -119,7 +137,7 @@ function observedCandidateTestCount(facts) {
 function plannerReview(entry) {
   const facts = entry.facts;
   const review = facts === null ? null : candidateReview(facts);
-  const reviewExpected = facts?.outcome !== 'no-op';
+  const reviewExpected = facts?.dialogue?.schemaVersion === 2 || facts?.outcome !== 'no-op';
   const missing = reviewExpected && review?.reported !== true ? ['review'] : [];
   return {
     unitId: entry.unitId,
@@ -392,6 +410,7 @@ async function runCampaignRound(options) {
   let inFlight = 0;
   let concluded = 0;
   let budgetExceeded = false;
+  let accountingIncomplete = false;
   let finished = false;
   const plannerReviews = [];
 
@@ -512,6 +531,7 @@ async function runCampaignRound(options) {
     };
 
     const dispatch = () => {
+      if (consumedTokens >= tokenBudget || accountingIncomplete) budgetExceeded = true;
       if (budgetExceeded) markUndispatched();
       while (!budgetExceeded && inFlight < concurrency && ready.length > 0) {
         const unitIndex = ready.shift();
@@ -593,9 +613,10 @@ async function runCampaignRound(options) {
           }
           return runUnit({
             ...runOptions,
+            workflowBinding: structuredClone(runOptions.workflowBinding),
             // The scheduler remains authoritative for cross-unit dispatch, while the
             // unit uses the currently remaining campaign budget as its per-round backstop.
-            tokenBudget: Math.max(1, tokenBudget - consumedTokens),
+            tokenBudget: Math.min(tokenBudget - consumedTokens, unit.tokenBudget ?? Infinity),
             task: unit.task,
             target,
             gate,
@@ -620,6 +641,8 @@ async function runCampaignRound(options) {
             ? facts
             : { ...facts, perspective: unit.perspective };
           const unitUsage = addUsage(EMPTY_USAGE, entry.facts?.tokens?.total);
+          accountingIncomplete ||= entry.facts?.resources?.usageUnknown === true || entry.facts?.tokens?.usageUnknown === true
+            || !['inputTokens', 'outputTokens'].every(key => Number.isFinite(entry.facts?.tokens?.total?.[key]) && entry.facts.tokens.total[key] >= 0);
           usageChecks.push({
             unitId: unit.unitId,
             ...checkUsageConsistency(unitUsage),
@@ -749,7 +772,7 @@ async function runCampaignRound(options) {
   const undispatchedEntries = entries.filter((entry) => entry.status === 'not-dispatched');
   const everyCandidateFailed = candidateSet
     && failedEntries.length === entries.length;
-  const outcome = candidateSet
+  const outcome = accountingIncomplete ? 'accounting-incomplete' : candidateSet
     ? (everyCandidateFailed
         ? 'campaign-failed'
         : budgetExceeded ? 'budget-exhausted' : 'review-ready')
@@ -774,6 +797,7 @@ async function runCampaignRound(options) {
     usageConsistency: summarizeUsageConsistency(usageChecks),
     consumedTokens,
     budgetExceeded,
+    ...(accountingIncomplete ? { accountingIncomplete: true } : {}),
   };
   const alternatives = candidateSet ? {
     status: 'awaiting-planner-decision',
@@ -1016,8 +1040,9 @@ function iterativeRollup(rounds, tokenBudget, stopReason) {
       && (entry.status === 'failed' || exitCodeFor(entry.facts?.outcome) !== 0)
   ));
   const budgetExceeded = stopReason === CAMPAIGN_STOP_REASONS.BUDGET_EXHAUSTED;
+  const accountingIncomplete = rounds.some(round => round.rollup.accountingIncomplete);
   return {
-    outcome: everyCandidateFailed
+    outcome: accountingIncomplete ? 'accounting-incomplete' : everyCandidateFailed
       ? 'campaign-failed'
       : budgetExceeded ? 'budget-exhausted' : 'review-ready',
     counts,
@@ -1025,12 +1050,19 @@ function iterativeRollup(rounds, tokenBudget, stopReason) {
     usageConsistency: summarizeUsageConsistency(usageChecks),
     consumedTokens,
     budgetExceeded,
+    ...(accountingIncomplete ? { accountingIncomplete: true } : {}),
     tokenBudget,
   };
 }
 
 export async function runCampaign(options) {
   if (!isRecord(options)) throw new TypeError('campaign options must be an object');
+  const workflowBinding = structuredClone(resolveNativeWorkflowBinding({ workflowBinding: options.runOptions?.workflowBinding }));
+  const assertRoundWorkflow = declaration => {
+    if (declaration?.runOptions?.workflowBinding !== undefined
+      && JSON.stringify(workflowIdentity({ binding: declaration.runOptions.workflowBinding }))
+        !== JSON.stringify(workflowIdentity({ binding: workflowBinding }))) throw new Error('conflicting campaign round workflow binding');
+  };
   const environment = options.env ?? options.runOptions?.env ?? process.env;
   const suppliedSuperpowers = options.superpowers ?? options.runOptions?.superpowers;
   const verifySuperpowers = options.verifySuperpowers ?? verifySuperpowersSeats;
@@ -1052,7 +1084,7 @@ export async function runCampaign(options) {
   const providers = normalizeProviderOptions({ ...providerRunOptions, ...options,
     mode: options.interactionMode ?? options.mode ?? options.runOptions?.mode });
   options = { ...options, superpowers, interactionMode: providers.interactionMode,
-    runOptions: { ...options.runOptions, superpowers, env: environment, mode: providers.interactionMode,
+    runOptions: { ...options.runOptions, workflowBinding, superpowers, env: environment, mode: providers.interactionMode,
       ...(providers.codexModel === undefined ? {} : { executorModel: providers.codexModel }),
       ...(providers.codexEffort === undefined ? {} : { executorEffort: providers.codexEffort }),
       ...(providers.claudeModel === undefined ? {} : { arbiterModel: providers.claudeModel, verifierModel: providers.claudeModel }),
@@ -1065,6 +1097,7 @@ export async function runCampaign(options) {
   // it adds no stop reason or rounds collection and emits the same lifecycle records.
   if (configuration.maxRounds === DEFAULT_ROUNDS) {
     if (firstDeclaration === undefined) return runCampaignRound(options);
+    assertRoundWorkflow(firstDeclaration);
     const {
       rounds: _rounds,
       roundPlans: _roundPlans,
@@ -1073,7 +1106,8 @@ export async function runCampaign(options) {
       shouldStop: _shouldStop,
       ...singleOptions
     } = options;
-    return runCampaignRound({ ...singleOptions, ...firstDeclaration });
+    return runCampaignRound({ ...singleOptions, ...firstDeclaration,
+      runOptions: { ...(firstDeclaration.runOptions ?? singleOptions.runOptions), workflowBinding } });
   }
 
   if (options.round !== undefined && options.round !== 1) {
@@ -1110,6 +1144,7 @@ export async function runCampaign(options) {
 
   try {
     for (let round = 1; round <= configuration.maxRounds; round++) {
+      assertRoundWorkflow(next);
       const tasks = withRoundUnitIds(next.tasks, campaignId, round);
       const validation = validateIterativeRound(tasks, campaignId, seenUnitIds, expectedBaseRef);
       expectedBaseRef ??= validation.baseRef;

@@ -28,6 +28,34 @@ import {
   vscodeFileHref,
 } from '../src/dashboard-view.js';
 import { spawnCapture } from '../src/spawn.js';
+import { createSharedContext } from '../src/shared-context.js';
+import { loadWorkflowBinding } from '../src/workflow-profiles.js';
+
+for (const mode of ['bound', 'invalid', 'v1']) test(`dashboard actual ${mode} facts show curated workflow identity and preserve conversation`, t => {
+  const root = mkdtempSync(join(tmpdir(), 'ccc-dashboard-snapshot-shape-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const run = makeRun(root, 'workflow-display', [event('workflow-display', 'report', 'finish')]);
+  const facts = { runId: 'workflow-display', phase: 'execution', interactionMode: 'manual', authority: 'human', approved: false,
+    messages: [{ speaker: 'codex', phase: 'execution', role: 'implementation-author', content: 'Retained implementation' }] };
+  if (mode === 'v1') facts.checkpointState = { version: 1, phase: 'execution', stage: 'execution-dispute' };
+  else {
+    const snapshot = structuredClone(createSharedContext({ projectId: 'p', runId: 'r', unitId: 'u', phase: 'execution',
+      sourceRevision: 's', entries: [], workflowBinding: loadWorkflowBinding() }));
+    if (mode === 'invalid') snapshot.entries[0].content = 'PRIVATE_SENTINEL';
+    facts.dialogue = { snapshot, phase: 'execution', messages: facts.messages };
+  }
+  writeFileSync(join(run.work, 'uro-runfacts.json'), JSON.stringify(facts));
+  const snapshot = buildDashboardSnapshot({ runDirectory: run.directory });
+  const expected = mode === 'v1' ? 'legacy-unbound' : mode;
+  const client = snapshotForClient(snapshot);
+  assert.equal(snapshot.runs[0].workflow.mode, expected);
+  assert.equal(client.runs[0].workflow.mode, expected);
+  const html = renderDashboardPage(snapshot);
+  assert.match(html, new RegExp(`Workflow: ${expected}`));
+  assert.match(html, /Retained implementation/);
+  assert.doesNotMatch(JSON.stringify(client) + html, /PRIVATE_SENTINEL|BMAD planning adaptation/);
+  if (mode === 'bound') assert.match(html, /spec-kit.*revision 1.*sections: execution/);
+});
 
 const cli = fileURLToPath(new URL('../bin/loop.js', import.meta.url));
 

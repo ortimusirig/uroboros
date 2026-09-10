@@ -229,8 +229,11 @@ test('the arbiter prompt never rides in argv, whatever its size', async () => {
       return child;
     },
   });
-  await pending;
+  const result = await pending;
   assert.equal(delivered, huge, 'the prompt must be written to stdin');
+  assert.equal(result.delivery.kind, 'stdin-submitted');
+  assert.equal(result.delivery.bytes, Buffer.byteLength(huge));
+  assert.equal(result.delivery.consumption, 'unknown');
 });
 
 test('the landing judgement carries approval, reasoning, and findings verbatim', () => {

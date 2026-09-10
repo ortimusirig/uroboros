@@ -5,6 +5,9 @@ Start with the [project overview and installation](../README.md).
 ## Current guides
 
 - [Usage and command reference](guides/usage.md), including [manual resume](guides/usage.md#manual-resume)
+- [Sizing goals and task units by outcome](guides/task-sizing.md)
+- [Bundled BMAD and Spec Kit workflow profiles](guides/workflow-profiles.md)
+- [Coworker dialogue, evidence and recovery](guides/coworker-dialogue.md)
 - [GitHub publishing and confidentiality guard](guides/publishing.md)
 - [Moving between machines](guides/porting.md)
 

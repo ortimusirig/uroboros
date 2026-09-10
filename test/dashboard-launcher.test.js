@@ -8,6 +8,7 @@ import { join } from 'node:path';
 import {
   formatDashboardAnnouncement,
   launchDashboard,
+  probeDashboard,
 } from '../src/dashboard-launcher.js';
 import { startDashboard } from '../src/dashboard.js';
 
@@ -152,8 +153,155 @@ test('an answering CCC dashboard is reused without spawning another process', as
   }
 });
 
+for (const partial of [false, true]) {
+  test(`a dashboard with a delayed ${partial ? 'partial-body' : 'initial'} marker is reused`, async () => {
+    const server = createServer((_request, response) => {
+      if (partial) response.write('<html><body>');
+      const timer = setTimeout(() => response.end('<h1>URO live run dashboard</h1>'), 400);
+      response.once('close', () => clearTimeout(timer));
+    });
+    const port = await listen(server);
+    let spawnCount = 0;
+    try {
+      const result = await launchDashboard('C:/scratch', {
+        env: {}, port,
+        // Exercise the actual default probe/readiness budgets from the CLI path.
+        spawn: () => { spawnCount += 1; throw new Error('must reuse'); },
+      });
+      assert.deepEqual(result, { status: 'reused', url: `http://127.0.0.1:${port}/` });
+      assert.equal(spawnCount, 0, 'slow identification must not spawn over an occupied port');
+    } finally {
+      await close(server);
+    }
+  });
+}
+
+test('a started dashboard gets the remaining budget to deliver a delayed marker', async () => {
+  const server = createServer((_request, response) => {
+    const timer = setTimeout(() => response.end('<h1>URO live run dashboard</h1>'), 400);
+    response.once('close', () => clearTimeout(timer));
+  });
+  const port = await listen(server);
+  const child = new EventEmitter();
+  child.unref = () => {};
+  let probes = 0;
+  let spawnCount = 0;
+  try {
+    const result = await launchDashboard('C:/scratch', {
+      env: {}, port, startupTimeoutMs: 2000,
+      // Model only the process-binding transition; identity still uses real HTTP.
+      probe: (probePort, options) => ++probes === 1
+        ? Promise.resolve({ status: 'vacant' }) : probeDashboard(probePort, options),
+      spawn: () => { spawnCount += 1; return child; },
+    });
+    assert.deepEqual(result, { status: 'started', url: `http://127.0.0.1:${port}/` });
+    assert.equal(spawnCount, 1, 'readiness retries must not start a second dashboard');
+  } finally {
+    await close(server);
+  }
+});
+
+test('unconfirmed occupancy never permits a later vacant probe to spawn a dashboard', async () => {
+  let probes = 0;
+  let spawnCount = 0;
+  const result = await launchDashboard('C:/scratch', {
+    env: {}, port: 48134, startupTimeoutMs: 100,
+    probe: async () => ({ status: ++probes === 1 ? 'occupied' : 'vacant' }),
+    spawn: () => { spawnCount += 1; throw new Error('must not spawn'); },
+    wait: async () => {},
+  });
+  assert.equal(result.status, 'unavailable');
+  assert.equal(Object.hasOwn(result, 'url'), false);
+  assert.equal(spawnCount, 0, 'observed occupancy must remain ineligible for spawn');
+  assert.ok(probes >= 2, 'the launcher must attempt bounded identification');
+});
+
+test('initial identification and startup share one deadline', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: 0 });
+  const timeouts = [];
+  let probes = 0;
+  let spawnCount = 0;
+  const result = await launchDashboard('C:/scratch', {
+    env: {}, port: 48135, probeTimeoutMs: 200, startupTimeoutMs: 80,
+    probe: async (_port, { timeoutMs }) => {
+      timeouts.push(timeoutMs);
+      if (++probes === 1) {
+        t.mock.timers.tick(60);
+        return { status: 'occupied' };
+      }
+      t.mock.timers.tick(timeoutMs);
+      return { status: 'occupied' };
+    },
+    spawn: () => { spawnCount += 1; throw new Error('must not spawn'); },
+    wait: async (ms) => t.mock.timers.tick(ms),
+  });
+  assert.equal(result.status, 'unavailable');
+  assert.equal(spawnCount, 0);
+  assert.equal(timeouts[0], 80, 'the first probe must respect the total deadline');
+  assert.equal(timeouts[1], 20, 'identification gets the remaining budget, not a fresh one');
+  assert.equal(Date.now(), 80);
+});
+
+test('an exhausted polling wait cannot start another probe or accept a late marker', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: 0 });
+  const child = new EventEmitter();
+  child.unref = () => {};
+  let probes = 0;
+  const result = await launchDashboard('C:/scratch', {
+    env: {}, port: 48137, startupTimeoutMs: 80, startupPollMs: 80,
+    spawn: () => child,
+    probe: async () => ({ status: ++probes <= 2 ? 'vacant' : 'uroboros' }),
+    wait: async (ms) => t.mock.timers.tick(ms),
+  });
+  assert.equal(result.status, 'unavailable');
+  assert.equal(Object.hasOwn(result, 'url'), false);
+  assert.equal(probes, 2, 'no new network work may begin after the shared deadline');
+});
+
+test('repeated incomplete responses are paced inside the shared deadline', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: 0 });
+  let probes = 0;
+  let waits = 0;
+  const result = await launchDashboard('C:/scratch', {
+    env: {}, port: 48138, startupTimeoutMs: 80, startupPollMs: 80,
+    probe: async () => {
+      if (++probes > 2) throw new Error('unexpected unpaced retry');
+      return { status: 'occupied' };
+    },
+    spawn: () => { throw new Error('must not spawn'); },
+    wait: async (ms) => { waits += 1; t.mock.timers.tick(ms); },
+  });
+  assert.equal(result.status, 'unavailable');
+  assert.equal(waits, 1, 'repeated failed identity requests must not form a busy retry loop');
+  assert.equal(probes, 2);
+  assert.equal(Date.now(), 80);
+});
+
+for (const event of ['error', 'exit']) {
+  test(`a dashboard child ${event} during identification cannot become a successful launch`, async () => {
+    const child = new EventEmitter();
+    child.unref = () => {};
+    let probes = 0;
+    const result = await launchDashboard('C:/scratch', {
+      env: {}, port: 48136,
+      spawn: () => child,
+      probe: async () => {
+        if (++probes === 1) return { status: 'vacant' };
+        if (event === 'error') child.emit('error', new Error('identification child failed'));
+        else child.emit('exit', 7, null);
+        return { status: 'uroboros' };
+      },
+    });
+    assert.equal(result.status, 'unavailable');
+    assert.match(result.reason, event === 'error' ? /identification child failed/ : /exited with code 7/);
+    assert.equal(Object.hasOwn(result, 'url'), false);
+  });
+}
+
 test('a foreign HTTP listener is not adopted and reports its occupied port', async () => {
+  let requests = 0;
   const foreign = createServer((_request, response) => {
+    requests += 1;
     response.writeHead(200, { 'Content-Type': 'text/html' });
     response.end('<h1>Definitely some other service</h1>');
   });
@@ -168,6 +316,7 @@ test('a foreign HTTP listener is not adopted and reports its occupied port', asy
     assert.equal(result.status, 'unavailable');
     assert.match(result.reason, new RegExp(`port ${port}.*other than a CCC dashboard`, 'i'));
     assert.equal(spawnCount, 0);
+    assert.equal(requests, 1, 'a definitive foreign response must not enter readiness retries');
     assert.equal(Object.hasOwn(result, 'url'), false, 'a foreign service must not be claimed');
   } finally {
     await close(foreign);
@@ -178,14 +327,17 @@ test('a wedged listener is bounded and treated as occupied', async () => {
   const wedged = createServer(() => {});
   const port = await listen(wedged);
   const startedAt = Date.now();
+  let spawnCount = 0;
   try {
     const result = await launchDashboard('C:/scratch', {
-      env: {}, port, probeTimeoutMs: 30,
-      spawn: () => { throw new Error('must not spawn over a connected listener'); },
+      env: {}, port, probeTimeoutMs: 30, startupTimeoutMs: 100,
+      spawn: () => { spawnCount += 1; throw new Error('must not spawn over a connected listener'); },
     });
     assert.equal(result.status, 'unavailable');
-    assert.match(result.reason, new RegExp(`port ${port}.*other than`, 'i'));
-    assert.ok(Date.now() - startedAt < 500, 'the HTTP probe must be tightly bounded');
+    assert.match(result.reason, new RegExp(`port ${port}.*not.*identif`, 'i'));
+    assert.equal(spawnCount, 0);
+    assert.equal(Object.hasOwn(result, 'url'), false);
+    assert.ok(Date.now() - startedAt < 1000, 'unconfirmed occupancy must respect a bounded budget');
   } finally {
     await close(wedged);
   }

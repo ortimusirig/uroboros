@@ -3,7 +3,14 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { runPlan, runPlanCandidateSet } from '../src/plan.js';
+import { runPlan as runNewPlan, runPlanCandidateSet as runNewCandidateSet } from '../src/plan.js';
+import { scriptedPlanningAdapters, scriptedPlanningResponse } from './fixtures/planning-responses.js';
+const runPlan = options => runNewPlan({ artifactRoot: join(tmpdir(), 'uro-task3-fixture-artifacts'), ...options, adapters: scriptedPlanningAdapters(options.adapters ?? {}) });
+const runPlanCandidateSet = options => runNewCandidateSet({ artifactRoot: join(tmpdir(), 'uro-task3-fixture-artifacts'), ...options,
+  ...(options.draft ? { draft: async r => scriptedPlanningResponse(r, await options.draft(r), 'claude') } : {}),
+  ...(options.select ? { select: async r => scriptedPlanningResponse(r, await options.select(r), 'codex') } : {}),
+  ...(options.review ? { review: async r => scriptedPlanningResponse(r, await options.review(r), 'codex') } : {}),
+});
 import { applySuperpowersRequirement } from '../src/superpowers.js';
 
 test('candidate token totals include every authored alternative and the reviewer selection',async t=>{
@@ -67,13 +74,13 @@ test('standalone autonomous planning routes a dissenting final decision to Codex
   review:async r=>{
    reviews++;
    const digest=/ARTIFACT_DIGEST: ([a-f0-9]{64})/.exec(r.plan)?.[1];
-   return {exitCode:0,lastMessage:(r.plan.includes('Return DECISION:')
+   return {exitCode:0,lastMessage:(r.plan.includes('Requested action: decide.')
      ?'DECISION: approve\nREASON: The current approach meets the requirements.'
      :'AGREE: no\nS1 P1: Discuss the approach')+'\nARTIFACT_DIGEST: '+digest};
   },
  })});
  assert.equal(result.approved,true);
- assert.equal(result.converged,false);
+  assert.equal(result.dialogue.messages.at(-1).action,'approve');
  assert.equal(result.approval.decidedBy,'codex');
  assert.equal(reviews,3);
 });
@@ -133,7 +140,7 @@ test('production final-ruling parser rejects echoed, conflicting, and malformed 
       author: async () => ({ answer: artifact().replace('AGREE: yes', 'AGREE: no') }),
       review: async r => {
         const digest = /ARTIFACT_DIGEST: ([a-f0-9]{64})/.exec(r.plan)?.[1];
-        if (!r.plan.includes('Return DECISION:')) {
+        if (!r.plan.includes('Requested action: decide.')) {
           return { exitCode: 0, lastMessage: 'AGREE: no\nS1 P1: Continuing dispute\nARTIFACT_DIGEST: ' + digest };
         }
         finalReply = ruling + '\nREASON: This resolves the dispute.\nARTIFACT_DIGEST: ' + digest;
@@ -141,7 +148,7 @@ test('production final-ruling parser rejects echoed, conflicting, and malformed 
       },
     }) });
     assert.equal(result.approved, false, ruling);
-    assert.equal(result.reason, 'decision-unreadable', ruling);
+    assert.match(result.reason, /unreadable dialogue after one format repair/, ruling);
     assert.equal(result.messages.at(-1).content, finalReply);
     assert.equal(existsSync(join(options.out, 'plan.md')), false);
   }
@@ -181,8 +188,8 @@ test('production selector retains the delivered selection and all failed-call us
 });
 
 
-test('default candidate drafts repair delivered malformed artifacts before selection without spending a round', async t => {
-  const options = { ...setup(t), candidates: undefined, rounds: 1 };
+test('explicit candidate drafts repair delivered malformed artifacts before selection without spending a round', async t => {
+  const options = { ...setup(t), candidates: 3, rounds: 1 };
   const attempts = new Map(), brokenReplies = [];
   let authors = 0, reviews = 0;
   const result = await runPlan({ ...options, adapters: adapters({
@@ -231,16 +238,16 @@ test('default perpetually malformed candidates exhaust one shared repair budget 
   }) });
   assert.equal(result.reason, 'proposal-irreparable');
   assert.equal(result.approved, false);
-  assert.equal(authors, 8, 'three initial candidates and at most five repair calls');
+  assert.equal(authors, 6, 'one initial draft and at most five repair calls');
   assert.equal(reviews, 0);
-  assert.equal(result.tokens.total.inputTokens, 80);
-  assert.equal(result.messages.length, 8);
+  assert.equal(result.tokens.total.inputTokens, 60);
+  assert.equal(result.messages.length, 6);
   assert.equal(result.checkpointState.artifactRepairs, 6);
   assert.ok(result.messages.every(message => message.content === '<PLAN_MD>Missing evidence artifact</PLAN_MD>'));
   assert.equal(existsSync(join(options.out, 'plan.md')), false);
 });
 test('candidate repairs and later proposal repairs consume the same five-repair allowance', async t => {
-  const options = { ...setup(t), candidates: undefined };
+  const options = { ...setup(t), candidates: 3 };
   let candidateOneCalls = 0, authorCalls = 0, reviews = 0;
   const result = await runPlan({ ...options, adapters: adapters({
     author: async r => {
@@ -273,7 +280,7 @@ test('autonomous planning final decision uses terminal stop despite earlier deli
   const first = 'DECISION: approve\nREASON: Preliminary approval before checking the disputed branch.';
   const result = await runPlan({ ...setup(t), interactionMode: 'autonomous', adapters: adapters({ review: async r => {
     const digest = /ARTIFACT_DIGEST: ([a-f0-9]{64})/.exec(r.plan)?.[1];
-    const final = r.plan.includes('Return DECISION: approve');
+    const final = r.plan.includes('Requested action: decide.');
     if (final) finals++;
     const terminal = final ? `DECISION: stop\nREASON: The requested behavior cannot be met.\nARTIFACT_DIGEST: ${digest}`
       : `AGREE: no\nS1 P1: Unresolved behavior.\nARTIFACT_DIGEST: ${digest}`;
@@ -313,7 +320,8 @@ for (const failed of [false, true]) test(`planning retains every delivered Codex
   } else {
     assert.equal(result.reason, 'needs-decision');
     assert.ok(prompts[1].includes(first));
-    assert.ok(retained.every(message => message.stance === 'disagree'));
+    assert.ok(retained.every(message => message.stance === 'neutral'),
+      'legacy prose without a validated explicit dialogue action must not invent disagreement');
   }
 });
 const artifact = (text = 'Plan with "quotes"\nand newlines') =>

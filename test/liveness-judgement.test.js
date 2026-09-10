@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runExecutor } from '../src/executor.js';
@@ -59,15 +59,30 @@ for (const mode of ['no-judge', 'no-reporter', 'stuck', 'working', 'malformed', 
     if (!['deadline', 'no-reporter'].includes(mode)) assert.ok(events.some(event => event.type === 'stalled' && event.tier === 'progress'));
   });
 }
-import { createLivenessDeadline } from '../src/spawn.js';
+import { createLivenessDeadline, spawnCapture } from '../src/spawn.js';
 import { run as executeRun } from '../src/run.js';
 import { withVerifiedSuperpowers } from '../fixtures/verified-superpowers.mjs';
+import { createInspectionReceipt } from '../src/context-evidence.js';
 import {
   createLivenessJudge,
   DEFAULT_LIVENESS_JUDGE_TIMEOUT_MS,
 } from '../src/liveness-judge.js';
 
 const run = (options) => executeRun(withVerifiedSuperpowers(options));
+const runScratchBase = process.platform === 'win32' ? 'C:/ccc-test' : tmpdir();
+function runScratch() { mkdirSync(runScratchBase, { recursive: true }); return mkdtempSync(join(runScratchBase, 'liveness-scratch-')); }
+function nativeEnvelope(r, action, extra = {}) {
+  return { schemaVersion: 1, action, artifactDigest: r.state.artifactDigest, contextDigest: r.state.snapshot.digest,
+    replyTo: null, content: 'Observed current task', claims: [], issues: [], evidence: [], verifications: [], next: null, ...extra };
+}
+function nativeReview(r) {
+  const evidence = r.state.evidence.find(item => item.id === 'requirement-briefing');
+  const receipt = createInspectionReceipt({ operationId: r.operationId, seat: 'claude', evidence: [evidence], inspected: true, result: 'read' });
+  return { usage: { inputTokens: 1, outputTokens: 1 }, observations: { evidence: [], receipts: [receipt] }, dialogue: nativeEnvelope(r, 'approve', {
+    claims: [{ id: 'briefing-requirement', kind: 'fact', text: 'Observed the supplied task.', evidenceIds: [evidence.id] }],
+    verifications: [{ claimId: 'briefing-requirement', evidenceIds: [evidence.id], inspectionReceiptIds: [receipt.id], result: 'supports', reason: 'Read the captured task.' }],
+  }) };
+}
 
 function controlledClock() {
   let time = 0;
@@ -118,6 +133,7 @@ function deadlineHarness({
   processTree = { available: true, rootPid: 7, liveDescendantCount: 0, descendants: [] },
   worktreeActivity = { available: true, changed: false, changedFiles: [] },
   onDecision,
+  onDecisionRequired,
 } = {}) {
   const clock = controlledClock();
   const events = [];
@@ -145,6 +161,7 @@ function deadlineHarness({
       onDecision?.(decision);
     },
     onKill: (reason) => killed.push(reason),
+    onDecisionRequired,
     now: clock.now,
     setTimer: clock.setTimer,
     clearTimer: clock.clearTimer,
@@ -159,6 +176,36 @@ function deadlineHarness({
     },
   };
 }
+
+test('required liveness decision is awaited before kill and failure cannot grant working extension', async () => {
+  let release;
+  const harness = deadlineHarness({ judge: async () => ({ status: 'working', reasoning: 'Live child' }),
+    onDecisionRequired: () => new Promise((resolve, reject) => { release = () => reject(new Error('decision journal failed')); }),
+  });
+  harness.clock.advance(50);
+  await flush(); await flush();
+  assert.equal(typeof release, 'function');
+  assert.equal(harness.killed.length, 0);
+  release();
+  await flush();
+  assert.equal(harness.killed.length, 1);
+  assert.match(harness.killed[0].persistenceFailure, /decision journal failed/);
+  harness.deadline.dispose();
+});
+
+for (const end of ['dispose', 'timeout']) test(`native liveness ${end} prevents late evidence gathering from launching a judge`, async () => {
+  const clock = controlledClock(); let release, launches = 0;
+  const deadline = createLivenessDeadline({ thresholdMs: 50, judgeTimeoutMs: 20,
+    getLiveness: () => ({ gapMs: 50 }),
+    getProcessTree: () => new Promise(resolve => { release = resolve; }),
+    judge: async () => { launches++; return { status: 'working', reasoning: 'late judge' }; },
+    onDecisionRequired: async () => {}, onKill: () => {}, now: clock.now, setTimer: clock.setTimer, clearTimer: clock.clearTimer });
+  clock.advance(50); await flush();
+  if (end === 'dispose') deadline.dispose(); else clock.advance(20);
+  release({ descendants: [] }); await flush(); await flush();
+  assert.equal(launches, 0);
+  deadline.dispose();
+});
 
 test('silence asks a judge; working leaves the executor alive and emits its reason', async () => {
   const clock = controlledClock();
@@ -425,9 +472,36 @@ test('the production fresh judge is read-only, bounded, and receives verbatim ev
   assert.equal(calls[0].opts.env.CODEX_HOME, env.CODEX_HOME);
   assert.equal(calls[0].opts.env[Object.keys(process.env).find(key => key.toLowerCase() === 'path') ?? 'PATH'], process.env[Object.keys(process.env).find(key => key.toLowerCase() === 'path') ?? 'PATH']);
   assert.match(calls[0].opts.input, /waiting on child \\"alpha\\"/);
-  assert.deepEqual(result, {
+  assert.partialDeepStrictEqual(result, {
     status: 'working', reasoning: 'The worker child is live.', nextIntervalMs: 90,
   });
+});
+
+test('liveness transport retains actual launch, stdin delivery and parsed usage from an owned child', async () => {
+  const script = 'process.stdin.resume(); process.stdin.on("end", () => { console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:JSON.stringify({status:"working",reasoning:"Observed child"})}})); console.log(JSON.stringify({type:"turn.completed",usage:{input_tokens:7,output_tokens:3}})); });';
+  const judge = createLivenessJudge({ cwd: tmpdir(), runSeat: (bin, args, options) => {
+    assert.equal(args[args.indexOf('-s') + 1], 'read-only');
+    return spawnCapture(process.execPath, ['-e', script], options);
+  } });
+  const result = await judge({ lastAgentMessage: 'retained current task' });
+  assert.equal(result.status, 'working');
+  assert.deepEqual(result.usage, { inputTokens: 7, outputTokens: 3, cachedInputTokens: 0, reasoningOutputTokens: 0, cacheWriteTokens: 0 });
+  assert.equal(result.launch.argv[0], process.execPath);
+  assert.equal(result.delivery.kind, 'stdin-submitted');
+  assert.equal(result.delivery.consumption, 'unknown');
+  assert.equal(result.exitCode, 0);
+});
+
+test('failed liveness launch retains its requested read-only transport without inventing delivery', async () => {
+  const judge = createLivenessJudge({ cwd: tmpdir(), bin: 'missing-test-seat', runSeat: async () => { throw new Error('fixture launch failed'); } });
+  const result = await judge({ checkCount: 1 });
+  assert.equal(result.available, false);
+  assert.equal(result.requestedLaunch.bin, 'missing-test-seat');
+  assert.equal(result.requestedLaunch.cwd, tmpdir());
+  assert.equal(result.requestedLaunch.args[result.requestedLaunch.args.indexOf('-s') + 1], 'read-only');
+  assert.equal(result.launch, null);
+  assert.equal(result.delivery, null);
+  assert.equal(result.usage, null);
 });
 
 test('the production fresh judge preserves a working verdict with a malformed cadence', async () => {
@@ -449,7 +523,7 @@ test('the production fresh judge preserves a working verdict with a malformed ca
     }),
   });
 
-  assert.deepEqual(await judge({}), {
+  assert.partialDeepStrictEqual(await judge({}), {
     status: 'working',
     reasoning: 'The worker child is live.',
     invalidNextIntervalMs: 0,
@@ -494,8 +568,8 @@ test('mutation control: post-parse else-if invalidNextIntervalMs branch records 
 });
 
 test('run facts mutation control records createLivenessDeadline via decide(decision)', async () => {
-  const root = mkdtempSync(join(process.cwd(), '.liveness-run-'));
-  const scratchRoot = join(root, 'scratch');
+  const root = mkdtempSync(join(tmpdir(), '.liveness-run-'));
+  const scratchRoot = runScratch();
   const worktree = join(root, 'worktree');
   const target = join(root, 'target');
   const artifactRoot = join(root, 'artifacts');
@@ -503,8 +577,9 @@ test('run facts mutation control records createLivenessDeadline via decide(decis
   mkdirSync(worktree, { recursive: true });
   mkdirSync(target, { recursive: true });
   const judgeLiveness = async () => ({
-    status: 'working', reasoning: 'Injected integration judge.', nextIntervalMs: 0,
+    status: 'working', reasoning: 'Injected integration judge.', nextIntervalMs: 0, usage: { inputTokens: 2, outputTokens: 1 },
   });
+  writeFileSync(join(target, 'seed.txt'), 'existing task source\n');
   try {
     const facts = await run({
       task: 'Observe a liveness decision.', target, gate: [], gateRetries: 0,
@@ -512,29 +587,27 @@ test('run facts mutation control records createLivenessDeadline via decide(decis
       stallThresholdMs: 50,
       adapters: {
         judgeLiveness,
-        isolate: async () => ({
-          dir: worktree, isRepo: false, baseRef: 'HEAD', baseCommit: null,
-          branch: 'uro/liveness-facts',
-        }),
         runExecutor: async (options) => {
-          assert.equal(options.judgeLiveness, judgeLiveness);
+          assert.equal(typeof options.judgeLiveness, 'function');
+          let decisionRecorded;
+          const recorded = new Promise(resolve => { decisionRecorded = resolve; });
           const harness = deadlineHarness({
             thresholdMs: options.livenessThresholdMs,
             judge: options.judgeLiveness,
-            onDecision: options.onLivenessDecision,
+            onDecision: decision => { options.onLivenessDecision(decision); decisionRecorded(); },
+            onDecisionRequired: options.onLivenessDecisionRequired,
           });
           harness.clock.advance(options.livenessThresholdMs);
-          await flush();
+          await recorded;
           assert.deepEqual(harness.killed, []);
           harness.deadline.dispose();
-          return { changedFiles: [], lastMessage: 'No source change.', exitCode: 0 };
+          return { dialogue: nativeEnvelope(options, 'propose'), usage: { inputTokens: 1, outputTokens: 1 }, exitCode: 0 };
         },
-        diffText: async () => '',
         runGate: async () => ({ passed: true, results: [] }),
-        runVerifier: async () => { throw new Error('a no-op must not verify'); },
+        runReview: nativeReview,
       },
     });
-    assert.equal(facts.outcome, 'no-op');
+    assert.equal(facts.approved, true, facts.reason);
     assert.equal(facts.livenessChecks.length, 1,
       'removing decide(decision) from createLivenessDeadline must make this mutation control fail');
     assert.equal(facts.livenessChecks[0].nextIntervalMs, 50);
@@ -545,39 +618,37 @@ test('run facts mutation control records createLivenessDeadline via decide(decis
       'Injected integration judge.');
   } finally {
     rmSync(root, { recursive: true, force: true });
+    rmSync(scratchRoot, { recursive: true, force: true });
   }
 });
 
 test('a normal run without a liveness check leaves facts and behavior unchanged', async () => {
-  const root = mkdtempSync(join(process.cwd(), '.liveness-control-run-'));
-  const scratchRoot = join(root, 'scratch');
+  const root = mkdtempSync(join(tmpdir(), '.liveness-control-run-'));
+  const scratchRoot = runScratch();
   const worktree = join(root, 'worktree');
   const target = join(root, 'target');
   const artifactRoot = join(root, 'artifacts');
   mkdirSync(scratchRoot, { recursive: true });
   mkdirSync(worktree, { recursive: true });
   mkdirSync(target, { recursive: true });
+  writeFileSync(join(target, 'seed.txt'), 'existing task source\n');
   try {
     const facts = await run({
       task: 'Complete without a liveness check.', target, gate: [], gateRetries: 0,
       scratchRoot, artifactRoot, runId: 'liveness-control', reporter: () => {},
       adapters: {
-        isolate: async () => ({
-          dir: worktree, isRepo: false, baseRef: 'HEAD', baseCommit: null,
-          branch: 'uro/liveness-control',
+        runExecutor: async r => ({
+          dialogue: nativeEnvelope(r, 'propose'), usage: { inputTokens: 1, outputTokens: 1 }, exitCode: 0,
         }),
-        runExecutor: async () => ({
-          changedFiles: [], lastMessage: 'No source change.', exitCode: 0,
-        }),
-        diffText: async () => '',
         runGate: async () => ({ passed: true, results: [] }),
-        runVerifier: async () => { throw new Error('a no-op must not verify'); },
+        runReview: nativeReview,
       },
     });
 
-    assert.equal(facts.outcome, 'no-op');
+    assert.equal(facts.approved, true, facts.reason);
     assert.deepEqual(facts.livenessChecks, []);
   } finally {
     rmSync(root, { recursive: true, force: true });
+    rmSync(scratchRoot, { recursive: true, force: true });
   }
 });

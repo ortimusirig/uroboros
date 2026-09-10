@@ -18,6 +18,7 @@ function fixture() {
   writeFileSync(join(target, 'source.js'), 'original\n');
   for (const path of [target, dir]) {
     execFileSync('git', ['init', '-q', path]);
+    execFileSync('git', ['-C', path, 'config', 'core.autocrlf', 'false']);
     writeFileSync(join(path, 'source.js'), 'original\n');
     execFileSync('git', ['-C', path, 'add', '.']);
     execFileSync('git', ['-C', path, '-c', 'user.name=Test', '-c', 'user.email=test@local', 'commit', '-qm', 'baseline']);
@@ -46,6 +47,35 @@ test('a durable checkpoint rejects unknown, missing, duplicate, blank, wrong-run
   assert.deepEqual(checkpoint.readCheckpoint(f.dir), saved);
 });
 
+test('v1 migration validates original checksum and answer receipts before preserving the exact old envelope', async () => {
+  const f = fixture();
+  const original = await checkpoint.saveCheckpoint({ directory: f.dir, checkpointState: f.state });
+  const answer = { schemaVersion: 1, runId: original.runId, artifactDigest: original.artifactDigest,
+    answers: [{ id: 'Q1', answer: 'Use the original schema' }] };
+  const result = { runId: original.runId, approved: false, reason: 'historical completed result' };
+  original.receipts.push({ decisionId: checkpoint.answerIdentity(answer), artifactDigest: original.artifactDigest,
+    answers: answer.answers, status: 'applied', result, resultDigest: checkpoint.checkpointDigest(result) });
+  checkpoint.writeCheckpointAtomic(join(f.dir, 'uro-checkpoint.json'), original);
+  assert.equal(typeof checkpoint.migrateCheckpointV1, 'function');
+  const migrated = checkpoint.migrateCheckpointV1(original);
+  assert.equal(migrated.schemaVersion, 2);
+  assert.equal(migrated.revision, original.revision + 1);
+  assert.notEqual(migrated.artifactDigest, original.artifactDigest);
+  assert.deepEqual(migrated.migration.original, original);
+  assert.deepEqual(migrated.receipts, original.receipts);
+  assert.equal(migrated.continuation.version, 1, 'migration never manufactures native dialogue or usage');
+  assert.doesNotThrow(() => checkpoint.validateCheckpoint(migrated));
+  const corruptChecksum = structuredClone(original); corruptChecksum.history.push({ invented: true });
+  assert.throws(() => checkpoint.migrateCheckpointV1(corruptChecksum), /checksum/);
+  const corruptReceipt = structuredClone(original); corruptReceipt.receipts[0].decisionId = 'fabricated-answer';
+  checkpoint.writeCheckpointAtomic(join(f.dir, 'uro-checkpoint.json'), corruptReceipt);
+  assert.throws(() => checkpoint.migrateCheckpointV1(corruptReceipt), /answer receipt/);
+  const substitutedEnvelope = structuredClone(migrated);
+  substitutedEnvelope.receipts[0].envelope = { ...answer, answers: [{ id: 'Q1', answer: 'Substituted decision' }] };
+  checkpoint.writeCheckpointAtomic(join(f.dir, 'uro-checkpoint.json'), substitutedEnvelope);
+  assert.throws(() => checkpoint.validateCheckpoint(substitutedEnvelope), /answer.*envelope|envelope.*receipt/);
+});
+
 for (const topology of ['linked', 'copy', 'campaign']) test(`checkpoint validates the actual ${topology} isolation relationship`, async () => {
   const f = fixture();
   const target = join(f.root, 'original');
@@ -53,6 +83,7 @@ for (const topology of ['linked', 'copy', 'campaign']) test(`checkpoint validate
   writeFileSync(join(target, 'source.js'), 'seed\n');
   if (topology === 'linked') {
     execFileSync('git', ['init', '-q', target]);
+    execFileSync('git', ['-C', target, 'config', 'core.autocrlf', 'false']);
     execFileSync('git', ['-C', target, 'add', '.']);
     execFileSync('git', ['-C', target, '-c', 'user.name=Test', '-c', 'user.email=test@local', 'commit', '-qm', 'baseline']);
   }

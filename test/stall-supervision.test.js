@@ -7,9 +7,41 @@ import { reportEvent } from '../src/events.js';
 import { exitCodeFor } from '../src/exit.js';
 import { run as executeRun } from '../src/run.js';
 import { withVerifiedSuperpowers } from '../fixtures/verified-superpowers.mjs';
-import { EXECUTOR_PREAMBLE } from '../src/executor.js';
+import { runExecutor } from '../src/executor.js';
+import { spawn, execFileSync } from 'node:child_process';
 
 const run = (options) => executeRun(withVerifiedSuperpowers(options));
+
+test('native stalled partial writer is preserved once and paused even with restart configured', async () => {
+  const scr = scratch(), tgt = target(); let writers = 0;
+  try {
+    const facts = await run({ task: 'Retain partial work', target: tgt, scratchRoot: scr, gate: [], runId: 'native-partial-stall',
+      reporter: () => {}, stallPolicy: 'restart', stallRestartLimit: 3, stallThresholdMs: 150,
+      adapters: { runExecutor: options => {
+        writers++;
+        return runExecutor({ ...options, bin: process.execPath,
+          spawnProcess: (bin, args, spawnOptions) => spawn(process.execPath, ['-e', 'require("node:fs").writeFileSync("partial.txt", "useful partial bytes\\n"); process.stdout.write("ready"); setInterval(() => {},100);'], spawnOptions),
+          getProcessTree: () => ({ available: true, descendants: [] }),
+          getWorktreeActivity: () => ({ available: true, changed: true, changedFiles: ['partial.txt'] }),
+        });
+      } },
+    });
+    assert.equal(writers, 1);
+    assert.equal(facts.approved, false);
+    assert.equal(facts.nextAction, 'paused');
+    assert.equal(readFileSync(join(facts.dir, 'partial.txt'), 'utf8'), 'useful partial bytes\n');
+    const supervision = facts.checkpointState.supervision;
+    const preserves = supervision.operations.filter(item => item.purpose === 'preservation');
+    assert.equal(preserves.length, 1);
+    assert.equal(preserves[0].status, 'completed');
+    assert.equal(preserves[0].result.head, execFileSync('git', ['-C', facts.dir, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim());
+    assert.match(preserves[0].result.diff, /useful partial bytes/);
+    assert.ok(preserves[0].result.affectedFiles.includes('partial.txt'));
+    assert.equal(supervision.uncertainty.at(-1).outcome, 'unknown');
+    assert.equal(facts.retryCounts.stall, 0);
+    assert.equal(facts.checkpointState.supervision.stallConfig.policy, 'restart');
+  } finally { rmSync(tgt, { recursive: true, force: true }); rmSync(scr, { recursive: true, force: true }); }
+});
 
 const SAFE_SCRATCH_BASE = process.env.URO_TEST_SCRATCH_ROOT ?? (process.platform === 'win32'
   ? 'C:/ccc-test'
@@ -62,7 +94,8 @@ test('report policy records a required liveness kill without scheduling a restar
           runVerifier: async () => { throw new Error('a no-op must not verify'); },
         },
       });
-      assert.equal(facts.outcome, 'timed-out');
+      assert.equal(facts.nextAction, 'paused');
+      assert.equal(facts.approved, false);
       assert.equal(facts.retryCounts.stall, 0);
       assert.ok(facts.stallEvents.some((event) => event.stage === 'executor'));
       assert.ok(events.some((event) => event.stage === 'executor' && event.type === 'stalled'),
@@ -74,7 +107,7 @@ test('report policy records a required liveness kill without scheduling a restar
     }
   });
 
-test('restart relaunches once, then a second silence remains a terminal liveness kill',
+test('saved restart policy terminates one uncertain writer and never grants relaunch',
   async () => {
     const scr = scratch();
     const tgt = target();
@@ -116,25 +149,20 @@ test('restart relaunches once, then a second silence remains a terminal liveness
         },
       });
       assert.deepEqual(killed, [true], 'the first stalled launch must actually receive abort');
-      assert.equal(calls, 2, 'one allowed restart means exactly two executor launches');
-      assert.equal(plans[0], `${EXECUTOR_PREAMBLE}\n\nComplete the original task.`);
-      assert.ok(plans[1].startsWith(plans[0]));
-      assert.match(plans[1], /Previous executor attempt stalled/);
-      assert.match(plans[1], /Last event: executor\/start/);
-      assert.equal(facts.retryCounts.stall, 1);
+      assert.equal(calls, 1, 'uncertain writer cannot restart');
+      assert.match(plans[0], /Complete the original task/);
+      assert.equal(facts.retryCounts.stall, 0);
       assert.equal(facts.limits.stall.restartLimit, 1);
-      assert.ok(facts.stallEvents.some((event) => event.action === 'restart'));
-      assert.ok(facts.stallEvents.some((event) => event.stage === 'executor'
-        && event.action === 'report'),
-      'positive control: the second silence is observed but cannot exceed the kill bound');
-      assert.equal(facts.outcome, 'timed-out');
+      assert.ok(facts.stallEvents.some((event) => event.action === 'pause'));
+      assert.equal(facts.nextAction, 'paused');
+      assert.equal(facts.approved, false);
     } finally {
       rmSync(tgt, { recursive: true, force: true });
       rmSync(scr, { recursive: true, force: true });
     }
   });
 
-test('stall restarts count alone now that verdict-driven retries are gone', async () => {
+test('stall termination neither consumes restart allowance nor reaches evidence commands', async () => {
   const scr = scratch();
   const tgt = target();
   let executorCalls = 0;
@@ -149,6 +177,7 @@ test('stall restarts count alone now that verdict-driven retries are gone', asyn
           executorCalls++;
           executorEvent(opts, 'start');
           if (executorCalls === 1) {
+            writeFileSync(join(opts.cwd, 'changed.txt'), 'partial work\n');
             await new Promise((resolve) => opts.signal.addEventListener('abort', resolve,
               { once: true }));
             executorEvent(opts, 'finish', { code: -1 });
@@ -163,12 +192,12 @@ test('stall restarts count alone now that verdict-driven retries are gone', asyn
         runVerifier: async () => ({ verdict: 'NO_BLOCKERS', launchFailed: false }),
       },
     });
-    assert.equal(facts.outcome, 'review-ready');
-    assert.deepEqual(facts.retryCounts, { stall: 1 },
-      'only the stall restart counter remains; verdict retries are gone');
+    assert.equal(facts.nextAction, 'paused');
+    assert.deepEqual(facts.retryCounts, { stall: 0 });
     assert.equal(facts.limits.stall.restartLimit, 1);
-    assert.equal(executorCalls, 2, 'killed launch + its replacement, nothing gate-driven');
-    assert.equal(gateCalls, 1, 'commands run once as evidence');
+    assert.equal(executorCalls, 1);
+    assert.equal(gateCalls, 0, 'uncertain writer reaches no command effect');
+    assert.equal(readFileSync(join(facts.dir, 'changed.txt'), 'utf8'), 'partial work\n');
   } finally {
     rmSync(tgt, { recursive: true, force: true });
     rmSync(scr, { recursive: true, force: true });
@@ -197,7 +226,7 @@ test('a run that remains stalled until its stage timeout has a non-zero outcome'
     });
     assert.ok(facts.stallEvents.some((event) => event.stage === 'executor'),
       'positive control: this timeout must also have crossed the stall threshold');
-    assert.equal(facts.outcome, 'timed-out');
+    assert.equal(facts.nextAction, 'paused');
     assert.notEqual(exitCodeFor(facts.outcome), 0);
   } finally {
     rmSync(tgt, { recursive: true, force: true });
@@ -215,13 +244,14 @@ test('without a reporter even invalid watchdog settings are never resolved', asy
       adapters: {
         runExecutor: async (opts) => {
           assert.equal(opts.signal, undefined);
-          return { changedFiles: [], lastMessage: 'unchanged' };
+          return { changedFiles: [], error: 'controlled no-change pause', usage: { inputTokens: 1, outputTokens: 1 } };
         },
         runGate: async () => ({ passed: true, results: [] }),
         runVerifier: async () => { throw new Error('no-op must not verify'); },
       },
     });
-    assert.equal(facts.outcome, 'no-op');
+    assert.equal(facts.nextAction, 'paused');
+    assert.equal(facts.approved, false);
     assert.equal(Object.hasOwn(facts, 'stallEvents'), false);
     assert.equal(Object.hasOwn(facts, 'retryCounts'), false);
   } finally {

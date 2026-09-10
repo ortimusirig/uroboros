@@ -130,7 +130,12 @@ export async function runGate({
   // The tail below is a facts-sized excerpt; the sink is how the complete
   // output reaches disk so seats judge from whole evidence, never a cut string.
   onEvidence,
+  requiredEvidence = false,
+  codeIdentity,
 }) {
+  if (requiredEvidence && (typeof onEvidence !== 'function' || typeof codeIdentity !== 'function')) {
+    throw new Error('required command evidence needs a sink and observed code identity');
+  }
   const results = [];
   let testCount = 0;
   let observedTestCount = false;
@@ -142,6 +147,8 @@ export async function runGate({
       if (observedTestCount) commandEnv.URO_OBSERVED_TEST_COUNT = String(testCount);
       else delete commandEnv.URO_OBSERVED_TEST_COUNT;
     }
+    const observedCodeIdentity = requiredEvidence ? await codeIdentity({ cwd, command: cmd }) : null;
+    if (requiredEvidence && !observedCodeIdentity) throw new Error('required command code identity unavailable');
     const r = await spawnCapture(cmd.bin, cmd.args, {
       cwd,
       timeoutMs,
@@ -161,7 +168,7 @@ export async function runGate({
       code: r.code,
     };
     try {
-      onEvidence?.({
+      await onEvidence?.({
         bin: cmd.bin,
         args: cmd.args,
         ...(cmd.harness === undefined ? {} : { harness: cmd.harness }),
@@ -170,8 +177,12 @@ export async function runGate({
         attempt,
         stdout: r.stdout,
         stderr: r.stderr,
+        ...(requiredEvidence ? { executed: true, argv: r.launch.argv, cwd: r.launch.cwd,
+          requested: r.launch.requested, exitCode: r.code,
+          status: r.timedOut ? 'timed-out' : r.signal ? 'signalled' : 'completed',
+          codeIdentity: observedCodeIdentity } : {}),
       });
-    } catch { /* evidence capture must never alter execution */ }
+    } catch (error) { if (requiredEvidence) throw error; /* Explicit legacy best-effort sink. */ }
     reportEvent(reporter, runId, 'gate', 'gate_command', {
       ...result, timedOut: r.timedOut, attempt,
     });

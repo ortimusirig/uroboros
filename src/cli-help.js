@@ -4,11 +4,12 @@ export const CLI_COMMANDS = Object.freeze([
 
 export const CLI_USAGE = `Usage:
   node bin/loop.js resume --run <run-directory> --decision-file <answers.json>
+  node bin/loop.js resume --run <run-directory> --continue
   node bin/loop.js run --task <plan-file-or-prose> --target <directory> --gate <gate.json> [--gate-retries <0-3>] [--pivot-candidates <1-5>] [--mode manual|autonomous] [--claude-model MODEL] [--codex-model MODEL] [--codex-effort EFFORT] [--executor-timeout <ms>] [--verifier-timeout <ms>] [--arbiter-timeout <ms>] [--gate-timeout <ms>] [--artifact-root <directory>] [--mutate] [--port <0-65535>] [--open] [--no-dashboard] [--quiet]
   node bin/loop.js mutate --target <directory> [--base <ref>] [--tests <command>] [--dry-run]
   node bin/loop.js plan --goal <prose-or-file> --target <directory> --out <directory> [--rounds <n>] [--candidates <1-5>] [--pivot-candidates <1-5>] [--mode manual|autonomous] [--claude-model MODEL] [--codex-model MODEL] [--codex-effort EFFORT] [--dry-run]
   node bin/loop.js decompose (--goal <spec.md> | --project <file-or-prose> --out <dir>) --target <dir> [--rounds N] [--map-budget CHARS] [--mode manual|autonomous] [--claude-model MODEL] [--codex-model MODEL] [--codex-effort EFFORT]
-  node bin/loop.js queue --file <queue.json> [--accept-goal <spec.md>] [--mode <manual|autonomous>] [--max-runs <n>] [--token-budget <tokens>] [--dry-run]
+  node bin/loop.js queue --file <queue.json> [--accept-goal <spec.md>] [--mode <manual|autonomous>] [--max-runs <n>] [--rounds <n>] [--token-budget <tokens>] [--dry-run]
   node bin/loop.js batch --task <plan> [--task <plan> ...] --target <directory> --gate <gate.json> [--gate-retries <0-3>] [--pivot-candidates <1-5>] [--mode manual|autonomous] [--claude-model MODEL] [--codex-model MODEL] [--codex-effort EFFORT] [--executor-timeout <ms>] [--verifier-timeout <ms>] [--arbiter-timeout <ms>] [--gate-timeout <ms>] [--artifact-root <directory>] [--concurrency <1-16>] [--token-budget <tokens>] [--rounds <1-3>] [--round <number> ...] [--unit-kind <candidate|node|merge> ...] [--unit-id <id> ...] [--perspective <name> ...] [--depends-on <child=parent> ...] [--port <0-65535>] [--open] [--no-dashboard] [--quiet]
   node bin/loop.js batch --campaign <file> [--executor-timeout <ms>] [--verifier-timeout <ms>] [--arbiter-timeout <ms>] [--gate-timeout <ms>] [--artifact-root <directory>] [--port <0-65535>] [--open] [--no-dashboard] [--quiet]
   node bin/loop.js status <run-or-campaign-directory>
@@ -39,7 +40,7 @@ Mode and provider options (run, plan, decompose, queue, batch):
 
 Commands:
   run        Execute isolated Codex implementation and evidence with Claude reviewing read-only.
-  resume     Continue a saved manual phase with JSON answers; saved mode cannot change.
+  resume     Continue a saved human decision or eligible technical pause; saved mode and limits cannot change.
   mutate     Delete changed statements temporarily and report which selected tests do not notice.
   plan       Debate a goal into a mechanically checked plan and gate without changing the target.
   decompose  Debate a project into goals, or one goal into loop-ready task units.

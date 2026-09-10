@@ -458,11 +458,13 @@ export async function runArbiter({
     bin, args, model, judgement: request?.type, provider: 'claude', role,
   });
   let captured;
+  let delivery = null;
   try {
     captured = await spawnCapture(bin, args, {
       ...transportOptions,
       cwd,
       input: prompt,
+      onInputSubmitted: receipt => { delivery = receipt; },
       env: { ...process.env, ...env },
       timeoutMs: resolvedTimeoutMs,
       timeoutSetting: stage === 'verify' ? 'URO_VERIFIER_TIMEOUT_MS' : 'URO_ARBITER_TIMEOUT_MS',
@@ -493,6 +495,7 @@ export async function runArbiter({
   const parsed = parseArbiterStream(captured.stdout);
   const result = annotateUsageConsistency({
     ...parsed,
+    delivery,
     provider: 'claude', role,
     stdout: captured.stdout,
     stderr: captured.stderr,

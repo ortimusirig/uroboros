@@ -12,7 +12,9 @@ import {
 } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { readEnv } from './env-compat.js';
+import { createHash } from 'node:crypto';
 import { isSafePhysicalRunId, physicalRunIdFor } from './run-id.js';
+import { refreshReportProjection } from './report.js';
 
 // Files written by the harness inside an isolated worktree. Keep this list central:
 // every Git staging/diff operation must exclude the same paths. Both prefixes are listed
@@ -24,6 +26,8 @@ export const HARNESS_ARTIFACTS = Object.freeze([
   'uro-resume.lock',
   '__uro_review/',
   '__uro_evidence/',
+  '__uro_context/',
+  '__uro_dialogue/',
   '.uro-tmp/',
   'CHANGES.diff',
   'uro-report.md',
@@ -128,14 +132,16 @@ function persistFinalFacts({ dir, durableDirectory, facts, result }) {
   const sourceFacts = join(dir, 'uro-runfacts.json');
   if (!existsSync(sourceFacts)) return;
   try {
-    writeFileSync(sourceFacts, JSON.stringify(facts, null, 2));
+    if (existsSync(join(dir, 'uro-report.md'))) refreshReportProjection({ dir, facts });
+    else writeFileSync(sourceFacts, JSON.stringify(facts, null, 2));
   } catch (error) {
     result.status = 'failed';
     result.factsWrite = { status: 'failed', error: errorMessage(error) };
   }
   if (durableDirectory === null || !existsSync(durableDirectory)) return;
   try {
-    writeFileSync(join(durableDirectory, 'uro-runfacts.json'), JSON.stringify(facts, null, 2));
+    if (existsSync(join(durableDirectory, 'uro-report.md'))) refreshReportProjection({ dir: durableDirectory, facts });
+    else writeFileSync(join(durableDirectory, 'uro-runfacts.json'), JSON.stringify(facts, null, 2));
   } catch (error) {
     result.status = 'failed';
     result.refresh = { status: 'failed', error: errorMessage(error) };
@@ -157,6 +163,8 @@ export function archiveRunArtifacts({
   startedAt,
   endedAt,
   refresh = false,
+  retainedFiles = [],
+  requiredRetention = false,
 }) {
   const root = resolveArtifactRoot({ scratchRoot, artifactRoot, env });
   let physicalRunId = null;
@@ -172,10 +180,55 @@ export function archiveRunArtifacts({
   };
   let retentionAllowed = false;
   let retentionError = null;
+  const digestFile = path => createHash('sha256').update(readFileSync(path)).digest('hex');
+  const retainedPath = (root, path, missingAllowed = false) => {
+    if (typeof path !== 'string' || path.includes('\\') || path.split('/').some(part => ['.', '..', ''].includes(part))
+      || !/^\.uro-tmp\/retained-phases\/[^/]+\/(?:phase-link\.json|__uro_(?:context|dialogue|evidence)\/.+)$/.test(path)
+      || path.endsWith('/controller.lock')) throw new Error('invalid retained phase file path');
+    let current = resolve(root);
+    for (let ancestor = current; ; ancestor = dirname(ancestor)) {
+      if (lstatSync(ancestor, { throwIfNoEntry: false })?.isSymbolicLink()) throw new Error('retained phase symbolic-link ancestor refused');
+      if (dirname(ancestor) === ancestor) break;
+    }
+    for (const part of ['', ...path.split('/')]) {
+      if (part) current = join(current, part);
+      const stat = lstatSync(current, { throwIfNoEntry: false });
+      if (stat?.isSymbolicLink()) throw new Error('retained phase symbolic-link ancestor refused');
+      if (!stat && !missingAllowed) throw new Error('required retained phase source is missing');
+    }
+    if (!containsPath(resolve(root), current)) throw new Error('retained phase path escape');
+    return current;
+  };
+  const sourceFailure = (error, path) => {
+    result.requiredSource = { status: 'failed', error: errorMessage(error), path };
+    facts.approved = false; facts.approval = null; facts.outcome = 'needs-pivot'; facts.nextAction = 'paused';
+    facts.reason = `required retained source integrity failed: ${errorMessage(error)}`;
+    if (facts.checkpointState) Object.assign(facts.checkpointState, { approved: false, action: 'paused', reason: facts.reason,
+      requiredSourceFailure: result.requiredSource });
+    throw error;
+  };
+  const requiredSource = item => {
+    try {
+      const path = retainedPath(dir, item.path);
+      if (!/^[a-f0-9]{64}$/i.test(item.sha256) || !lstatSync(path).isFile() || digestFile(path) !== item.sha256.toLowerCase()) {
+        throw new Error('required retained phase source digest changed');
+      }
+      return path;
+    } catch (error) {
+      sourceFailure(error, item?.path);
+    }
+  };
 
   try {
     if (!isSafePhysicalRunId(physicalRunId)) {
       throw new TypeError('runId could not be mapped to a safe physical directory');
+    }
+    if (!Array.isArray(retainedFiles)) sourceFailure(new Error('exact retained file list required'));
+    const seenRetained = new Set();
+    for (const item of retainedFiles) {
+      requiredSource(item);
+      if (seenRetained.has(item.path)) sourceFailure(new Error('duplicate retained phase file path'), item.path);
+      seenRetained.add(item.path);
     }
     const canonicalWorktree = futureRealPath(dir);
     const canonicalRoot = futureRealPath(root);
@@ -194,7 +247,11 @@ export function archiveRunArtifacts({
       if (lstatSync(source).isDirectory()) {
         mkdirSync(destination, { recursive: true });
         for (const entry of readdirSync(source)) copyEvidenceDirectory(join(source, entry), join(destination, entry), boundary);
-      } else if (lstatSync(source).isFile()) copyFileSync(source, destination);
+      } else if (lstatSync(source).isFile()) {
+        const before = requiredRetention ? digestFile(source) : null;
+        copyFileSync(source, destination);
+        if (requiredRetention && (digestFile(source) !== before || digestFile(destination) !== before)) throw new Error('required context archive copy digest mismatch');
+      }
       else throw new Error('evidence retention refused a nonregular file');
     };
     for (const filename of HARNESS_ARTIFACTS) {
@@ -202,7 +259,7 @@ export function archiveRunArtifacts({
       const source = join(dir, filename);
       if (!existsSync(source)) continue;
       try {
-        if (['__uro_evidence/', '__uro_review/'].includes(filename)) {
+        if (['__uro_evidence/', '__uro_review/', '__uro_context/', '__uro_dialogue/'].includes(filename)) {
           copyEvidenceDirectory(source, join(durableDirectory, filename), dir);
           result.copied.push(filename);
           continue;
@@ -214,6 +271,20 @@ export function archiveRunArtifacts({
         result.copied.push(filename);
       } catch (error) {
         result.copyFailures.push({ filename, error: errorMessage(error) });
+      }
+    }
+    for (const item of retainedFiles) {
+      try {
+        const source = requiredSource(item);
+        const destination = retainedPath(durableDirectory, item.path, true);
+        mkdirSync(dirname(destination), { recursive: true });
+        copyEvidenceDirectory(source, destination, dir);
+        requiredSource(item);
+        if (digestFile(destination) !== item.sha256.toLowerCase()) throw new Error('retained destination copy digest mismatch');
+        result.copied.push(item.path);
+      } catch (error) {
+        result.copyFailures.push({ filename: item.path, error: errorMessage(error) });
+        if (result.requiredSource?.status === 'failed') break;
       }
     }
     if (result.copyFailures.length > 0) result.status = 'failed';
@@ -237,11 +308,22 @@ export function archiveRunArtifacts({
     }
   }
 
+  const revokeRequiredRetention = () => {
+    if (!requiredRetention || result.status === 'ok') return false;
+    result.requiredRetention = { status: 'failed' };
+    facts.approved = false; facts.approval = null; facts.outcome = 'needs-pivot'; facts.nextAction = 'paused';
+    facts.reason = `required artifact retention failed: ${result.error ?? result.copyFailures[0]?.error ?? result.factsWrite?.error ?? result.refresh?.error ?? result.index.error}`;
+    if (facts.checkpointState) Object.assign(facts.checkpointState, { approved: false, action: 'paused', reason: facts.reason,
+      requiredRetentionFailure: result.requiredRetention });
+    return true;
+  };
+  revokeRequiredRetention();
   persistFinalFacts({
     dir,
     durableDirectory: retentionAllowed ? durableDirectory : null,
     facts,
     result,
   });
+  if (revokeRequiredRetention()) persistFinalFacts({ dir, durableDirectory: retentionAllowed ? durableDirectory : null, facts, result });
   return result;
 }

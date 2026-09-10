@@ -81,6 +81,43 @@ function scratch() {
   return { directory, cleanup: () => rmSync(directory, { recursive: true, force: true }) };
 }
 
+test('queue children transport and consume a pinned current context reference with frozen allowance and rounds', async () => {
+  const { createSharedContext, persistSharedContext, readSharedContextReference } = await import('../src/shared-context.js');
+  const { resolveProjectIdentity } = await import('../src/project-memory.js');
+  const f = scratch();
+  try {
+    const project = resolveProjectIdentity({ target: f.directory });
+    const snapshot = createSharedContext({ projectId: project.projectId, runId: 'queue-17', unitId: 'queue-17:2',
+      phase: 'queue', sourceRevision: 'fixture-source', entries: [{ id: 'requirements', kind: 'requirement',
+        content: 'Retain compatibility', sourceIdentity: 'fixture-source', status: 'required', provenance: { origin: 'queue' } }] });
+    const path = persistSharedContext({ directory: f.directory, snapshot });
+    const contextRef = { schemaVersion: 1, path, projectId: snapshot.projectId, runId: snapshot.runId,
+      unitId: snapshot.unitId, contextDigest: snapshot.digest };
+    const calls = [];
+    const runCommand = async (bin, args, options) => {
+      calls.push({ args, options });
+      assert.ok(args.includes('--context-stdin'));
+      assert.equal(args[args.indexOf('--token-budget') + 1], '17');
+      assert.equal(args[args.indexOf('--rounds') + 1], '9');
+      const received = JSON.parse(options.input);
+      assert.deepEqual(received, contextRef);
+      assert.equal(typeof readSharedContextReference, 'function');
+      assert.deepEqual(readSharedContextReference({ reference: received, target: f.directory }), snapshot);
+      return { code: 1, stdout: JSON.stringify(args[1] === 'run' ? { runId: 'child', dir: f.directory }
+        : { approved: false, converged: false, rounds: 1 }), stderr: '' };
+    };
+    await launchLoopRun({ unit: { task: 'plan.md', gate: 'gate.json' }, target: f.directory, contextRef,
+      tokenBudget: 17, rounds: 9 }, { runCommand });
+    await launchLoopPlan({ unit: { goal: 'Compatibility', out: f.directory }, target: f.directory, contextRef,
+      tokenBudget: 17, rounds: 9 }, { runCommand });
+    assert.equal(calls.length, 2);
+    for (const field of ['projectId', 'runId', 'unitId', 'contextDigest']) assert.throws(() => readSharedContextReference({
+      reference: { ...contextRef, [field]: 'wrong' }, target: f.directory }), /identity|context|project/);
+    writeFileSync(path, '{}');
+    assert.throws(() => readSharedContextReference({ reference: contextRef, target: f.directory }), /identity|context|project|required/);
+  } finally { f.cleanup(); }
+});
+
 test('the production launcher composes loop run and accepts facts from a stopping exit', async () => {
   const calls = [];
   const env = { CODEX_HOME: 'C:/registered-codex-home' };
@@ -486,11 +523,12 @@ test('judgeLandingWithClaude hands Claude the composed task, diff, findings, and
     }, {
       arbiter: async ({ request }) => {
         requests.push(request);
-        return { approved: true, reasoning: 'verified the diff first-hand' };
+        return { approved: true, reasoning: 'verified the diff first-hand', usage: { inputTokens: 4, outputTokens: 2 } };
       },
     });
     assert.deepEqual(judgement, {
       approved: true, reasoning: 'verified the diff first-hand', findings: [],
+      usage: { inputTokens: 4, outputTokens: 2 },
     });
     assert.equal(requests[0].type, 'landing');
     assert.equal(requests[0].task, 'Composed task exactly as executed.');

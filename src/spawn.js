@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { createHash } from 'node:crypto';
 
 const WINDOWS_TREE_SCRIPT = fileURLToPath(new URL('./windows-process-tree.ps1', import.meta.url));
 
@@ -201,6 +202,7 @@ export function createLivenessDeadline({
   getWorktreeActivity,
   onEvent,
   onDecision,
+  onDecisionRequired,
   judgeTimeoutMs = 60_000,
   now = Date.now,
   setTimer = setTimeout,
@@ -251,7 +253,16 @@ export function createLivenessDeadline({
     try { onKill(reason); } catch { /* the termination callback owns its errors */ }
   };
 
-  const unavailable = (observed, reason, gathered = {}) => {
+  const recordDecision = async decision => {
+    try { await onDecisionRequired(decision); return true; }
+    catch (error) {
+      finish({ kind: 'liveness', judged: false, reasoning: 'Required liveness decision recording failed',
+        persistenceFailure: error.message, setting: 'URO_STALL_THRESHOLD_MS' });
+      return false;
+    }
+  };
+
+  const unavailable = async (observed, reason, gathered = {}) => {
     const reasoning = `Liveness check was unjudged: ${reason}`;
     const decision = {
       status: 'stuck',
@@ -265,6 +276,7 @@ export function createLivenessDeadline({
       lastEvent: observed.lastEvent,
       ...gathered,
     };
+    if (onDecisionRequired && !await recordDecision(decision)) return;
     notify('stuck', decision);
     decide(decision);
     finish({
@@ -287,7 +299,7 @@ export function createLivenessDeadline({
       resolve({ available: false, reason: `liveness judge exceeded its ${judgeTimeoutMs}ms bound` });
     }, judgeTimeoutMs);
     Promise.resolve()
-      .then(operation)
+      .then(() => operation(() => settled || disposed || killed))
       .then((value) => {
         if (settled) return;
         settled = true;
@@ -318,7 +330,7 @@ export function createLivenessDeadline({
 
     judging = true;
     const sinceMs = clockValue(now) - observed.gapMs;
-    const result = await boundedOperation(async () => {
+    const result = await boundedOperation(async noLongerActive => {
       const [processTree, worktreeActivity] = await Promise.all([
         typeof getProcessTree === 'function'
           ? Promise.resolve().then(() => getProcessTree()).catch((error) => ({
@@ -332,6 +344,7 @@ export function createLivenessDeadline({
           }))
           : Promise.resolve({ available: false, changed: false, changedFiles: [], sinceMs }),
       ]);
+      if (onDecisionRequired && noLongerActive()) return { available: false, reason: 'liveness observation expired before judge launch' };
       const input = {
         seat: observed.seat,
         ...(observed.pass === undefined ? {} : { pass: observed.pass }),
@@ -396,6 +409,8 @@ export function createLivenessDeadline({
         checkCount, seat: observed.seat,
         lastEvent: observed.lastEvent, processTree, worktreeActivity,
       };
+      if (onDecisionRequired && !await recordDecision(decision)) return;
+      if (disposed || killed) return;
       notify('working', decision);
       decide(decision);
       arm(intervalMs);
@@ -408,6 +423,8 @@ export function createLivenessDeadline({
       checkCount, seat: observed.seat,
       lastEvent: observed.lastEvent, processTree, worktreeActivity,
     };
+    if (onDecisionRequired && !await recordDecision(decision)) return;
+    if (disposed || killed) return;
     notify('stuck', decision);
     decide(decision);
     finish({
@@ -481,6 +498,7 @@ export async function spawnCapture(bin, args, opts = {}) {
       detached: (timeoutMs !== undefined || opts.livenessSupervision !== undefined)
         && process.platform !== 'win32',
     });
+    const launch = { requested: { bin, args: [...args] }, argv: [cmd, ...cmdArgs], cwd: opts.cwd ?? process.cwd() };
     const outChunks = [];
     const errChunks = [];
     let timedOut = false;
@@ -489,13 +507,17 @@ export async function spawnCapture(bin, args, opts = {}) {
     let childClosed = false;
     let timeoutReason = null;
     let killPromise = null;
+    let inputFailure = null;
+    let preservation = null;
+    let preservationError = null;
     const requestKill = (reason, isTimeout) => {
       if (settled || killPromise) return killPromise;
       if (isTimeout) timedOut = true;
       timeoutReason = isTimeout ? reason : null;
       killPromise = Promise.resolve()
-        .then(() => opts.beforeKill?.(reason))
-        .catch(() => {})
+        .then(() => (opts.beforeKillRequired ?? opts.beforeKill)?.(reason))
+        .then(result => { if (opts.beforeKillRequired) preservation = result ?? null; })
+        .catch(error => { if (opts.beforeKillRequired) preservationError = error.message; })
         .then(() => {
           // The child may finish naturally while partial work is being preserved.
           // Never target a closed PID, which could already have been reused.
@@ -580,12 +602,15 @@ export async function spawnCapture(bin, args, opts = {}) {
       const finishClose = () => {
         if (settled) return;
         settled = true;
+        if (inputFailure) { reject(inputFailure); return; }
         resolve({
+          launch,
           code: code ?? -1,
           signal: closeSignal ?? null,
           stdout: Buffer.concat(outChunks).toString('utf8'),
           stderr: Buffer.concat(errChunks).toString('utf8'),
           timedOut,
+          ...(opts.beforeKillRequired ? { preservation, preservationError } : {}),
           ...(opts.signal ? { aborted } : {}),
           timeoutMs: timeoutMs ?? null,
           ...(timeoutReason ? { timeoutReason } : {}),
@@ -595,8 +620,22 @@ export async function spawnCapture(bin, args, opts = {}) {
       if (killPromise) killPromise.then(finishClose, finishClose);
       else finishClose();
     });
-    if (opts.input !== undefined) child.stdin.end(opts.input);
-    else child.stdin.end();
+    try {
+      if (opts.input !== undefined) child.stdin.end(opts.input);
+      else child.stdin.end();
+    } catch (error) {
+      inputFailure = error;
+      requestKill({ kind: 'stdin-failed', reason: error.message }, false);
+      return;
+    }
+    if (opts.input !== undefined && typeof opts.onInputSubmitted === 'function') {
+      const bytes = Buffer.from(opts.input);
+      try {
+        const observed = opts.onInputSubmitted({ kind: 'stdin-submitted', bytes: bytes.length,
+          sha256: createHash('sha256').update(bytes).digest('hex'), consumption: 'unknown' });
+        if (observed?.catch) observed.catch(() => {});
+      } catch { /* Submission happened; an optional observer cannot change capture behavior. */ }
+    }
   });
 }
 

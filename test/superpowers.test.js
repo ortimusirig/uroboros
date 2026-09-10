@@ -186,6 +186,126 @@ test('Codex verification requires the openai-curated registration, not a namesak
   assert.match(verification.evidence, /superpowers@openai-curated.*not installed/i);
 });
 
+test('Codex verification recognizes the installed remote marketplace registration', async () => {
+  const verification = await verifyCodexSuperpowers({
+    spawn: async () => ({
+      code: 0,
+      timedOut: false,
+      stdout: 'Name  Status  Version  Location\r\n  superpowers@openai-curated-remote  installed, enabled  6.3.0  C:/plugins/superpowers\r\n',
+      stderr: '',
+    }),
+  });
+
+  assert.equal(verification.verified, true);
+  assert.equal(verification.version, '6.3.0');
+  assert.match(verification.evidence, /superpowers@openai-curated-remote\s+installed, enabled/);
+});
+
+test('Codex verification selects an enabled supported registration regardless of row order', async (t) => {
+  const cases = [
+    {
+      name: 'disabled remote before enabled curated',
+      rows: [
+        'superpowers@openai-curated-remote  installed, disabled  6.3.0  C:/remote',
+        'superpowers@openai-curated  installed, enabled  6.2.0  C:/curated',
+      ],
+      version: '6.2.0', evidence: 'superpowers@openai-curated  installed, enabled',
+    },
+    {
+      name: 'enabled curated before disabled remote',
+      rows: [
+        'superpowers@openai-curated  installed, enabled  6.2.0  C:/curated',
+        'superpowers@openai-curated-remote  installed, disabled  6.3.0  C:/remote',
+      ],
+      version: '6.2.0', evidence: 'superpowers@openai-curated  installed, enabled',
+    },
+    {
+      name: 'absent curated before enabled remote',
+      rows: [
+        'superpowers@openai-curated  not installed  C:/curated',
+        'superpowers@openai-curated-remote  installed, enabled  6.3.0  C:/remote',
+      ],
+      version: '6.3.0', evidence: 'superpowers@openai-curated-remote  installed, enabled',
+    },
+    {
+      name: 'enabled remote before absent curated',
+      rows: [
+        'superpowers@openai-curated-remote  installed, enabled  6.3.0  C:/remote',
+        'superpowers@openai-curated  not installed  C:/curated',
+      ],
+      version: '6.3.0', evidence: 'superpowers@openai-curated-remote  installed, enabled',
+    },
+    {
+      name: 'no enabled supported registration',
+      rows: [
+        'superpowers@openai-curated-remote  installed, disabled  6.3.0  C:/remote',
+        'superpowers@openai-curated  not installed  C:/curated',
+        'superpowers@untrusted-marketplace  installed, enabled  99.0.0  C:/untrusted',
+      ],
+      version: null, evidence: 'superpowers@openai-curated-remote  installed, disabled',
+    },
+    {
+      name: 'lookalike first cannot replace rejected supported registrations',
+      rows: [
+        'superpowers@openai-curated-remote-untrusted  installed, enabled  99.0.0  C:/untrusted',
+        'superpowers@openai-curated  not installed  C:/curated',
+        'superpowers@openai-curated-remote  installed, disabled  6.3.0  C:/remote',
+      ],
+      version: null, evidence: 'superpowers@openai-curated  not installed',
+    },
+  ];
+  for (const fixture of cases) {
+    await t.test(fixture.name, async () => {
+      const verification = await verifyCodexSuperpowers({
+        spawn: async () => ({
+          code: 0, timedOut: false, stdout: fixture.rows.join('\n'), stderr: '',
+        }),
+      });
+      assert.equal(verification.verified, fixture.version !== null);
+      assert.equal(verification.version, fixture.version);
+      assert.ok(verification.evidence.includes(fixture.evidence), 'evidence must describe the selected supported row');
+    });
+  }
+});
+
+test('Codex remote registration still requires installed and enabled status', async (t) => {
+  for (const status of ['not installed', 'installed, disabled', 'installed', 'enabled']) {
+    await t.test(status, async () => {
+      const verification = await verifyCodexSuperpowers({
+        spawn: async () => ({
+          code: 0, timedOut: false,
+          stdout: `superpowers@openai-curated-remote  ${status}  6.3.0  C:/plugins/superpowers\n`,
+          stderr: '',
+        }),
+      });
+      assert.equal(verification.verified, false);
+      assert.equal(verification.version, null);
+      assert.ok(verification.evidence.includes(status), 'retain the actual rejected registry status');
+    });
+  }
+});
+
+test('Codex verification rejects lookalike remote marketplace identifiers', async (t) => {
+  for (const identifier of [
+    'superpowers@openai-curated-remote-untrusted',
+    'superpowers@openai-curated-untrusted',
+    'superpowers-extra@openai-curated-remote',
+    'superpowers@untrusted-marketplace',
+  ]) {
+    await t.test(identifier, async () => {
+      const verification = await verifyCodexSuperpowers({
+        spawn: async () => ({
+          code: 0, timedOut: false,
+          stdout: `${identifier}  installed, enabled  6.3.0  C:/plugins/superpowers\n`,
+          stderr: '',
+        }),
+      });
+      assert.equal(verification.verified, false);
+      assert.equal(verification.version, null);
+    });
+  }
+});
+
 test('the hard requirement treats an omitted seat as unverified', () => {
   const verification = {
     ok: true,

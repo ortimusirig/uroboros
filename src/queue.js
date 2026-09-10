@@ -5,12 +5,17 @@ import {
   statSync,
 } from 'node:fs';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { assertCurrentPlanApproval, assertPlanOutputAvailable, resolveGoal } from './plan.js';
 import { detectReview, reviewDigest } from './review.js';
-import { attachQueueCheckpoint, checkpointDigest, readCheckpoint } from './checkpoint.js';
+import { attachQueueCheckpoint, checkpointDigest, readCheckpoint, writeCheckpointAtomic } from './checkpoint.js';
 import { recoverQueueLanding } from './queue-runtime.js';
+import { assertPlanningSidecars, createPlanningHandoff, readPlanningHandoffReference, planningHistory } from './planning-dialogue.js';
+import { createSharedContext, extendSharedContext, persistSharedContext, readSharedContextReference, resolveNativeWorkflowBinding } from './shared-context.js';
+import { workflowIdentity, validateWorkflowBinding, readWorkflowBinding } from './workflow-profiles.js';
+import { resolveProjectIdentity } from './project-memory.js';
 
-const QUEUE_UNIT_KEYS = new Set(['name', 'task', 'gate', 'goal', 'out']);
+const QUEUE_UNIT_KEYS = new Set(['name', 'task', 'gate', 'goal', 'out', 'tokenBudget', 'rounds']);
 const QUEUE_MODES = new Set(['manual', 'autonomous']);
 
 function isRecord(value) {
@@ -60,6 +65,10 @@ export function loadQueueFile(file) {
     if (raw.name !== undefined && (typeof raw.name !== 'string' || raw.name.trim() === '')) {
       throw new TypeError(`queue unit ${index + 1} name must be a non-empty string`);
     }
+    for (const key of ['tokenBudget', 'rounds']) if (raw[key] !== undefined && (!Number.isSafeInteger(raw[key]) || raw[key] < 1)) {
+      throw new TypeError(`queue unit ${index + 1} ${key} must be a positive safe integer`);
+    }
+    const controls = Object.fromEntries(['tokenBudget', 'rounds'].filter(key => raw[key] !== undefined).map(key => [key, raw[key]]));
     const hasTaskShape = Object.hasOwn(raw, 'task') || Object.hasOwn(raw, 'gate');
     const hasGoalShape = Object.hasOwn(raw, 'goal') || Object.hasOwn(raw, 'out');
     if (hasTaskShape === hasGoalShape) {
@@ -76,6 +85,7 @@ export function loadQueueFile(file) {
       assertPlanOutputAvailable(out);
       return {
         index: index + 1,
+        ...controls,
         kind: 'goal',
         name: raw.name?.trim() ?? (goal.source ? basename(goal.source) : `goal-${index + 1}`),
         goal: goal.source ?? goal.text,
@@ -91,6 +101,7 @@ export function loadQueueFile(file) {
     validateFile(gate, 'gate', index);
     return {
       index: index + 1,
+      ...controls,
       name: raw.name?.trim() ?? basename(task),
       task,
       gate,
@@ -324,20 +335,94 @@ export async function runQueue(options) {
 
 export async function continueQueue({ context, phaseResult, runDirectory, dependencies = {}, journal = {}, persistJournal = () => {} }) {
   if (checkpointDigest(readFileSync(context.queue.path, 'utf8')) !== context.fileDigest) throw new Error('queue file changed; saved cursor is invalid');
+  validateQueueWorkflow({ context, journal, continuation: phaseResult?.checkpointState });
   return executeQueue({ ...context.options, queue: context.queue,
     continuation: { ...context, phaseResult, runDirectory, journal, persistJournal }, dependencies });
+}
+
+// The parent capture and independent checkpoint identity must agree before
+// native continuation, landing recovery, or another child may cause effects.
+export function validateQueueWorkflow({ context, journal = context.journal ?? {}, continuation }) {
+  const schema = journal.schemaVersion ?? 1;
+  if (![1, 2, 3].includes(schema)) throw new Error('unsupported queue workflow journal schema');
+  const legacy = { schemaVersion: 1, mode: 'legacy-unbound' };
+  const binding = validateWorkflowBinding({ binding: schema === 3 ? journal.workflowBinding : journal.workflowBinding ?? legacy });
+  if (schema === 3 && (binding.mode !== 'bound' || !context.workflow)) throw new Error('required queue workflow identity missing');
+  if (schema !== 3 && binding.mode !== 'legacy-unbound') throw new Error('historical queue workflow cannot become bound');
+  const expected = workflowIdentity({ binding });
+  const agree = identity => {
+    if (checkpointDigest({ workflow: identity }) !== checkpointDigest({ workflow: expected })) throw new Error('queue workflow identity conflict');
+  };
+  if (context.workflow !== undefined) agree(context.workflow);
+  if (context.options?.workflowBinding !== undefined) agree(workflowIdentity({ binding: context.options.workflowBinding }));
+  const check = snapshot => readWorkflowBinding({ snapshot, expected, allowLegacy: schema !== 3 });
+  for (const entry of Object.values(journal.units ?? {})) {
+    if (entry.contextRef) check(readSharedContextReference({ reference: entry.contextRef, target: context.options.target }));
+    if (entry.executionContextRef) check(readPlanningHandoffReference({ reference: entry.executionContextRef,
+      target: context.options.target, completedExecution: completedExecutionHandoff(entry) }));
+  }
+  if (continuation) {
+    const phases = [...(continuation.phaseChain ?? []).map(phase => phase.checkpointState), continuation];
+    for (const phase of phases) {
+      const snapshot = phase?.dialogue?.snapshot ?? phase?.preparationSnapshot;
+      if (snapshot) check(snapshot);
+      if (phase?.workflow !== undefined) agree(phase.workflow);
+      else if (schema === 3) throw new Error('required child workflow identity missing');
+    }
+  }
+  return binding;
+}
+
+function completedExecutionHandoff(entry) {
+  return entry.operationId && entry.launch?.runDirectory && entry.result?.approval?.artifactDigest ? {
+    operationId: entry.operationId, commit: entry.landing?.commit,
+    diffPath: join(entry.launch.runDirectory, 'CHANGES.diff'), artifactDigest: entry.result.approval.artifactDigest,
+  } : undefined;
+}
+
+// Delivery is distinct from the raw recovery journal: retain ordinary protocol
+// records and validated context, not transport/checkpoint/private option bags.
+function priorUnitContext({ entry, unit, target }) {
+  const fields = (value, keys) => Object.fromEntries(keys.filter(key => value?.[key] !== undefined
+    && (value[key] === null || typeof value[key] !== 'object')).map(key => [key, value[key]]));
+  const approval = value => fields(value, ['approved', 'decidedBy', 'basis', 'artifactDigest', 'contextDigest', 'sidecarDigest', 'messageId', 'reason']);
+  const reference = entry.executionContextRef ?? entry.contextRef;
+  const snapshot = reference ? readPlanningHandoffReference({ reference, target,
+    completedExecution: completedExecutionHandoff(entry) }) : null;
+  return {
+    unit: fields(unit, ['index', 'name', 'kind', 'goal', 'task', 'gate', 'out']),
+    ...fields(entry, ['operationId', 'logged']),
+    plan: { ...fields(entry.planResult, ['runId', 'approved', 'reason', 'planPath', 'gatePath']), approval: approval(entry.planResult?.approval) },
+    execution: { ...fields(entry.result, ['runId', 'outcome', 'approved', 'reason', 'phase', 'nextAction']),
+      approval: approval(entry.result?.approval),
+      ...(entry.result?.dialogue ? { history: planningHistory(entry.result.dialogue) } : {}) },
+    landing: fields(entry.landing, ['commit', 'landed', 'reason']),
+    judgement: fields(entry.judgement, ['approved', 'reasoning']),
+    ...(snapshot ? { context: snapshot } : {}),
+  };
 }
 
 // Exact generated files only. Never exempt the output directory or unrelated
 // untracked source; revalidate the saved plan receipt before each use.
 export function queueContinuationPaths(context) {
-  const paths = [context.queue.logPath];
+  validateQueueWorkflow({ context });
+  const paths = [context.queue.logPath, ...(context.journal?.path ? [context.journal.path] : [])];
+  for (const entry of Object.values(context.journal?.units ?? {})) if (entry.contextRef) {
+    readSharedContextReference({ reference: entry.contextRef, target: context.options.target });
+    paths.push(entry.contextRef.path);
+    if (entry.executionContextRef) {
+      readPlanningHandoffReference({ reference: entry.executionContextRef, target: context.options.target, completedExecution: completedExecutionHandoff(entry) });
+      paths.push(entry.executionContextRef.path);
+    }
+  }
   for (const unit of context.queue.units.filter(unit => unit.kind === 'goal')) {
-    const result = context.journal?.units?.[unit.index]?.planResult
-      ?? (unit.index === context.unitIndex ? (context.phase === 'planning' ? context.phaseResult : context.planResult) : null)
+    const result = (unit.index === context.unitIndex ? (context.phase === 'planning' ? context.phaseResult : context.planResult) : null)
+      ?? context.journal?.units?.[unit.index]?.planResult
       ?? context.approvedPlans?.[unit.index];
     if (!result?.approved) continue;
     assertCurrentPlanApproval({ unit, result, mode: context.options?.mode ?? 'manual' });
+    if (result.approval.contextDigest) paths.push(...assertPlanningSidecars({ directory: unit.out,
+      runId: result.runId, approval: result.approval, manifest: result.planningArtifacts }));
     paths.push(join(unit.out, 'plan.md'), join(unit.out, 'gate.json'));
     if (existsSync(join(unit.out, 'uro-checkpoint.json')) && readCheckpoint(unit.out).runId === result.runId) {
       paths.push(join(unit.out, 'uro-checkpoint.json'), join(unit.out, 'uro-resume.lock'));
@@ -353,10 +438,12 @@ async function executeQueue({
   claudeModel, codexModel, codexEffort,
   maxRuns,
   tokenBudget,
+  rounds,
   acceptGoalSpec,
   dryRun = false,
   dependencies = {},
   queue, continuation,
+  workflowBinding,
 }) {
   if (!QUEUE_MODES.has(mode)) {
     throw new TypeError(`invalid queue mode: ${mode}; expected manual or autonomous`);
@@ -395,8 +482,33 @@ async function executeQueue({
   const appendLog = dependencies.appendLog ?? appendQueueLog;
   const now = dependencies.now ?? (() => Date.now());
 
+  workflowBinding = structuredClone(continuation ? validateQueueWorkflow({ context: continuation })
+    : resolveNativeWorkflowBinding({ workflowBinding }));
   let allowedQueuePaths = continuation ? queueContinuationPaths(continuation) : [queue.logPath];
-  await assertCleanTarget(target, { allowedPaths: allowedQueuePaths });
+  await assertCleanTarget(target, { allowedPaths: [...allowedQueuePaths] });
+  const queueFileDigest = continuation?.fileDigest ?? checkpointDigest(readFileSync(queue.path, 'utf8'));
+  const queueJournal = continuation?.journal ?? { schemaVersion: workflowBinding.mode === 'bound' ? 3 : 2,
+    workflowBinding, runId: `queue-${randomUUID()}`, units: {}, debits: {} };
+  queueJournal.workflowBinding ??= workflowBinding;
+  const parentContext = { queue, workflow: workflowIdentity({ binding: workflowBinding }), options: { mode, target }, journal: queueJournal };
+  if (!continuation) queueJournal.path = join(queue.directory, '__uro_context', `${queueJournal.runId}-queue.json`);
+  const persistQueue = () => {
+    if (queueJournal.path) writeCheckpointAtomic(queueJournal.path, { ...queueJournal, checksum: checkpointDigest(queueJournal) });
+    continuation?.persistJournal(queueJournal);
+  };
+  const debit = (id, tokens, value, provider = false) => {
+    const resource = value?.resources;
+    (queueJournal.debits ??= {})[id] = { tokens, providerLaunches: resource?.providerLaunches ?? (provider ? 1 : 0),
+      launchesUnknown: !provider && !resource, usageUnknown: resource?.usageUnknown === true || value?.tokens?.usageUnknown === true
+        || (provider ? !value?.usage || ![value.usage.inputTokens, value.usage.outputTokens].every(Number.isFinite) : !factTokens(value).valid) };
+    persistQueue();
+  };
+  const resources = () => Object.values(queueJournal.debits ?? {}).reduce((sum, item) => ({
+    providerLaunches: sum.providerLaunches + item.providerLaunches,
+    launchesUnknown: sum.launchesUnknown || item.launchesUnknown, usageUnknown: sum.usageUnknown || item.usageUnknown,
+    knownUsage: { inputTokens: sum.knownUsage.inputTokens + item.tokens.inputTokens,
+      outputTokens: sum.knownUsage.outputTokens + item.tokens.outputTokens },
+  }), { providerLaunches: 0, launchesUnknown: false, usageUnknown: false, knownUsage: { inputTokens: 0, outputTokens: 0 } });
   // Preserve only validated output provenance, not arbitrary existing files or
   // whole output directories. Earlier goals must survive a later suspension.
   const approvedPlans = { ...continuation?.approvedPlans };
@@ -411,24 +523,53 @@ async function executeQueue({
     if (continuation && unit.index < continuation.unitIndex) continue;
     const resuming = continuation && unit.index === continuation.unitIndex;
     const beforeUnit = { attemptedCount, landedCount, totalTokens: { ...totalTokens } };
-    const journal = continuation?.journal;
+    const journal = queueJournal;
     if (journal) journal.units ??= {};
     const unitJournal = journal ? (journal.units[unit.index] ??= {}) : {};
-    const persist = () => continuation?.persistJournal(journal);
+    const persist = persistQueue;
+    const childControls = (execution = false) => {
+      const parentRemaining = tokenBudget === undefined ? Infinity : tokenBudget - totalTokens.total;
+      const itemRemaining = unit.tokenBudget === undefined ? Infinity : unit.tokenBudget - (totalTokens.total - beforeUnit.totalTokens.total);
+      const remaining = Math.min(parentRemaining, itemRemaining);
+      if (Number.isFinite(remaining) && resources().usageUnknown) throw new Error('accounting-incomplete: unknown queue usage');
+      if (remaining <= 0) throw new Error('budget-exhausted: saved queue or item allowance exhausted');
+      if (!unitJournal.contextRef) {
+        const project = resolveProjectIdentity({ target });
+        journal.runId ??= `queue-${randomUUID()}`;
+        const snapshot = createSharedContext({ projectId: project.projectId, runId: journal.runId, workflowBinding,
+          unitId: `${journal.runId}:${unit.index}`, phase: 'queue', sourceRevision: queueFileDigest,
+          entries: [{ id: 'requirements', kind: 'requirement', content: unit.goal ?? readFileSync(unit.task, 'utf8'),
+            sourceIdentity: queueFileDigest, status: 'required', provenance: { origin: 'queue', unitIndex: unit.index } },
+          { id: 'prior-units', kind: 'queue-results', content: JSON.stringify(Object.entries(journal.units).filter(([id]) => Number(id) < unit.index)
+            .map(([id, entry]) => [id, priorUnitContext({ entry, unit: queue.units.find(previous => previous.index === Number(id)), target })])),
+            sourceIdentity: queueFileDigest, status: 'historical', provenance: { origin: 'queue', runId: journal.runId } }] });
+        const path = persistSharedContext({ directory: queue.directory, snapshot });
+        unitJournal.contextRef = { schemaVersion: 1, path, projectId: project.projectId, runId: snapshot.runId,
+          unitId: snapshot.unitId, contextDigest: snapshot.digest };
+        persist();
+      }
+      readSharedContextReference({ reference: unitJournal.contextRef, target });
+      allowedQueuePaths = [...new Set([...allowedQueuePaths, unitJournal.contextRef.path, ...(journal.path ? [journal.path] : [])])];
+      const reference = execution && unitJournal.executionContextRef ? unitJournal.executionContextRef : unitJournal.contextRef;
+      if (execution) readPlanningHandoffReference({ reference, target });
+      validateQueueWorkflow({ context: parentContext });
+      return { contextRef: reference, workflowBinding: structuredClone(workflowBinding), ...(Number.isFinite(remaining) ? { tokenBudget: remaining } : {}),
+        ...((unit.rounds ?? rounds) === undefined ? {} : { rounds: unit.rounds ?? rounds }) };
+    };
     if (unitJournal.logged) {
       if (unitJournal.planResult?.approved) {
-        const { runId, planPath, gatePath, approval } = unitJournal.planResult;
-        approvedPlans[unit.index] = { approved: true, runId, planPath, gatePath, approval };
+        const { runId, planPath, gatePath, approval, planningArtifacts } = unitJournal.planResult;
+        approvedPlans[unit.index] = { approved: true, runId, planPath, gatePath, approval, ...(planningArtifacts ? { planningArtifacts } : {}) };
       }
       ({ attemptedCount, landedCount, totalTokens } = unitJournal.afterUnit);
       continue;
     }
     const savePending = async (directory, phase, planResult) => {
       if (!directory || !existsSync(join(directory, 'uro-checkpoint.json'))) return;
-      const checkpoint = await attachQueueCheckpoint(directory, { version: 1, queue,
+      const checkpoint = await attachQueueCheckpoint(directory, { version: 1, queue, workflow: workflowIdentity({ binding: workflowBinding }),
         fileDigest: checkpointDigest(readFileSync(queue.path, 'utf8')), unitIndex: unit.index, phase,
         ...beforeUnit, planResult, approvedPlans, options: { file, target: resolve(target), mode,
-          claudeModel, codexModel, codexEffort, maxRuns, tokenBudget, acceptGoalSpec } });
+          claudeModel, codexModel, codexEffort, maxRuns, tokenBudget, rounds, acceptGoalSpec } }, journal);
       if (stop) stop.checkpoint = { directory, artifactDigest: checkpoint.artifactDigest, questions: checkpoint.pending.questions };
     };
     if (maxRuns !== undefined && attemptedCount >= maxRuns) {
@@ -462,11 +603,12 @@ async function executeQueue({
     let implementationUnit = unit;
     try {
       if (unit.kind === 'goal') {
-        planResult = unitJournal.planResult ?? (resuming ? (continuation.phase === 'planning' ? continuation.phaseResult : continuation.planResult) : null);
+        planResult = resuming && continuation.phase === 'planning' ? continuation.phaseResult
+          : unitJournal.planResult ?? (resuming ? continuation.planResult : null);
         if (!planResult) {
           if (unitJournal.planningStarted) throw new Error('queue planning was already started without a recorded result; automatic replay refused');
           if (journal) { unitJournal.planningStarted = true; persist(); }
-          planResult = await launchPlan({ unit, target: resolve(target), mode, claudeModel, codexModel, codexEffort });
+          planResult = await launchPlan({ unit, target: resolve(target), mode, claudeModel, codexModel, codexEffort, ...childControls() });
         }
         if (journal) { unitJournal.planResult = planResult; delete unitJournal.planningStarted; persist(); }
         // The taxi meter runs whether or not you arrive: planning spend counts
@@ -474,6 +616,8 @@ async function executeQueue({
         const planTokenReading = factTokens(planResult);
         if (planTokenReading.valid) totalTokens = addTokens(totalTokens, planTokenReading.tokens);
         planTokens = planTokenReading.valid ? planTokenReading.tokens : zeroTokens;
+        debit(`${unit.index}:planning`, planTokens, planResult);
+        if ((tokenBudget !== undefined || unit.tokenBudget !== undefined) && resources().usageUnknown) throw new Error('accounting-incomplete: unknown planning usage');
         if (planResult?.approved !== true) {
           const durationMs = Math.max(0, now() - startedAt);
           const reason = `plan was not approved: ${planResult?.reason ?? 'unknown reason'}`;
@@ -508,8 +652,29 @@ async function executeQueue({
           break;
         }
         assertCurrentPlanApproval({ unit, result: planResult, mode });
+        if (planResult.approval.contextDigest || planResult.approval.sidecarDigest || planResult.planningArtifacts
+          || planResult.checkpointState?.version === 2 || planResult.sharedContext || planResult.dialogue) {
+          if (!unitJournal.executionContextRef) {
+            if (unitJournal.launch || unitJournal.launching || unitJournal.result || resuming && continuation.phase === 'execution') throw new Error('required saved planning execution handoff missing; replay refused');
+            const handoff = createPlanningHandoff({ target, directory: unit.out, result: planResult });
+            const parent = readSharedContextReference({ reference: unitJournal.contextRef, target });
+            const snapshot = extendSharedContext({ snapshot: parent, entries: [{ id: 'current-planning-handoff', kind: 'planning-handoff',
+              content: JSON.stringify(handoff), sourceIdentity: planResult.approval.contextDigest,
+              provenance: { origin: 'validated-planning-approval', runId: planResult.runId }, status: 'required' }] });
+            const path = persistSharedContext({ directory: queue.directory, snapshot });
+            unitJournal.executionContextRef = { ...unitJournal.contextRef, path, contextDigest: snapshot.digest,
+              planningHandoff: { directory: unit.out, runId: planResult.runId, contextDigest: planResult.approval.contextDigest,
+                artifactDigest: planResult.approval.artifactDigest, sidecarDigest: planResult.approval.sidecarDigest } };
+            persist();
+          }
+          readPlanningHandoffReference({ reference: unitJournal.executionContextRef, target, completedExecution: completedExecutionHandoff(unitJournal) });
+          if (unitJournal.executionContextRef.planningHandoff.contextDigest !== planResult.approval.contextDigest
+            || unitJournal.executionContextRef.planningHandoff.runId !== planResult.runId) throw new Error('saved planning handoff is stale');
+          allowedQueuePaths.push(unitJournal.executionContextRef.path);
+        }
         approvedPlans[unit.index] = { approved: true, runId: planResult.runId,
-          planPath: planResult.planPath, gatePath: planResult.gatePath, approval: planResult.approval };
+          planPath: planResult.planPath, gatePath: planResult.gatePath, approval: planResult.approval,
+          ...(planResult.planningArtifacts ? { planningArtifacts: planResult.planningArtifacts } : {}) };
         implementationUnit = {
           ...unit,
           approval: planResult.approval,
@@ -517,17 +682,19 @@ async function executeQueue({
           gate: planResult.gatePath ?? join(unit.out, 'gate.json'),
         };
         allowedQueuePaths.push(implementationUnit.task, implementationUnit.gate);
+        if (planResult.approval.contextDigest) allowedQueuePaths.push(...assertPlanningSidecars({ directory: unit.out,
+          runId: planResult.runId, approval: planResult.approval, manifest: planResult.planningArtifacts }));
       }
-      if (unitJournal.result) {
-        launch = unitJournal.launch;
-        facts = unitJournal.result;
-      } else if (resuming && continuation.phase === 'execution') {
+      if (resuming && continuation.phase === 'execution') {
         launch = { runDirectory: continuation.runDirectory, runId: continuation.phaseResult.runId };
         facts = continuation.phaseResult;
+      } else if (unitJournal.result) {
+        launch = unitJournal.launch;
+        facts = unitJournal.result;
       } else {
         if (unitJournal.launching) throw new Error('queue child was already launched without a recorded result; automatic replay refused');
         if (journal) { unitJournal.launching = true; persist(); }
-        launch = await launchRun({ unit: implementationUnit, target: resolve(target), mode, claudeModel, codexModel, codexEffort });
+        launch = await launchRun({ unit: implementationUnit, target: resolve(target), mode, claudeModel, codexModel, codexEffort, ...childControls(true) });
         facts = await readRunFacts(launch);
       }
       if (journal) { unitJournal.result = facts; unitJournal.launch = launch; delete unitJournal.launching; persist(); }
@@ -572,7 +739,10 @@ async function executeQueue({
     const tokenReading = factTokens(facts);
     const { tokens } = tokenReading;
     if (tokenReading.valid) totalTokens = addTokens(totalTokens, tokens);
-    const evaluation = tokenReading.valid
+    debit(`${unit.index}:execution`, tokens, facts);
+    const evaluation = (tokenBudget !== undefined || unit.tokenBudget !== undefined) && resources().usageUnknown
+      ? { action: 'stop', kind: 'accounting-incomplete', reason: 'accounting-incomplete: unknown completed child usage', outcome: facts?.outcome, questions: [] }
+      : tokenReading.valid
       ? evaluateFacts(facts, launch.runDirectory)
       : {
         action: 'stop',
@@ -596,6 +766,11 @@ async function executeQueue({
     let landed = false;
     let landing = null;
     let landingJudgement = null;
+    if (evaluation.action === 'land' && !unitJournal.judgement
+      && (tokenBudget !== undefined && totalTokens.total >= tokenBudget
+        || unit.tokenBudget !== undefined && totalTokens.total - beforeUnit.totalTokens.total >= unit.tokenBudget)) {
+      Object.assign(evaluation, { action: 'stop', kind: 'token-budget', reason: 'budget-exhausted: no allowance remains for landing review' });
+    }
     if (evaluation.action === 'land') {
       // The hierarchy's last step: with the reviewer's findings closed,
       // Claude reads the change first-hand and judges the landing. Nothing
@@ -609,6 +784,7 @@ async function executeQueue({
           facts,
           claudeModel,
           runDirectory: launch.runDirectory,
+          ...childControls(),
         }) ?? { approved: null, reasoning: 'landing judge returned nothing' };
       } catch (error) {
         landingJudgement = {
@@ -617,13 +793,19 @@ async function executeQueue({
         };
       }
       if (journal) { unitJournal.judgement = landingJudgement; persist(); }
+      const landingTokens = usageTokens(landingJudgement.usage);
+      totalTokens = addTokens(totalTokens, landingTokens);
+      debit(`${unit.index}:landing`, landingTokens, landingJudgement, true);
+      if ((tokenBudget !== undefined || unit.tokenBudget !== undefined) && resources().usageUnknown) {
+        landingJudgement = { ...landingJudgement, approved: null, reasoning: 'accounting-incomplete: unknown landing usage' };
+      }
       if (landingJudgement.approved === true) {
         try {
           if (unit.kind === 'goal') assertCurrentPlanApproval({ unit, result: planResult, mode });
           assertCurrentExecutionApproval(facts, launch.runDirectory);
-          allowedQueuePaths = queueContinuationPaths({ queue, options: { mode }, approvedPlans, journal });
+          allowedQueuePaths = queueContinuationPaths({ ...parentContext, approvedPlans });
           if (journal) {
-            unitJournal.operationId ??= checkpointDigest({ queue: continuation.fileDigest, unit: unit.index,
+            unitJournal.operationId ??= checkpointDigest({ queue: queueFileDigest, unit: unit.index,
               runId: facts.runId, diff: facts.approval.artifactDigest });
             persist();
           }
@@ -644,12 +826,19 @@ async function executeQueue({
             // not proof it did not commit. Reconcile or leave phase-complete.
             const recovered = await recoverQueueLanding({ target, operationId: unitJournal.operationId,
               diffPath: join(launch.runDirectory, 'CHANGES.diff'), allowedDirtyPaths: allowedQueuePaths });
-            if (!recovered) throw error;
-            landing = recovered;
-            unitJournal.landing = recovered;
-            persist();
-            landed = true;
-            landedCount++;
+            if (!recovered) {
+              if (continuation) throw error;
+              unitJournal.landingFailure = { reason: error?.message ?? String(error), status: 'reconciliation-required' };
+              persist();
+              stop = { kind: 'apply-failed', unit: unit.name, unitIndex: unit.index,
+                reason: error?.message ?? String(error), outcome: facts?.outcome ?? null, questions: [] };
+            } else {
+              landing = recovered;
+              unitJournal.landing = recovered;
+              persist();
+              landed = true;
+              landedCount++;
+            }
           } else {
             const reason = error?.message ?? String(error);
             stop = {
@@ -743,7 +932,8 @@ async function executeQueue({
       persist();
     }
 
-    if (facts?.outcome === 'needs-decision') await savePending(launch.runDirectory, 'execution', planResult);
+    if (facts?.outcome === 'needs-decision' || facts?.checkpointState?.dialogue?.technicalPause
+      || facts?.checkpointState?.technicalPause) await savePending(launch.runDirectory, 'execution', planResult);
     if (stop !== null) break;
     if (tokenBudget !== undefined && totalTokens.total > tokenBudget
       && attemptedCount < queue.units.length) {
@@ -789,29 +979,37 @@ async function executeQueue({
         outcome: null,
         questions: [],
       };
+    } else if (landedState.complete && !queueJournal.acceptance?.result && tokenBudget !== undefined
+      && (resources().usageUnknown || totalTokens.total >= tokenBudget)) {
+      stop = { kind: resources().usageUnknown ? 'accounting-incomplete' : 'token-budget',
+        reason: 'No known remaining allowance for goal acceptance', outcome: null, questions: [] };
     } else if (landedState.complete) {
-      const acceptanceJournal = continuation ? (continuation.journal.acceptance ??= {}) : {};
-      const persistAcceptance = () => continuation?.persistJournal(continuation.journal);
+      const acceptanceJournal = (queueJournal.acceptance ??= {});
+      const persistAcceptance = persistQueue;
       let acceptance;
       try {
         if (!acceptanceJournal.result && acceptanceJournal.started) throw new Error('goal acceptance was already started without a recorded result; automatic replay refused');
-        if (!acceptanceJournal.result && continuation) { acceptanceJournal.started = true; persistAcceptance(); }
+        if (!acceptanceJournal.result) { acceptanceJournal.started = true; persistAcceptance(); }
         acceptance = acceptanceJournal.result ?? await acceptGoal({
           claudeModel,
+          workflowBinding: structuredClone(workflowBinding),
           goalSpecPath: resolve(acceptGoalSpec),
           target: resolve(target),
           logPath: queue.logPath,
+          ...(tokenBudget === undefined ? {} : { tokenBudget: tokenBudget - totalTokens.total }),
         }) ?? { approved: null, reasoning: 'goal acceptance returned nothing' };
       } catch (error) {
         acceptance = { approved: null, reasoning: error?.message ?? String(error) };
       }
-      if (continuation) { acceptanceJournal.result = acceptance; persistAcceptance(); }
+      acceptanceJournal.result = acceptance; persistAcceptance();
       // The taxi meter runs whether or not you arrive: the acceptance judgement
       // spends real tokens on every path, approved or refused or unavailable.
       const acceptanceTokens = usageTokens(acceptance.usage);
       totalTokens = addTokens(totalTokens, acceptanceTokens);
+      debit('goal-acceptance', acceptanceTokens, acceptance, true);
+      const accountingIncomplete = tokenBudget !== undefined && resources().usageUnknown;
       goalAcceptance = {
-        approved: typeof acceptance.approved === 'boolean' ? acceptance.approved : null,
+        approved: accountingIncomplete ? null : typeof acceptance.approved === 'boolean' ? acceptance.approved : null,
         reasoning: acceptance.reasoning ?? '',
         ...(Array.isArray(acceptance.findings) && acceptance.findings.length > 0
           ? { findings: acceptance.findings }
@@ -819,8 +1017,8 @@ async function executeQueue({
       };
       if (goalAcceptance.approved !== true) {
         stop = {
-          kind: 'goal-acceptance',
-          reason: goalAcceptance.approved === false
+          kind: accountingIncomplete ? 'accounting-incomplete' : 'goal-acceptance',
+          reason: accountingIncomplete ? 'accounting-incomplete: unknown goal acceptance usage' : goalAcceptance.approved === false
             ? `Claude refused the goal: ${goalAcceptance.reasoning || '(no reasoning recorded)'}`
             : "Claude's goal acceptance was unavailable — a goal is never achieved "
               + `unseen: ${goalAcceptance.reasoning || '(no detail)'}`,
@@ -828,7 +1026,7 @@ async function executeQueue({
           questions: [],
         };
       }
-      const operationId = continuation ? checkpointDigest({ queue: continuation.fileDigest, kind: 'goal-acceptance' }) : undefined;
+      const operationId = checkpointDigest({ queue: queueFileDigest, kind: 'goal-acceptance', runId: queueJournal.runId ?? null });
       const alreadyLogged = operationId && existsSync(queue.logPath) && readFileSync(queue.logPath, 'utf8')
         .split(/\r?\n/).filter(Boolean).map(line => JSON.parse(line)).some(row => row.operationId === operationId);
       if (!alreadyLogged) appendLog(queue.logPath, {
@@ -847,6 +1045,7 @@ async function executeQueue({
     landedCount,
     remaining,
     totalTokens,
+    resources: resources(),
     stop,
     assumedDecisions,
     goalAcceptance,

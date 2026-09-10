@@ -1,5 +1,14 @@
 # Usage
 
+See [Coworker dialogue](coworker-dialogue.md) for shared context, evidence and inspection
+semantics, reviewer/human authority, retained-work replanning, and safe recovery.
+
+[Bundled workflow profiles](workflow-profiles.md) explains the BMAD and Spec Kit adaptations
+delivered by native planning, direct execution, queue/campaign children and goal acceptance.
+There is no workflow-selection flag or toolkit install. Saved resume retains its captured
+version; historical work stays unbound. Added guidance costs prompt tokens in existing calls,
+without adding mandatory review rounds. A supplied `run --task` keeps its direct execution path.
+
 ## Updating an existing installation
 
 For an existing installation, run these in a terminal:
@@ -115,7 +124,7 @@ asks Claude to author a genuinely revised plan and Codex to review it over the *
 it does not reset to the pre-debate base or discard code/history/protected evidence. Implementation
 continues only after current plan approval. If planning raises another manual question, answer
 the new checkpoint using the same resume command; the saved proposal resumes without redrafting
-candidates or replaying execution. Autonomous fresh-reset behavior is unchanged.
+candidates or replaying execution. The same retained-work replanning rule applies in autonomous mode.
 
 The saved manual mode cannot be changed. Completed answer replay returns its recorded result
 without another implementation, commit or queue advance. A completed queue phase can recover
@@ -126,16 +135,32 @@ Changed target/code/evidence or missing/corrupt workspaces fail actionably. Pres
 objects and inspect the problem; the file archive is not permission to create a replacement
 workspace. Pending workspaces survive ordinary pruning. Keep queued work's queue file unchanged.
 
+### Technical continuation
+
+For an eligible saved technical pause with no human question:
+
+```sh
+node bin/loop.js resume --run <run-directory> --continue
+```
+
+`--continue` and `--decision-file` are mutually exclusive. The technical route validates the
+saved schema, pause, current workspace, identities, journal and resource allowance. It keeps the
+saved mode and limits and is not a human answer, approval, generic override or permission to
+retry an uncertain external/writer effect. Human-pending, stale/corrupt and exhausted/incomplete
+accounting states remain refused or paused. A consumed receipt does not itself promise exit 0.
+
 The dashboard is read-only: use its saved run path with the command above. Resumed reports,
 review/evidence directories and checkpoints refresh in the durable run directory; the initial
 artifact index entry is retained once and checkpoint history records decision transitions.
 
 ```
+node bin/loop.js resume --run <run-directory> --decision-file <answers.json>
+node bin/loop.js resume --run <run-directory> --continue
 node bin/loop.js run --task <plan-file-or-prose> --target <folder> --gate <gate.json> [--gate-retries M] [--pivot-candidates N] [--mode manual|autonomous] [--claude-model MODEL] [--codex-model MODEL] [--codex-effort EFFORT] [--arbiter-timeout MS] [--artifact-root DIRECTORY] [--mutate] [--port PORT] [--open] [--no-dashboard] [--quiet]
 node bin/loop.js mutate --target <folder> [--base REF] [--tests COMMAND] [--dry-run]
 node bin/loop.js plan --goal <prose-or-file> --target <folder> --out <folder> [--rounds N] [--candidates N] [--pivot-candidates N] [--mode manual|autonomous] [--claude-model MODEL] [--codex-model MODEL] [--codex-effort EFFORT] [--dry-run]
 node bin/loop.js decompose (--goal <spec.md> | --project <file-or-prose> --out <dir>) --target <folder> [--rounds N] [--map-budget CHARS] [--mode manual|autonomous] [--claude-model MODEL] [--codex-model MODEL] [--codex-effort EFFORT]
-node bin/loop.js queue --file <queue.json> [--accept-goal <spec.md>] [--mode <manual|autonomous>] [--max-runs N] [--token-budget TOKENS] [--dry-run]
+node bin/loop.js queue --file <queue.json> [--accept-goal <spec.md>] [--mode <manual|autonomous>] [--max-runs N] [--rounds N] [--token-budget TOKENS] [--dry-run]
 node bin/loop.js batch --task <plan-1> --task <plan-2> --target <folder> --gate <gate.json> [--gate-retries M] [--pivot-candidates N] [--mode manual|autonomous] [--claude-model MODEL] [--codex-model MODEL] [--codex-effort EFFORT] [--arbiter-timeout MS] [--artifact-root DIRECTORY] [--concurrency N] [--token-budget TOKENS] [--rounds N] [--round N ...] [--unit-kind KIND] [--unit-id ID ...] [--perspective NAME ...] [--depends-on CHILD=PARENT ...] [--port PORT] [--open] [--no-dashboard] [--quiet]
 node bin/loop.js batch --campaign <campaign.json> [--arbiter-timeout MS] [--artifact-root DIRECTORY] [--port PORT] [--open] [--no-dashboard] [--quiet]
 node bin/loop.js status <run-or-campaign-directory>
@@ -152,19 +177,22 @@ node bin/loop.js help
 The corresponding plugin commands are `/uroboros:run`, `/uroboros:resume`, `/uroboros:mutate`, `/uroboros:plan`,
 `/uroboros:decompose`, `/uroboros:queue`, `/uroboros:batch`, `/uroboros:status`,
 `/uroboros:dashboard`, `/uroboros:publish`, `/uroboros:prune`, `/uroboros:doctor`,
-`/uroboros:setup`, `/uroboros:init`, and `/uroboros:help`. Install them with
-`/plugin marketplace add <absolute-clone-path>` and `/plugin install uroboros@uroboros`.
+`/uroboros:setup`, `/uroboros:init`, and `/uroboros:help`. Normal installation uses
+`/plugin marketplace add ortimusirig/uroboros` and `/plugin install uroboros@uroboros`.
+Registering an absolute clone path is local-development setup only; `node install.mjs` validates
+and prepares a checkout, but does not mutate installed plugin state.
 
-`loop plan` uses Claude as author and Codex as independent read-only reviewer. Both
-receive the same goal and repository context. Agreement and approval are separate: manual
+`loop plan` uses Claude as author and Codex as independent read-only reviewer. Both receive the
+same explicit shared-context snapshot with required evidence and selected attributed recall.
+Agreement and approval are separate: manual
 mode preserves unresolved disagreement for human authority; autonomous mode lets Codex
 approve the exact current artifacts with recorded rationale while dissent remains visible.
 Queues verify that approval still matches the current goal, exact plan bytes, and parsed gate
 before execution and landing. `approved: true` can coexist with `converged: false`.
 
-Initial planning generates three distinct-perspective candidates and selects among the plans
-that drafted successfully; no mechanical gate judges a plan, the seats do. Use `--candidates 1` for the previous single-draft behavior. A FRESH
-pivot uses the same process with the debate ledger and defaults to three candidates; configure
+Initial planning defaults to one candidate. Explicit alternative exploration selects among the
+plans that drafted successfully; no mechanical gate judges a plan, the seats do. A fresh/replan
+uses retained code, evidence and history and currently defaults to three candidates; configure
 that count with `--pivot-candidates` (1–5).
 
 `loop decompose` runs the same two-agent planning conversation one level up or down the decomposition
@@ -197,10 +225,10 @@ multi-statement unit, and reports survivors for arbiter judgement. `--tests` rep
 launcher; use `{tests}` when that launcher should receive the statically selected paths.
 `--dry-run` executes neither tests nor judging seats. Mutation survivors are evidence like any
 other command output.
-Add `--mutate` to `loop run` to perform the same advisory measurement after a converged run
-and retain the evidence beside the command records and review findings in
-`uro-runfacts.json` and `uro-report.md`. A survivor, red mutation baseline, or unavailable
-mutation seat does not alter the already-observed run outcome.
+Add `--mutate` to request native advisory analysis after successful required checks and before
+the next discretionary Claude review. Exact unchanged analysis input reuses its completed receipt;
+a genuine code/test/policy change can repeat the optional spend. Disposable trial source is not
+current live code. The evidence does not mechanically decide the run or require another final call.
 
 `init` never overwrites `plan.md` or `gate.json`. It detects a `package.json` test script;
 otherwise it emits a valid, runnable placeholder command list with an explicit comment telling
@@ -236,7 +264,9 @@ selector is separate from its `interactionMode`.
 
 `batch` accepts one or more repeated `--task` options. The target, gate, retry, and model
 options have exactly the same meaning they do for `run`; every task gets its own isolated
-worktree, evidence commands, one read-only review pass, run facts, and `events.jsonl`.
+worktree, evidence commands, Claude execution review, run facts, and `events.jsonl`. The reviewer
+may ask, inspect or rebut until current approval, a decision/pause, or an explicit limit; there is
+neither a one-call ceiling nor a mandatory separate final call.
 
 `prune` is the only scratch-retention command. It keeps the 20 most recent completed run
 directories by default. `--keep N` changes that count; `--older-than DAYS` adds an age rule,
@@ -352,21 +382,17 @@ become a success.
 
 ## Iterating
 
-One `loop run` invocation continues until the current review approves or the pivot ladder stops it.
-Execution records use `converged: null` when no explicit mutual-agreement signal was recorded;
-review approval does not claim consensus. No-op/skipped review does not fabricate reviewer participation.
-Complete replies are retained, and only explicit rebuttals or held objections are labeled dissent.
-Structured blocking review findings are converted into executor work, followed by another
-evidence run and the reviewer's next report. `URO_DEBATE_ROUNDS` is an optional operator cap; the tool supplies no
-round limit of its own. On FRESH, the run creates a branch at the pre-debate commit, restores
-the accumulated `__uro_review/` tests byte-for-byte, generates ledger-informed STORM plans, and
-executes only the selected plan. The ledger is not reset. `needs-pivot` returns
-control only when the arbiter concludes or no viable FRESH plan survives.
+Native planning/execution uses issue dialogue over the current artifact and shared-context
+identity. Questions, answers and rebuttals are neutral conversation unless a validated explicit
+action establishes a stance; they do not consume proposal/correction cycles or mutate bytes.
+Material context or artifact change invalidates old approval. Execution records `converged: null`
+when mutual agreement was not recorded, and skipped/unreadable review invents no participation.
 
-Codex writes the implementation and Claude reviews it independently, read-only. Claude answers
-autonomous challenges and judges pivots from the ledger and attempted remedies. Invalid findings are retained as
-overruled evidence. If Claude is unavailable, findings remain blocking, challenges stop with
-`needs-decision`, and the deterministic pivot ladder is explicitly recorded as unjudged.
+Claude authors retained-work replans in both modes and Codex reviews the replacement before
+remaining implementation continues. Useful code, checks, evidence and attributed history remain;
+an uncertain effect is paused, not blindly replayed. Dialogue has no default round, provider-call
+or elapsed ceiling. `URO_DEBATE_ROUNDS`, challenge limits, candidates, campaign rounds, token
+budgets, gate retries and operational timeouts are explicit independent controls.
 
 ## Optional flat event view with Logdy
 
@@ -390,6 +416,10 @@ reasoning, and scope as sortable table columns. It remains useful for filtering 
 the observability audit concludes that an interleaved flat table is not an adequate primary
 current-state view for many concurrent units.
 
+Native execution does not synthesize all historical `diff/*`, `debate/*`, or `decision/*` event
+pairs. Constructor/schema controls are compatibility checks, not proof of native emission. Native
+dialogue state/journal plus actual executor/check/reviewer/report events are separate inputs.
+
 Do **not** use `loop run ... | logdy`: stdout is the machine-readable run-facts contract,
 not the event stream. Logdy must follow the isolated `events.jsonl` file.
 
@@ -412,7 +442,9 @@ Regenerate every run discoverable below a scratch root:
 node bin/generate-run-journal.js --all "C:/uro/w"
 ```
 
-The output is deterministic for the same `uro-runfacts.json` and optional `events.jsonl`.
+The output is deterministic for the same `uro-runfacts.json` and optional `events.jsonl`. This
+offline report journal is distinct from the versioned project notebook/recall store; neither is
+hidden cross-project model memory.
 See [`docs/runs/README.md`](../runs/README.md) for the stable frontmatter schema and an
 embedded Obsidian Bases campaign table.
 
@@ -446,19 +478,28 @@ embedded Obsidian Bases campaign table.
   chooses the next check interval; a stuck judgement kills the seat. If no judge is available,
   the seat is killed and the facts identify the decision as unjudged. There is no hard elapsed
   ceiling.
+  Under an enforced token allowance, an in-flight writer with unknown usage denies a concurrent
+  paid liveness judge; unknown usage is not estimated as zero or reserved speculatively.
 - **Progress gap:** five minutes since the last completed item; override with
   `URO_PROGRESS_THRESHOLD_MS`. Progress silence is informational and never kills or restarts
   while stdout bytes continue to prove liveness.
 - **Stall policy:** `URO_STALL_POLICY=report` records a stuck executor without a relaunch. Set
   `URO_STALL_POLICY=restart` to relaunch that executor with a stall notice appended to the
   original plan. Verifier passes are never rewritten into findings after a kill.
+  Native uncertain writer effects pause without blind replay; restart wording applies only where
+  the saved legacy controller positively establishes replay safety.
 - **Stall restart bound:** one restart by default; set `URO_STALL_RESTARTS` to `0`-`3`.
   Stall restarts and gate retries have separate limits and counters in the run facts.
-- **Debate rounds:** unbounded by default; set `URO_DEBATE_ROUNDS` to any positive integer to
-  impose an operator-owned cap. `loop plan --rounds` has the same optional-cap semantics.
+- **Dialogue:** no default dialogue round, provider-call, or elapsed ceiling. Set
+  `URO_DEBATE_ROUNDS` to an explicit positive proposal-cycle cap where supported; `loop plan
+  --rounds` is also explicit. Neither option counts ordinary Q&A or campaign rounds.
 - **Terminal heartbeat:** pass `--quiet` to suppress event summaries on stderr without
   disabling the isolated `events.jsonl` stream.
 
 ## Chunking wave goals
 
 Large goals should be decomposed BEFORE the loop runs: the `uroboros-chunk` skill (skills/uroboros-chunk/SKILL.md) runs in the calling session, cuts the goal into small units from reasoning (never size rules), verifies declared structure (acyclic dependencies, disjoint parallel files) as report-back advisories, executes each unit's evidence commands so they are provably runnable today, and emits the queue/campaign file. The loop core is unchanged; it simply receives smaller units.
+
+Use [outcome-based goal and task sizing](task-sizing.md) to reason about those boundaries,
+challenge missing or unnecessary work, and preserve completed evidence when remaining work must be
+replanned. The questions are planning prompts, not numerical limits or automated acceptance rules.

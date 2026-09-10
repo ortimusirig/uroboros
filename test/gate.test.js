@@ -1,13 +1,61 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { GATE_TAIL_LIMIT, runGate } from '../src/gate.js';
 import { testCountFloorCommand, TEST_COUNT_FLOOR_BIN } from '../src/merge.js';
+import { createEvidenceWriter } from '../src/evidence.js';
 
 const ok = { bin: process.execPath, args: ['-e', 'process.exit(0)'] };
 const bad = { bin: process.execPath, args: ['-e', 'process.exit(1)'] };
+
+for (const asynchronous of [false, true]) test(`required ${asynchronous ? 'async' : 'sync'} evidence failure prevents the next real command`, async () => {
+  const cwd = mkdtempSync(join(tmpdir(), 'gate-required-'));
+  const counter = join(cwd, 'counter');
+  try {
+    const next = { bin: process.execPath, args: ['-e', 'require("node:fs").writeFileSync("counter", "1")'] };
+    const fail = () => { throw new Error('capture unavailable'); };
+    await assert.rejects(runGate({ commands: [ok, next], cwd, requiredEvidence: true,
+      codeIdentity: () => 'actual-project-before-command', onEvidence: asynchronous ? async () => fail() : fail }), /capture unavailable/);
+    assert.equal(existsSync(counter), false);
+    await runGate({ commands: [ok, next], cwd, onEvidence: asynchronous ? async () => fail() : fail });
+    assert.equal(readFileSync(counter, 'utf8'), '1', 'legacy best-effort capture still runs all commands');
+  } finally { rmSync(cwd, { recursive: true, force: true }); }
+});
+
+test('required command evidence captures actual argv, complete output and identity before each launch', async () => {
+  const cwd = mkdtempSync(join(tmpdir(), 'gate-observed-'));
+  try {
+    writeFileSync(join(cwd, 'source'), 'before');
+    const commands = [{ bin: process.execPath, args: ['-e', 'require("node:fs").writeFileSync("source", "after");process.stdout.write("x".repeat(6000));process.stderr.write("err")'] }, ok];
+    const records = [];
+    await runGate({ commands, cwd, requiredEvidence: true,
+      codeIdentity: () => readFileSync(join(cwd, 'source'), 'utf8'), onEvidence: async record => records.push(record) });
+    assert.deepEqual(records.map(record => record.codeIdentity), ['before', 'after']);
+    assert.deepEqual(records[0].argv, [process.execPath, ...commands[0].args]);
+    assert.equal(records[0].cwd, cwd);
+    assert.equal(records[0].exitCode, 0);
+    assert.equal(records[0].status, 'completed');
+    assert.equal(records[0].stdout, 'x'.repeat(6000));
+    assert.equal(records[0].stderr, 'err');
+  } finally { rmSync(cwd, { recursive: true, force: true }); }
+});
+
+test('required file sink failure stops later commands while preserving explicit legacy write errors', async t => {
+  const cwd = mkdtempSync(join(tmpdir(), 'gate-file-sink-'));
+  t.after(() => rmSync(cwd, { recursive: true, force: true }));
+  writeFileSync(join(cwd, '__uro_evidence'), 'This file prevents the evidence directory from being created.');
+  const next = { bin: process.execPath, args: ['-e', 'require("node:fs").writeFileSync("counter", "1")'] };
+  await assert.rejects(runGate({ commands: [ok, next], cwd, requiredEvidence: true,
+    codeIdentity: () => 'actual-code', onEvidence: createEvidenceWriter({ dir: cwd, required: true }).write }));
+  assert.equal(existsSync(join(cwd, 'counter')), false);
+  const legacy = createEvidenceWriter({ dir: cwd });
+  await runGate({ commands: [ok, next], cwd, onEvidence: legacy.write });
+  assert.equal(readFileSync(join(cwd, 'counter'), 'utf8'), '1');
+  assert.equal(legacy.records().length, 2);
+  assert.ok(legacy.records().every(record => record.writeError));
+});
 
 test('all-zero commands pass', async () => {
   const r = await runGate({ commands: [ok, ok], cwd: process.cwd() });

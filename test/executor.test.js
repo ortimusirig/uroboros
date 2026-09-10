@@ -23,6 +23,15 @@ import {
 } from '../src/usage.js';
 
 const fakeCodex = fileURLToPath(new URL('../fixtures/fake-codex.mjs', import.meta.url));
+
+test('command stream retains partial observed tool identity without inventing nested argv or cwd', () => {
+  const event = { type: 'item.completed', item: { id: 'cmd-1', type: 'command_execution',
+    command: 'Get-Content source.js', aggregated_output: 'source bytes', exit_code: 0, status: 'completed' } };
+  const result = parseCodexStream(JSON.stringify(event));
+  assert.deepEqual(result.toolObservations, [{ provider: 'codex', eventType: 'item.completed', item: event.item }]);
+  assert.equal(result.toolObservations[0].item.argv, undefined);
+  assert.equal(result.toolObservations[0].item.cwd, undefined);
+});
 const schemaSamplePath = fileURLToPath(new URL('../fixtures/codex-stream-schema-sample.ndjson', import.meta.url));
 const usageSamplePath = fileURLToPath(new URL('../fixtures/codex-exec-usage-sample.ndjson', import.meta.url));
 const cursorPlanSamplePath = fileURLToPath(new URL('../fixtures/cursor-plan-mode-sample.ndjson', import.meta.url));
@@ -40,7 +49,7 @@ function fakeChild() {
 async function runFakeExecutorStream(lines) {
   const events = [];
   const script = `for (const line of ${JSON.stringify(lines)}) process.stdout.write(JSON.stringify(line) + "\\n")`;
-  await runExecutor({
+  const result = await runExecutor({
     plan: 'observe the supplied stream',
     cwd: tmpdir(),
     bin: process.execPath,
@@ -50,6 +59,9 @@ async function runFakeExecutorStream(lines) {
     attempt: 1,
     timeoutMs: 5000,
   });
+  assert.equal(result.delivery.kind, 'stdin-submitted');
+  assert.equal(result.delivery.consumption, 'unknown');
+  assert.equal(typeof result.delivery.sha256, 'string');
   return events;
 }
 

@@ -14,6 +14,12 @@ import { planningArtifactDigest } from '../src/conversation.js';
 import { runQueue, continueQueue, loadQueueFile } from '../src/queue.js';
 import { checkpointDigest } from '../src/checkpoint.js';
 import { reviewDigest } from '../src/review.js';
+import { execFileSync } from 'node:child_process';
+import { tmpdir, homedir } from 'node:os';
+import { run as runExecution } from '../src/run.js';
+import { landQueueDiff, assertCleanTarget } from '../src/queue-runtime.js';
+import { withVerifiedSuperpowers } from '../fixtures/verified-superpowers.mjs';
+import { createInspectionReceipt } from '../src/context-evidence.js';
 
 const APPROVED_DIFF = 'diff --git a/x b/x\n+reviewed change\n';
 
@@ -128,7 +134,7 @@ function fakeRuntime(facts, overrides = {}) {
       // are exercised explicitly below.
       judgeLanding: async (request) => {
         judgements.push(request);
-        return { approved: true, reasoning: 'reviewed first-hand in fixture' };
+        return { approved: true, reasoning: 'reviewed first-hand in fixture', usage: { inputTokens: 0, outputTokens: 0 } };
       },
       // Same declaration for the goal-level review: the default accepts, and
       // its usage is non-zero so the metering assertions have something real
@@ -195,6 +201,47 @@ test('queue requires explicit execution approval bound to the actual diff before
       if (mutation !== 'valid') assert.match(result.stop.reason, /execution approval/i, mutation);
     } finally { fixture.cleanup(); }
   }
+});
+
+test('queue consumes native ordinary execution approval and lands the actual reviewed diff', async t => {
+  const root = mkdtempSync(join(tmpdir(), 'native-queue-'));
+  const scratchBase = process.platform === 'win32' ? 'C:/ccc-test' : join(homedir(), '.ccc-test');
+  mkdirSync(scratchBase, { recursive: true });
+  const scratchRoot = mkdtempSync(join(scratchBase, 'native-queue-'));
+  t.after(() => { rmSync(root, { recursive: true, force: true }); rmSync(scratchRoot, { recursive: true, force: true }); });
+  const target = join(root, 'target'); mkdirSync(target);
+  execFileSync('git', ['init', '-q', target]);
+  execFileSync('git', ['-C', target, 'config', 'core.autocrlf', 'false']);
+  execFileSync('git', ['-C', target, 'config', 'user.name', 'Fixture']);
+  execFileSync('git', ['-C', target, 'config', 'user.email', 'fixture@example.test']);
+  writeFileSync(join(target, 'seed.txt'), 'base\n');
+  execFileSync('git', ['-C', target, 'add', '.']); execFileSync('git', ['-C', target, 'commit', '-qm', 'base']);
+  writeFileSync(join(root, 'plan.md'), 'Create the reviewed file'); writeFileSync(join(root, 'gate.json'), '[]');
+  const file = join(root, 'queue.json'); writeFileSync(file, JSON.stringify([{ name: 'native', task: 'plan.md', gate: 'gate.json' }]));
+  const envelope = (r, action, extra = {}) => ({ schemaVersion: 1, action, artifactDigest: r.state.artifactDigest,
+    contextDigest: r.state.snapshot.digest, replyTo: null, content: 'Review current fixture work', claims: [], issues: [], evidence: [], verifications: [], next: null, ...extra });
+  let facts;
+  const result = await runQueue({ file, target, dependencies: {
+    assertCleanTarget,
+    launchRun: async () => {
+      facts = await runExecution(withVerifiedSuperpowers({ target, scratchRoot, artifactRoot: join(root, 'artifacts'), runId: 'native-queue', task: 'Create the reviewed file', gate: [],
+        adapters: { runExecutor: r => { writeFileSync(join(r.cwd, 'reviewed.txt'), 'reviewed native bytes\n'); return { dialogue: envelope(r, 'propose'), usage: { inputTokens: 1, outputTokens: 1 } }; },
+          runReview: r => {
+            const evidence = r.state.evidence.find(e => e.id === 'requirement-briefing');
+            const receipt = createInspectionReceipt({ operationId: r.operationId, seat: 'claude', evidence: [evidence], inspected: true, result: 'read' });
+            return { usage: { inputTokens: 1, outputTokens: 1 }, observations: { evidence: [], receipts: [receipt] }, dialogue: envelope(r, 'approve', {
+              claims: [{ id: 'briefing-requirement', kind: 'fact', text: 'Saved briefing read', evidenceIds: [evidence.id] }],
+              verifications: [{ claimId: 'briefing-requirement', evidenceIds: [evidence.id], inspectionReceiptIds: [receipt.id], result: 'supports', reason: 'Read briefing' }],
+            }) };
+          } },
+      }));
+      return { runDirectory: facts.dir };
+    }, readRunFacts: async () => facts, judgeLanding: async () => ({ approved: true, reasoning: 'Reviewed native fixture diff' }), landDiff: landQueueDiff,
+  } });
+  assert.equal(result.stop, null, result.stop?.reason);
+  assert.equal(readFileSync(join(target, 'reviewed.txt'), 'utf8'), 'reviewed native bytes\n');
+  assert.equal(execFileSync('git', ['-C', target, 'status', '--porcelain'], { encoding: 'utf8' }), '');
+  assert.equal(facts.approval.contextDigest, facts.dialogue.snapshot.digest);
 });
 
 test('queue rechecks execution approval after final review before applying a changed diff', async () => {
@@ -540,6 +587,69 @@ test('max-runs stops after one landed unit with two remaining', async () => {
   }
 });
 
+test('queue carries current unit context and min parent item allowance with landing usage counted once', async () => {
+  const f = makeFixture(2);
+  try {
+    const units = JSON.parse(readFileSync(f.file, 'utf8'));
+    units[0].tokenBudget = 20; units[1].tokenBudget = 100;
+    writeFileSync(f.file, JSON.stringify(units));
+    const runtime = fakeRuntime([reviewReady('one'), reviewReady('two')], {
+      judgeLanding: async () => ({ approved: true, reasoning: 'observed', usage: { inputTokens: 1, outputTokens: 1 } }),
+    });
+    const result = await runQueue({ file: f.file, target: f.target, tokenBudget: 30, rounds: 9, dependencies: runtime.dependencies });
+    assert.deepEqual(runtime.launches.map(request => request.tokenBudget), [20, 23]);
+    assert.deepEqual(runtime.launches.map(request => request.rounds), [9, 9]);
+    const { readSharedContextReference } = await import('../src/shared-context.js');
+    for (const [index, request] of runtime.launches.entries()) {
+      const snapshot = readSharedContextReference({ reference: request.contextRef, target: f.target });
+      assert.equal(snapshot.unitId, `${snapshot.runId}:${index + 1}`);
+      assert.ok(snapshot.entries.some(entry => entry.kind === 'requirement'));
+    }
+    assert.equal(result.totalTokens.total, 14);
+    assert.equal(result.resources.providerLaunches, 2, 'legacy child launches stay unknown; the two actual landing calls are counted');
+    assert.equal(result.resources.usageUnknown, false);
+  } finally { f.cleanup(); }
+});
+
+test('enforced queue allowance refuses unknown native usage before landing or another child', async () => {
+  const f = makeFixture(2);
+  try {
+    const runtime = fakeRuntime([reviewReady('unknown', { resources: { providerLaunches: 1, usageUnknown: true,
+      knownUsage: { inputTokens: 3, outputTokens: 2 } } }), reviewReady('not-run')]);
+    const result = await runQueue({ file: f.file, target: f.target, tokenBudget: 100, dependencies: runtime.dependencies });
+    assert.equal(result.stop.kind, 'accounting-incomplete');
+    assert.equal(runtime.launches.length, 1); assert.equal(runtime.judgements.length, 0); assert.equal(runtime.landings.length, 0);
+  } finally { f.cleanup(); }
+});
+
+test('an exhausted child allowance starts no landing review and records no phantom reviewer debit', async () => {
+  const f = makeFixture(1);
+  try {
+    const runtime = fakeRuntime([reviewReady('at-ceiling')]);
+    const result = await runQueue({ file: f.file, target: f.target, tokenBudget: 5, dependencies: runtime.dependencies });
+    assert.equal(runtime.judgements.length, 0); assert.equal(runtime.landings.length, 0);
+    assert.equal(result.stop.kind, 'token-budget');
+    assert.equal(result.resources.providerLaunches, 0);
+    assert.equal(result.resources.usageUnknown, false);
+  } finally { f.cleanup(); }
+});
+
+test('queue acceptance preserves unknown usage and cannot claim success under an enforced allowance', async () => {
+  const f = makeFixture(1);
+  try {
+    const runtime = fakeRuntime([reviewReady('one')], {
+      judgeLanding: async () => ({ approved: true, reasoning: 'observed', usage: { inputTokens: 0, outputTokens: 0 } }),
+      acceptGoal: async () => ({ approved: true, reasoning: 'answer with unreported usage', usage: null }),
+    });
+    const result = await runQueue({ file: f.file, target: f.target, tokenBudget: 100,
+      acceptGoalSpec: join(f.directory, 'goal.md'), dependencies: runtime.dependencies });
+    assert.equal(result.stop.kind, 'accounting-incomplete');
+    assert.equal(result.resources.providerLaunches, 2);
+    assert.equal(result.resources.usageUnknown, true);
+    assert.notEqual(result.goalAcceptance.approved, true);
+  } finally { f.cleanup(); }
+});
+
 test('token budget forecasts the next unit and never interrupts an in-flight unit', async () => {
   const fixture = makeFixture();
   try {
@@ -566,7 +676,7 @@ test('token budget forecasts the next unit and never interrupts an in-flight uni
   }
 });
 
-test('a run that itself exceeds the token budget completes and lands before the queue stops', async () => {
+test('a completed child that exceeds the budget is retained without launching a new landing review', async () => {
   const fixture = makeFixture();
   try {
     const runtime = fakeRuntime([
@@ -583,9 +693,10 @@ test('a run that itself exceeds the token budget completes and lands before the 
     });
 
     assert.equal(runtime.launches.length, 1);
-    assert.equal(runtime.landings.length, 1);
+    assert.equal(runtime.judgements.length, 0);
+    assert.equal(runtime.landings.length, 0);
     assert.equal(result.totalTokens.total, 13);
-    assert.match(result.stop.reason, /exceeded.*13.*10/);
+    assert.match(result.stop.reason, /budget-exhausted/);
   } finally {
     fixture.cleanup();
   }
@@ -611,8 +722,8 @@ test('malformed token facts stop safely instead of weakening budget accounting',
 
     assert.equal(runtime.launches.length, 1);
     assert.equal(runtime.landings.length, 0);
-    assert.equal(result.stop.kind, 'token-accounting');
-    assert.match(result.stop.reason, /invalid token accounting/);
+    assert.equal(result.stop.kind, 'accounting-incomplete');
+    assert.match(result.stop.reason, /unknown.*usage/);
     assert.equal(result.totalTokens.total, 0);
     assert.equal(readLog(fixture.logPath)[0].tokenAccounting, 'invalid');
   } finally {
@@ -776,7 +887,7 @@ test('queue-log gains exactly one JSON line for every attempted unit', async () 
   }
 });
 
-test('the beside-queue log is the only dirty-path exception passed to landing', async () => {
+test('only the beside-queue log and exact persisted context files are exempted at landing', async () => {
   const fixture = makeFixture(1);
   try {
     const cleanChecks = [];
@@ -791,7 +902,11 @@ test('the beside-queue log is the only dirty-path exception passed to landing', 
     });
 
     assert.deepEqual(cleanChecks[0].request.allowedPaths, [fixture.logPath]);
-    assert.deepEqual(runtime.landings[0].allowedDirtyPaths, [fixture.logPath]);
+    const paths = runtime.landings[0].allowedDirtyPaths;
+    assert.equal(paths.length, 3);
+    assert.ok(paths.includes(fixture.logPath));
+    assert.ok(paths.includes(runtime.launches[0].contextRef.path));
+    for (const path of paths.filter(path => path !== fixture.logPath)) assert.ok(existsSync(path));
   } finally {
     fixture.cleanup();
   }

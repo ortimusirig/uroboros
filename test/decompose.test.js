@@ -3,11 +3,14 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { parseTaggedPair, runDecomposeGoal, runDecomposeProject, topologicalOrder,
+import { parseTaggedPair, runDecomposeGoal as runNewGoal, runDecomposeProject as runNewProject, topologicalOrder,
   validateDecomposeProjectRequest, writeTier1Artifacts } from '../src/decompose.js';
 import { parseArgs } from '../src/args.js';
 import { RepairableArtifactError } from '../src/conversation.js';
 import { resumeRun } from '../src/resume.js';
+import { scriptedPlanningAdapters } from './fixtures/planning-responses.js';
+const runDecomposeGoal = options => runNewGoal({ artifactRoot: join(tmpdir(), 'uro-task3-fixture-artifacts'), ...options, adapters: scriptedPlanningAdapters(options.adapters ?? {}) });
+const runDecomposeProject = options => runNewProject({ artifactRoot: join(tmpdir(), 'uro-task3-fixture-artifacts'), ...options, adapters: scriptedPlanningAdapters(options.adapters ?? {}) });
 const superpowers={seats:{codex:{verified:true},claude:{verified:true}}};
 const proposalText = (tasksJson, tasksMd) => `<TASKS_JSON>${JSON.stringify(tasksJson)}</TASKS_JSON>\n<TASKS_MD>${tasksMd}</TASKS_MD>`;
 const goodTasks = [
@@ -41,16 +44,26 @@ for(const tier of ['goal','project']){
  test(tier+' decomposition delivers verbatim debate to Claude and reviews revisions before writing',async t=>{
   const f=goalFixture(); t.after(f.cleanup);
   let authors=0,reviews=0;
+  const snapshotDigests=[];
+  const constitutionDir=tier==='goal'?join(f.root,'uro-project'):join(f.root,'project');
+  mkdirSync(constitutionDir,{recursive:true});
+  writeFileSync(join(constitutionDir,'constitution.md'),'Do not remove offline login.');
   const run=tier==='goal'?runDecomposeGoal:runDecomposeProject;
   const result=await run({target:f.root,goalSpecPath:f.specPath,project:'Build the project',out:join(f.root,'project'),
    superpowers,adapters:{
     runArbiter:async r=>{
      authors++;
+     snapshotDigests.push(r.request.state.snapshot.digest);
+     assert.match(r.prompt,/Do not remove offline login/);
+     assert.ok(r.request.state.snapshot.entries.some(e=>e.id==='repoMap' && e.status==='required'));
      if(authors===2) assert.match(r.prompt,/S1 P1: Preserve "quotes"\nRetain this line/);
      return {answer:(tier==='goal'?taskText:goalsText)(authors===1?'first':'revised')};
     },
     runExecutor:async r=>{
      reviews++;
+     snapshotDigests.push(r.dialogueState.snapshot.digest);
+     assert.match(r.plan,/Do not remove offline login/);
+     assert.ok(r.dialogueState.snapshot.entries.some(e=>e.id==='repoMap' && e.status==='required'));
      assert.equal(r.sandbox,'read-only');
      if(reviews===2) assert.match(r.plan,/revised/);
      return {exitCode:0,lastMessage:(reviews===1?'AGREE: no\nS1 P1: Preserve "quotes"\nRetain this line':'AGREE: yes')+
@@ -60,6 +73,7 @@ for(const tier of ['goal','project']){
   assert.equal(result.approved,true);
   assert.equal(result.approval.basis,'consensus');
   assert.equal(authors,2);
+  assert.equal(new Set(snapshotDigests).size,1);
   assert.equal(existsSync(tier==='goal'?join(f.goalDir,'tasks','T1-plan.md'):join(f.root,'project','goals','goals.json')),true);
  });
  test(tier+' manual dispute preserves the canonical artifact and raw transcript for resume',async t=>{
@@ -134,7 +148,7 @@ test('a dependency cycle goes back as feedback and the repaired round converges'
       ]),
     });
     assert.equal(result.converged, true, 'the cycle repaired through feedback, not refusal');
-    assert.equal(result.rounds, 2);
+    assert.equal(result.rounds, 1, 'pre-application structural repair stays in its allocated cycle');
   } finally { fixture.cleanup(); }
 });
 
@@ -210,7 +224,7 @@ test('a goal dependency cycle goes back as feedback and the repaired round conve
       adapters: adaptersFor([cyclicProposal, goalProposal()]),
     });
     assert.equal(result.converged, true, 'the cycle repaired through feedback, not refusal');
-    assert.equal(result.rounds, 2);
+    assert.equal(result.rounds, 1, 'pre-application structural repair stays in its allocated cycle');
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -288,11 +302,11 @@ test('a goal depending on a later goal is a contradiction fed back, not silently
       },
     });
     assert.equal(result.converged, true, 'the forward dependency repaired through feedback, not refusal');
-    assert.equal(result.rounds, 2);
+    assert.equal(result.rounds, 1, 'pre-application structural repair stays in its allocated cycle');
     assert.match(
       proposePrompts[0],
       /G1 depends on later goal G2 — goals are MVP-first and dependency-ordered; reorder or re-scope/,
-      "the writer-found contradiction reaches round 2's proposing seat verbatim",
+      'the pre-application contradiction reaches the repairing author verbatim',
     );
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

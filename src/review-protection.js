@@ -31,6 +31,7 @@ export class WorktreeRestorationError extends Error {
 export const HARNESS_ARTIFACT_PATTERNS = Object.freeze([
   /^events\.jsonl$/, /^TASK\.md$/, /^CHANGES\.diff$/, /^__uro_review(\/|\\|$)/,
   /^\.uro-tmp(\/|\\|$)/,
+  /^__uro_context(\/|\\|$)/, /^__uro_dialogue(\/|\\|$)/,
 ]);
 export function isHarnessArtifact(relativePath) {
   const normalized = String(relativePath).replace(/\\/g, '/');
@@ -133,15 +134,28 @@ export async function runProtectedOperation({
   reporter,
   operation,
   onRestore,
+  validateCritical,
   captureSnapshot = captureWorktreeSnapshot,
   restoreSnapshot = restoreWorktreeSnapshot,
 }) {
+  const critical = ['__uro_context', '__uro_dialogue'].map(prefix => reviewFiles(cwd, prefix));
   const snapshot = await captureSnapshot({ cwd, scope, prefix });
   let result;
   let restoredPaths = [];
   try {
     result = await operation();
   } finally {
+    let changedCriticalMetadata = false;
+    const changedCriticalPaths = critical.flatMap(before => {
+      const after = reviewFiles(cwd, relative(cwd, before.root));
+      return [...new Set([...before.entries.keys(), ...after.entries.keys()])]
+        .filter(path => {
+          const original = before.entries.get(path), current = after.entries.get(path);
+          if (entriesEqual(original, current)) return false;
+          if (original?.type !== 'file' || current?.type !== 'file' || original.mode !== current.mode) changedCriticalMetadata = true;
+          return true;
+        });
+    });
     let restoration;
     try {
       restoration = await restoreSnapshot({ snapshot, scope, prefix });
@@ -159,6 +173,10 @@ export async function runProtectedOperation({
         paths: restoredPaths,
         action: 'restored',
       });
+    }
+    if (changedCriticalPaths.length && (changedCriticalMetadata || typeof validateCritical !== 'function'
+      || await validateCritical({ changedPaths: changedCriticalPaths }) !== true)) {
+      throw new WorktreeRestorationError('correctness-critical shared context or dialogue records changed during provider access');
     }
   }
   return { result, restoredPaths };

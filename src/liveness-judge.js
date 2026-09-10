@@ -91,13 +91,16 @@ export function createLivenessJudge({
   });
   const launchEnv = { ...process.env, ...env };
 
-  return async (evidence) => {
+  return async (evidence, { signal, input = buildLivenessJudgePrompt(evidence) } = {}) => {
     let result;
+    let delivery = null;
+    const requestedLaunch = { bin, args: [...args], cwd };
     try {
       result = await runSeat(bin, args, {
         cwd,
         env: launchEnv,
-        input: buildLivenessJudgePrompt(evidence),
+        input, signal,
+        onInputSubmitted: receipt => { delivery = receipt; },
         timeoutMs,
         timeoutSetting: 'liveness judge bound',
       });
@@ -105,18 +108,22 @@ export function createLivenessJudge({
       return {
         available: false,
         reason: `liveness judge could not start: ${error?.message ?? String(error)}`,
+        error: error?.message ?? String(error), usage: null, delivery, requestedLaunch, launch: null,
       };
     }
-    if (result.timedOut) {
-      return { available: false, reason: `liveness judge exceeded its ${timeoutMs}ms bound` };
-    }
+    const parsed = parseCodexStream(result.stdout);
+    const metadata = { requestedLaunch, launch: result.launch ?? null, delivery, usage: parsed.usage ?? null,
+      exitCode: result.code, timedOut: Boolean(result.timedOut), aborted: Boolean(result.aborted),
+      stdout: result.stdout ?? '', stderr: result.stderr ?? '' };
+    if (result.timedOut || result.aborted) return { ...metadata, available: false,
+      reason: result.aborted ? 'liveness judge was cancelled' : `liveness judge exceeded its ${timeoutMs}ms bound` };
     if (result.code !== 0) {
-      return { available: false, reason: `liveness judge exited ${result.code}` };
+      return { ...metadata, available: false, reason: `liveness judge exited ${result.code}` };
     }
-    const judgement = parseLivenessJudgement(parseCodexStream(result.stdout).lastMessage);
-    return judgement ?? {
+    const judgement = parseLivenessJudgement(parsed.lastMessage);
+    return { ...metadata, ...(judgement ?? {
       available: false,
       reason: 'liveness judge returned no readable working/stuck judgement',
-    };
+    }) };
   };
 }

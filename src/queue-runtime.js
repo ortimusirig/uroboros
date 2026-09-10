@@ -9,7 +9,10 @@ import {
 } from 'node:path';
 import { assertCurrentPlanApproval } from './plan.js';
 import { spawnCapture } from './spawn.js';
-import { DEFAULT_ARBITER_MODEL, parseAcceptanceJudgement, parseLandingJudgement, runArbiter } from './arbiter.js';
+import { DEFAULT_ARBITER_MODEL, buildArbiterPrompt, parseAcceptanceJudgement, parseLandingJudgement, runArbiter } from './arbiter.js';
+import { resolveNativeWorkflowBinding } from './shared-context.js';
+import { renderWorkflowGuidance } from './workflow-profiles.js';
+import { readPlanningHandoffReference } from './planning-dialogue.js';
 
 const GIT_TIMEOUT_MS = 30_000;
 // Git's well-known empty-tree object hash — valid in any repository without
@@ -30,6 +33,11 @@ function providerFlags({ claudeModel, codexModel, codexEffort }) {
   return Object.entries({ 'claude-model': claudeModel, 'codex-model': codexModel, 'codex-effort': codexEffort })
     .flatMap(([flag, value]) => value === undefined ? [] : ['--' + flag, value]);
 }
+function childControlFlags({ contextRef, tokenBudget, rounds }) {
+  return [...(contextRef ? ['--context-stdin'] : []),
+    ...(tokenBudget === undefined ? [] : ['--token-budget', String(tokenBudget)]),
+    ...(rounds === undefined ? [] : ['--rounds', String(rounds)])];
+}
 
 function oneLine(value) {
   return String(value).replace(/\s+/g, ' ').trim();
@@ -42,6 +50,8 @@ export async function launchLoopRun({ unit, target, mode = 'manual', ...models }
   env,
 } = {}) {
   const resolvedTarget = resolve(target);
+  if (models.workflowBinding !== undefined) resolveNativeWorkflowBinding({ workflowBinding: models.workflowBinding,
+    parentSnapshots: [readPlanningHandoffReference({ reference: models.contextRef, target: resolvedTarget })] });
   const result = await runCommand(nodePath, [
     loopPath,
     'run',
@@ -51,9 +61,11 @@ export async function launchLoopRun({ unit, target, mode = 'manual', ...models }
     '--mode', mode,
     '--no-dashboard',
     ...providerFlags(models),
+    ...childControlFlags(models),
   ], {
     cwd: resolvedTarget,
     env: launchEnvironment(env),
+    ...(models.contextRef ? { input: JSON.stringify(models.contextRef) } : {}),
     // The child's stderr heartbeat streams through LIVE. Buffered-until-exit
     // meant 25-50 silent minutes per unit: an operator could not tell deep
     // deliberation from a hang and babysat by polling artifacts instead.
@@ -86,6 +98,8 @@ export async function launchLoopPlan({ unit, target, mode = 'manual', ...models 
   env,
 } = {}) {
   const resolvedTarget = resolve(target);
+  if (models.workflowBinding !== undefined) resolveNativeWorkflowBinding({ workflowBinding: models.workflowBinding,
+    parentSnapshots: [readPlanningHandoffReference({ reference: models.contextRef, target: resolvedTarget })] });
   const result = await runCommand(nodePath, [
     loopPath,
     'plan',
@@ -94,9 +108,11 @@ export async function launchLoopPlan({ unit, target, mode = 'manual', ...models 
     '--out', unit.out,
     '--mode', mode,
     ...providerFlags(models),
+    ...childControlFlags(models),
   ], {
     cwd: resolvedTarget,
     env: launchEnvironment(env),
+    ...(models.contextRef ? { input: JSON.stringify(models.contextRef) } : {}),
     // Planning heartbeats stream through live, same as runs: the two-agent
     // conversation can deliberate for a long time, and silence must mean
     // stopped, not buffered.
@@ -372,6 +388,7 @@ export async function judgeLandingWithClaude({ unit, facts, runDirectory, claude
     return {
       approved: null,
       reasoning: error instanceof Error ? error.message : String(error),
+      usage: null,
     };
   }
   const judgement = parseLandingJudgement(result);
@@ -379,12 +396,14 @@ export async function judgeLandingWithClaude({ unit, facts, runDirectory, claude
     return {
       approved: null,
       reasoning: result?.error ?? 'no readable landing judgement',
+      usage: result?.usage ?? null,
     };
   }
   return {
     approved: judgement.approved,
     reasoning: judgement.reasoning,
     findings: judgement.findings,
+    usage: result?.usage ?? null,
   };
 }
 
@@ -417,11 +436,13 @@ function readQueueLogRows(logPath) {
 // trail is refused rather than judged partial. An unreachable or unreadable
 // judgement — Claude's or Git's — returns approved: null; the queue treats
 // anything but an explicit yes as a stop.
-export async function judgeGoalAcceptance({ goalSpecPath, target, logPath, claudeModel = DEFAULT_ARBITER_MODEL }, {
+export async function judgeGoalAcceptance({ goalSpecPath, target, logPath, claudeModel = DEFAULT_ARBITER_MODEL, workflowBinding }, {
   arbiter = runArbiter,
   runCommand = spawnCapture,
   cwd = process.cwd(),
 } = {}) {
+  workflowBinding = resolveNativeWorkflowBinding({ workflowBinding });
+  const guidance = renderWorkflowGuidance({ binding: workflowBinding, phase: 'acceptance' });
   const readOptional = (path) => {
     try { return readFileSync(path, 'utf8'); } catch { return ''; }
   };
@@ -521,7 +542,7 @@ export async function judgeGoalAcceptance({ goalSpecPath, target, logPath, claud
   };
   let result;
   try {
-    result = await arbiter({ cwd, request, model: claudeModel });
+    result = await arbiter({ cwd, request, prompt: `${buildArbiterPrompt(request)}\n\n${guidance}`, model: claudeModel });
   } catch (error) {
     return {
       approved: null,

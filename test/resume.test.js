@@ -5,17 +5,30 @@ import fs from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { runPlan } from '../src/plan.js';
+import { runPlan as runNewPlan } from '../src/plan.js';
+import { scriptedPlanningAdapters, scriptedFreshPlanningAdapters, planningEnvelope as envelope } from './fixtures/planning-responses.js';
+const runPlan = options => runNewPlan({ artifactRoot: join(tmpdir(), 'uro-task3-fixture-artifacts'), ...options, adapters: scriptedPlanningAdapters(options.adapters ?? {}) });
 import { planningArtifactDigest } from '../src/conversation.js';
 import { withVerifiedSuperpowers } from '../fixtures/verified-superpowers.mjs';
-import { run } from '../src/run.js';
+import { run as executeRun } from '../src/run.js';
+import { savedV1Execution } from './fixtures/saved-v1-execution.js';
+const run = options => executeRun({ ...options, env: { ...process.env, ...options.env,
+  URO_ARTIFACT_ROOT: options.artifactRoot ?? join(options.scratchRoot, 'artifacts') }, adapters: scriptedFreshPlanningAdapters(options.adapters) });
 import { isolate } from '../src/isolation.js';
 import { materializeReviewBundle } from '../src/review.js';
+import { createInspectionReceipt } from '../src/context-evidence.js';
+import { runGate } from '../src/gate.js';
 import { execFileSync } from 'node:child_process';
 import { parseArgs } from '../src/args.js';
 import { runQueue } from '../src/queue.js';
+import { writeCheckpointAtomic } from '../src/checkpoint.js';
+import { loadWorkflowBinding } from '../src/workflow-profiles.js';
+import { copyNativeWorkflowPackage } from './fixtures/workflow-profile-fixture.js';
 import { assertCleanTarget, landQueueDiff } from '../src/queue-runtime.js';
-const resume = await import('../src/resume.js').catch(() => ({}));
+const resumeModule = await import('../src/resume.js').catch(() => ({}));
+const resume = { ...resumeModule, resumeRun: options => resumeModule.resumeRun({ ...options,
+  env: { ...process.env, ...options.env, URO_ARTIFACT_ROOT: join(tmpdir(), 'uro-task3-fixture-artifacts') },
+  adapters: scriptedFreshPlanningAdapters(options.adapters) }) };
 
 test('resume CLI accepts only the saved run and answer file, never a mode override', () => {
   assert.deepEqual(parseArgs(['resume', '--run', 'saved', '--decision-file', 'answers.json']),
@@ -72,9 +85,9 @@ test('a further planning dispute atomically replaces pending state without a fal
   const root = mkdtempSync(join(tmpdir(), 'uro-resume-next-'));
   const target = join(root, 'target'), out = join(root, 'plan');
   mkdirSync(target);
-  const adapters = { author: async () => ({ plan: 'Existing proposal.', gate: [], readable: true, agree: false, content: 'Keep it.' }),
+  const adapters = scriptedPlanningAdapters({ author: async () => ({ plan: 'Existing proposal.', gate: [], readable: true, agree: false, content: 'Keep it.' }),
     reviewer: async r => ({ readable: true, agree: false, artifactDigest: r.artifactDigest,
-      suggestions: [{ id: 'S1', text: 'Change it.' }], content: 'Change it.' }) };
+      suggestions: [{ id: 'S1', text: 'Change it.' }], content: 'Change it.' }) });
   const pending = await runPlan(withVerifiedSuperpowers({ goal: 'A goal.', target, out, candidates: 1, adapters }));
   const decisionFile = join(root, 'answers.json');
   writeFileSync(decisionFile, JSON.stringify({ schemaVersion: 1, runId: pending.runId,
@@ -96,7 +109,8 @@ test('a further planning dispute atomically replaces pending state without a fal
   assert.deepEqual(replay.checkpoint, next.checkpoint);
 });
 
-for (const interruption of ['log', 'return']) test(`an explicit human acceptance resumes the edited Git isolate and recovers ${interruption} interruption`, async () => {
+for (const interruption of ['log', 'return']) test(`an explicit human acceptance resumes the edited Git isolate and recovers ${interruption} interruption`, async t => {
+  const { runQueue: historicalQueue } = await copyNativeWorkflowPackage(t, { historical: true }).module('queue.js');
   const base = process.platform === 'win32' ? 'C:/ccc-test' : tmpdir();
   mkdirSync(base, { recursive: true });
   const root = mkdtempSync(join(base, 'uro-resume-exec-'));
@@ -136,12 +150,13 @@ for (const interruption of ['log', 'return']) test(`an explicit human acceptance
   writeFileSync(join(root, 'gate.json'), '[]');
   writeFileSync(queueFile, JSON.stringify([{ name: 'first', task: 'plan.md', gate: 'gate.json' },
     { name: 'second', task: 'plan.md', gate: 'gate.json' }]));
-  let judged = 0, landed = 0, launched = 0, pending, crashAfterCommit = true;
+  let judged = 0, landed = 0, launched = 0, pending, crashAfterCommit = true, interruptedRunId;
   const queueDependencies = {
     assertCleanTarget,
     launchRun: async () => {
       launched++;
-      pending = await run(withVerifiedSuperpowers({ task: 'Change the value.', target, gate: [],
+      pending = await savedV1Execution(withVerifiedSuperpowers({ task: 'Change the value.', target, gate: [],
+        stage: launched === 1 ? null : 'execution-dispute', setupTurns: launched === 1 ? 1 : 2,
         scratchRoot: join(root, 'scratch'), runId: `execution-${launched}`, debateRounds: 8, adapters }));
       return { runDirectory: pending.dir };
     },
@@ -150,8 +165,9 @@ for (const interruption of ['log', 'return']) test(`an explicit human acceptance
     landDiff: async request => {
       landed++;
       const result = await landQueueDiff(request);
-      if (request.operationId && interruption === 'return' && crashAfterCommit) {
+      if (request.operationId && request.runId === 'execution-2' && interruption === 'return' && crashAfterCommit) {
         crashAfterCommit = false;
+        interruptedRunId = request.runId;
         throw new Error('simulated lost return after real commit');
       }
       return result;
@@ -159,6 +175,7 @@ for (const interruption of ['log', 'return']) test(`an explicit human acceptance
     appendLog: (path, row) => {
       if (row.landed && row.runId === 'execution-2' && interruption === 'log' && crashAfterCommit) {
         crashAfterCommit = false;
+        interruptedRunId = row.runId;
         // A legacy uncertain failure row is retained, then explicitly reconciled.
         appendFileSync(path, `${JSON.stringify({ ...row, landed: false, commit: null })}\n`);
         throw new Error('simulated crash after commit before queue log');
@@ -166,7 +183,7 @@ for (const interruption of ['log', 'return']) test(`an explicit human acceptance
       appendFileSync(path, `${JSON.stringify(row)}\n`);
     },
   };
-  const stoppedQueue = await runQueue({ file: queueFile, target, dependencies: queueDependencies });
+  const stoppedQueue = await historicalQueue({ file: queueFile, target, dependencies: queueDependencies });
   assert.equal(pending.outcome, 'needs-decision');
   const saved = JSON.parse(readFileSync(join(pending.dir, 'uro-checkpoint.json'), 'utf8'));
   assert.equal(stoppedQueue.stop.checkpoint?.artifactDigest, saved.artifactDigest);
@@ -204,10 +221,15 @@ for (const interruption of ['log', 'return']) test(`an explicit human acceptance
   assert.equal(judged, 2);
   assert.equal(landed, 2);
   assert.equal(launched, 2);
+  assert.equal(interruptedRunId, 'execution-2', 'the injected failure must occur in the resumed second landing');
   const operationRows = readFileSync(join(root, 'queue-log.jsonl'), 'utf8').trim().split(/\r?\n/)
-    .map(line => JSON.parse(line)).filter(row => row.operationId);
+    .map(line => JSON.parse(line)).filter(row => row.operationId && row.runId === 'execution-2');
+  assert.equal(readFileSync(join(root, 'queue-log.jsonl'), 'utf8').trim().split(/\r?\n/)
+    .map(JSON.parse).filter(row => row.runId === 'execution-1' && row.operationId && row.landed).length, 1);
   assert.equal(operationRows.filter(row => !row.landed).length, interruption === 'log' ? 1 : 0);
   assert.equal(operationRows.filter(row => row.landed).length, 1);
+  assert.equal(readFileSync(join(root, 'queue-log.jsonl'), 'utf8').trim().split(/\r?\n/)
+    .map(JSON.parse).filter(row => row.operationId && row.landed).length, 2);
   if (interruption === 'log') assert.equal(operationRows.at(-1).reconcilesOperation, operationRows[0].operationId);
   assert.equal(execFileSync('git', ['-C', target, 'rev-list', '--count', 'HEAD'], { encoding: 'utf8' }).trim(), '3');
 });
@@ -215,6 +237,7 @@ for (const interruption of ['log', 'return']) test(`an explicit human acceptance
 for (const twoGoals of [false, true]) test(`queued saved planning inside the target resumes with real cleanliness and exact generated-path allowances${twoGoals ? ' across two goals' : ''}`, async () => {
   const root = mkdtempSync(join(process.platform === 'win32' ? 'C:/ccc-test' : tmpdir(), 'uro-goal-attach-'));
   const target = join(root, 'target'), out = join(target, 'planned');
+  const workflowDigest = loadWorkflowBinding().digest;
   mkdirSync(target);
   const git = (...args) => execFileSync('git', ['-C', target, ...args], { encoding: 'utf8' });
   git('init', '-q'); git('config', 'user.name', 'Test'); git('config', 'user.email', 'test@local'); git('config', 'core.autocrlf', 'false');
@@ -223,22 +246,43 @@ for (const twoGoals of [false, true]) test(`queued saved planning inside the tar
   writeFileSync(queueFile, JSON.stringify([...(twoGoals ? [{ name: 'first', goal: 'First change', out: 'target/first-plan' }] : []),
     { name: 'goal', goal: 'Change source', out: 'target/planned' }]));
   let implementations = 0, drafts = 0, facts, planningUnit = 0, interrupted = false;
-  const planningAdapters = { author: async () => { drafts++; return { plan: 'Change source.\n', gate: [], agree: twoGoals && planningUnit === 1, readable: true }; },
+  const command = { bin: process.execPath, args: ['-e', "require('node:assert/strict').match(require('node:fs').readFileSync('source.js','utf8'),/^changed [12]\\n$/);process.stdout.write('queued-child-check')"] };
+  const planningAdapters = { author: async () => { drafts++; return { plan: 'Change source.\n', gate: [command], agree: twoGoals && planningUnit === 1, readable: true }; },
     reviewer: async r => ({ agree: twoGoals && planningUnit === 1, readable: true, artifactDigest: r.artifactDigest, suggestions: [{ id: 'S1', text: 'Prefer another change.' }] }) };
   const dependencies = { assertCleanTarget,
-    launchPlan: ({ unit }) => { planningUnit = unit.index; return runPlan(withVerifiedSuperpowers({ goal: unit.goal, target, out: unit.out, candidates: 1, adapters: planningAdapters })); },
-    launchRun: async ({ unit }) => {
+    launchPlan: ({ unit, contextRef }) => { planningUnit = unit.index; return runPlan(withVerifiedSuperpowers({ goal: unit.goal, target, out: unit.out, contextRef, candidates: 1, adapters: planningAdapters })); },
+    launchRun: async ({ unit, contextRef }) => {
       implementations++;
-      facts = await run(withVerifiedSuperpowers({ task: unit.task, gate: unit.gate, target, scratchRoot: join(root, 'scratch'), runId: `goal-run-${implementations}`,
-        adapters: { runExecutor: async ({ cwd }) => { writeFileSync(join(cwd, 'source.js'), `changed ${implementations}\n`); return { exitCode: 0, changedFiles: ['source.js'], lastMessage: 'Done' }; },
-          runGate: async () => ({ results: [] }), runReview: async options => {
-            const bundle = { version: 1, conclusion: 'clean', report: 'No blockers.', tests: [] };
-            return { artifact: await materializeReviewBundle({ ...options, bundle }), answer: JSON.stringify(bundle) };
+      facts = await run(withVerifiedSuperpowers({ task: unit.task, gate: unit.gate, target, contextRef, scratchRoot: join(root, 'scratch'), runId: `goal-run-${implementations}`,
+        adapters: { runExecutor: async request => {
+          writeFileSync(join(request.cwd, 'source.js'), `changed ${implementations}\n`);
+          return { exitCode: 0, usage: { inputTokens: 1, outputTokens: 1 }, dialogue: envelope(request, request.action) };
+        }, runGate, runReview: request => {
+            const evidence = request.state.evidence.find(item => item.id === 'requirement-briefing');
+            readFileSync(evidence.capturedPath);
+            const receipt = createInspectionReceipt({ operationId: request.operationId, seat: 'claude',
+              evidence: [evidence], inspected: true, result: 'read' });
+            return { usage: { inputTokens: 1, outputTokens: 1 }, observations: { evidence: [], receipts: [receipt] },
+              dialogue: envelope(request, 'approve', {
+                claims: [{ id: 'briefing-requirement', kind: 'fact', text: evidence.text, evidenceIds: [evidence.id] }],
+                verifications: [{ claimId: 'briefing-requirement', evidenceIds: [evidence.id], inspectionReceiptIds: [receipt.id],
+                  result: 'supports', reason: 'Read the captured approved child requirement.' }],
+              }) };
           } } }));
+      assert.equal(facts.approved, true, facts.reason);
+      assert.equal(facts.checkpointState.workflow.digest, workflowDigest);
+      assert.equal(facts.dialogue.snapshot.workflow.digest, workflowDigest);
+      assert.equal(facts.resources.providerLaunches, 2);
+      const check = facts.dialogue.evidence.find(item => item.kind === 'command');
+      assert.equal(check.stdout, 'queued-child-check');
+      assert.equal(check.exitCode, 0);
+      assert.deepEqual(check.argv, [process.execPath, ...command.args]);
+      assert.equal(check.cwd, facts.dir);
+      assert.ok(check.codeIdentity);
       return { runDirectory: facts.dir };
     }, readRunFacts: async () => facts, judgeLanding: async () => ({ approved: true }), landDiff: landQueueDiff,
     appendLog: (path, row) => {
-      if (twoGoals && row.operationId && row.landed && !interrupted) {
+      if (twoGoals && row.runId === 'goal-run-2' && row.operationId && row.landed && !interrupted) {
         interrupted = true; throw new Error('two-goal interruption after commit before log');
       }
       appendFileSync(path, `${JSON.stringify(row)}\n`);
@@ -246,6 +290,9 @@ for (const twoGoals of [false, true]) test(`queued saved planning inside the tar
   const pending = await runQueue({ file: queueFile, target, dependencies });
   assert.equal(pending.stop.kind, 'plan-not-approved');
   const checkpoint = JSON.parse(readFileSync(join(out, 'uro-checkpoint.json'), 'utf8'));
+  assert.equal(checkpoint.queue.workflow.digest, workflowDigest);
+  assert.equal(checkpoint.queueJournal.workflowBinding.digest, workflowDigest);
+  assert.equal(checkpoint.continuation.workflow.digest, workflowDigest);
   const decisionFile = join(root, 'answers.json');
   writeFileSync(decisionFile, JSON.stringify({ schemaVersion: 1, runId: checkpoint.runId, artifactDigest: checkpoint.artifactDigest,
     answers: [{ id: checkpoint.pending.questions[0].id, answer: 'approve' }] }));
@@ -266,6 +313,14 @@ for (const twoGoals of [false, true]) test(`queued saved planning inside the tar
     assert.equal(implementations, 1);
     await assert.rejects(resume.resumeRun({ runDirectory: out, decisionFile, adapters: planningAdapters, queueDependencies: dependencies }), /two-goal interruption/);
     const completedDrafts = drafts;
+    const checkpointPath = join(out, 'uro-checkpoint.json'), savedRecovery = JSON.parse(readFileSync(checkpointPath, 'utf8'));
+    const corruptRecovery = structuredClone(savedRecovery);
+    delete corruptRecovery.queueJournal.workflowBinding;
+    writeCheckpointAtomic(checkpointPath, corruptRecovery);
+    await assert.rejects(resume.resumeRun({ runDirectory: out, decisionFile, adapters: planningAdapters, queueDependencies: dependencies }), /workflow binding/i);
+    assert.equal(drafts, completedDrafts);
+    assert.equal(implementations, 2);
+    writeCheckpointAtomic(checkpointPath, savedRecovery);
     writeFileSync(priorPlan, 'Changed prior plan during landing recovery.');
     await assert.rejects(resume.resumeRun({ runDirectory: out, decisionFile, adapters: planningAdapters, queueDependencies: dependencies }), /approval.*stale/);
     writeFileSync(priorPlan, savedPlan);
@@ -277,8 +332,10 @@ for (const twoGoals of [false, true]) test(`queued saved planning inside the tar
   }
   const result = await resume.resumeRun({ runDirectory: out, decisionFile, adapters: planningAdapters, queueDependencies: dependencies });
   assert.equal(result.queueResult.landedCount, twoGoals ? 2 : 1, result.queueResult.stop?.reason);
+  if (twoGoals) assert.equal(interrupted, true, 'the resumed second-run landing fault must actually fire');
   assert.equal(implementations, twoGoals ? 2 : 1);
-  assert.equal(drafts, twoGoals ? 4 : 3);
+  // The explicit human approval applies the saved proposal without another author call.
+  assert.equal(drafts, twoGoals ? 3 : 2);
   assert.equal(readFileSync(join(target, 'source.js'), 'utf8'), twoGoals ? 'changed 2\n' : 'changed 1\n');
   assert.equal(git('rev-list', '--count', 'HEAD').trim(), twoGoals ? '3' : '2');
   await resume.resumeRun({ runDirectory: out, decisionFile, adapters: planningAdapters, queueDependencies: dependencies });
@@ -337,7 +394,8 @@ for (const choice of ['stop', 'correction', 'fresh plan', 'further planning disp
         suggestions: choice === 'further planning dispute' ? [{ id: 'P1', text: 'Retain the existing strategy instead.' }] : [], content: 'Current strategy review.' };
     }, createFreshPivotBranch: () => assert.fail('manual fresh plan must not reset or delete saved work'),
   };
-  const pending = await run(withVerifiedSuperpowers({ task: 'Implement the original strategy.', target, gate: [],
+  const pending = await savedV1Execution(withVerifiedSuperpowers({ task: 'Implement the original strategy.', target, gate: [],
+    stage: 'execution-pivot',
     scratchRoot: join(root, 'scratch'), runId: 'manual-pivot', debateRounds: 8, pivotCandidates: 1, adapters }));
   assert.equal(pending.checkpointState.stage, 'execution-pivot');
   const checkpoint = JSON.parse(readFileSync(join(pending.dir, 'uro-checkpoint.json'), 'utf8'));
